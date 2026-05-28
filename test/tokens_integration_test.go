@@ -10,6 +10,7 @@ import (
 	"github.com/JLugagne/libauth/domain"
 	"github.com/JLugagne/libauth/tokens"
 	"github.com/JLugagne/libauth/tokens/jwt"
+	"github.com/JLugagne/libauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -21,9 +22,11 @@ type IntegrationCustomClaims struct {
 
 func TestTokenLifecycleIntegration(t *testing.T) {
 	ctx := context.Background()
+	store := memory.NewStore[IntegrationCustomClaims]()
 
 	// Instantiate the JWT service
-	cfg := jwt.Config{
+	cfg := jwt.Config[IntegrationCustomClaims]{
+		Store:      store,
 		SecretKey:  "integration-secret-key",
 		Issuer:     "libauth-integration",
 		AccessTTL:  5 * time.Minute,
@@ -98,7 +101,8 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	})
 
 	t.Run("Scenario: Token with different signature is rejected", func(t *testing.T) {
-		otherSvc := jwt.New[IntegrationCustomClaims](jwt.Config{
+		otherSvc := jwt.New[IntegrationCustomClaims](jwt.Config[IntegrationCustomClaims]{
+			Store:     store,
 			SecretKey: "different-secret-key",
 			AccessTTL: 5 * time.Minute,
 		})

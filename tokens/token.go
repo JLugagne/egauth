@@ -23,6 +23,7 @@ type Claims[C any] struct {
 type TokenPair[C any] struct {
 	AccessToken           string
 	RefreshToken          string
+	RefreshTokenHash      string // SHA-256 hash of the refresh token for storage
 	AccessTokenExpiresAt  time.Time
 	RefreshTokenExpiresAt time.Time
 	Claims                Claims[C]

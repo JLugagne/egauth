@@ -33,7 +33,9 @@ func (m *MockIssuer[C]) IssueAPIKey(ctx context.Context, prefix string, claims t
 
 // MockVerifier is a function-based mock implementation of the tokens.Verifier interface.
 type MockVerifier[C any] struct {
-	VerifyAccessTokenFunc func(ctx context.Context, token string) (*tokens.Claims[C], error)
+	VerifyAccessTokenFunc  func(ctx context.Context, token string) (*tokens.Claims[C], error)
+	VerifyRefreshTokenFunc func(ctx context.Context, token string) (*tokens.Claims[C], error)
+	VerifyAPIKeyFunc       func(ctx context.Context, key string) (*tokens.Claims[C], error)
 }
 
 func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
@@ -41,6 +43,20 @@ func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (
 		panic("called not defined VerifyAccessTokenFunc")
 	}
 	return m.VerifyAccessTokenFunc(ctx, token)
+}
+
+func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
+	if m.VerifyRefreshTokenFunc == nil {
+		panic("called not defined VerifyRefreshTokenFunc")
+	}
+	return m.VerifyRefreshTokenFunc(ctx, token)
+}
+
+func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
+	if m.VerifyAPIKeyFunc == nil {
+		panic("called not defined VerifyAPIKeyFunc")
+	}
+	return m.VerifyAPIKeyFunc(ctx, key)
 }
 
 // IssuerVerifierContractTesting runs all contract tests for tokens.Issuer and tokens.Verifier implementations.
@@ -66,9 +82,14 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 		require.NotNil(t, verifiedClaims, "Verified claims must not be nil")
 		assert.Equal(t, claims.Subject, verifiedClaims.Subject, "Subject should match")
 		assert.Equal(t, claims.TenantID, verifiedClaims.TenantID, "TenantID should match")
+
+		// Verify Refresh Token
+		refClaims, err := verifier.VerifyRefreshToken(ctx, pair.RefreshToken)
+		require.NoError(t, err)
+		assert.Equal(t, claims.Subject, refClaims.Subject)
 	})
 
-	t.Run("Contract: Issue API Key", func(t *testing.T) {
+	t.Run("Contract: Issue and Verify API Key", func(t *testing.T) {
 		claims := tokens.Claims[C]{
 			Subject:  uuid.New(),
 			TenantID: "tenant-123",
@@ -80,5 +101,14 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 		require.NotNil(t, apiKey, "APIKey must not be nil")
 		assert.True(t, len(apiKey.Token) > len("sk_test_"), "Token should be longer than the prefix")
 		assert.NotEmpty(t, apiKey.Hash, "Hash must not be empty")
+
+		// Verify API Key
+		verifiedClaims, err := verifier.VerifyAPIKey(ctx, apiKey.Token)
+		require.NoError(t, err)
+		assert.Equal(t, claims.Subject, verifiedClaims.Subject)
+		// For API Keys, if the store is tenant-aware, it should return the tenant
+		if claims.TenantID != "" {
+			assert.Equal(t, claims.TenantID, verifiedClaims.TenantID)
+		}
 	})
 }

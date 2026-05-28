@@ -17,4 +17,10 @@ type Issuer[C any] interface {
 type Verifier[C any] interface {
 	// VerifyAccessToken parses and validates an access token, returning its claims.
 	VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
+
+	// VerifyRefreshToken validates a refresh token against the store and returns its claims.
+	VerifyRefreshToken(ctx context.Context, token string) (*Claims[C], error)
+
+	// VerifyAPIKey validates an API key against the store and returns its claims.
+	VerifyAPIKey(ctx context.Context, key string) (*Claims[C], error)
 }

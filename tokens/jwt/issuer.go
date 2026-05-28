@@ -3,8 +3,7 @@ package jwt
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"time"
@@ -26,6 +25,7 @@ type claimsWrapper[C any] struct {
 
 // Service provides JWT-based implementations of tokens.Issuer and tokens.Verifier.
 type Service[C any] struct {
+	store         tokens.Store[C]
 	secretKey     []byte
 	issuer        string
 	accessTTL     time.Duration
@@ -35,7 +35,8 @@ type Service[C any] struct {
 }
 
 // Config defines the configuration for the JWT Service.
-type Config struct {
+type Config[C any] struct {
+	Store         tokens.Store[C]
 	SecretKey     string
 	Issuer        string
 	AccessTTL     time.Duration
@@ -45,7 +46,7 @@ type Config struct {
 }
 
 // New creates a new JWT Service.
-func New[C any](cfg Config) *Service[C] {
+func New[C any](cfg Config[C]) *Service[C] {
 	if cfg.RefreshLength == 0 {
 		cfg.RefreshLength = 32
 	}
@@ -54,6 +55,7 @@ func New[C any](cfg Config) *Service[C] {
 	}
 
 	return &Service[C]{
+		store:         cfg.Store,
 		secretKey:     []byte(cfg.SecretKey),
 		issuer:        cfg.Issuer,
 		accessTTL:     cfg.AccessTTL,
@@ -98,37 +100,38 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 	if _, err := rand.Read(refreshBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
-	refreshTokenStr := hex.EncodeToString(refreshBytes)
+	refreshTokenStr := base64.RawURLEncoding.EncodeToString(refreshBytes)
+	refreshHash := tokens.HashToken(refreshTokenStr)
 	refreshExpiresAt := now.Add(s.refreshTTL)
 
 	return &tokens.TokenPair[C]{
 		AccessToken:           accessTokenStr,
 		RefreshToken:          refreshTokenStr,
+		RefreshTokenHash:      refreshHash,
 		AccessTokenExpiresAt:  accessExpiresAt,
 		RefreshTokenExpiresAt: refreshExpiresAt,
 		Claims:                claims,
-	}, nil
-}
+	}, s.store.SaveRefreshToken(ctx, refreshHash, claims.Subject, refreshExpiresAt, tokens.WithTenant(claims.TenantID))
+	}
 
-// IssueAPIKey generates a new API Key with the specified prefix and claims.
-func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+	// IssueAPIKey generates a new API Key with the specified prefix and claims.
+	func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
 	keyBytes := make([]byte, s.apiKeyLength)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)
 	}
 
-	tokenStr := prefix + hex.EncodeToString(keyBytes)
+	tokenStr := prefix + base64.RawURLEncoding.EncodeToString(keyBytes)
 
 	// Hash the token for storage
-	hash := sha256.Sum256([]byte(tokenStr))
-	hashStr := hex.EncodeToString(hash[:])
+	hashStr := tokens.HashToken(tokenStr)
 
 	var expiresAt *time.Time
 	if !claims.ExpiresAt.IsZero() {
 		expiresAt = &claims.ExpiresAt
 	}
 
-	return &tokens.APIKey[C]{
+	key := &tokens.APIKey[C]{
 		ID:        uuid.New(),
 		TenantID:  claims.TenantID,
 		Prefix:    prefix,
@@ -136,11 +139,17 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 		Hash:      hashStr,
 		ExpiresAt: expiresAt,
 		Claims:    claims,
-	}, nil
-}
+	}
 
-// VerifyAccessToken parses and validates an access token, returning its claims.
-func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
+	if err := s.store.SaveAPIKey(ctx, key, tokens.WithTenant(claims.TenantID)); err != nil {
+		return nil, err
+	}
+
+	return key, nil
+	}
+
+	// VerifyAccessToken parses and validates an access token, returning its claims.
+	func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
 	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, func(token *jwt.Token) (interface{}, error) {
@@ -174,12 +183,50 @@ func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*t
 		Audiences: wrapper.Audience,
 		Scopes:    wrapper.Scopes,
 		Groups:    wrapper.Groups,
-		Roles:     wrapper.Roles,
+		Roles:    wrapper.Roles,
 		Custom:    wrapper.Custom,
 	}
 
 	return &claims, nil
+	}
+
+// VerifyRefreshToken validates a refresh token against the store and returns its claims.
+func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
+	hash := tokens.HashToken(token)
+
+	// Since we don't store full claims for refresh tokens in this simple Store,
+	// we just verify existence and return a minimal Claims object with the Subject.
+	userID, expiresAt, err := s.store.FindRefreshTokenByHash(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	if time.Now().After(expiresAt) {
+		return nil, tokens.ErrTokenExpired
+	}
+
+	return &tokens.Claims[C]{
+		Subject:   userID,
+		ExpiresAt: expiresAt,
+	}, nil
 }
+
+// VerifyAPIKey validates an API key against the store and returns its claims.
+func (s *Service[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
+	hash := tokens.HashToken(key)
+
+	apiKey, err := s.store.FindAPIKeyByHash(ctx, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now()) {
+		return nil, tokens.ErrTokenExpired
+	}
+
+	return &apiKey.Claims, nil
+}
+
 
 // Verify interface compliance
 var _ tokens.Issuer[any] = (*Service[any])(nil)

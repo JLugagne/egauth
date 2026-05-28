@@ -11,4 +11,10 @@ var (
 
 	// ErrInvalidClaims is returned when a token's claims do not meet the expected structure or rules.
 	ErrInvalidClaims = errors.New("invalid claims")
+
+	// ErrAPIKeyNotFound is returned when an API key cannot be found by its hash.
+	ErrAPIKeyNotFound = errors.New("api key not found")
+
+	// ErrRefreshTokenNotFound is returned when a refresh token cannot be found by its hash.
+	ErrRefreshTokenNotFound = errors.New("refresh token not found")
 )

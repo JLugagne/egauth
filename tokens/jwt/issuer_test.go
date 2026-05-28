@@ -8,6 +8,7 @@ import (
 	"github.com/JLugagne/libauth/tokens"
 	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/JLugagne/libauth/tokens/issuertest"
+	"github.com/JLugagne/libauth/tokens/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,7 +20,36 @@ type MyCustomClaims struct {
 }
 
 func TestJWTIssuerVerifier_Contract(t *testing.T) {
-	cfg := jwt.Config{
+	refreshTokens := make(map[string]uuid.UUID)
+	apiKeys := make(map[string]*tokens.APIKey[MyCustomClaims])
+
+	mockStore := &storetest.MockStore[MyCustomClaims]{
+		SaveRefreshTokenFunc: func(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...tokens.Option) error {
+			refreshTokens[tokenHash] = userID
+			return nil
+		},
+		FindRefreshTokenByHashFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (uuid.UUID, time.Time, error) {
+			userID, ok := refreshTokens[tokenHash]
+			if !ok {
+				return uuid.Nil, time.Time{}, tokens.ErrRefreshTokenNotFound
+			}
+			return userID, time.Now().Add(time.Hour), nil
+		},
+		SaveAPIKeyFunc: func(ctx context.Context, key *tokens.APIKey[MyCustomClaims], opts ...tokens.Option) error {
+			apiKeys[key.Hash] = key
+			return nil
+		},
+		FindAPIKeyByHashFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.APIKey[MyCustomClaims], error) {
+			key, ok := apiKeys[tokenHash]
+			if !ok {
+				return nil, tokens.ErrAPIKeyNotFound
+			}
+			return key, nil
+		},
+	}
+
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:      mockStore,
 		SecretKey:  "super-secret-key-for-testing",
 		Issuer:     "libauth-test",
 		AccessTTL:  15 * time.Minute,
@@ -32,7 +62,14 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 	ctx := context.Background()
-	cfg := jwt.Config{
+	mockStore := &storetest.MockStore[MyCustomClaims]{
+		SaveRefreshTokenFunc: func(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...tokens.Option) error {
+			return nil
+		},
+	}
+
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:      mockStore,
 		SecretKey:  "secret",
 		Issuer:     "test",
 		AccessTTL:  -1 * time.Minute, // Expired immediately
@@ -54,7 +91,8 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 
 	t.Run("Invalid signature returns ErrInvalidToken", func(t *testing.T) {
 		// Create a token with a different secret
-		otherSvc := jwt.New[MyCustomClaims](jwt.Config{
+		otherSvc := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
+			Store:     mockStore,
 			SecretKey: "different-secret",
 			AccessTTL: 1 * time.Hour,
 		})
