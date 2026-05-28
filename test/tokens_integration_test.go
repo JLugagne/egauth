@@ -9,7 +9,7 @@ import (
 
 	"github.com/JLugagne/libauth/domain"
 	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/internal/jwt"
+	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

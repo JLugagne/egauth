@@ -5,7 +5,7 @@ import (
 	"testing"
 
 	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/passwords/internal/policy"
+	"github.com/JLugagne/libauth/passwords/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

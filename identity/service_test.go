@@ -1,0 +1,324 @@
+package identity_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/libauth/identity/storetest"
+	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/libauth/passwords/hashertest"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// mockPolicy is a simple mock for passwords.Policy
+type mockPolicy struct {
+	VerifyFunc func(ctx context.Context, password string) error
+}
+
+func (m *mockPolicy) Verify(ctx context.Context, password string) error {
+	if m.VerifyFunc == nil {
+		panic("called not defined VerifyFunc")
+	}
+	return m.VerifyFunc(ctx, password)
+}
+
+func TestService_Register(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success", func(t *testing.T) {
+		email := "test@example.com"
+		password := "ValidPassword123!"
+		expectedHash := "hashed_password"
+		expectedUser := &identity.User{
+			ID:    uuid.New(),
+			Email: email,
+		}
+
+		store := &storetest.MockStore{
+			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				assert.Equal(t, email, e)
+				return expectedUser, nil
+			},
+			AddIdentityFunc: func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
+				assert.Equal(t, expectedUser.ID, ident.UserID)
+				assert.Equal(t, "password", ident.Provider)
+				assert.Equal(t, email, ident.ProviderID)
+				assert.Equal(t, expectedHash, *ident.PasswordHash)
+				return nil
+			},
+		}
+
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) {
+				assert.Equal(t, password, p)
+				return expectedHash, nil
+			},
+		}
+
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, p string) error {
+				assert.Equal(t, password, p)
+				return nil
+			},
+		}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Register(ctx, email, password)
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedUser, user)
+	})
+
+	t.Run("policy failure", func(t *testing.T) {
+		store := &storetest.MockStore{}
+		hasher := &hashertest.MockHasher{}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, p string) error {
+				return passwords.ErrPasswordTooShort
+			},
+		}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Register(ctx, "test@example.com", "short")
+
+		assert.ErrorIs(t, err, passwords.ErrPasswordTooShort)
+		assert.Nil(t, user)
+	})
+
+	t.Run("hash failure", func(t *testing.T) {
+		store := &storetest.MockStore{}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) {
+				return "", passwords.ErrHashFailed
+			},
+		}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, p string) error {
+				return nil
+			},
+		}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Register(ctx, "test@example.com", "password")
+
+		assert.ErrorIs(t, err, passwords.ErrHashFailed)
+		assert.Nil(t, user)
+	})
+}
+
+func TestService_Authenticate(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("success password provider", func(t *testing.T) {
+		email := "test@example.com"
+		password := "password123"
+		hash := "hashed"
+		expectedUser := &identity.User{
+			ID:    uuid.New(),
+			Email: email,
+		}
+
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				assert.Equal(t, email, e)
+				return expectedUser, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				assert.Equal(t, "password", p)
+				assert.Equal(t, email, pid)
+				return &identity.Identity{
+					UserID:       expectedUser.ID,
+					Provider:     "password",
+					ProviderID:   email,
+					PasswordHash: &hash,
+				}, nil
+			},
+		}
+
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error {
+				assert.Equal(t, hash, h)
+				assert.Equal(t, password, p)
+				return nil
+			},
+		}
+
+		policy := &mockPolicy{}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Authenticate(ctx, "password", email, password)
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedUser, user)
+	})
+
+	t.Run("user not found", func(t *testing.T) {
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
+		}
+
+		svc := identity.NewService(store, nil, nil)
+		user, err := svc.Authenticate(ctx, "password", "test@example.com", "password")
+
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.Nil(t, user)
+	})
+
+	t.Run("identity not found", func(t *testing.T) {
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return nil, identity.ErrIdentityNotFound
+			},
+		}
+
+		svc := identity.NewService(store, nil, nil)
+		user, err := svc.Authenticate(ctx, "password", "test@example.com", "password")
+
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.Nil(t, user)
+	})
+
+	t.Run("invalid password", func(t *testing.T) {
+		hash := "hash"
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return &identity.Identity{PasswordHash: &hash}, nil
+			},
+		}
+
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error {
+				return passwords.ErrInvalidPassword
+			},
+		}
+
+		svc := identity.NewService(store, hasher, nil)
+		user, err := svc.Authenticate(ctx, "password", "test@example.com", "wrong")
+
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.Nil(t, user)
+	})
+
+	t.Run("other provider success", func(t *testing.T) {
+		expectedUser := &identity.User{
+			ID: uuid.New(),
+		}
+		store := &storetest.MockStore{
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				assert.Equal(t, "google", p)
+				assert.Equal(t, "sub123", pid)
+				return &identity.Identity{UserID: expectedUser.ID}, nil
+			},
+			FindUserByIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
+				assert.Equal(t, expectedUser.ID, id)
+				return expectedUser, nil
+			},
+		}
+
+		svc := identity.NewService(store, nil, nil)
+		user, err := svc.Authenticate(ctx, "google", "sub123", "")
+
+		require.NoError(t, err)
+		assert.Equal(t, expectedUser, user)
+	})
+	
+	t.Run("create user fails", func(t *testing.T) {
+		store := &storetest.MockStore{
+			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return nil, errors.New("db error")
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) {
+				return "hash", nil
+			},
+		}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, p string) error { return nil },
+		}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Register(ctx, "test@example.com", "pass")
+
+		assert.Error(t, err)
+		assert.EqualError(t, err, "db error")
+		assert.Nil(t, user)
+	})
+
+	t.Run("add identity fails", func(t *testing.T) {
+		store := &storetest.MockStore{
+			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			AddIdentityFunc: func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
+				return errors.New("db error")
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) {
+				return "hash", nil
+			},
+		}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, p string) error { return nil },
+		}
+
+		svc := identity.NewService(store, hasher, policy)
+		user, err := svc.Register(ctx, "test@example.com", "pass")
+
+		assert.Error(t, err)
+		assert.EqualError(t, err, "db error")
+		assert.Nil(t, user)
+		})
+
+		t.Run("missing password hash", func(t *testing.T) {
+		mockStore := &storetest.MockStore{
+		FindUserByEmailFunc: func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
+		return &identity.User{ID: uuid.New()}, nil
+		},
+		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+		return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
+		},
+		}
+		service := identity.NewService(mockStore, nil, nil)
+		_, err := service.Authenticate(context.Background(), "password", "test@test.com", "pass")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		})
+
+		t.Run("other provider identity not found", func(t *testing.T) {
+		mockStore := &storetest.MockStore{
+		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+		return nil, identity.ErrIdentityNotFound
+		},
+		}
+		service := identity.NewService(mockStore, nil, nil)
+		_, err := service.Authenticate(context.Background(), "google", "12345", "")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		})
+
+		t.Run("other provider user not found", func(t *testing.T) {
+		mockStore := &storetest.MockStore{
+		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+		return &identity.Identity{UserID: uuid.New()}, nil
+		},
+		FindUserByIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
+		return nil, identity.ErrUserNotFound
+		},
+		}
+		service := identity.NewService(mockStore, nil, nil)
+		_, err := service.Authenticate(context.Background(), "google", "12345", "")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		})
+		}

@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/internal/jwt"
+	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/JLugagne/libauth/tokens/issuertest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

@@ -1,0 +1,30 @@
+package identity
+
+import (
+	"time"
+
+	"github.com/google/uuid"
+)
+
+// User represents an account container.
+type User struct {
+	ID              uuid.UUID
+	TenantID        string
+	Email           string
+	EmailVerifiedAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+	DeletedAt       *time.Time
+}
+
+// Identity represents an authentication method linked to a User.
+type Identity struct {
+	ID           uuid.UUID
+	UserID       uuid.UUID
+	TenantID     string
+	Provider     string  // e.g., "password", "google", "github"
+	ProviderID   string  // e.g., email for "password", "sub" for OAuth
+	PasswordHash *string // Only populated for "password" provider
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
