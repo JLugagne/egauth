@@ -39,6 +39,11 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 	if password == "" {
 		return "", passwords.ErrHashFailed
 	}
+	// Bound attacker-controlled input before running the (deliberately expensive) KDF, to
+	// prevent a pre-auth CPU/memory amplification DoS. See passwords.MaxPasswordLength.
+	if len(password) > passwords.MaxPasswordLength {
+		return "", passwords.ErrPasswordTooLong
+	}
 
 	salt := make([]byte, h.saltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -59,6 +64,13 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 
 // Compare checks a plaintext password against a PHC formatted Argon2id hash.
 func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
+	// Refuse to run the KDF on oversized candidate input (pre-auth DoS guard). A stored hash
+	// can only have come from an in-bounds password, so an oversized candidate cannot match;
+	// report it as an ordinary mismatch to avoid leaking a distinct signal.
+	if len(password) > passwords.MaxPasswordLength {
+		return passwords.ErrInvalidPassword
+	}
+
 	parts := strings.Split(hash, "$")
 	if len(parts) != 6 {
 		return passwords.ErrInvalidPassword

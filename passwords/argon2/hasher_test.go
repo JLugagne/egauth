@@ -55,3 +55,25 @@ func TestArgon2Hasher_EdgeCases(t *testing.T) {
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 	})
 }
+
+// TestArgon2Hasher_RejectsOversizedPassword guards against a pre-authentication
+// CPU/memory amplification DoS: an unbounded attacker-controlled password must never reach
+// argon2.IDKey (64MB, 4 threads). The hasher must reject it cheaply on both the Hash
+// (registration / decoy) and Compare (login) paths.
+func TestArgon2Hasher_RejectsOversizedPassword(t *testing.T) {
+	ctx := context.Background()
+	hasher := argon2hasher.NewHasher()
+
+	oversized := strings.Repeat("a", 1<<20) // 1 MiB
+
+	_, err := hasher.Hash(ctx, oversized)
+	assert.ErrorIs(t, err, passwords.ErrPasswordTooLong)
+
+	// Compare must also refuse to run the KDF on an oversized candidate. A stored hash can
+	// only have come from an in-bounds password, so an oversized candidate cannot match; it
+	// is reported as an ordinary credential mismatch (no enumeration signal).
+	valid, err := hasher.Hash(ctx, "TestPassword123!")
+	require.NoError(t, err)
+	err = hasher.Compare(ctx, valid, oversized)
+	assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
+}
