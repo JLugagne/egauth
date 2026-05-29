@@ -61,6 +61,15 @@ type Service interface {
 	// LoginWithMagicLink consumes a magic-link token (single-use) and returns the user it
 	// authenticates, so the caller can issue a session/token pair.
 	LoginWithMagicLink(ctx context.Context, token string, opts ...Option) (*User, error)
+
+	// ChangePassword re-verifies the user's current password and, on success, validates the
+	// new password against the policy and replaces the stored hash. It is the authenticated
+	// self-service counterpart to ResetPassword (which is token-gated). It returns
+	// ErrInvalidCredentials when the current password is wrong or the account has no password
+	// identity (e.g. OAuth-only), or a passwords.Policy error when the new password is
+	// rejected. After a successful change the caller SHOULD revoke the user's other sessions
+	// and refresh-token families (that is cross-module and left to the consumer).
+	ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...Option) error
 }
 
 type service struct {
@@ -294,6 +303,44 @@ func (s *service) ResetPassword(ctx context.Context, token, newPassword string, 
 	}
 
 	return s.store.UpdateIdentityPassword(ctx, user.ID, hash, opts...)
+}
+
+// ChangePassword re-verifies the user's current password, then validates and applies a new one.
+func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...Option) error {
+	// Validate the new password against the policy first: a weak new password must fail fast,
+	// before we spend a KDF comparison on the current credential or touch the store.
+	if err := s.policy.Verify(ctx, newPassword); err != nil {
+		return err
+	}
+
+	idents, err := s.store.FindIdentitiesByUserID(ctx, userID, opts...)
+	if err != nil {
+		return err
+	}
+
+	var pwIdent *Identity
+	for _, id := range idents {
+		if id.Provider == "password" && id.PasswordHash != nil {
+			pwIdent = id
+			break
+		}
+	}
+	if pwIdent == nil {
+		// No password set (e.g. an OAuth-only account). Apply an equivalent hashing cost so the
+		// response time does not distinguish "no password" from "wrong password".
+		s.decoyHash(ctx, currentPassword)
+		return ErrInvalidCredentials
+	}
+
+	if err := s.hasher.Compare(ctx, *pwIdent.PasswordHash, currentPassword); err != nil {
+		return ErrInvalidCredentials
+	}
+
+	hash, err := s.hasher.Hash(ctx, newPassword)
+	if err != nil {
+		return err
+	}
+	return s.store.UpdateIdentityPassword(ctx, userID, hash, opts...)
 }
 
 // RequestEmailVerification mints an email-verification token for the given user.

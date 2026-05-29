@@ -19,6 +19,14 @@ type MockService struct {
 	LinkOrCreateIdentityFunc     func(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...identity.Option) (*identity.User, error)
 	RequestMagicLinkFunc         func(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error)
 	LoginWithMagicLinkFunc       func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
+	ChangePasswordFunc           func(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...identity.Option) error
+}
+
+func (m *MockService) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...identity.Option) error {
+	if m.ChangePasswordFunc == nil {
+		panic("called not defined ChangePasswordFunc")
+	}
+	return m.ChangePasswordFunc(ctx, userID, currentPassword, newPassword, opts...)
 }
 
 func (m *MockService) RequestMagicLink(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error) {

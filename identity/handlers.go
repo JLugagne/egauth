@@ -17,6 +17,12 @@ import (
 // applies.
 type ClaimsBuilder[C any] func(*User) tokens.Claims[C]
 
+// DefaultMaxBodyBytes is the default cap applied to the request body of the form handlers.
+// It bounds attacker-controlled input (notably the password field, which feeds the expensive
+// argon2 KDF) to prevent a pre-authentication CPU/memory amplification DoS. It is comfortably
+// larger than a legitimate email+password+token form. Override with WithMaxBodyBytes.
+const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
+
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
 	provider       string
@@ -27,9 +33,12 @@ type handlerConfig struct {
 	emailField     string
 	passwordField  string
 	rememberField  string
-	tokenField     string
-	userResolver   func(*http.Request) (*User, bool)
-	trustedOrigins map[string]bool
+	tokenField           string
+	currentPasswordField string
+	newPasswordField     string
+	userResolver         func(*http.Request) (*User, bool)
+	trustedOrigins       map[string]bool
+	maxBodyBytes         int64
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -41,8 +50,11 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		cookies:       tokens.DefaultCookies(),
 		emailField:    "email",
 		passwordField: "password",
-		rememberField: "remember_me",
-		tokenField:    "token",
+		rememberField:        "remember_me",
+		tokenField:           "token",
+		currentPasswordField: "current_password",
+		newPasswordField:     "new_password",
+		maxBodyBytes:         DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -146,6 +158,43 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 	}
 }
 
+// WithPasswordChangeFields overrides the form field names read by ChangePasswordHandler
+// (defaults "current_password" and "new_password").
+func WithPasswordChangeFields(current, newField string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.currentPasswordField = current
+		h.newPasswordField = newField
+	}
+}
+
+// WithMaxBodyBytes overrides the request-body size cap applied before form parsing
+// (default DefaultMaxBodyBytes). A non-positive value disables the cap; do so only if an
+// upstream layer already bounds the body, since an unbounded password feeds the expensive
+// argon2 KDF (a pre-auth DoS vector).
+func WithMaxBodyBytes(n int64) HandlerOption {
+	return func(h *handlerConfig) { h.maxBodyBytes = n }
+}
+
+// parseLimitedForm bounds the request body to cfg.maxBodyBytes before parsing the form. It
+// protects the argon2 hashing path from unbounded attacker-controlled input. On failure it
+// writes the error response (413 when the body is too large, 400 when malformed) and returns
+// false.
+func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
+		} else {
+			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		}
+		return false
+	}
+	return true
+}
+
 // LoginHandler builds an HTTP handler that authenticates form credentials and, on success,
 // issues an access+refresh token pair, writes them as secure cookies and redirects.
 //
@@ -163,8 +212,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -201,8 +249,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -315,8 +362,7 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -351,8 +397,7 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -412,8 +457,7 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -444,8 +488,7 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -476,8 +519,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -493,6 +535,59 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ChangePasswordHandler builds an authenticated HTTP handler that lets a signed-in user
+// change their own password. The current user is obtained via WithUserResolver (typically
+// reading whatever the application's auth middleware stashed on the request); if no resolver
+// is configured or it reports no user, the handler responds 401. It reads the current and new
+// passwords from the form (fields configurable via WithPasswordChangeFields), then calls
+// Service.ChangePassword.
+//
+// On success the consumer SHOULD revoke the user's other sessions / refresh-token families
+// (cross-module, so not done here). A wrong current password maps to 401; a new password that
+// fails the policy maps to 400.
+func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		current := r.PostForm.Get(cfg.currentPasswordField)
+		newPassword := r.PostForm.Get(cfg.newPasswordField)
+
+		if err := svc.ChangePassword(r.Context(), user.ID, current, newPassword, cfg.authOpts(r)...); err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidCredentials):
+				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
+			case isPasswordPolicyError(err):
+				cfg.fail(w, r, http.StatusBadRequest, "password_rejected")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
 			return
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)

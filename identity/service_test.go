@@ -27,6 +27,110 @@ func (m *mockPolicy) Verify(ctx context.Context, password string) error {
 	return m.VerifyFunc(ctx, password)
 }
 
+func TestService_ChangePassword(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.New()
+	const storedHash = "stored-hash"
+
+	passwordIdent := func() []*identity.Identity {
+		h := storedHash
+		return []*identity.Identity{{ID: uuid.New(), UserID: userID, Provider: "password", PasswordHash: &h}}
+	}
+
+	t.Run("wrong current password is rejected and nothing is written", func(t *testing.T) {
+		updated := false
+		store := &storetest.MockStore{
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+			UpdateIdentityPasswordFunc: func(ctx context.Context, id uuid.UUID, hash string, opts ...identity.Option) error {
+				updated = true
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error {
+				assert.Equal(t, storedHash, hash)
+				return passwords.ErrInvalidPassword
+			},
+			HashFunc: func(ctx context.Context, p string) (string, error) { return "new", nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, userID, "wrong-current", "NewValidPass123!")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.False(t, updated, "password must not be updated when the current password is wrong")
+	})
+
+	t.Run("correct current and valid new updates the hash", func(t *testing.T) {
+		var gotHash string
+		store := &storetest.MockStore{
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
+				assert.Equal(t, userID, id)
+				return passwordIdent(), nil
+			},
+			UpdateIdentityPasswordFunc: func(ctx context.Context, id uuid.UUID, hash string, opts ...identity.Option) error {
+				assert.Equal(t, userID, id)
+				gotHash = hash
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error {
+				assert.Equal(t, "current-pass", password)
+				return nil
+			},
+			HashFunc: func(ctx context.Context, p string) (string, error) {
+				assert.Equal(t, "NewValidPass123!", p)
+				return "new-hash", nil
+			},
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, userID, "current-pass", "NewValidPass123!")
+		require.NoError(t, err)
+		assert.Equal(t, "new-hash", gotHash)
+	})
+
+	t.Run("new password failing policy is rejected before the current is verified", func(t *testing.T) {
+		compareCalled := false
+		store := &storetest.MockStore{
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error { compareCalled = true; return nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return passwords.ErrPasswordTooShort }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, userID, "current", "weak")
+		assert.ErrorIs(t, err, passwords.ErrPasswordTooShort)
+		assert.False(t, compareCalled, "policy must be checked before verifying the current password")
+	})
+
+	t.Run("account without a password identity is rejected with a decoy hash", func(t *testing.T) {
+		store := &storetest.MockStore{
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
+				return []*identity.Identity{{Provider: "google", ProviderID: "x"}}, nil
+			},
+		}
+		decoyed := false
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { decoyed = true; return "h", nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, userID, "whatever", "NewValidPass123!")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, decoyed, "should apply a decoy hash to equalize timing for an account with no password")
+	})
+}
+
 func TestService_Register(t *testing.T) {
 	ctx := context.Background()
 

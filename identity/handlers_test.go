@@ -11,6 +11,7 @@ import (
 
 	"github.com/JLugagne/libauth/identity"
 	"github.com/JLugagne/libauth/identity/servicetest"
+	"github.com/JLugagne/libauth/passwords"
 	"github.com/JLugagne/libauth/tokens"
 	"github.com/JLugagne/libauth/tokens/issuertest"
 	"github.com/google/uuid"
@@ -98,6 +99,92 @@ func TestLoginHandler_RememberMePersistsRefresh(t *testing.T) {
 	refresh := cookieByName(rec, tokens.DefaultRefreshCookieName)
 	require.NotNil(t, refresh)
 	assert.Greater(t, refresh.MaxAge, 0, "remember_me must make the refresh cookie persistent")
+}
+
+func changePwForm(t *testing.T, current, newPw string) *http.Request {
+	t.Helper()
+	form := url.Values{}
+	form.Set("current_password", current)
+	form.Set("new_password", newPw)
+	req := httptest.NewRequest(http.MethodPost, "/account/password", strings.NewReader(form.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	return req
+}
+
+func TestChangePasswordHandler(t *testing.T) {
+	uid := uuid.New()
+	withUser := identity.WithUserResolver(func(r *http.Request) (*identity.User, bool) {
+		return &identity.User{ID: uid}, true
+	})
+
+	t.Run("no resolver returns 401", func(t *testing.T) {
+		h := identity.ChangePasswordHandler(&servicetest.MockService{})
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	})
+
+	t.Run("wrong current password returns 401", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+				assert.Equal(t, uid, userID)
+				return identity.ErrInvalidCredentials
+			},
+		}
+		rec := httptest.NewRecorder()
+		identity.ChangePasswordHandler(svc, withUser).ServeHTTP(rec, changePwForm(t, "wrong", "NewValidPass123!"))
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "invalid_credentials")
+	})
+
+	t.Run("policy rejection returns 400", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+				return passwords.ErrPasswordTooShort
+			},
+		}
+		rec := httptest.NewRecorder()
+		identity.ChangePasswordHandler(svc, withUser).ServeHTTP(rec, changePwForm(t, "old", "x"))
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "password_rejected")
+	})
+
+	t.Run("success returns 204 and passes the fields through", func(t *testing.T) {
+		called := false
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+				called = true
+				assert.Equal(t, "old-pass", current)
+				assert.Equal(t, "NewValidPass123!", newPassword)
+				return nil
+			},
+		}
+		rec := httptest.NewRecorder()
+		identity.ChangePasswordHandler(svc, withUser).ServeHTTP(rec, changePwForm(t, "old-pass", "NewValidPass123!"))
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		assert.True(t, called)
+	})
+}
+
+func TestLoginHandler_RejectsOversizedBody(t *testing.T) {
+	called := false
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+			called = true
+			return &identity.User{ID: uuid.New()}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	// A password far larger than the body cap must be rejected before it reaches the service
+	// (and thus the expensive argon2 KDF): a pre-authentication amplification DoS guard.
+	huge := strings.Repeat("a", int(identity.DefaultMaxBodyBytes)+(1<<10))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", huge, ""))
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.Contains(t, rec.Body.String(), "request_too_large")
+	assert.False(t, called, "service must not be invoked for an over-limit body")
 }
 
 func TestLoginHandler_InvalidCredentials(t *testing.T) {
