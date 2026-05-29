@@ -3,11 +3,27 @@ package identity
 import (
 	"context"
 	"errors"
+	"net/mail"
+	"strings"
 	"time"
 
 	"github.com/JLugagne/libauth/passwords"
 	"github.com/google/uuid"
 )
+
+// normalizeEmail validates an email against RFC 5322 and returns its canonical form (trimmed,
+// lowercased). Because account uniqueness is byte-exact at the store, normalizing here means
+// "User@Example.com" and "user@example.com" resolve to a single account — closing both a
+// duplicate-account hazard and a pre-registration takeover of a victim's case-variant. The
+// local part is lowercased too: although RFC 5321 permits case-sensitive local parts, virtually
+// all providers treat them case-insensitively, so this is the safe, expected behavior.
+func normalizeEmail(email string) (string, error) {
+	addr, err := mail.ParseAddress(strings.TrimSpace(email))
+	if err != nil {
+		return "", ErrInvalidEmail
+	}
+	return strings.ToLower(addr.Address), nil
+}
 
 // Default lockout configuration values.
 const (
@@ -129,6 +145,10 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 }
 
 func (s *service) Register(ctx context.Context, email, password string, opts ...Option) (*User, error) {
+	email, err := normalizeEmail(email)
+	if err != nil {
+		return nil, err
+	}
 	if err := s.policy.Verify(ctx, password); err != nil {
 		return nil, err
 	}
@@ -173,6 +193,15 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 
 func (s *service) Authenticate(ctx context.Context, provider, providerID, password string, opts ...Option) (*User, error) {
 	if provider == "password" {
+		normalized, nerr := normalizeEmail(providerID)
+		if nerr != nil {
+			// Not a valid email: spend an equivalent hashing cost, then fail uniformly so a
+			// malformed identifier is indistinguishable from a wrong password.
+			s.decoyHash(ctx, password)
+			return nil, ErrInvalidCredentials
+		}
+		providerID = normalized
+
 		user, err := s.store.FindUserByEmail(ctx, providerID, opts...)
 		if err != nil {
 			// Constant-time: apply an equivalent hashing cost so an attacker cannot
@@ -227,6 +256,11 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 
 // RequestPasswordReset mints a password-reset token for the account owning email.
 func (s *service) RequestPasswordReset(ctx context.Context, email string, opts ...Option) (string, *User, error) {
+	email, nerr := normalizeEmail(email)
+	if nerr != nil {
+		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		return "", nil, nil
+	}
 	user, err := s.store.FindUserByEmail(ctx, email, opts...)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
@@ -376,6 +410,17 @@ func (s *service) VerifyEmail(ctx context.Context, token string, opts ...Option)
 // LinkOrCreateIdentity resolves the user behind an external identity, JIT-provisioning when
 // the provider identity is unknown.
 func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...Option) (*User, error) {
+	// Canonicalize the provider-supplied email so the takeover-by-email guard and account
+	// linking compare on the same normalized form the password flow stores. An unparseable
+	// value is dropped (provision without an email) rather than persisted verbatim.
+	if email != "" {
+		if normalized, nerr := normalizeEmail(email); nerr == nil {
+			email = normalized
+		} else {
+			email = ""
+		}
+	}
+
 	// 1. Already linked? Return the owning user.
 	ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
 	if err == nil {
@@ -426,6 +471,11 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 
 // RequestMagicLink mints a passwordless login token for the account owning email.
 func (s *service) RequestMagicLink(ctx context.Context, email string, opts ...Option) (string, *User, error) {
+	email, nerr := normalizeEmail(email)
+	if nerr != nil {
+		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		return "", nil, nil
+	}
 	user, err := s.store.FindUserByEmail(ctx, email, opts...)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {

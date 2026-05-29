@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/libauth/identity"
+	identitymemory "github.com/JLugagne/libauth/identity/memory"
 	"github.com/JLugagne/libauth/identity/storetest"
 	"github.com/JLugagne/libauth/passwords"
 	"github.com/JLugagne/libauth/passwords/hashertest"
@@ -25,6 +26,29 @@ func (m *mockPolicy) Verify(ctx context.Context, password string) error {
 		panic("called not defined VerifyFunc")
 	}
 	return m.VerifyFunc(ctx, password)
+}
+
+func TestService_Register_NormalizesEmail(t *testing.T) {
+	ctx := context.Background()
+	store := identitymemory.NewStore()
+	hasher := &hashertest.MockHasher{HashFunc: func(ctx context.Context, p string) (string, error) { return "h", nil }}
+	policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+	svc := identity.NewService(store, hasher, policy)
+
+	u1, err := svc.Register(ctx, "  User@Example.COM ", "pw")
+	require.NoError(t, err)
+	assert.Equal(t, "user@example.com", u1.Email, "email is trimmed and lowercased")
+
+	// A case/space variant must resolve to the same account (no duplicate / pre-reg takeover).
+	_, err = svc.Register(ctx, "user@example.com", "pw")
+	assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
+}
+
+func TestService_Register_RejectsInvalidEmail(t *testing.T) {
+	ctx := context.Background()
+	svc := identity.NewService(identitymemory.NewStore(), &hashertest.MockHasher{}, &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }})
+	_, err := svc.Register(ctx, "not-an-email", "pw")
+	assert.ErrorIs(t, err, identity.ErrInvalidEmail)
 }
 
 func TestService_RequestEmailVerification_EnumerationSafe(t *testing.T) {

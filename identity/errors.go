@@ -12,6 +12,9 @@ var (
 	// that already exists in the same tenant.
 	ErrEmailAlreadyExists = errors.New("email already exists")
 
+	// ErrInvalidEmail is returned when an email fails RFC 5322 address parsing.
+	ErrInvalidEmail = errors.New("invalid email")
+
 	// ErrIdentityNotFound is returned when an identity cannot be found.
 	ErrIdentityNotFound = errors.New("identity not found")
 
