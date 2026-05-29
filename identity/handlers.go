@@ -438,8 +438,11 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			cfg.fail(w, r, http.StatusInternalServerError, "verification_request_failed")
 			return
 		}
-		if mailer != nil {
-			_ = mailer.SendEmailVerification(r.Context(), user, token)
+		// token is empty when the account is not a live, same-tenant user (swallowed at the
+		// service for enumeration safety); only dispatch delivery when a token was minted.
+		if token != "" && mailer != nil {
+			ctx := context.WithoutCancel(r.Context())
+			go func() { _ = mailer.SendEmailVerification(ctx, user, token) }()
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}

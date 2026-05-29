@@ -27,6 +27,24 @@ func (m *mockPolicy) Verify(ctx context.Context, password string) error {
 	return m.VerifyFunc(ctx, password)
 }
 
+func TestService_RequestEmailVerification_EnumerationSafe(t *testing.T) {
+	ctx := context.Background()
+	store := &storetest.MockStore{
+		CreateVerificationTokenFunc: func(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
+			// The store's live/same-tenant guard reports a non-existent or foreign user as
+			// ErrUserNotFound.
+			return "", identity.ErrUserNotFound
+		},
+	}
+	svc := identity.NewService(store, &hashertest.MockHasher{}, &mockPolicy{})
+
+	token, err := svc.RequestEmailVerification(ctx, uuid.New())
+	// Must NOT surface a distinct error: a 500-vs-204 difference for a live/same-tenant account
+	// is an account-enumeration oracle, unlike the other Request* flows.
+	assert.NoError(t, err)
+	assert.Empty(t, token)
+}
+
 func TestService_ChangePassword(t *testing.T) {
 	ctx := context.Background()
 	userID := uuid.New()

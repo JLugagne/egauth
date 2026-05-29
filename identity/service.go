@@ -343,9 +343,19 @@ func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentP
 	return s.store.UpdateIdentityPassword(ctx, userID, hash, opts...)
 }
 
-// RequestEmailVerification mints an email-verification token for the given user.
+// RequestEmailVerification mints an email-verification token for the given user. Like the
+// other Request* flows it is enumeration-safe: a non-existent, soft-deleted or cross-tenant
+// user yields ("", nil) rather than a distinct error, so a caller cannot use the 500-vs-204
+// (or latency) difference as an oracle for whether a userID is a live, same-tenant account.
 func (s *service) RequestEmailVerification(ctx context.Context, userID uuid.UUID, opts ...Option) (string, error) {
-	return s.store.CreateVerificationToken(ctx, userID, KindEmailVerification, s.emailVerificationTTL, nil, opts...)
+	token, err := s.store.CreateVerificationToken(ctx, userID, KindEmailVerification, s.emailVerificationTTL, nil, opts...)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return "", nil
+		}
+		return "", err
+	}
+	return token, nil
 }
 
 // VerifyEmail consumes an email-verification token and marks the email verified.
