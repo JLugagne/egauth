@@ -22,6 +22,7 @@ type MockStore struct {
 	FindUserByIDFunc           func(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error)
 	FindUserByEmailFunc        func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error)
 	UpdateUserFunc             func(ctx context.Context, user *identity.User, opts ...identity.Option) error
+	UpdateUserEmailFunc        func(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error
 	DeleteUserFunc             func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error
 	AddIdentityFunc            func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error
 	FindIdentitiesByUserIDFunc func(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error)
@@ -98,6 +99,13 @@ func (m *MockStore) UpdateUser(ctx context.Context, user *identity.User, opts ..
 		panic("called not defined UpdateUserFunc")
 	}
 	return m.UpdateUserFunc(ctx, user, opts...)
+}
+
+func (m *MockStore) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error {
+	if m.UpdateUserEmailFunc == nil {
+		panic("called not defined UpdateUserEmailFunc")
+	}
+	return m.UpdateUserEmailFunc(ctx, userID, newEmail, verifiedAt, opts...)
 }
 
 func (m *MockStore) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
@@ -302,6 +310,73 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, err)
 		err = store.UpdateIdentityPassword(ctx, ghost.ID, "x", identity.WithTenant(tenantA))
 		assert.ErrorIs(t, err, identity.ErrIdentityNotFound)
+	})
+
+	t.Run("Contract: Change Email", func(t *testing.T) {
+		const oldEmail = "change_old@example.com"
+		const newEmail = "change_new@example.com"
+		user, err := store.CreateUser(ctx, oldEmail, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   oldEmail, // password identities are keyed by email
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, ident, identity.WithTenant(tenantA)))
+
+		verifiedAt := time.Now()
+		require.NoError(t, store.UpdateUserEmail(ctx, user.ID, newEmail, verifiedAt, identity.WithTenant(tenantA)))
+
+		// The user now resolves by the new email and is marked verified; the old email is gone.
+		found, err := store.FindUserByEmail(ctx, newEmail, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, found.ID)
+		require.NotNil(t, found.EmailVerifiedAt, "the confirmed new address must be verified")
+		assert.Equal(t, verifiedAt.Unix(), found.EmailVerifiedAt.Unix())
+
+		_, err = store.FindUserByEmail(ctx, oldEmail, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+
+		// The password identity must have been re-keyed to the new email, so password login by
+		// the new email keeps working (and the old key no longer resolves).
+		reIdent, err := store.FindIdentityByProvider(ctx, "password", newEmail, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, reIdent.UserID)
+		_, err = store.FindIdentityByProvider(ctx, "password", oldEmail, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrIdentityNotFound)
+
+		// Changing to an address held by another live account is rejected.
+		other, err := store.CreateUser(ctx, "change_other@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		err = store.UpdateUserEmail(ctx, other.ID, newEmail, time.Now(), identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
+
+		// An unknown user is reported as not found.
+		err = store.UpdateUserEmail(ctx, uuid.New(), "nobody_new@example.com", time.Now(), identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+
+		// An account with no password identity (e.g. OAuth-only) can still change its email; only
+		// the user row moves and a non-password identity is left untouched (not re-keyed).
+		oauthUser, err := store.CreateUser(ctx, "oauth_old@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		oauthIdent := &identity.Identity{
+			UserID:     oauthUser.ID,
+			Provider:   "google",
+			ProviderID: "google-sub-123",
+		}
+		require.NoError(t, store.AddIdentity(ctx, oauthIdent, identity.WithTenant(tenantA)))
+
+		require.NoError(t, store.UpdateUserEmail(ctx, oauthUser.ID, "oauth_new@example.com", time.Now(), identity.WithTenant(tenantA)))
+		movedOAuth, err := store.FindUserByEmail(ctx, "oauth_new@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, oauthUser.ID, movedOAuth.ID)
+		// The OAuth identity must still resolve by its original provider key (never re-keyed).
+		gotOAuth, err := store.FindIdentityByProvider(ctx, "google", "google-sub-123", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, oauthUser.ID, gotOAuth.UserID)
 	})
 
 	t.Run("Contract: Verification Tokens", func(t *testing.T) {

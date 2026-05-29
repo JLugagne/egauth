@@ -127,7 +127,7 @@ and general CSRF are left to the application layer):
 
 ## Account-existence disclosure (by design)
 
-Two responses intentionally reveal that an account exists; this is an accepted trade-off,
+Three responses intentionally reveal that an account exists; this is an accepted trade-off,
 not a bug:
 
 - **`ErrAccountLocked` → 429** on login: lockout is meant to be observable (PRD §105–106).
@@ -135,9 +135,17 @@ not a bug:
   requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
   `400` (note that `Register` already hashes before the uniqueness check, so the timing
   channel is already closed).
+- **`email_taken` → 409** on the authenticated change-email request
+  (`RequestEmailChangeHandler`): the caller is told up front when the requested new address
+  already belongs to another account, mirroring the registration disclosure. This is gated
+  behind authentication (a higher bar than sign-up) and gives the user a clear "pick another
+  address" response. If your threat model forbids it, drop the pre-flight `FindUserByEmail`
+  conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
+  time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
+  the interim).
 
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
-decoy hashing); the two disclosures above are the only intentional exceptions.
+decoy hashing); the three disclosures above are the only intentional exceptions.
 
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an

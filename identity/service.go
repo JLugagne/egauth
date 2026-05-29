@@ -36,6 +36,10 @@ const (
 	DefaultPasswordResetTTL     = time.Hour
 	DefaultEmailVerificationTTL = 24 * time.Hour
 	DefaultMagicLinkTTL         = 15 * time.Minute
+	// DefaultEmailChangeTTL is the lifetime of a change-email confirmation token. It is kept
+	// short (reset-class, not the longer email-verification window) because switching the
+	// account's login address is a sensitive, takeover-relevant action.
+	DefaultEmailChangeTTL = time.Hour
 )
 
 // Service defines the business logic for user identity operations.
@@ -86,6 +90,22 @@ type Service interface {
 	// rejected. After a successful change the caller SHOULD revoke the user's other sessions
 	// and refresh-token families (that is cross-module and left to the consumer).
 	ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...Option) error
+
+	// RequestEmailChange starts the authenticated change-email flow for userID. It validates
+	// and normalizes newEmail, rejects an address already owned by another live account in the
+	// tenant (ErrEmailAlreadyExists), and mints a single-use token bound to newEmail (carried
+	// as the token's metadata). The token MUST be delivered to newEmail — confirming it proves
+	// control of the new address before the swap, so a hijacked session cannot silently move
+	// the account to an attacker-controlled address. It returns ErrInvalidEmail for a malformed
+	// address and ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
+	RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...Option) (token string, err error)
+
+	// ConfirmEmailChange consumes a change-email token (single-use) and atomically switches the
+	// owning user's email to the address the token was minted for, marking it verified (the
+	// confirmation, delivered to the new address, proves control). It returns the updated user.
+	// It returns ErrEmailAlreadyExists when the target was claimed by another account in the
+	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
+	ConfirmEmailChange(ctx context.Context, token string, opts ...Option) (*User, error)
 }
 
 type service struct {
@@ -97,6 +117,7 @@ type service struct {
 	passwordResetTTL     time.Duration
 	emailVerificationTTL time.Duration
 	magicLinkTTL         time.Duration
+	emailChangeTTL       time.Duration
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -125,6 +146,11 @@ func WithMagicLinkTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.magicLinkTTL = d }
 }
 
+// WithEmailChangeTTL overrides how long a change-email confirmation token stays valid.
+func WithEmailChangeTTL(d time.Duration) ServiceOption {
+	return func(s *service) { s.emailChangeTTL = d }
+}
+
 // NewService creates a new identity Service. By default it enables account lockout
 // after DefaultLockThreshold failed attempts for DefaultLockDuration.
 func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service {
@@ -137,6 +163,7 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 		passwordResetTTL:     DefaultPasswordResetTTL,
 		emailVerificationTTL: DefaultEmailVerificationTTL,
 		magicLinkTTL:         DefaultMagicLinkTTL,
+		emailChangeTTL:       DefaultEmailChangeTTL,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -375,6 +402,65 @@ func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentP
 		return err
 	}
 	return s.store.UpdateIdentityPassword(ctx, userID, hash, opts...)
+}
+
+// RequestEmailChange mints a token that, once confirmed, switches userID's email to newEmail.
+func (s *service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...Option) (string, error) {
+	newEmail, err := normalizeEmail(newEmail)
+	if err != nil {
+		return "", err
+	}
+
+	// Pre-flight uniqueness check: reject up front when another live account in the tenant
+	// already owns the address (consistent with registration's email_taken behavior). This is
+	// only advisory — the store's unique index is the authoritative guard at confirm time, which
+	// closes the request→confirm race. Finding the *same* user (newEmail is already theirs) is
+	// not a conflict; confirming would simply re-verify it.
+	if existing, ferr := s.store.FindUserByEmail(ctx, newEmail, opts...); ferr == nil {
+		if existing.ID != userID {
+			return "", ErrEmailAlreadyExists
+		}
+	} else if !errors.Is(ferr, ErrUserNotFound) {
+		return "", ferr
+	}
+
+	// Bind the requested address to the token as metadata. CreateVerificationToken also gates
+	// on userID being a live, same-tenant account (returning ErrUserNotFound otherwise).
+	token, err := s.store.CreateVerificationToken(ctx, userID, KindEmailChange, s.emailChangeTTL, []byte(newEmail), opts...)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConfirmEmailChange consumes a change-email token and atomically applies the new address.
+func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...Option) (*User, error) {
+	user, metadata, err := s.consumeForLiveUser(ctx, token, KindEmailChange, opts...)
+	if err != nil {
+		return nil, err
+	}
+
+	// The token carries the (already-normalized) new address. Re-normalize defensively rather
+	// than trusting stored bytes blindly.
+	newEmail, err := normalizeEmail(string(metadata))
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	// UpdateUserEmail is the atomic swap point: it switches the user email AND re-keys the
+	// password identity (which is keyed by email) in one operation, enforcing email uniqueness,
+	// so a target claimed since the token was minted yields ErrEmailAlreadyExists rather than a
+	// duplicate live email or a password identity left stranded on the old address. Confirming a
+	// token delivered to the new address proves control of it, so the address is marked verified.
+	if err := s.store.UpdateUserEmail(ctx, user.ID, newEmail, now, opts...); err != nil {
+		return nil, err
+	}
+	// Reflect the post-swap state on the returned user (it was loaded pre-swap).
+	user.Email = newEmail
+	user.EmailVerifiedAt = &now
+	user.UpdatedAt = now
+	return user, nil
 }
 
 // RequestEmailVerification mints an email-verification token for the given user. Like the

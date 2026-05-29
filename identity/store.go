@@ -38,6 +38,18 @@ type Store interface {
 	FindUserByID(ctx context.Context, id uuid.UUID, opts ...Option) (*User, error)
 	FindUserByEmail(ctx context.Context, email string, opts ...Option) (*User, error)
 	UpdateUser(ctx context.Context, user *User, opts ...Option) error
+
+	// UpdateUserEmail atomically changes a live user's email to newEmail, marks it verified
+	// (email_verified_at = verifiedAt) and re-keys the user's "password" identity provider_id
+	// to newEmail. The password flow looks identities up by email, so the user email and the
+	// password identity's provider_id must move together; doing both in one atomic operation
+	// means a uniqueness conflict on either the user-email index or the identity
+	// (provider, provider_id) index aborts the whole change. It returns ErrEmailAlreadyExists
+	// when newEmail is already taken by another account in the tenant and ErrUserNotFound when
+	// no live user matches. An account with no password identity (e.g. OAuth-only) simply has
+	// its user email updated.
+	UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...Option) error
+
 	DeleteUser(ctx context.Context, id uuid.UUID, opts ...Option) error
 
 	// Identity operations

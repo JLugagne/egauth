@@ -22,6 +22,10 @@ const (
 	KindEmailVerification = "email_verification"
 	// KindMagicLink identifies tokens minted for passwordless magic-link login.
 	KindMagicLink = "magic_link"
+	// KindEmailChange identifies tokens minted for the authenticated change-email flow. The
+	// token carries the requested new email address as its metadata and is delivered to that
+	// new address, so confirming it proves control of the new address before the swap.
+	KindEmailChange = "email_change"
 )
 
 const (
@@ -114,4 +118,11 @@ type Mailer interface {
 	SendEmailVerification(ctx context.Context, user *User, token string) error
 	// SendMagicLink delivers a passwordless magic-link login token to the user.
 	SendMagicLink(ctx context.Context, user *User, token string) error
+	// SendEmailChange delivers a change-email confirmation token to the account's NEW address
+	// (newEmail), e.g. as a confirmation link. The token is delivered to newEmail rather than
+	// the account's current address because confirming it is what proves control of the new
+	// address before the email is switched. Implementations SHOULD additionally send a security
+	// notification to the current address (user.Email) so the legitimate owner is alerted to a
+	// pending change they did not initiate.
+	SendEmailChange(ctx context.Context, user *User, newEmail, token string) error
 }

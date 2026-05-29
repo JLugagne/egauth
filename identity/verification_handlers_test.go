@@ -20,16 +20,18 @@ import (
 )
 
 type deliveredMail struct {
-	user  *identity.User
-	token string
+	user     *identity.User
+	newEmail string // only set for change-email deliveries (the new target address)
+	token    string
 }
 
 // mockMailer captures deliveries over buffered channels so tests stay race-free even though
-// password-reset delivery is dispatched on a background goroutine.
+// delivery is dispatched on a background goroutine.
 type mockMailer struct {
 	resetCh  chan deliveredMail
 	verifyCh chan deliveredMail
 	magicCh  chan deliveredMail
+	changeCh chan deliveredMail
 }
 
 func newMockMailer() *mockMailer {
@@ -37,21 +39,27 @@ func newMockMailer() *mockMailer {
 		resetCh:  make(chan deliveredMail, 1),
 		verifyCh: make(chan deliveredMail, 1),
 		magicCh:  make(chan deliveredMail, 1),
+		changeCh: make(chan deliveredMail, 1),
 	}
 }
 
 func (m *mockMailer) SendPasswordReset(_ context.Context, user *identity.User, token string) error {
-	m.resetCh <- deliveredMail{user, token}
+	m.resetCh <- deliveredMail{user: user, token: token}
 	return nil
 }
 
 func (m *mockMailer) SendEmailVerification(_ context.Context, user *identity.User, token string) error {
-	m.verifyCh <- deliveredMail{user, token}
+	m.verifyCh <- deliveredMail{user: user, token: token}
 	return nil
 }
 
 func (m *mockMailer) SendMagicLink(_ context.Context, user *identity.User, token string) error {
-	m.magicCh <- deliveredMail{user, token}
+	m.magicCh <- deliveredMail{user: user, token: token}
+	return nil
+}
+
+func (m *mockMailer) SendEmailChange(_ context.Context, user *identity.User, newEmail, token string) error {
+	m.changeCh <- deliveredMail{user: user, newEmail: newEmail, token: token}
 	return nil
 }
 

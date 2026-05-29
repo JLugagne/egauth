@@ -171,6 +171,46 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 	return nil
 }
 
+// UpdateUserEmail atomically swaps a live user's email and re-keys its password identity in a
+// single statement (data-modifying CTEs share one snapshot and one transaction), so a unique
+// violation on either index aborts the whole change.
+func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error {
+	tenantID := s.getTenantID(opts)
+	if tenantID == "" {
+		return identity.ErrTenantRequired
+	}
+
+	now := time.Now().UTC()
+	const query = `
+		WITH target AS (
+			SELECT id FROM users
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		),
+		pw AS (
+			UPDATE identities
+			SET provider_id = $3, updated_at = $4
+			WHERE user_id = (SELECT id FROM target) AND tenant_id = $2 AND provider = 'password'
+		)
+		UPDATE users
+		SET email = $3, email_verified_at = $5, updated_at = $4
+		WHERE id = (SELECT id FROM target)
+	`
+	tag, err := s.db.Exec(ctx, query, userID, tenantID, newEmail, now, verifiedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// A conflict on either the user-email index or the password identity index during an
+			// email change both mean the new address is already taken in this tenant.
+			return identity.ErrEmailAlreadyExists
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
 func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
 	tenantID := s.getTenantID(opts)
 

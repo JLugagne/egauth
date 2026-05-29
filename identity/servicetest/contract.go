@@ -20,6 +20,22 @@ type MockService struct {
 	RequestMagicLinkFunc         func(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error)
 	LoginWithMagicLinkFunc       func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
 	ChangePasswordFunc           func(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...identity.Option) error
+	RequestEmailChangeFunc       func(ctx context.Context, userID uuid.UUID, newEmail string, opts ...identity.Option) (string, error)
+	ConfirmEmailChangeFunc       func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
+}
+
+func (m *MockService) RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...identity.Option) (string, error) {
+	if m.RequestEmailChangeFunc == nil {
+		panic("called not defined RequestEmailChangeFunc")
+	}
+	return m.RequestEmailChangeFunc(ctx, userID, newEmail, opts...)
+}
+
+func (m *MockService) ConfirmEmailChange(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error) {
+	if m.ConfirmEmailChangeFunc == nil {
+		panic("called not defined ConfirmEmailChangeFunc")
+	}
+	return m.ConfirmEmailChangeFunc(ctx, token, opts...)
 }
 
 func (m *MockService) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...identity.Option) error {

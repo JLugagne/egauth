@@ -134,6 +134,48 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 	return nil
 }
 
+// UpdateUserEmail atomically swaps a live user's email and re-keys its password identity.
+func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	// Uniqueness: no other live user may already hold newEmail. Because a password identity is
+	// keyed by its owner's email, a real conflict on the identity (provider, provider_id) index
+	// is always accompanied by this live-user-email conflict, so checking the email alone matches
+	// what the pgx backend enforces (its identity re-key only runs when the user owns a password
+	// identity). Both backends therefore reject exactly the reachable taken-address cases.
+	for _, u := range s.users {
+		if u.TenantID == tenantID && u.Email == newEmail && u.DeletedAt == nil && u.ID != userID {
+			return identity.ErrEmailAlreadyExists
+		}
+	}
+
+	now := time.Now()
+	user.Email = newEmail
+	v := verifiedAt
+	user.EmailVerifiedAt = &v
+	user.UpdatedAt = now
+	for _, ident := range s.identities {
+		if ident.UserID == userID && ident.TenantID == tenantID && ident.Provider == "password" {
+			ident.ProviderID = newEmail
+			ident.UpdatedAt = now
+		}
+	}
+
+	return nil
+}
+
 // DeleteUser performs a soft delete and anonymizes the email.
 func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
 	s.mu.Lock()

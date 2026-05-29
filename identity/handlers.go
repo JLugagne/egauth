@@ -36,6 +36,7 @@ type handlerConfig struct {
 	tokenField           string
 	currentPasswordField string
 	newPasswordField     string
+	newEmailField        string
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
 	maxBodyBytes         int64
@@ -54,6 +55,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		tokenField:           "token",
 		currentPasswordField: "current_password",
 		newPasswordField:     "new_password",
+		newEmailField:        "new_email",
 		maxBodyBytes:         DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
@@ -165,6 +167,12 @@ func WithPasswordChangeFields(current, newField string) HandlerOption {
 		h.currentPasswordField = current
 		h.newPasswordField = newField
 	}
+}
+
+// WithEmailChangeField overrides the form field carrying the requested new address in
+// RequestEmailChangeHandler (default "new_email").
+func WithEmailChangeField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.newEmailField = name }
 }
 
 // WithMaxBodyBytes overrides the request-body size cap applied before form parsing
@@ -597,8 +605,102 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 	}
 }
 
-// mapVerificationError maps password-reset / email-verification errors to an HTTP status and
-// a stable error code.
+// RequestEmailChangeHandler builds an authenticated HTTP handler that starts the change-email
+// flow for the signed-in user. The current user is obtained via WithUserResolver (typically
+// reading whatever the application's auth middleware stashed on the request); if no resolver
+// is configured or it reports no user, the handler responds 401. It reads the requested new
+// address from the form (field configurable via WithEmailChangeField, default "new_email"),
+// mints a confirmation token via Service.RequestEmailChange and hands it to the Mailer for
+// delivery to the NEW address — delivery is dispatched off the response path. A malformed
+// address maps to 400; an address already taken by another account maps to 409.
+func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		newEmail := strings.TrimSpace(r.PostForm.Get(cfg.newEmailField))
+		token, err := svc.RequestEmailChange(r.Context(), user.ID, newEmail, cfg.authOpts(r)...)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidEmail):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
+			case errors.Is(err, ErrEmailAlreadyExists):
+				cfg.fail(w, r, http.StatusConflict, "email_taken")
+			case errors.Is(err, ErrUserNotFound):
+				// The session resolved to an account that is no longer live; treat as unauthorized.
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && mailer != nil {
+			// Deliver to the canonical form of the new address — the same normalization the
+			// service applied before binding it to the token.
+			deliverTo := newEmail
+			if n, nerr := normalizeEmail(newEmail); nerr == nil {
+				deliverTo = n
+			}
+			ctx := context.WithoutCancel(r.Context())
+			go func() { _ = mailer.SendEmailChange(ctx, user, deliverTo, token) }()
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmEmailChangeHandler builds an HTTP handler that completes the change-email flow: it
+// reads the token from the form, consumes it (single-use) and atomically switches the account's
+// email to the confirmed new address. It is authenticated by the single-use token (delivered to
+// the new address), so it needs no resolved session — like VerifyEmailHandler / ResetPassword
+// Handler. It is POST-only so a link prefetcher cannot trigger the swap.
+func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmEmailChange(r.Context(), token, cfg.authOpts(r)...); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// mapVerificationError maps password-reset / email-verification / change-email errors to an
+// HTTP status and a stable error code.
 func mapVerificationError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrVerificationTokenExpired):
@@ -611,6 +713,12 @@ func mapVerificationError(err error) (int, string) {
 	case errors.Is(err, ErrUserNotFound):
 		// The token was valid but its account has since been deactivated/deleted.
 		return http.StatusBadRequest, "invalid_token"
+	case errors.Is(err, ErrEmailAlreadyExists):
+		// Change-email: the target address was claimed by another account in the interim.
+		return http.StatusConflict, "email_taken"
+	case errors.Is(err, ErrInvalidEmail):
+		// Change-email: the token's stored address failed re-validation (defensive).
+		return http.StatusBadRequest, "invalid_email"
 	case isPasswordPolicyError(err):
 		return http.StatusBadRequest, "password_rejected"
 	default:
