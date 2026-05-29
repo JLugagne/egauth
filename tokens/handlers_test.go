@@ -41,6 +41,58 @@ func postWithRefresh(value string) *http.Request {
 	return req
 }
 
+func TestRefreshHandler_CSRFBlocksCrossOrigin(t *testing.T) {
+	called := false
+	rot := &issuertest.MockRotator[struct{}]{
+		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+			called = true
+			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}, nil
+		},
+	}
+	h := tokens.RefreshHandler[struct{}](rot, tokens.WithTrustedOrigins("app.example.com"))
+
+	req := postWithRefresh("some-refresh")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "rotator must not run for a cross-site request")
+}
+
+func TestRefreshHandler_CSRFAllowsSameOrigin(t *testing.T) {
+	svc, _ := newRotator(t)
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	require.NoError(t, err)
+
+	h := tokens.RefreshHandler[struct{}](svc, tokens.WithTrustedOrigins("app.example.com"))
+	req := postWithRefresh(pair.RefreshToken)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestLogoutHandler_CSRFBlocksCrossOrigin(t *testing.T) {
+	store := memory.NewStore[struct{}]()
+	h := tokens.LogoutHandler(store, tokens.WithTrustedOrigins("app.example.com"))
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: "x"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+}
+
 func TestRefreshHandler_Success(t *testing.T) {
 	svc, _ := newRotator(t)
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
