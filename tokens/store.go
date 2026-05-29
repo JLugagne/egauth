@@ -2,7 +2,6 @@ package tokens
 
 import (
 	"context"
-	"time"
 
 	"github.com/google/uuid"
 )
@@ -34,14 +33,22 @@ func ApplyOptions(opts []Option) StoreOptions {
 // Store defines the persistence interface for Refresh Tokens and API Keys.
 // It stores ONLY the hash of the tokens to ensure security at rest.
 type Store[C any] interface {
-	// SaveRefreshToken persists the hash of a refresh token.
-	SaveRefreshToken(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...Option) error
+	// SaveRefreshToken persists a refresh token record (storing only its hash).
+	SaveRefreshToken(ctx context.Context, rt *RefreshToken, opts ...Option) error
 
-	// FindRefreshTokenByHash retrieves a refresh token hash information.
-	FindRefreshTokenByHash(ctx context.Context, tokenHash string, opts ...Option) (userID uuid.UUID, expiresAt time.Time, err error)
+	// FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
+	FindRefreshToken(ctx context.Context, tokenHash string, opts ...Option) (*RefreshToken, error)
 
-	// RevokeRefreshToken marks a refresh token as revoked or deletes it.
+	// ConsumeRefreshToken atomically marks a refresh token as consumed (single-use).
+	// It returns ErrRefreshTokenNotFound if the token does not exist (in the tenant),
+	// and ErrRefreshTokenReused if it exists but was already consumed (replay detection).
+	ConsumeRefreshToken(ctx context.Context, tokenHash string, opts ...Option) error
+
+	// RevokeRefreshToken deletes/revokes a single refresh token by its hash.
 	RevokeRefreshToken(ctx context.Context, tokenHash string, opts ...Option) error
+
+	// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
+	RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...Option) error
 
 	// SaveAPIKey persists an API key.
 	SaveAPIKey(ctx context.Context, key *APIKey[C], opts ...Option) error

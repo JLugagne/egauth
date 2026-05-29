@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/JLugagne/libauth/identity"
 	"github.com/JLugagne/libauth/identity/storetest"
@@ -196,6 +197,9 @@ func TestService_Authenticate(t *testing.T) {
 			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
 				return &identity.Identity{PasswordHash: &hash}, nil
 			},
+			IncrementFailedAttemptsFunc: func(ctx context.Context, id uuid.UUID, threshold int, dur time.Duration, opts ...identity.Option) error {
+				return nil
+			},
 		}
 
 		hasher := &hashertest.MockHasher{
@@ -233,7 +237,7 @@ func TestService_Authenticate(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, expectedUser, user)
 	})
-	
+
 	t.Run("create user fails", func(t *testing.T) {
 		store := &storetest.MockStore{
 			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
@@ -258,12 +262,18 @@ func TestService_Authenticate(t *testing.T) {
 	})
 
 	t.Run("add identity fails", func(t *testing.T) {
+		compensated := false
 		store := &storetest.MockStore{
 			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
 				return &identity.User{ID: uuid.New()}, nil
 			},
 			AddIdentityFunc: func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
 				return errors.New("db error")
+			},
+			// Register must compensate the orphaned user when AddIdentity fails.
+			DeleteUserFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
+				compensated = true
+				return nil
 			},
 		}
 		hasher := &hashertest.MockHasher{
@@ -281,44 +291,232 @@ func TestService_Authenticate(t *testing.T) {
 		assert.Error(t, err)
 		assert.EqualError(t, err, "db error")
 		assert.Nil(t, user)
-		})
+		assert.True(t, compensated, "the orphaned user must be cleaned up")
+	})
 
-		t.Run("missing password hash", func(t *testing.T) {
+	t.Run("missing password hash", func(t *testing.T) {
 		mockStore := &storetest.MockStore{
-		FindUserByEmailFunc: func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
-		return &identity.User{ID: uuid.New()}, nil
-		},
-		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
-		return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
-		},
+			FindUserByEmailFunc: func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+				return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
+			},
 		}
 		service := identity.NewService(mockStore, nil, nil)
 		_, err := service.Authenticate(context.Background(), "password", "test@test.com", "pass")
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
-		})
+	})
 
-		t.Run("other provider identity not found", func(t *testing.T) {
+	t.Run("other provider identity not found", func(t *testing.T) {
 		mockStore := &storetest.MockStore{
-		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
-		return nil, identity.ErrIdentityNotFound
-		},
+			FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+				return nil, identity.ErrIdentityNotFound
+			},
 		}
 		service := identity.NewService(mockStore, nil, nil)
 		_, err := service.Authenticate(context.Background(), "google", "12345", "")
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
-		})
+	})
 
-		t.Run("other provider user not found", func(t *testing.T) {
+	t.Run("other provider user not found", func(t *testing.T) {
 		mockStore := &storetest.MockStore{
-		FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
-		return &identity.Identity{UserID: uuid.New()}, nil
-		},
-		FindUserByIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
-		return nil, identity.ErrUserNotFound
-		},
+			FindIdentityByProviderFunc: func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+				return &identity.Identity{UserID: uuid.New()}, nil
+			},
+			FindUserByIDFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
 		}
 		service := identity.NewService(mockStore, nil, nil)
 		_, err := service.Authenticate(context.Background(), "google", "12345", "")
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
-		})
+	})
+}
+
+func TestService_Authenticate_ConstantTime(t *testing.T) {
+	ctx := context.Background()
+
+	// These tests pin the PRD requirement (§108): the password authentication path
+	// must apply an equivalent hashing cost even when no real password hash is
+	// available, so an attacker cannot distinguish "user does not exist" from
+	// "wrong password" by measuring response time (user enumeration via timing).
+
+	t.Run("user not found still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
 		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "ghost@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the user does not exist")
+	})
+
+	t.Run("identity not found still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return nil, identity.ErrIdentityNotFound
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "test@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the identity does not exist")
+	})
+
+	t.Run("missing password hash still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "test@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the identity has no password hash")
+	})
+}
+
+func TestService_Lockout(t *testing.T) {
+	ctx := context.Background()
+	email := "lock@example.com"
+	hash := "hashed"
+
+	t.Run("password mismatch increments failed attempts", func(t *testing.T) {
+		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash}
+		var incremented bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return ident, nil
+			},
+			IncrementFailedAttemptsFunc: func(ctx context.Context, id uuid.UUID, threshold int, dur time.Duration, opts ...identity.Option) error {
+				assert.Equal(t, ident.ID, id)
+				incremented = true
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error { return passwords.ErrInvalidPassword },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", email, "wrong")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, incremented, "failed attempt must be recorded")
+	})
+
+	t.Run("locked account returns ErrAccountLocked without comparing password", func(t *testing.T) {
+		future := time.Now().Add(10 * time.Minute)
+		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &future}
+		var compared bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return ident, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error { compared = true; return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", email, "irrelevant")
+		assert.ErrorIs(t, err, identity.ErrAccountLocked)
+		assert.False(t, compared, "must not compare password for locked account")
+	})
+
+	t.Run("expired lock allows authentication and resets", func(t *testing.T) {
+		past := time.Now().Add(-10 * time.Minute)
+		uid := uuid.New()
+		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &past, FailedAttempts: 5}
+		var reset bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uid}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return ident, nil
+			},
+			ResetFailedAttemptsFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
+				reset = true
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error { return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		user, err := svc.Authenticate(ctx, "password", email, "correct")
+		require.NoError(t, err)
+		assert.Equal(t, uid, user.ID)
+		assert.True(t, reset, "successful auth after prior failures must reset counter")
+	})
+
+	t.Run("successful auth resets counter when attempts exist", func(t *testing.T) {
+		uid := uuid.New()
+		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 2}
+		var reset bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uid}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return ident, nil
+			},
+			ResetFailedAttemptsFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
+				reset = true
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error { return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", email, "correct")
+		require.NoError(t, err)
+		assert.True(t, reset)
+	})
+
+	t.Run("successful auth with no prior attempts does not reset", func(t *testing.T) {
+		uid := uuid.New()
+		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 0}
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uid}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return ident, nil
+			},
+			// ResetFailedAttemptsFunc intentionally nil: it must NOT be called.
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, h, p string) error { return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", email, "correct")
+		require.NoError(t, err)
+	})
+}

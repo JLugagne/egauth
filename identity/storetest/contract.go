@@ -11,6 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	defaultTestLockThreshold = 3
+	defaultTestLockDuration  = 15 * time.Minute
+)
+
 // MockStore is a functional mock of the identity.Store interface.
 type MockStore struct {
 	CreateUserFunc             func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error)
@@ -21,6 +26,50 @@ type MockStore struct {
 	AddIdentityFunc            func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error
 	FindIdentitiesByUserIDFunc func(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error)
 	FindIdentityByProviderFunc func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error)
+
+	IncrementFailedAttemptsFunc func(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error
+	ResetFailedAttemptsFunc     func(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error
+
+	UpdateIdentityPasswordFunc   func(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error
+	CreateVerificationTokenFunc  func(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error)
+	ConsumeVerificationTokenFunc func(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error)
+}
+
+var _ identity.Store = (*MockStore)(nil)
+
+func (m *MockStore) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
+	if m.UpdateIdentityPasswordFunc == nil {
+		panic("called not defined UpdateIdentityPasswordFunc")
+	}
+	return m.UpdateIdentityPasswordFunc(ctx, userID, passwordHash, opts...)
+}
+
+func (m *MockStore) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
+	if m.CreateVerificationTokenFunc == nil {
+		panic("called not defined CreateVerificationTokenFunc")
+	}
+	return m.CreateVerificationTokenFunc(ctx, userID, kind, ttl, metadata, opts...)
+}
+
+func (m *MockStore) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
+	if m.ConsumeVerificationTokenFunc == nil {
+		panic("called not defined ConsumeVerificationTokenFunc")
+	}
+	return m.ConsumeVerificationTokenFunc(ctx, token, kind, opts...)
+}
+
+func (m *MockStore) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+	if m.IncrementFailedAttemptsFunc == nil {
+		panic("called not defined IncrementFailedAttemptsFunc")
+	}
+	return m.IncrementFailedAttemptsFunc(ctx, identityID, lockThreshold, lockDuration, opts...)
+}
+
+func (m *MockStore) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+	if m.ResetFailedAttemptsFunc == nil {
+		panic("called not defined ResetFailedAttemptsFunc")
+	}
+	return m.ResetFailedAttemptsFunc(ctx, identityID, opts...)
 }
 
 func (m *MockStore) CreateUser(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
@@ -174,6 +223,134 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		err = store.AddIdentity(ctx, ident, identity.WithTenant(tenantA))
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, identity.ErrIdentityAlreadyExists)
+	})
+
+	t.Run("Contract: Lockout Attempts", func(t *testing.T) {
+		email := "test_lockout@example.com"
+		user, err := store.CreateUser(ctx, email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, ident, identity.WithTenant(tenantA)))
+
+		// Increment below threshold: counter rises, no lock.
+		for i := 1; i < defaultTestLockThreshold; i++ {
+			err = store.IncrementFailedAttempts(ctx, ident.ID, defaultTestLockThreshold, defaultTestLockDuration, identity.WithTenant(tenantA))
+			require.NoError(t, err)
+
+			found, err := store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+			require.NoError(t, err)
+			assert.Equal(t, i, found.FailedAttempts, "failed attempts must be persisted")
+			assert.Nil(t, found.LockedUntil, "must not be locked below threshold")
+		}
+
+		// Crossing the threshold sets LockedUntil.
+		err = store.IncrementFailedAttempts(ctx, ident.ID, defaultTestLockThreshold, defaultTestLockDuration, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		found, err := store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, defaultTestLockThreshold, found.FailedAttempts)
+		require.NotNil(t, found.LockedUntil, "must be locked at threshold")
+		assert.True(t, found.LockedUntil.After(time.Now()), "lock must be in the future")
+
+		// Reset clears both counter and lock.
+		err = store.ResetFailedAttempts(ctx, ident.ID, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		found, err = store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, 0, found.FailedAttempts)
+		assert.Nil(t, found.LockedUntil)
+	})
+
+	t.Run("Contract: Password Update", func(t *testing.T) {
+		email := "test_pwupdate@example.com"
+		user, err := store.CreateUser(ctx, email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		oldHash := "old_hash"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &oldHash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, ident, identity.WithTenant(tenantA)))
+
+		// Lock the account, then update the password: lockout must be cleared atomically.
+		require.NoError(t, store.IncrementFailedAttempts(ctx, ident.ID, 1, defaultTestLockDuration, identity.WithTenant(tenantA)))
+
+		err = store.UpdateIdentityPassword(ctx, user.ID, "new_hash", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		found, err := store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		require.NotNil(t, found.PasswordHash)
+		assert.Equal(t, "new_hash", *found.PasswordHash)
+		assert.Equal(t, 0, found.FailedAttempts, "password update must clear failed attempts")
+		assert.Nil(t, found.LockedUntil, "password update must clear the lock")
+
+		// Updating a user without a password identity fails.
+		ghost, err := store.CreateUser(ctx, "ghost@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		err = store.UpdateIdentityPassword(ctx, ghost.ID, "x", identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrIdentityNotFound)
+	})
+
+	t.Run("Contract: Verification Tokens", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, "test_verif@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		meta := []byte("payload-123")
+		token, err := store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, meta, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		require.NotEmpty(t, token)
+
+		// Wrong kind must not match.
+		_, _, err = store.ConsumeVerificationToken(ctx, token, identity.KindEmailVerification, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+
+		// Tampered verifier must not match.
+		_, _, err = store.ConsumeVerificationToken(ctx, token+"x", identity.KindPasswordReset, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+
+		// Malformed token (no separator) must not match.
+		_, _, err = store.ConsumeVerificationToken(ctx, "garbage", identity.KindPasswordReset, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+
+		// Happy path: returns the bound user and metadata.
+		gotUser, gotMeta, err := store.ConsumeVerificationToken(ctx, token, identity.KindPasswordReset, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, gotUser)
+		assert.Equal(t, meta, gotMeta)
+
+		// Single-use: a second consumption fails.
+		_, _, err = store.ConsumeVerificationToken(ctx, token, identity.KindPasswordReset, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+
+		// Expired token: genuine token, past expiry, reports expiry.
+		expiredToken, err := store.CreateVerificationToken(ctx, user.ID, identity.KindEmailVerification, -time.Minute, nil, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		_, _, err = store.ConsumeVerificationToken(ctx, expiredToken, identity.KindEmailVerification, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenExpired)
+
+		// A cross-tenant target must not be mintable (both backends enforce same-tenant).
+		if useMultiTenant {
+			_, err = store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, nil, identity.WithTenant(tenantB))
+			assert.ErrorIs(t, err, identity.ErrUserNotFound, "must not mint a token for a user in another tenant")
+		}
+
+		// A soft-deleted user must not be mintable.
+		require.NoError(t, store.DeleteUser(ctx, user.ID, identity.WithTenant(tenantA)))
+		_, err = store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, nil, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound, "must not mint a token for a soft-deleted user")
 	})
 
 	if useMultiTenant {

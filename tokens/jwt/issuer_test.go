@@ -6,8 +6,8 @@ import (
 	"time"
 
 	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/JLugagne/libauth/tokens/issuertest"
+	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/JLugagne/libauth/tokens/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -20,20 +20,21 @@ type MyCustomClaims struct {
 }
 
 func TestJWTIssuerVerifier_Contract(t *testing.T) {
-	refreshTokens := make(map[string]uuid.UUID)
+	refreshTokens := make(map[string]*tokens.RefreshToken)
 	apiKeys := make(map[string]*tokens.APIKey[MyCustomClaims])
 
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...tokens.Option) error {
-			refreshTokens[tokenHash] = userID
+		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
+			rtCopy := *rt
+			refreshTokens[rt.Hash] = &rtCopy
 			return nil
 		},
-		FindRefreshTokenByHashFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (uuid.UUID, time.Time, error) {
-			userID, ok := refreshTokens[tokenHash]
+		FindRefreshTokenFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.RefreshToken, error) {
+			rt, ok := refreshTokens[tokenHash]
 			if !ok {
-				return uuid.Nil, time.Time{}, tokens.ErrRefreshTokenNotFound
+				return nil, tokens.ErrRefreshTokenNotFound
 			}
-			return userID, time.Now().Add(time.Hour), nil
+			return rt, nil
 		},
 		SaveAPIKeyFunc: func(ctx context.Context, key *tokens.APIKey[MyCustomClaims], opts ...tokens.Option) error {
 			apiKeys[key.Hash] = key
@@ -63,7 +64,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...tokens.Option) error {
+		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
 			return nil
 		},
 	}

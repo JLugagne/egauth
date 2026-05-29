@@ -25,6 +25,10 @@ type Identity struct {
 	Provider     string  // e.g., "password", "google", "github"
 	ProviderID   string  // e.g., email for "password", "sub" for OAuth
 	PasswordHash *string // Only populated for "password" provider
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	// FailedAttempts is the number of consecutive failed authentication attempts.
+	FailedAttempts int
+	// LockedUntil, when set and in the future, blocks authentication for this identity.
+	LockedUntil *time.Time
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }

@@ -22,6 +22,11 @@ var (
 	// ErrPasswordMissingSpecial is returned when a password requires a special character but lacks one.
 	ErrPasswordMissingSpecial = errors.New("password must contain at least one special character")
 
+	// ErrPasswordBreached is returned when a password is rejected for being known-compromised
+	// or too common — either it matched the policy's denylist or a configured BreachChecker
+	// reported it as breached.
+	ErrPasswordBreached = errors.New("password is known to be compromised")
+
 	// ErrInvalidPassword is returned when a password hash comparison fails.
 	ErrInvalidPassword = errors.New("invalid password")
 

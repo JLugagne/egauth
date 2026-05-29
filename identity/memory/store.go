@@ -11,16 +11,18 @@ import (
 
 // Store is an in-memory implementation of identity.Store.
 type Store struct {
-	mu         sync.RWMutex
-	users      map[uuid.UUID]*identity.User
-	identities map[uuid.UUID]*identity.Identity
+	mu                 sync.RWMutex
+	users              map[uuid.UUID]*identity.User
+	identities         map[uuid.UUID]*identity.Identity
+	verificationTokens map[string]*identity.VerificationToken // keyed by selector
 }
 
 // NewStore creates a new in-memory Store.
 func NewStore() *Store {
 	return &Store{
-		users:      make(map[uuid.UUID]*identity.User),
-		identities: make(map[uuid.UUID]*identity.Identity),
+		users:              make(map[uuid.UUID]*identity.User),
+		identities:         make(map[uuid.UUID]*identity.Identity),
+		verificationTokens: make(map[string]*identity.VerificationToken),
 	}
 }
 
@@ -237,4 +239,151 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 	}
 
 	return nil, identity.ErrIdentityNotFound
+}
+
+// UpdateIdentityPassword sets a new password hash on the user's "password" identity and
+// clears any lockout.
+func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	for _, ident := range s.identities {
+		if ident.UserID == userID && ident.TenantID == tenantID && ident.Provider == "password" {
+			hash := passwordHash
+			ident.PasswordHash = &hash
+			ident.FailedAttempts = 0
+			ident.LockedUntil = nil
+			ident.UpdatedAt = time.Now()
+			return nil
+		}
+	}
+
+	return identity.ErrIdentityNotFound
+}
+
+// CreateVerificationToken mints, persists and returns a single-use plaintext token.
+func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	// Mirror the pgx foreign-key constraint: the user must exist (and be live) in the tenant.
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return "", identity.ErrUserNotFound
+	}
+
+	token, selector, verifierHash, err := identity.GenerateVerificationToken()
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now()
+	vt := &identity.VerificationToken{
+		Selector:     selector,
+		VerifierHash: verifierHash,
+		UserID:       userID,
+		TenantID:     tenantID,
+		Kind:         kind,
+		Metadata:     append([]byte(nil), metadata...),
+		ExpiresAt:    now.Add(ttl),
+		CreatedAt:    now,
+	}
+	s.verificationTokens[selector] = vt
+
+	return token, nil
+}
+
+// ConsumeVerificationToken validates and atomically consumes a verification token.
+func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	selector, verifier, ok := identity.SplitVerificationToken(token)
+	if !ok {
+		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+	}
+
+	vt, exists := s.verificationTokens[selector]
+	// The verifier is always compared in constant time; selector lookup itself needs no
+	// timing decoy because the selector is a 128-bit random value, not an enumerable key.
+	if !exists || vt.TenantID != tenantID || vt.Kind != kind || !identity.CompareVerifier(vt.VerifierHash, verifier) {
+		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+	}
+
+	if time.Now().After(vt.ExpiresAt) {
+		// Expired but genuine: drop it and report expiry to the legitimate holder.
+		delete(s.verificationTokens, selector)
+		return uuid.Nil, nil, identity.ErrVerificationTokenExpired
+	}
+
+	delete(s.verificationTokens, selector) // single-use
+	return vt.UserID, vt.Metadata, nil
+}
+
+// IncrementFailedAttempts increments the failed-attempt counter for an identity,
+// locking the account when the threshold is reached.
+func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	ident, exists := s.identities[identityID]
+	if !exists || ident.TenantID != tenantID {
+		return identity.ErrIdentityNotFound
+	}
+
+	ident.FailedAttempts++
+	ident.UpdatedAt = time.Now()
+	if lockThreshold > 0 && ident.FailedAttempts >= lockThreshold {
+		lockedUntil := time.Now().Add(lockDuration)
+		ident.LockedUntil = &lockedUntil
+	}
+
+	return nil
+}
+
+// ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
+func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	ident, exists := s.identities[identityID]
+	if !exists || ident.TenantID != tenantID {
+		return identity.ErrIdentityNotFound
+	}
+
+	ident.FailedAttempts = 0
+	ident.LockedUntil = nil
+	ident.UpdatedAt = time.Now()
+
+	return nil
 }

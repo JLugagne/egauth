@@ -4,11 +4,11 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/JLugagne/libauth/domain"
+	"github.com/JLugagne/libauth"
 )
 
 // AuthenticatedSessionHandlerFunc is a handler that receives the authenticated actor and session explicitly.
-type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request, actor domain.Actor, session Session)
+type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session Session)
 
 // RequireSession is a middleware that validates a session token from cookies or the Authorization header.
 // It injects the Actor and Session explicitly into the handler.
@@ -42,7 +42,7 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc) http.H
 			return
 		}
 
-		actor := domain.Actor{
+		actor := libauth.Actor{
 			UserID:   session.UserID,
 			TenantID: session.TenantID,
 		}

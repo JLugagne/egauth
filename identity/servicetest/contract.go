@@ -4,15 +4,73 @@ import (
 	"context"
 
 	"github.com/JLugagne/libauth/identity"
+	"github.com/google/uuid"
 )
 
 // MockService is a mock implementation of the identity.Service interface.
 type MockService struct {
 	RegisterFunc     func(ctx context.Context, email, password string, opts ...identity.Option) (*identity.User, error)
 	AuthenticateFunc func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error)
+
+	RequestPasswordResetFunc     func(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error)
+	ResetPasswordFunc            func(ctx context.Context, token, newPassword string, opts ...identity.Option) error
+	RequestEmailVerificationFunc func(ctx context.Context, userID uuid.UUID, opts ...identity.Option) (string, error)
+	VerifyEmailFunc              func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
+	LinkOrCreateIdentityFunc     func(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...identity.Option) (*identity.User, error)
+	RequestMagicLinkFunc         func(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error)
+	LoginWithMagicLinkFunc       func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
+}
+
+func (m *MockService) RequestMagicLink(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error) {
+	if m.RequestMagicLinkFunc == nil {
+		panic("called not defined RequestMagicLinkFunc")
+	}
+	return m.RequestMagicLinkFunc(ctx, email, opts...)
+}
+
+func (m *MockService) LoginWithMagicLink(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error) {
+	if m.LoginWithMagicLinkFunc == nil {
+		panic("called not defined LoginWithMagicLinkFunc")
+	}
+	return m.LoginWithMagicLinkFunc(ctx, token, opts...)
 }
 
 var _ identity.Service = (*MockService)(nil)
+
+func (m *MockService) RequestPasswordReset(ctx context.Context, email string, opts ...identity.Option) (string, *identity.User, error) {
+	if m.RequestPasswordResetFunc == nil {
+		panic("called not defined RequestPasswordResetFunc")
+	}
+	return m.RequestPasswordResetFunc(ctx, email, opts...)
+}
+
+func (m *MockService) ResetPassword(ctx context.Context, token, newPassword string, opts ...identity.Option) error {
+	if m.ResetPasswordFunc == nil {
+		panic("called not defined ResetPasswordFunc")
+	}
+	return m.ResetPasswordFunc(ctx, token, newPassword, opts...)
+}
+
+func (m *MockService) RequestEmailVerification(ctx context.Context, userID uuid.UUID, opts ...identity.Option) (string, error) {
+	if m.RequestEmailVerificationFunc == nil {
+		panic("called not defined RequestEmailVerificationFunc")
+	}
+	return m.RequestEmailVerificationFunc(ctx, userID, opts...)
+}
+
+func (m *MockService) VerifyEmail(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error) {
+	if m.VerifyEmailFunc == nil {
+		panic("called not defined VerifyEmailFunc")
+	}
+	return m.VerifyEmailFunc(ctx, token, opts...)
+}
+
+func (m *MockService) LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...identity.Option) (*identity.User, error) {
+	if m.LinkOrCreateIdentityFunc == nil {
+		panic("called not defined LinkOrCreateIdentityFunc")
+	}
+	return m.LinkOrCreateIdentityFunc(ctx, provider, providerID, email, emailVerified, opts...)
+}
 
 func (m *MockService) Register(ctx context.Context, email, password string, opts ...identity.Option) (*identity.User, error) {
 	if m.RegisterFunc == nil {

@@ -24,4 +24,18 @@ var (
 
 	// ErrInvalidCredentials is returned when authentication fails due to invalid credentials.
 	ErrInvalidCredentials = errors.New("invalid credentials")
+
+	// ErrAccountLocked is returned when authentication is attempted on an account that is
+	// currently locked due to too many failed attempts.
+	ErrAccountLocked = errors.New("account locked")
+
+	// ErrVerificationTokenNotFound is returned when a verification token cannot be found,
+	// is malformed, or its verifier does not match. The three cases are deliberately
+	// merged so the caller cannot distinguish "unknown selector" from "wrong verifier".
+	ErrVerificationTokenNotFound = errors.New("verification token not found")
+
+	// ErrVerificationTokenExpired is returned when a verification token is found and its
+	// verifier matches, but it is past its expiry. It is only surfaced to a caller that
+	// presented the genuine token.
+	ErrVerificationTokenExpired = errors.New("verification token expired")
 )

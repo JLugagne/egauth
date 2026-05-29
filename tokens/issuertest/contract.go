@@ -31,6 +31,18 @@ func (m *MockIssuer[C]) IssueAPIKey(ctx context.Context, prefix string, claims t
 	return m.IssueAPIKeyFunc(ctx, prefix, claims)
 }
 
+// MockRotator is a function-based mock implementation of the tokens.Rotator interface.
+type MockRotator[C any] struct {
+	RotateFunc func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[C], error)
+}
+
+func (m *MockRotator[C]) Rotate(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[C], error) {
+	if m.RotateFunc == nil {
+		panic("called not defined RotateFunc")
+	}
+	return m.RotateFunc(ctx, refreshToken, opts...)
+}
+
 // MockVerifier is a function-based mock implementation of the tokens.Verifier interface.
 type MockVerifier[C any] struct {
 	VerifyAccessTokenFunc  func(ctx context.Context, token string) (*tokens.Claims[C], error)
