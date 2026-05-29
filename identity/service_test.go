@@ -262,12 +262,18 @@ func TestService_Authenticate(t *testing.T) {
 	})
 
 	t.Run("add identity fails", func(t *testing.T) {
+		compensated := false
 		store := &storetest.MockStore{
 			CreateUserFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
 				return &identity.User{ID: uuid.New()}, nil
 			},
 			AddIdentityFunc: func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
 				return errors.New("db error")
+			},
+			// Register must compensate the orphaned user when AddIdentity fails.
+			DeleteUserFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
+				compensated = true
+				return nil
 			},
 		}
 		hasher := &hashertest.MockHasher{
@@ -285,6 +291,7 @@ func TestService_Authenticate(t *testing.T) {
 		assert.Error(t, err)
 		assert.EqualError(t, err, "db error")
 		assert.Nil(t, user)
+		assert.True(t, compensated, "the orphaned user must be cleaned up")
 	})
 
 	t.Run("missing password hash", func(t *testing.T) {

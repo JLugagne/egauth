@@ -272,6 +272,119 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 	return &ident, nil
 }
 
+// UpdateIdentityPassword sets a new password hash on the user's "password" identity and
+// atomically clears any lockout.
+func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
+	tenantID := s.getTenantID(opts)
+	if tenantID == "" {
+		return identity.ErrTenantRequired
+	}
+
+	query := `
+		UPDATE identities
+		SET password_hash = $1, failed_attempts = 0, locked_until = NULL, updated_at = now()
+		WHERE user_id = $2 AND tenant_id = $3 AND provider = 'password'
+	`
+	tag, err := s.db.Exec(ctx, query, passwordHash, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrIdentityNotFound
+	}
+	return nil
+}
+
+// CreateVerificationToken mints, persists and returns a single-use plaintext token. Only the
+// selector and the verifier hash are stored. The INSERT is gated on the target being a LIVE
+// user in the SAME tenant (the bare user_id foreign key alone would accept a cross-tenant or
+// soft-deleted user), so this matches the memory store's invariant exactly.
+func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
+	tenantID := s.getTenantID(opts)
+	if tenantID == "" {
+		return "", identity.ErrTenantRequired
+	}
+
+	token, selector, verifierHash, err := identity.GenerateVerificationToken()
+	if err != nil {
+		return "", err
+	}
+
+	now := time.Now().UTC()
+	// Explicit casts are required: $3 and $4 appear both in the SELECT list (untyped there)
+	// and in the EXISTS comparison, so without casts Postgres cannot deduce their types.
+	query := `
+		INSERT INTO verification_tokens (selector, verifier_hash, user_id, tenant_id, kind, metadata, expires_at, created_at)
+		SELECT $1::varchar, $2::varchar, $3::uuid, $4::varchar, $5::varchar, $6::bytea, $7::timestamptz, $8::timestamptz
+		WHERE EXISTS (SELECT 1 FROM users WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL)
+	`
+	tag, err := s.db.Exec(ctx, query, selector, verifierHash, userID, tenantID, kind, metadata, now.Add(ttl), now)
+	if err != nil {
+		return "", err
+	}
+	if tag.RowsAffected() == 0 {
+		// No live, same-tenant user matched the EXISTS guard.
+		return "", identity.ErrUserNotFound
+	}
+
+	return token, nil
+}
+
+// ConsumeVerificationToken validates and atomically consumes a verification token. It looks
+// the row up by selector (an indexed, high-entropy key), compares the verifier in constant
+// time, checks expiry, then deletes the row with a guarded DELETE so concurrent consumers
+// cannot both succeed (single-use).
+func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
+	tenantID := s.getTenantID(opts)
+
+	selector, verifier, ok := identity.SplitVerificationToken(token)
+	if !ok {
+		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+	}
+
+	const selectQuery = `
+		SELECT verifier_hash, user_id, metadata, expires_at
+		FROM verification_tokens
+		WHERE selector = $1 AND tenant_id = $2 AND kind = $3
+	`
+	var (
+		verifierHash string
+		userID       uuid.UUID
+		metadata     []byte
+		expiresAt    time.Time
+	)
+	err := s.db.QueryRow(ctx, selectQuery, selector, tenantID, kind).Scan(&verifierHash, &userID, &metadata, &expiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+		}
+		return uuid.Nil, nil, err
+	}
+
+	// Constant-time verifier comparison; a mismatch is reported as "not found" so it is
+	// indistinguishable from an unknown selector.
+	if !identity.CompareVerifier(verifierHash, verifier) {
+		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+	}
+
+	if time.Now().After(expiresAt) {
+		// Expired but genuine: best-effort delete and report expiry to the legitimate holder.
+		_, _ = s.db.Exec(ctx, `DELETE FROM verification_tokens WHERE selector = $1 AND tenant_id = $2`, selector, tenantID)
+		return uuid.Nil, nil, identity.ErrVerificationTokenExpired
+	}
+
+	// Guarded single-use delete: only the consumer that actually removes the row wins.
+	tag, err := s.db.Exec(ctx, `DELETE FROM verification_tokens WHERE selector = $1 AND tenant_id = $2`, selector, tenantID)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	if tag.RowsAffected() == 0 {
+		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+	}
+
+	return userID, metadata, nil
+}
+
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the new count reaches the threshold. It is performed
 // atomically in a single UPDATE statement.

@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/passwords/hashertest"
 	argon2hasher "github.com/JLugagne/libauth/passwords/argon2"
+	"github.com/JLugagne/libauth/passwords/hashertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

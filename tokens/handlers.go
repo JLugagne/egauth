@@ -1,0 +1,208 @@
+package tokens
+
+import (
+	"context"
+	"errors"
+	"net/http"
+	"net/url"
+
+	"github.com/google/uuid"
+)
+
+// FamilyRevoker is the minimal store capability LogoutHandler needs to revoke a rotation
+// family. tokens.Store[C] satisfies it for any C (neither method depends on C).
+type FamilyRevoker interface {
+	FindRefreshToken(ctx context.Context, tokenHash string, opts ...Option) (*RefreshToken, error)
+	RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...Option) error
+}
+
+// handlerConfig holds the configurable behavior of the tokens HTTP handlers.
+type handlerConfig struct {
+	cookies        Cookies
+	tenantResolver func(*http.Request) string
+	successURL     string
+	failureURL     string
+	persistRefresh bool
+}
+
+// HandlerOption configures the tokens HTTP handlers (RefreshHandler, LogoutHandler).
+type HandlerOption func(*handlerConfig)
+
+func newHandlerConfig(opts []HandlerOption) handlerConfig {
+	c := handlerConfig{cookies: DefaultCookies()}
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c
+}
+
+// WithCookies replaces the cookie configuration wholesale.
+func WithCookies(c Cookies) HandlerOption { return func(h *handlerConfig) { h.cookies = c } }
+
+// WithCookieDomain scopes the auth cookies to a domain.
+func WithCookieDomain(domain string) HandlerOption {
+	return func(h *handlerConfig) { h.cookies.Domain = domain }
+}
+
+// WithSameSite overrides the SameSite attribute of the auth cookies.
+func WithSameSite(mode http.SameSite) HandlerOption {
+	return func(h *handlerConfig) { h.cookies.SameSite = mode }
+}
+
+// WithCookiePath sets the path for both the access and refresh cookies.
+func WithCookiePath(path string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.cookies.Path = path
+		h.cookies.RefreshPath = path
+	}
+}
+
+// WithRefreshCookiePath scopes only the refresh cookie (e.g. to a dedicated refresh route).
+func WithRefreshCookiePath(path string) HandlerOption {
+	return func(h *handlerConfig) { h.cookies.RefreshPath = path }
+}
+
+// WithInsecureCookies disables the Secure attribute. Use only for local HTTP development.
+func WithInsecureCookies() HandlerOption {
+	return func(h *handlerConfig) { h.cookies.Insecure = true }
+}
+
+// WithSuccessRedirect makes the handler reply with a 303 redirect to url on success
+// (instead of 204 No Content).
+func WithSuccessRedirect(url string) HandlerOption {
+	return func(h *handlerConfig) { h.successURL = url }
+}
+
+// WithFailureRedirect makes the handler reply with a 303 redirect to url (with an
+// ?error=<code> query parameter) on failure, instead of an HTTP error status.
+func WithFailureRedirect(url string) HandlerOption {
+	return func(h *handlerConfig) { h.failureURL = url }
+}
+
+// WithPersistentRefresh re-issues the rotated refresh cookie as a PERSISTENT cookie
+// (Max-Age aligned to the refresh expiry). By default the rotated refresh cookie is a
+// session cookie, since this endpoint cannot recover the original remember_me choice from
+// the request and must not silently upgrade a session-only cookie to a persistent one.
+func WithPersistentRefresh() HandlerOption {
+	return func(h *handlerConfig) { h.persistRefresh = true }
+}
+
+// WithTenantResolver derives the tenant from the request to scope store operations in
+// multi-tenant deployments.
+func WithTenantResolver(f func(*http.Request) string) HandlerOption {
+	return func(h *handlerConfig) { h.tenantResolver = f }
+}
+
+// RefreshHandler builds an HTTP handler that rotates the refresh token carried in the
+// refresh cookie: it consumes the old token, issues a fresh access+refresh pair within the
+// same family, and rewrites both cookies. A replayed token causes family revocation and a
+// rejection. On any failure the cookies are cleared.
+func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		refreshToken, ok := cfg.cookies.Refresh(r)
+		if !ok {
+			cfg.cookies.Clear(w)
+			cfg.fail(w, r, http.StatusUnauthorized, "missing_refresh_token")
+			return
+		}
+
+		pair, err := rotator.Rotate(r.Context(), refreshToken, cfg.tenantOpts(r)...)
+		if err != nil {
+			// Including the reuse case: Rotate already revoked the family; we only need to
+			// clear the client's now-useless cookies.
+			cfg.cookies.Clear(w)
+			cfg.fail(w, r, http.StatusUnauthorized, refreshErrorCode(err))
+			return
+		}
+
+		cfg.cookies.SetAccess(w, pair.AccessToken)
+		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// LogoutHandler builds an HTTP handler that revokes the entire rotation family of the
+// presented refresh token (global logout) and clears the auth cookies. It is best-effort:
+// the cookies are always cleared and a success response is returned even if the token is
+// absent or already gone, so logout is idempotent.
+func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
+			ropts := cfg.tenantOpts(r)
+			hash := HashToken(refreshToken)
+			if rt, err := revoker.FindRefreshToken(r.Context(), hash, ropts...); err == nil {
+				_ = revoker.RevokeFamily(r.Context(), rt.FamilyID, ropts...)
+			}
+		}
+
+		cfg.cookies.Clear(w)
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// tenantOpts returns the store options derived from the request's tenant, if a resolver is
+// configured.
+func (cfg handlerConfig) tenantOpts(r *http.Request) []Option {
+	if cfg.tenantResolver == nil {
+		return nil
+	}
+	return []Option{WithTenant(cfg.tenantResolver(r))}
+}
+
+// fail emits a failure response: a 303 redirect to the configured failure URL (carrying an
+// ?error=<code> param) when set, otherwise an HTTP error with the given status.
+func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
+	if cfg.failureURL != "" {
+		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
+		return
+	}
+	http.Error(w, code, status)
+}
+
+func refreshErrorCode(err error) string {
+	switch {
+	case errors.Is(err, ErrRefreshTokenReused):
+		return "token_reuse_detected"
+	case errors.Is(err, ErrTokenExpired):
+		return "refresh_expired"
+	case errors.Is(err, ErrRefreshTokenNotFound):
+		return "invalid_refresh_token"
+	default:
+		return "refresh_failed"
+	}
+}
+
+// redirectOrStatus replies with a 303 redirect to url when non-empty, otherwise writes
+// okStatus.
+func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
+	if url != "" {
+		http.Redirect(w, r, url, http.StatusSeeOther)
+		return
+	}
+	w.WriteHeader(okStatus)
+}
+
+func withErrorParam(rawURL, code string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	q.Set("error", code)
+	u.RawQuery = q.Encode()
+	return u.String()
+}

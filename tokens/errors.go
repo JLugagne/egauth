@@ -21,4 +21,8 @@ var (
 	// ErrRefreshTokenReused is returned when an already-consumed refresh token is presented again,
 	// which indicates a possible token theft (replay) and should trigger family revocation.
 	ErrRefreshTokenReused = errors.New("refresh token reused")
+
+	// ErrNoClaimsProvider is returned by Rotate when the issuer was constructed without a
+	// ClaimsProvider, which is required to resolve fresh claims during refresh-token rotation.
+	ErrNoClaimsProvider = errors.New("no claims provider configured for rotation")
 )

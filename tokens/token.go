@@ -6,6 +6,15 @@ import (
 	"github.com/google/uuid"
 )
 
+// Authentication Method Reference values (RFC 8176), used in Claims.AMR to record HOW the
+// subject authenticated, so middleware can enforce step-up / AAL2 on sensitive routes.
+const (
+	AMRPassword = "pwd" // a password / passphrase was verified
+	AMROTP      = "otp" // a one-time password (TOTP authenticator app) was verified
+	AMRWebAuthn = "hwk" // a WebAuthn / passkey (hardware-backed key) was used
+	AMRMFA      = "mfa" // multiple factors were verified in this session
+)
+
 // Claims represents standard JWT claims plus custom generic claims.
 type Claims[C any] struct {
 	Subject   uuid.UUID
@@ -16,7 +25,12 @@ type Claims[C any] struct {
 	Scopes    []string
 	Groups    []string
 	Roles     []string
-	Custom    C
+	// AMR lists the authentication methods used to obtain this token (RFC 8176). It is set by
+	// the application when issuing the pair (e.g. after a second factor) and is enforced by the
+	// RequireAuth middleware via WithRequiredAMR. On refresh it is whatever the ClaimsProvider
+	// returns, so the assurance level is re-evaluated rather than frozen at login.
+	AMR    []string
+	Custom C
 }
 
 // TokenPair represents an access and refresh token pair.

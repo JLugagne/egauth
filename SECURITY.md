@@ -15,6 +15,73 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Constant-time authentication paths.** The password authentication path applies an
   equivalent hashing cost even when the user, identity, or password hash is absent, so
   account existence cannot be inferred from response timing (user-enumeration defence).
+- **Single-use refresh-token rotation with theft detection.** Refresh tokens are
+  single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
+  and mints a new one in the same family; the access-token lifetime is always
+  issuer-controlled on rotation, and the family's tenant is immutable across rotations.
+  Replaying a consumed token revokes the **entire family** (forcing re-authentication),
+  and a revocation that fails is surfaced rather than silently swallowed. To avoid logging
+  users out on ordinary request concurrency (parallel tabs, prefetch, concurrent
+  sub-resource loads racing the same cookie), a replay within `ReuseGracePeriod`
+  (default 10s) of consumption is treated as benign and rejected *without* revoking the
+  family — set a negative `ReuseGracePeriod` for strict mode where any replay revokes.
+- **Single-use verification tokens (selector/verifier).** Password-reset and email-verification
+  tokens follow a selector/verifier scheme: a 128-bit random `selector` indexes the row, and only
+  the SHA-256 of the secret `verifier` half is stored. Consumption compares the verifier in
+  constant time, is atomic and single-use (a guarded delete), reports a verifier mismatch
+  identically to an unknown token, and mints/consumes only for a **live, same-tenant** user
+  (enforced identically by the memory and Postgres stores). A weak new password or a hashing
+  failure is rejected *before* the token is consumed, so it is never burned for nothing.
+- **OAuth is CSRF- and phishing-hardened.** The authorization-code flow uses **PKCE (S256)** and a
+  single-use `state` value bound in an `HttpOnly`/`Secure`/`SameSite=Lax` cookie (compared in
+  constant time on callback). By default the callback **refuses to provision or sign in from a
+  provider email the provider reports as unverified** (`WithAllowUnverifiedEmail` opts out), and it
+  never auto-links an external identity onto a pre-existing account that merely shares the email —
+  both are account-squatting / takeover defences. The token exchange runs server-side with the
+  client secret; the provider access token never leaves the exchange.
+- **NIST-aligned passphrases.** `passwords/policy.PassphrasePolicy` enforces length (counted in
+  Unicode code points) with NO composition rules and screens secrets against a denylist plus an
+  optional pluggable `passwords.BreachChecker` (e.g. a HIBP k-anonymity client — libauth ships
+  the interface only, never the network call).
+- **TOTP & recovery codes.** The `mfa` module implements RFC 6238 TOTP (authenticator apps only,
+  no SMS) with a ±skew window and **replay protection** via a monotonic last-used time-step (a
+  code, including the enrolling one, cannot be reused). Recovery codes are single-use and stored
+  only as SHA-256 hashes. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
+  server recomputes codes from it), so — unlike passwords/opaque tokens — it is NOT hashed. Per the
+  PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
+  deployments that need defense against a database leak should encrypt the `secret` column at the
+  storage/DB layer (envelope encryption).
+- **Passkeys (WebAuthn).** The `passkey` module wraps go-webauthn. Credentials are scoped to the
+  configured Relying Party ID; the ceremony challenge and user-verification requirement
+  (`SessionData`) are carried between Begin and Finish in a short-lived, **HMAC-signed**
+  `HttpOnly`/`Secure` cookie (the key is **required** via `passkey.WithCookieKey`; the handlers
+  fail closed without it) so the client cannot tamper with the challenge or downgrade user
+  verification; the cookie is single-use and the ceremony has a server-enforced expiry. A
+  regressed signature counter (possible cloned authenticator) is rejected (`ErrCredentialCloned`).
+- **MFA verification is not rate-limited by libauth.** Per the non-objectives, throttling TOTP /
+  recovery-code / passkey attempts is the consumer's responsibility; libauth exposes the errors
+  and propagates `context.Context` so an external limiter can be attached in front of the handlers.
+- **Step-up / AAL enforcement.** Tokens carry an `AMR` claim (RFC 8176) recording the factors used
+  to obtain them; `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
+  `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. On refresh the AMR is
+  re-evaluated by the `ClaimsProvider`, not frozen at login.
+- **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
+  endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
+  exactly like the password-reset request.
+- **Deactivation revokes pending tokens.** Magic-link, password-reset and email-verification all
+  reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
+  re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its
+  outstanding passwordless logins and reset links (a token minted while live cannot resurrect it).
+- **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — libauth never
+  sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
+  is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).
+  Both guarantees hold under concurrency: success consumes the code through an atomic guarded
+  delete (only one of N parallel correct-code verifications wins), and an attempt slot is reserved
+  atomically *before* the code is compared, so concurrent wrong guesses cannot exceed the limit.
+  Because numeric OTPs are intentionally low-entropy, the at-rest SHA-256 hash is not a barrier
+  against an attacker who already has the database; the real defenses are the short TTL,
+  single-use consumption and the attempt limit — and, as always, the consumer's own rate limiting
+  on the verify endpoint.
 - **No internal logging.** libauth performs no logging of its own ("silent by default").
   It never writes passwords, plaintext tokens, or hashes to stdout/stderr or any logger.
   `context.Context` is propagated so consumers can attach their own tracing.
@@ -40,6 +107,44 @@ These are plain `string` fields with **no redaction**. Therefore the consumer mu
   plaintext. Send a token to the client deliberately (cookie/body) and nowhere else.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
+
+## CSRF on the form handlers (consumer responsibility)
+
+`LoginHandler`, `RegisterHandler`, `RefreshHandler` and `LogoutHandler` are
+state-changing endpoints driven by the request (form body / cookies). libauth applies two
+partial defences but does **not** ship a full CSRF-token system (per the PRD, rate limiting
+and general CSRF are left to the application layer):
+
+- **`SameSite=Lax` cookies** (default) stop a cross-site request from *sending* the
+  refresh/session cookie, which protects `RefreshHandler`/`LogoutHandler` against classic
+  CSRF acting on an existing session.
+- **`identity.WithTrustedOrigins(...)`** (opt-in) rejects a login/register POST whose
+  `Origin`/`Referer` host is not allow-listed. This closes the **login-CSRF / session
+  fixation** gap, where `SameSite` does *not* help because the attack needs no
+  pre-existing cookie (it forces the victim's browser to log into the *attacker's*
+  account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
+  in front of these endpoints.
+
+## Account-existence disclosure (by design)
+
+Two responses intentionally reveal that an account exists; this is an accepted trade-off,
+not a bug:
+
+- **`ErrAccountLocked` → 429** on login: lockout is meant to be observable (PRD §105–106).
+- **`email_taken` → 409** on registration: standard registration UX. If your threat model
+  requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
+  `400` (note that `Register` already hashes before the uniqueness check, so the timing
+  channel is already closed).
+
+The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
+decoy hashing); the two disclosures above are the only intentional exceptions.
+
+The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
+deliberately uniform: it returns the same response for a known account, an unknown account, an
+OAuth-only account (no password to reset), and even a backend error — and it dispatches email
+delivery off the response path so the Mailer's latency is not a timing oracle. Account existence
+must not be inferable from this endpoint. (Residual in-process timing — one extra indexed DB
+read for an existing account — is left to the consumer's rate limiting, per the non-objectives.)
 
 ## Reporting a vulnerability
 

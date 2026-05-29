@@ -45,6 +45,25 @@ type Store interface {
 	FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...Option) ([]*Identity, error)
 	FindIdentityByProvider(ctx context.Context, provider, providerID string, opts ...Option) (*Identity, error)
 
+	// UpdateIdentityPassword sets a new password hash on the user's "password" identity and
+	// atomically clears any lockout (failed_attempts and locked_until), since proving control
+	// of the reset channel re-establishes trust. Returns ErrIdentityNotFound when the user
+	// has no password identity.
+	UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...Option) error
+
+	// Verification token operations (selector/verifier scheme).
+
+	// CreateVerificationToken mints, persists and returns a single-use plaintext token bound
+	// to the user, kind and TTL. Only the selector and the verifier hash are stored. The
+	// returned string (selector.verifier) is a credential handed to the user exactly once.
+	CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...Option) (string, error)
+
+	// ConsumeVerificationToken validates and atomically consumes (single-use) a token of the
+	// given kind, returning the bound user ID and any stored metadata. It returns
+	// ErrVerificationTokenNotFound for an unknown/malformed token or a verifier mismatch, and
+	// ErrVerificationTokenExpired for a matching-but-expired token.
+	ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...Option) (uuid.UUID, []byte, error)
+
 	// Lockout operations
 
 	// IncrementFailedAttempts increments the failed-attempt counter for an identity.

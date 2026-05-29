@@ -1,0 +1,102 @@
+// Package storetest provides a shared conformance suite for otp.Store implementations.
+package storetest
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/JLugagne/libauth/otp"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// StoreContractTesting exercises any otp.Store implementation: save/get, attempt counting,
+// replacement semantics, idempotent delete and (optionally) tenant isolation.
+func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
+	ctx := context.Background()
+	var tenantA, tenantB string
+	if useMultiTenant {
+		tenantA, tenantB = "tenant-A", "tenant-B"
+	}
+
+	t.Run("save / get / attempts / delete", func(t *testing.T) {
+		sub := uuid.New()
+		_, err := store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		assert.ErrorIs(t, err, otp.ErrCodeNotFound)
+
+		require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+			SubjectID: sub, Purpose: "login", CodeHash: "h1", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		}, otp.WithTenant(tenantA)))
+
+		got, err := store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, "h1", got.CodeHash)
+		assert.Equal(t, 0, got.Attempts)
+
+		// Attempts increment and persist.
+		n, err := store.IncrementOTPAttempts(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+		n, err = store.IncrementOTPAttempts(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, 2, n)
+		got, _ = store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		assert.Equal(t, 2, got.Attempts)
+
+		// Save replaces the prior code AND resets attempts.
+		require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+			SubjectID: sub, Purpose: "login", CodeHash: "h2", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		}, otp.WithTenant(tenantA)))
+		got, _ = store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		assert.Equal(t, "h2", got.CodeHash)
+		assert.Equal(t, 0, got.Attempts, "re-issuing must reset the attempt counter")
+
+		// Different purpose is independent.
+		_, err = store.GetOTP(ctx, sub, "step_up", otp.WithTenant(tenantA))
+		assert.ErrorIs(t, err, otp.ErrCodeNotFound)
+
+		// Delete is idempotent.
+		require.NoError(t, store.DeleteOTP(ctx, sub, "login", otp.WithTenant(tenantA)))
+		_, err = store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		assert.ErrorIs(t, err, otp.ErrCodeNotFound)
+		require.NoError(t, store.DeleteOTP(ctx, sub, "login", otp.WithTenant(tenantA)))
+
+		// Incrementing a missing code reports not-found.
+		_, err = store.IncrementOTPAttempts(ctx, sub, "login", otp.WithTenant(tenantA))
+		assert.ErrorIs(t, err, otp.ErrCodeNotFound)
+	})
+
+	t.Run("ConsumeOTP is a guarded single-use delete", func(t *testing.T) {
+		sub := uuid.New()
+		// Consuming a non-existent code reports not-removed (no error).
+		ok, err := store.ConsumeOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.False(t, ok)
+
+		require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+			SubjectID: sub, Purpose: "login", CodeHash: "h", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		}, otp.WithTenant(tenantA)))
+
+		// Exactly one consume wins; a second reports not-removed.
+		ok, err = store.ConsumeOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.True(t, ok)
+		ok, err = store.ConsumeOTP(ctx, sub, "login", otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.False(t, ok, "the code may be consumed only once")
+	})
+
+	if useMultiTenant {
+		t.Run("tenant isolation", func(t *testing.T) {
+			sub := uuid.New()
+			require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+				SubjectID: sub, Purpose: "login", CodeHash: "hA", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+			}, otp.WithTenant(tenantA)))
+
+			_, err := store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantB))
+			assert.ErrorIs(t, err, otp.ErrCodeNotFound, "tenant B must not see tenant A's code")
+		})
+	}
+}

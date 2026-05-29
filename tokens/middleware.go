@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 
@@ -11,36 +12,183 @@ import (
 // actor and custom claims as parameters, ensuring business data is never hidden in the context.
 type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, customClaims C)
 
-// RequireAuth wraps an AuthenticatedHandlerFunc to enforce Bearer token verification.
-// If valid, it explicitly passes the extracted libauth.Actor and custom claims to the next handler.
-func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C]) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "missing authorization header", http.StatusUnauthorized)
-			return
-		}
+// authConfig holds the optional behavior of RequireAuth, configured via AuthOption.
+type authConfig[C any] struct {
+	cookies        *Cookies
+	rotator        Rotator[C]
+	tenantResolver func(*http.Request) string
+	readHeader     bool
+	persistRefresh bool
+	requiredAMR    []string
+}
 
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || strings.ToLower(parts[0]) != "bearer" {
-			http.Error(w, "invalid authorization header format", http.StatusUnauthorized)
-			return
-		}
+// AuthOption configures the RequireAuth middleware.
+type AuthOption[C any] func(*authConfig[C])
 
-		tokenStr := parts[1]
-
-		claims, err := verifier.VerifyAccessToken(r.Context(), tokenStr)
-		if err != nil {
-			// In a real application, we might want to log this or handle expired differently
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-
-		actor := libauth.Actor{
-			UserID:   claims.Subject,
-			TenantID: claims.TenantID,
-		}
-
-		next(w, r, actor, claims.Custom)
+// WithCookieAuth reads the access token from the given cookie configuration instead of
+// (or in addition to) the Authorization header.
+func WithCookieAuth[C any](c Cookies) AuthOption[C] {
+	return func(a *authConfig[C]) {
+		cc := c
+		a.cookies = &cc
 	}
+}
+
+// WithAutoRefresh enables opt-in transparent rotation: when the access token is missing or
+// expired but a valid refresh cookie is present, the middleware rotates the pair, rewrites
+// both cookies and proceeds with the freshly issued claims. It implies cookie-based reads.
+func WithAutoRefresh[C any](rotator Rotator[C], cookies Cookies) AuthOption[C] {
+	return func(a *authConfig[C]) {
+		cc := cookies
+		a.cookies = &cc
+		a.rotator = rotator
+	}
+}
+
+// WithRefreshTenantResolver supplies the tenant for store-scoped auto-refresh rotation in
+// multi-tenant setups.
+func WithRefreshTenantResolver[C any](f func(*http.Request) string) AuthOption[C] {
+	return func(a *authConfig[C]) { a.tenantResolver = f }
+}
+
+// WithoutHeaderAuth disables reading the access token from the Authorization header,
+// restricting authentication to cookies only.
+func WithoutHeaderAuth[C any]() AuthOption[C] {
+	return func(a *authConfig[C]) { a.readHeader = false }
+}
+
+// WithPersistentAutoRefresh makes auto-refresh re-issue a PERSISTENT refresh cookie.
+//
+// By default auto-refresh writes a SESSION refresh cookie: the middleware cannot recover
+// the per-user remember_me choice from a bare request (browsers never echo a cookie's
+// Max-Age), so the conservative default never silently upgrades a session-only cookie into
+// a persistent one. Enable this only when the deployment uses persistent "remember me"
+// refresh cookies globally.
+func WithPersistentAutoRefresh[C any]() AuthOption[C] {
+	return func(a *authConfig[C]) { a.persistRefresh = true }
+}
+
+// WithRequiredAMR gates the route on step-up authentication: the verified token's AMR claim
+// (RFC 8176) must contain ALL of the given values, otherwise the request is rejected with 403
+// "step_up_required" (the subject is authenticated but at too low an assurance level). Issue
+// tokens whose Claims.AMR records the factors used (e.g. AMRPassword, AMROTP, AMRWebAuthn,
+// AMRMFA) so this gate can enforce, for example, WithRequiredAMR(AMRMFA) on sensitive routes.
+func WithRequiredAMR[C any](values ...string) AuthOption[C] {
+	return func(a *authConfig[C]) { a.requiredAMR = values }
+}
+
+// RequireAuth wraps an AuthenticatedHandlerFunc to enforce access-token verification.
+//
+// By default it reads a Bearer token from the Authorization header (backward-compatible).
+// Options enable reading from a cookie (WithCookieAuth) and opt-in transparent rotation
+// (WithAutoRefresh). On success it explicitly passes the extracted libauth.Actor and custom
+// claims to the next handler.
+func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc {
+	cfg := authConfig[C]{readHeader: true}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	return func(w http.ResponseWriter, r *http.Request) {
+		token, _ := extractAccessToken(r, &cfg)
+
+		if token != "" {
+			claims, err := verifier.VerifyAccessToken(r.Context(), token)
+			if err == nil {
+				if !cfg.amrSatisfied(claims) {
+					stepUpRequired(w)
+					return
+				}
+				next(w, r, actorFromClaims(claims), claims.Custom)
+				return
+			}
+			// Only an expired token is eligible for auto-refresh; any other failure
+			// (malformed, bad signature, invalid claims) is rejected outright.
+			if !errors.Is(err, ErrTokenExpired) || cfg.rotator == nil {
+				unauthorized(w)
+				return
+			}
+		}
+
+		// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
+		if cfg.rotator != nil && cfg.cookies != nil {
+			if refreshToken, ok := cfg.cookies.Refresh(r); ok {
+				var ropts []Option
+				if cfg.tenantResolver != nil {
+					ropts = append(ropts, WithTenant(cfg.tenantResolver(r)))
+				}
+				pair, err := cfg.rotator.Rotate(r.Context(), refreshToken, ropts...)
+				if err != nil {
+					// Rotation failed (reuse/expired/not found): clear cookies so a
+					// poisoned family cannot keep retrying, then reject.
+					cfg.cookies.Clear(w)
+					unauthorized(w)
+					return
+				}
+				cfg.cookies.SetAccess(w, pair.AccessToken)
+				cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+				if !cfg.amrSatisfied(&pair.Claims) {
+					stepUpRequired(w)
+					return
+				}
+				next(w, r, actorFromClaims(&pair.Claims), pair.Claims.Custom)
+				return
+			}
+		}
+
+		unauthorized(w)
+	}
+}
+
+// extractAccessToken pulls the access token from the configured cookie and/or the
+// Authorization header. The bool reports whether it came from a cookie.
+func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, bool) {
+	if cfg.cookies != nil {
+		if t, ok := cfg.cookies.Access(r); ok {
+			return t, true
+		}
+	}
+	if cfg.readHeader {
+		authHeader := r.Header.Get("Authorization")
+		parts := strings.Split(authHeader, " ")
+		if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
+			return parts[1], false
+		}
+	}
+	return "", false
+}
+
+func actorFromClaims[C any](claims *Claims[C]) libauth.Actor {
+	return libauth.Actor{
+		UserID:   claims.Subject,
+		TenantID: claims.TenantID,
+	}
+}
+
+// amrSatisfied reports whether the claims carry every required authentication-method
+// reference (step-up gate). With no requirement configured it always passes.
+func (cfg *authConfig[C]) amrSatisfied(claims *Claims[C]) bool {
+	if len(cfg.requiredAMR) == 0 {
+		return true
+	}
+	have := make(map[string]bool, len(claims.AMR))
+	for _, a := range claims.AMR {
+		have[a] = true
+	}
+	for _, req := range cfg.requiredAMR {
+		if !have[req] {
+			return false
+		}
+	}
+	return true
+}
+
+func unauthorized(w http.ResponseWriter) {
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+}
+
+// stepUpRequired signals an authenticated subject whose assurance level is too low for the
+// route (RFC 8176 AMR gate); the client should re-authenticate with the missing factor.
+func stepUpRequired(w http.ResponseWriter) {
+	http.Error(w, "step_up_required", http.StatusForbidden)
 }

@@ -216,8 +216,8 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tokenHash string, opts 
 	return &key, nil
 }
 
-// jsonbWrapper is not strictly needed if we marshal manually as above, 
-// but it's good practice for complex types. 
+// jsonbWrapper is not strictly needed if we marshal manually as above,
+// but it's good practice for complex types.
 // Given the generic Store[C], we handle it in Scan/Value if we want to use row.Scan directly into a struct field.
 
 type claimsWrapper[C any] struct {
