@@ -84,15 +84,29 @@ func (s *service) Register(ctx context.Context, email, password string, opts ...
 	return user, nil
 }
 
+// decoyHash performs a throwaway password hash to equalize timing on authentication
+// failure paths where no real password hash is available (unknown user/identity, or an
+// identity without a password). This prevents user enumeration via response-time analysis.
+func (s *service) decoyHash(ctx context.Context, password string) {
+	if s.hasher == nil {
+		return
+	}
+	_, _ = s.hasher.Hash(ctx, password)
+}
+
 func (s *service) Authenticate(ctx context.Context, provider, providerID, password string, opts ...Option) (*User, error) {
 	if provider == "password" {
 		user, err := s.store.FindUserByEmail(ctx, providerID, opts...)
 		if err != nil {
+			// Constant-time: apply an equivalent hashing cost so an attacker cannot
+			// distinguish a missing user from a wrong password by timing (PRD §108).
+			s.decoyHash(ctx, password)
 			return nil, ErrInvalidCredentials
 		}
 
 		ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
 		if err != nil {
+			s.decoyHash(ctx, password)
 			return nil, ErrInvalidCredentials
 		}
 
@@ -102,6 +116,7 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 		}
 
 		if ident.PasswordHash == nil {
+			s.decoyHash(ctx, password)
 			return nil, ErrInvalidCredentials
 		}
 

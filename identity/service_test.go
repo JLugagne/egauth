@@ -327,6 +327,69 @@ func TestService_Authenticate(t *testing.T) {
 	})
 }
 
+func TestService_Authenticate_ConstantTime(t *testing.T) {
+	ctx := context.Background()
+
+	// These tests pin the PRD requirement (§108): the password authentication path
+	// must apply an equivalent hashing cost even when no real password hash is
+	// available, so an attacker cannot distinguish "user does not exist" from
+	// "wrong password" by measuring response time (user enumeration via timing).
+
+	t.Run("user not found still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "ghost@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the user does not exist")
+	})
+
+	t.Run("identity not found still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return nil, identity.ErrIdentityNotFound
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "test@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the identity does not exist")
+	})
+
+	t.Run("missing password hash still performs a hashing cost", func(t *testing.T) {
+		var hashed bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+				return &identity.User{ID: uuid.New()}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+				return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "password", "test@example.com", "pw")
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, hashed, "must apply a hashing cost when the identity has no password hash")
+	})
+}
+
 func TestService_Lockout(t *testing.T) {
 	ctx := context.Background()
 	email := "lock@example.com"
