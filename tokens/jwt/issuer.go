@@ -104,6 +104,15 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 	refreshHash := tokens.HashToken(refreshTokenStr)
 	refreshExpiresAt := now.Add(s.refreshTTL)
 
+	rt := &tokens.RefreshToken{
+		Hash:      refreshHash,
+		FamilyID:  uuid.New(),
+		UserID:    claims.Subject,
+		TenantID:  claims.TenantID,
+		ExpiresAt: refreshExpiresAt,
+		CreatedAt: now,
+	}
+
 	return &tokens.TokenPair[C]{
 		AccessToken:           accessTokenStr,
 		RefreshToken:          refreshTokenStr,
@@ -111,7 +120,7 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 		AccessTokenExpiresAt:  accessExpiresAt,
 		RefreshTokenExpiresAt: refreshExpiresAt,
 		Claims:                claims,
-	}, s.store.SaveRefreshToken(ctx, refreshHash, claims.Subject, refreshExpiresAt, tokens.WithTenant(claims.TenantID))
+	}, s.store.SaveRefreshToken(ctx, rt, tokens.WithTenant(claims.TenantID))
 	}
 
 	// IssueAPIKey generates a new API Key with the specified prefix and claims.
@@ -196,18 +205,23 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tok
 
 	// Since we don't store full claims for refresh tokens in this simple Store,
 	// we just verify existence and return a minimal Claims object with the Subject.
-	userID, expiresAt, err := s.store.FindRefreshTokenByHash(ctx, hash)
+	rt, err := s.store.FindRefreshToken(ctx, hash)
 	if err != nil {
 		return nil, err
 	}
 
-	if time.Now().After(expiresAt) {
+	if rt.ConsumedAt != nil {
+		return nil, tokens.ErrRefreshTokenReused
+	}
+
+	if time.Now().After(rt.ExpiresAt) {
 		return nil, tokens.ErrTokenExpired
 	}
 
 	return &tokens.Claims[C]{
-		Subject:   userID,
-		ExpiresAt: expiresAt,
+		Subject:   rt.UserID,
+		TenantID:  rt.TenantID,
+		ExpiresAt: rt.ExpiresAt,
 	}, nil
 }
 

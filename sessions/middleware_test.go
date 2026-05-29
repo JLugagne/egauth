@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/domain"
+	"github.com/JLugagne/libauth"
 	"github.com/JLugagne/libauth/sessions"
 	"github.com/JLugagne/libauth/sessions/storetest"
 	"github.com/google/uuid"
@@ -31,7 +31,7 @@ func TestMiddleware(t *testing.T) {
 	}
 	svc := sessions.NewService(mockStore)
 
-	handler := func(w http.ResponseWriter, r *http.Request, actor domain.Actor, session sessions.Session) {
+	handler := func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {
 		assert.Equal(t, userID, actor.UserID)
 		assert.Equal(t, tenantID, actor.TenantID)
 		w.WriteHeader(http.StatusOK)
@@ -63,7 +63,7 @@ func TestMiddleware(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
@@ -81,7 +81,7 @@ func TestMiddleware(t *testing.T) {
 		req.AddCookie(&http.Cookie{Name: "session_token", Value: "invalid"})
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svcError, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svcError, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
@@ -92,7 +92,7 @@ func TestMiddleware(t *testing.T) {
 		req.Header.Set("Authorization", "Basic something")
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)

@@ -238,3 +238,53 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 
 	return nil, identity.ErrIdentityNotFound
 }
+
+// IncrementFailedAttempts increments the failed-attempt counter for an identity,
+// locking the account when the threshold is reached.
+func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	ident, exists := s.identities[identityID]
+	if !exists || ident.TenantID != tenantID {
+		return identity.ErrIdentityNotFound
+	}
+
+	ident.FailedAttempts++
+	ident.UpdatedAt = time.Now()
+	if lockThreshold > 0 && ident.FailedAttempts >= lockThreshold {
+		lockedUntil := time.Now().Add(lockDuration)
+		ident.LockedUntil = &lockedUntil
+	}
+
+	return nil
+}
+
+// ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
+func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	ident, exists := s.identities[identityID]
+	if !exists || ident.TenantID != tenantID {
+		return identity.ErrIdentityNotFound
+	}
+
+	ident.FailedAttempts = 0
+	ident.LockedUntil = nil
+	ident.UpdatedAt = time.Now()
+
+	return nil
+}

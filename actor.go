@@ -1,4 +1,4 @@
-package domain
+package libauth
 
 import (
 	"github.com/google/uuid"

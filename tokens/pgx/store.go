@@ -61,45 +61,86 @@ func (s *Store[C]) getTenantID(opts []tokens.Option) string {
 	return *options.TenantID
 }
 
-// SaveRefreshToken persists the hash of a refresh token.
-func (s *Store[C]) SaveRefreshToken(ctx context.Context, tokenHash string, userID uuid.UUID, expiresAt time.Time, opts ...tokens.Option) error {
+// SaveRefreshToken persists a refresh token record (storing only its hash).
+func (s *Store[C]) SaveRefreshToken(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
 	tenantID := s.getTenantID(opts)
+	if tenantID == "" {
+		tenantID = rt.TenantID
+	}
+
+	createdAt := rt.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
 
 	query := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, expires_at, created_at, consumed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
-		SET user_id = EXCLUDED.user_id, expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at
+		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id,
+			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, tokenHash, userID, expiresAt, time.Now().UTC())
+	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, rt.ExpiresAt, createdAt, rt.ConsumedAt)
 	return err
 }
 
-// FindRefreshTokenByHash retrieves a refresh token hash information.
-func (s *Store[C]) FindRefreshTokenByHash(ctx context.Context, tokenHash string, opts ...tokens.Option) (uuid.UUID, time.Time, error) {
+// FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
+func (s *Store[C]) FindRefreshToken(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.RefreshToken, error) {
 	tenantID := s.getTenantID(opts)
 
 	query := `
-		SELECT user_id, expires_at
+		SELECT token_hash, family_id, user_id, tenant_id, expires_at, created_at, consumed_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, tenantID, tokenHash)
 
-	var userID uuid.UUID
-	var expiresAt time.Time
-	err := row.Scan(&userID, &expiresAt)
+	var rt tokens.RefreshToken
+	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return uuid.Nil, time.Time{}, tokens.ErrRefreshTokenNotFound
+			return nil, tokens.ErrRefreshTokenNotFound
 		}
-		return uuid.Nil, time.Time{}, err
+		return nil, err
 	}
 
-	return userID, expiresAt, nil
+	return &rt, nil
 }
 
-// RevokeRefreshToken marks a refresh token as revoked or deletes it.
+// ConsumeRefreshToken atomically marks a refresh token as consumed (single-use).
+func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tokenHash string, opts ...tokens.Option) error {
+	tenantID := s.getTenantID(opts)
+
+	query := `
+		UPDATE tokens SET consumed_at = now()
+		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, tenantID, tokenHash)
+	if err != nil {
+		return err
+	}
+
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+
+	// 0 rows: either the token does not exist (in this tenant) or it was already consumed.
+	// Disambiguate with an existence check to return the correct sentinel.
+	existsQuery := `SELECT 1 FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
+	var dummy int
+	err = s.db.QueryRow(ctx, existsQuery, tenantID, tokenHash).Scan(&dummy)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tokens.ErrRefreshTokenNotFound
+		}
+		return err
+	}
+
+	// The token exists but already had consumed_at set -> replay.
+	return tokens.ErrRefreshTokenReused
+}
+
+// RevokeRefreshToken deletes/revokes a single refresh token by its hash.
 func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tokenHash string, opts ...tokens.Option) error {
 	tenantID := s.getTenantID(opts)
 
@@ -114,6 +155,15 @@ func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tokenHash string, opt
 	}
 
 	return nil
+}
+
+// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
+func (s *Store[C]) RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...tokens.Option) error {
+	tenantID := s.getTenantID(opts)
+
+	query := `DELETE FROM tokens WHERE tenant_id = $1 AND family_id = $2 AND claims IS NULL`
+	_, err := s.db.Exec(ctx, query, tenantID, familyID)
+	return err
 }
 
 // SaveAPIKey persists an API key.

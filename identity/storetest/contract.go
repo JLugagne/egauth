@@ -11,6 +11,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	defaultTestLockThreshold = 3
+	defaultTestLockDuration  = 15 * time.Minute
+)
+
 // MockStore is a functional mock of the identity.Store interface.
 type MockStore struct {
 	CreateUserFunc             func(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error)
@@ -21,6 +26,25 @@ type MockStore struct {
 	AddIdentityFunc            func(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error
 	FindIdentitiesByUserIDFunc func(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error)
 	FindIdentityByProviderFunc func(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error)
+
+	IncrementFailedAttemptsFunc func(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error
+	ResetFailedAttemptsFunc     func(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error
+}
+
+var _ identity.Store = (*MockStore)(nil)
+
+func (m *MockStore) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+	if m.IncrementFailedAttemptsFunc == nil {
+		panic("called not defined IncrementFailedAttemptsFunc")
+	}
+	return m.IncrementFailedAttemptsFunc(ctx, identityID, lockThreshold, lockDuration, opts...)
+}
+
+func (m *MockStore) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+	if m.ResetFailedAttemptsFunc == nil {
+		panic("called not defined ResetFailedAttemptsFunc")
+	}
+	return m.ResetFailedAttemptsFunc(ctx, identityID, opts...)
 }
 
 func (m *MockStore) CreateUser(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
@@ -174,6 +198,51 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		err = store.AddIdentity(ctx, ident, identity.WithTenant(tenantA))
 		assert.Error(t, err)
 		assert.ErrorIs(t, err, identity.ErrIdentityAlreadyExists)
+	})
+
+	t.Run("Contract: Lockout Attempts", func(t *testing.T) {
+		email := "test_lockout@example.com"
+		user, err := store.CreateUser(ctx, email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, ident, identity.WithTenant(tenantA)))
+
+		// Increment below threshold: counter rises, no lock.
+		for i := 1; i < defaultTestLockThreshold; i++ {
+			err = store.IncrementFailedAttempts(ctx, ident.ID, defaultTestLockThreshold, defaultTestLockDuration, identity.WithTenant(tenantA))
+			require.NoError(t, err)
+
+			found, err := store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+			require.NoError(t, err)
+			assert.Equal(t, i, found.FailedAttempts, "failed attempts must be persisted")
+			assert.Nil(t, found.LockedUntil, "must not be locked below threshold")
+		}
+
+		// Crossing the threshold sets LockedUntil.
+		err = store.IncrementFailedAttempts(ctx, ident.ID, defaultTestLockThreshold, defaultTestLockDuration, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		found, err := store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, defaultTestLockThreshold, found.FailedAttempts)
+		require.NotNil(t, found.LockedUntil, "must be locked at threshold")
+		assert.True(t, found.LockedUntil.After(time.Now()), "lock must be in the future")
+
+		// Reset clears both counter and lock.
+		err = store.ResetFailedAttempts(ctx, ident.ID, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		found, err = store.FindIdentityByProvider(ctx, "password", email, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, 0, found.FailedAttempts)
+		assert.Nil(t, found.LockedUntil)
 	})
 
 	if useMultiTenant {

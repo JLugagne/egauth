@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -43,4 +44,13 @@ type Store interface {
 	AddIdentity(ctx context.Context, identity *Identity, opts ...Option) error
 	FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...Option) ([]*Identity, error)
 	FindIdentityByProvider(ctx context.Context, provider, providerID string, opts ...Option) (*Identity, error)
+
+	// Lockout operations
+
+	// IncrementFailedAttempts increments the failed-attempt counter for an identity.
+	// When the counter reaches/exceeds lockThreshold, LockedUntil is set to now + lockDuration.
+	IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...Option) error
+
+	// ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
+	ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...Option) error
 }

@@ -33,9 +33,21 @@ type TokenPair[C any] struct {
 type APIKey[C any] struct {
 	ID        uuid.UUID
 	TenantID  string
-	Prefix    string     // e.g., "sk_live_"
-	Token     string     // The clear text value (only available at creation)
-	Hash      string     // The hashed value (SHA-256) stored in DB
+	Prefix    string // e.g., "sk_live_"
+	Token     string // The clear text value (only available at creation)
+	Hash      string // The hashed value (SHA-256) stored in DB
 	ExpiresAt *time.Time
 	Claims    Claims[C]
+}
+
+// RefreshToken represents a single-use refresh token belonging to a rotation family.
+// Only the hash of the clear-text token is ever persisted.
+type RefreshToken struct {
+	Hash       string
+	FamilyID   uuid.UUID
+	UserID     uuid.UUID
+	TenantID   string
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
+	ConsumedAt *time.Time
 }

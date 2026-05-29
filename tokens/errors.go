@@ -17,4 +17,8 @@ var (
 
 	// ErrRefreshTokenNotFound is returned when a refresh token cannot be found by its hash.
 	ErrRefreshTokenNotFound = errors.New("refresh token not found")
+
+	// ErrRefreshTokenReused is returned when an already-consumed refresh token is presented again,
+	// which indicates a possible token theft (replay) and should trigger family revocation.
+	ErrRefreshTokenReused = errors.New("refresh token reused")
 )

@@ -222,9 +222,9 @@ func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts 
 
 func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
 	tenantID := s.getTenantID(opts)
-	
+
 	query := `
-		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, created_at, updated_at
+		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
 		FROM identities
 		WHERE user_id = $1 AND tenant_id = $2
 	`
@@ -237,7 +237,7 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, op
 	var identities []*identity.Identity
 	for rows.Next() {
 		var ident identity.Identity
-		if err := rows.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.CreatedAt, &ident.UpdatedAt); err != nil {
+		if err := rows.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt); err != nil {
 			return nil, err
 		}
 		identities = append(identities, &ident)
@@ -254,14 +254,14 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 	tenantID := s.getTenantID(opts)
 
 	query := `
-		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, created_at, updated_at
+		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
 		FROM identities
 		WHERE provider = $1 AND provider_id = $2 AND tenant_id = $3
 	`
 	row := s.db.QueryRow(ctx, query, provider, providerID, tenantID)
 
 	var ident identity.Identity
-	err := row.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.CreatedAt, &ident.UpdatedAt)
+	err := row.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrIdentityNotFound
@@ -270,4 +270,49 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 	}
 
 	return &ident, nil
+}
+
+// IncrementFailedAttempts increments the failed-attempt counter for an identity,
+// locking the account when the new count reaches the threshold. It is performed
+// atomically in a single UPDATE statement.
+func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+	tenantID := s.getTenantID(opts)
+
+	query := `
+		UPDATE identities
+		SET failed_attempts = failed_attempts + 1,
+			locked_until = CASE
+				WHEN failed_attempts + 1 >= $3 THEN now() + ($4::bigint * interval '1 millisecond')
+				ELSE locked_until
+			END,
+			updated_at = now()
+		WHERE id = $1 AND tenant_id = $2
+	`
+	tag, err := s.db.Exec(ctx, query, identityID, tenantID, lockThreshold, lockDuration.Milliseconds())
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrIdentityNotFound
+	}
+	return nil
+}
+
+// ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
+func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+	tenantID := s.getTenantID(opts)
+
+	query := `
+		UPDATE identities
+		SET failed_attempts = 0, locked_until = NULL, updated_at = now()
+		WHERE id = $1 AND tenant_id = $2
+	`
+	tag, err := s.db.Exec(ctx, query, identityID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrIdentityNotFound
+	}
+	return nil
 }

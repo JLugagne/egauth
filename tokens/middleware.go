@@ -4,15 +4,15 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/JLugagne/libauth/domain"
+	"github.com/JLugagne/libauth"
 )
 
 // AuthenticatedHandlerFunc is an HTTP handler that explicitly requires an authenticated
 // actor and custom claims as parameters, ensuring business data is never hidden in the context.
-type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor domain.Actor, customClaims C)
+type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, customClaims C)
 
 // RequireAuth wraps an AuthenticatedHandlerFunc to enforce Bearer token verification.
-// If valid, it explicitly passes the extracted domain.Actor and custom claims to the next handler.
+// If valid, it explicitly passes the extracted libauth.Actor and custom claims to the next handler.
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -36,7 +36,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C]) 
 			return
 		}
 
-		actor := domain.Actor{
+		actor := libauth.Actor{
 			UserID:   claims.Subject,
 			TenantID: claims.TenantID,
 		}

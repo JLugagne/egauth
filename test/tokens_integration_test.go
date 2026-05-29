@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/domain"
+	"github.com/JLugagne/libauth"
 	"github.com/JLugagne/libauth/tokens"
 	"github.com/JLugagne/libauth/tokens/jwt"
 	"github.com/JLugagne/libauth/tokens/memory"
@@ -55,11 +55,11 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		var extractedActor domain.Actor
+		var extractedActor libauth.Actor
 		var extractedCustom IntegrationCustomClaims
 		var called bool
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
 			extractedActor = actor
 			extractedCustom = custom
 			called = true
@@ -91,7 +91,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -116,7 +116,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor domain.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
 			w.WriteHeader(http.StatusOK)
 		})
 

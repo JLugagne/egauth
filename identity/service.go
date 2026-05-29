@@ -2,8 +2,15 @@ package identity
 
 import (
 	"context"
+	"time"
 
 	"github.com/JLugagne/libauth/passwords"
+)
+
+// Default lockout configuration values.
+const (
+	DefaultLockThreshold = 5
+	DefaultLockDuration  = 15 * time.Minute
 )
 
 // Service defines the business logic for user identity operations.
@@ -13,18 +20,38 @@ type Service interface {
 }
 
 type service struct {
-	store  Store
-	hasher passwords.Hasher
-	policy passwords.Policy
+	store         Store
+	hasher        passwords.Hasher
+	policy        passwords.Policy
+	lockThreshold int
+	lockDuration  time.Duration
 }
 
-// NewService creates a new identity Service.
-func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy) Service {
-	return &service{
-		store:  store,
-		hasher: hasher,
-		policy: policy,
+// ServiceOption configures optional behavior of the identity Service.
+type ServiceOption func(*service)
+
+// WithLockout overrides the default account-lockout threshold and duration.
+func WithLockout(threshold int, duration time.Duration) ServiceOption {
+	return func(s *service) {
+		s.lockThreshold = threshold
+		s.lockDuration = duration
 	}
+}
+
+// NewService creates a new identity Service. By default it enables account lockout
+// after DefaultLockThreshold failed attempts for DefaultLockDuration.
+func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service {
+	s := &service{
+		store:         store,
+		hasher:        hasher,
+		policy:        policy,
+		lockThreshold: DefaultLockThreshold,
+		lockDuration:  DefaultLockDuration,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *service) Register(ctx context.Context, email, password string, opts ...Option) (*User, error) {
@@ -69,12 +96,24 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 			return nil, ErrInvalidCredentials
 		}
 
+		// If the account is currently locked, reject without comparing the password.
+		if ident.LockedUntil != nil && ident.LockedUntil.After(time.Now()) {
+			return nil, ErrAccountLocked
+		}
+
 		if ident.PasswordHash == nil {
 			return nil, ErrInvalidCredentials
 		}
 
 		if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
+			// Record the failed attempt (and possibly lock the account).
+			_ = s.store.IncrementFailedAttempts(ctx, ident.ID, s.lockThreshold, s.lockDuration, opts...)
 			return nil, ErrInvalidCredentials
+		}
+
+		// Successful authentication: reset the counter only if there were prior attempts.
+		if ident.FailedAttempts > 0 {
+			_ = s.store.ResetFailedAttempts(ctx, ident.ID, opts...)
 		}
 
 		return user, nil

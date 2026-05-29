@@ -24,4 +24,8 @@ var (
 
 	// ErrInvalidCredentials is returned when authentication fails due to invalid credentials.
 	ErrInvalidCredentials = errors.New("invalid credentials")
+
+	// ErrAccountLocked is returned when authentication is attempted on an account that is
+	// currently locked due to too many failed attempts.
+	ErrAccountLocked = errors.New("account locked")
 )
