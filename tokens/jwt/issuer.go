@@ -65,8 +65,42 @@ type Config[C any] struct {
 	ReuseGracePeriod time.Duration
 }
 
-// New creates a new JWT Service.
+// MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
+// shorter than the HMAC-SHA-256 output weakens the signature. Config.Validate enforces it.
+const MinSecretKeyLength = 32
+
+// Validate reports configuration that would make the issuer insecure or non-functional:
+// an empty or too-short SecretKey, an empty Issuer, or a non-positive Access/Refresh TTL.
+// Production callers SHOULD call it at startup (it returns all problems joined). New itself
+// only hard-fails the never-valid empty-key case, so test code may still construct an issuer
+// with, e.g., a deliberately negative AccessTTL to exercise token expiry.
+func (cfg Config[C]) Validate() error {
+	var errs []error
+	switch {
+	case cfg.SecretKey == "":
+		errs = append(errs, errors.New("jwt: SecretKey must not be empty"))
+	case len(cfg.SecretKey) < MinSecretKeyLength:
+		errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
+	}
+	if cfg.Issuer == "" {
+		errs = append(errs, errors.New("jwt: Issuer must not be empty"))
+	}
+	if cfg.AccessTTL <= 0 {
+		errs = append(errs, errors.New("jwt: AccessTTL must be positive"))
+	}
+	if cfg.RefreshTTL <= 0 {
+		errs = append(errs, errors.New("jwt: RefreshTTL must be positive"))
+	}
+	return errors.Join(errs...)
+}
+
+// New creates a new JWT Service. It panics on the one configuration that is never valid — an
+// empty SecretKey — to fail fast instead of silently signing tokens with an empty HMAC key.
+// For comprehensive startup validation call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
+	if cfg.SecretKey == "" {
+		panic("jwt: New called with an empty SecretKey; signing with an empty HMAC key is never valid (call Config.Validate to check configuration)")
+	}
 	if cfg.RefreshLength == 0 {
 		cfg.RefreshLength = 32
 	}
