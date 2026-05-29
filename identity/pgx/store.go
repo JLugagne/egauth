@@ -211,30 +211,46 @@ func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail 
 	return nil
 }
 
+// DeleteUser soft-deletes and anonymizes a live user in one atomic statement: it anonymizes the
+// users row (deleted_at + random email), anonymizes the user's identity provider_ids, and purges
+// any pending verification tokens (which would otherwise outlive the account carrying its user_id
+// and, for change-email tokens, a plaintext target email — residual PII the soft delete is meant
+// to erase). All three run as data-modifying CTEs gated on the user actually being live, so they
+// commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
 func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
 	tenantID := s.getTenantID(opts)
 
-	// Soft delete and anonymize email
 	now := time.Now().UTC()
 	anonymizedEmail := "deleted_" + uuid.New().String() + "@deleted.local"
 
-	query := `
-		UPDATE users
-		SET deleted_at = $1, email = $2, updated_at = $1
-		WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+	const query = `
+		WITH del AS (
+			UPDATE users
+			SET deleted_at = $1, email = $2, updated_at = $1
+			WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+			RETURNING id
+		),
+		ident AS (
+			UPDATE identities
+			SET provider_id = $2, updated_at = $1
+			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
+		),
+		toks AS (
+			DELETE FROM verification_tokens
+			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
+		)
+		SELECT id FROM del
 	`
-	_, err := s.db.Exec(ctx, query, now, anonymizedEmail, id, tenantID)
+	var deletedID uuid.UUID
+	err := s.db.QueryRow(ctx, query, now, anonymizedEmail, id, tenantID).Scan(&deletedID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No live, same-tenant user matched, so nothing was deleted.
+			return identity.ErrUserNotFound
+		}
 		return err
 	}
-
-	identQuery := `
-		UPDATE identities
-		SET provider_id = $1, updated_at = $2
-		WHERE user_id = $3 AND tenant_id = $4
-	`
-	_, err = s.db.Exec(ctx, identQuery, anonymizedEmail, now, id, tenantID)
-	return err
+	return nil
 }
 
 func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {

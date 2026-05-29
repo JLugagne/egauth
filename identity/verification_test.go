@@ -228,6 +228,10 @@ func TestVerification_MagicLinkWorksForOAuthOnlyAccount(t *testing.T) {
 func TestVerification_TokensDoNotResurrectDeactivatedUsers(t *testing.T) {
 	ctx := context.Background()
 
+	// Deleting a user PURGES its pending verification tokens (GDPR erasure), so a token minted
+	// before deletion no longer exists afterwards — consuming it reports ErrVerificationToken
+	// NotFound. (The service also keeps a liveness gate in consumeForLiveUser as belt-and-
+	// suspenders, but with the purge the token is gone before that gate is reached.)
 	t.Run("magic-link", func(t *testing.T) {
 		svc, store := newVerificationService(t)
 		user, err := svc.Register(ctx, "ml-dead@example.com", "OldPassw0rd!")
@@ -238,7 +242,7 @@ func TestVerification_TokensDoNotResurrectDeactivatedUsers(t *testing.T) {
 		require.NoError(t, store.DeleteUser(ctx, user.ID))
 
 		_, err = svc.LoginWithMagicLink(ctx, token)
-		assert.ErrorIs(t, err, identity.ErrUserNotFound, "a magic-link must not log in a deactivated account")
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "a magic-link must not log in a deactivated account")
 	})
 
 	t.Run("password reset", func(t *testing.T) {
@@ -251,7 +255,7 @@ func TestVerification_TokensDoNotResurrectDeactivatedUsers(t *testing.T) {
 		require.NoError(t, store.DeleteUser(ctx, user.ID))
 
 		err = svc.ResetPassword(ctx, token, "NewPassw0rd!")
-		assert.ErrorIs(t, err, identity.ErrUserNotFound, "a reset token must not act on a deactivated account")
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "a reset token must not act on a deactivated account")
 	})
 
 	t.Run("email verification", func(t *testing.T) {
@@ -264,7 +268,7 @@ func TestVerification_TokensDoNotResurrectDeactivatedUsers(t *testing.T) {
 		require.NoError(t, store.DeleteUser(ctx, user.ID))
 
 		_, err = svc.VerifyEmail(ctx, token)
-		assert.ErrorIs(t, err, identity.ErrUserNotFound, "a verification token must not act on a deactivated account")
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "a verification token must not act on a deactivated account")
 	})
 }
 

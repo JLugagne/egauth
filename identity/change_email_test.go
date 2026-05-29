@@ -174,8 +174,9 @@ func TestChangeEmail_DoesNotActOnDeactivatedAccount(t *testing.T) {
 
 	require.NoError(t, store.DeleteUser(ctx, user.ID))
 
+	// Deleting the account purges its pending tokens, so the change-email token is gone.
 	_, err = svc.ConfirmEmailChange(ctx, token)
-	assert.ErrorIs(t, err, identity.ErrUserNotFound, "a change-email token must not act on a deactivated account")
+	assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "a change-email token must not act on a deactivated account")
 }
 
 func TestChangeEmail_RequestForUnknownUserIsRejected(t *testing.T) {

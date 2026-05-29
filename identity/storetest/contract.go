@@ -196,6 +196,28 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, err)
 		require.NotNil(t, deletedUser.DeletedAt)
 		assert.NotEqual(t, email, deletedUser.Email)
+
+		// Deleting an already-deleted (or unknown / cross-tenant) user reports ErrUserNotFound,
+		// not a silent no-op success — both backends must agree.
+		err = store.DeleteUser(ctx, user.ID, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound, "re-deleting a soft-deleted user must report not found")
+		err = store.DeleteUser(ctx, uuid.New(), identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound, "deleting an unknown user must report not found")
+	})
+
+	t.Run("Contract: Delete purges verification tokens", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, "test_delete_purge@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		token, err := store.CreateVerificationToken(ctx, user.ID, identity.KindMagicLink, time.Hour, []byte("meta"), identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		require.NoError(t, store.DeleteUser(ctx, user.ID, identity.WithTenant(tenantA)))
+
+		// The pending token must be GONE (not merely inert): its row carried the user_id and any
+		// metadata PII, which the soft delete must erase.
+		_, _, err = store.ConsumeVerificationToken(ctx, token, identity.KindMagicLink, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "deletion must purge the user's verification tokens")
 	})
 
 	t.Run("Contract: Identity CRUD", func(t *testing.T) {

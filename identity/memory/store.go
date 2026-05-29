@@ -203,6 +203,15 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.O
 		}
 	}
 
+	// Purge any pending verification tokens for the user: they would otherwise outlive the
+	// account, carrying its user_id and (for change-email tokens) a plaintext target email —
+	// residual PII the soft delete is meant to erase. Deleting during range is safe in Go.
+	for selector, vt := range s.verificationTokens {
+		if vt.UserID == id && vt.TenantID == tenantID {
+			delete(s.verificationTokens, selector)
+		}
+	}
+
 	return nil
 }
 

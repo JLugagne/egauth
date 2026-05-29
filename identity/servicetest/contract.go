@@ -22,6 +22,14 @@ type MockService struct {
 	ChangePasswordFunc           func(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...identity.Option) error
 	RequestEmailChangeFunc       func(ctx context.Context, userID uuid.UUID, newEmail string, opts ...identity.Option) (string, error)
 	ConfirmEmailChangeFunc       func(ctx context.Context, token string, opts ...identity.Option) (*identity.User, error)
+	DeleteAccountFunc            func(ctx context.Context, userID uuid.UUID, opts ...identity.Option) error
+}
+
+func (m *MockService) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...identity.Option) error {
+	if m.DeleteAccountFunc == nil {
+		panic("called not defined DeleteAccountFunc")
+	}
+	return m.DeleteAccountFunc(ctx, userID, opts...)
 }
 
 func (m *MockService) RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...identity.Option) (string, error) {

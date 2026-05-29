@@ -699,6 +699,52 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 	}
 }
 
+// DeleteAccountHandler builds an authenticated HTTP handler that lets a signed-in user delete
+// their own account. The current user is obtained via WithUserResolver (typically reading
+// whatever the application's auth middleware stashed on the request); if no resolver is
+// configured or it reports no user, the handler responds 401. On success it clears the auth
+// cookies (the account is gone) and responds 204 (or redirects). Deletion is sensitive and
+// irreversible: you SHOULD gate it behind a re-authentication / step-up check (fresh proof of
+// presence) in front of this handler in addition to the session, and configure WithTrustedOrigins
+// so the CSRF origin check is active. A first-class enforceable step-up primitive is planned.
+func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		if err := svc.DeleteAccount(r.Context(), user.ID, cfg.authOpts(r)...); err != nil {
+			switch {
+			case errors.Is(err, ErrUserNotFound):
+				cfg.fail(w, r, http.StatusNotFound, "not_found")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		// The account no longer exists; clear this session's auth cookies client-side. Revoking
+		// the server-side session/refresh artifacts is handled by the Service's AccountErasers.
+		cfg.cookies.Clear(w)
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
 // mapVerificationError maps password-reset / email-verification / change-email errors to an
 // HTTP status and a stable error code.
 func mapVerificationError(err error) (int, string) {

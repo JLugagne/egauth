@@ -106,7 +106,29 @@ type Service interface {
 	// It returns ErrEmailAlreadyExists when the target was claimed by another account in the
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
 	ConfirmEmailChange(ctx context.Context, token string, opts ...Option) (*User, error)
+
+	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
+	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
+	// MFA, passkeys — see WithAccountErasers) and then soft-deletes and anonymizes the identity
+	// (clearing the email and provider IDs, which erases the account's PII and frees its
+	// email/identity slots for re-registration). Erasers run first so a revocation failure
+	// aborts before anything is deleted, leaving the operation cleanly retriable; the identity
+	// is soft-deleted only once every eraser succeeds. Returns ErrUserNotFound when no live user
+	// matches. Deletion is sensitive and irreversible: callers SHOULD gate it behind a
+	// re-authentication / step-up check (fresh proof of presence) in addition to the session —
+	// this is a stronger bar than the ambient session alone, matching how ChangePassword
+	// re-verifies the current password. libauth does not yet ship an enforceable step-up
+	// primitive (planned); until then the gate is the consumer's responsibility.
+	DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...Option) error
 }
+
+// AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
+// refresh-token families, MFA enrollments, passkeys) as part of DeleteAccount. libauth keeps
+// its modules decoupled — the identity service cannot reach the sessions/tokens/mfa/passkey
+// stores itself — so account deletion runs whatever erasers the application registers via
+// WithAccountErasers. Each eraser SHOULD be idempotent, since deletion may be retried after a
+// partial failure.
+type AccountEraser func(ctx context.Context, userID uuid.UUID, opts ...Option) error
 
 type service struct {
 	store                Store
@@ -118,6 +140,7 @@ type service struct {
 	emailVerificationTTL time.Duration
 	magicLinkTTL         time.Duration
 	emailChangeTTL       time.Duration
+	erasers              []AccountEraser
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -149,6 +172,14 @@ func WithMagicLinkTTL(d time.Duration) ServiceOption {
 // WithEmailChangeTTL overrides how long a change-email confirmation token stays valid.
 func WithEmailChangeTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.emailChangeTTL = d }
+}
+
+// WithAccountErasers registers cross-module revocation hooks run by DeleteAccount, in the order
+// given, to revoke the deleted user's sessions, refresh-token families, MFA enrollments,
+// passkeys, etc. libauth keeps its modules decoupled, so the identity service cannot revoke
+// those itself; wire your other modules' revocation here. Erasers SHOULD be idempotent.
+func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
+	return func(s *service) { s.erasers = append(s.erasers, erasers...) }
 }
 
 // NewService creates a new identity Service. By default it enables account lockout
@@ -328,9 +359,11 @@ func hasPasswordIdentity(idents []*Identity) bool {
 
 // consumeForLiveUser consumes a verification token of the given kind and returns the user it
 // is bound to, REJECTING tokens whose account has since been soft-deleted/deactivated.
-// FindUserByID deliberately still returns soft-deleted users (the store contract depends on
-// that for inspection), so the liveness gate must live here: otherwise a token minted while
-// the account was live could resurrect a deactivated account and grant it a session.
+// DeleteUser purges a user's pending tokens, so in practice a token for a deactivated account
+// is already gone (ConsumeVerificationToken returns ErrVerificationTokenNotFound first). This
+// liveness gate remains as belt-and-suspenders: FindUserByID deliberately still returns
+// soft-deleted users (the store contract depends on that for inspection), so should any token
+// ever outlive its account, it still cannot resurrect a deactivated account or grant a session.
 func (s *service) consumeForLiveUser(ctx context.Context, token, kind string, opts ...Option) (*User, []byte, error) {
 	userID, metadata, err := s.store.ConsumeVerificationToken(ctx, token, kind, opts...)
 	if err != nil {
@@ -461,6 +494,38 @@ func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...
 	user.EmailVerifiedAt = &now
 	user.UpdatedAt = now
 	return user, nil
+}
+
+// DeleteAccount revokes the user's cross-module artifacts, then soft-deletes the identity.
+func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...Option) error {
+	// Gate on a live, same-tenant user first so we report ErrUserNotFound (and skip the erasers)
+	// for an unknown, soft-deleted or cross-tenant account.
+	user, err := s.store.FindUserByID(ctx, userID, opts...)
+	if err != nil {
+		return err
+	}
+	if user.DeletedAt != nil {
+		return ErrUserNotFound
+	}
+
+	// Run the cross-module erasers before touching the identity: a revocation failure must abort
+	// cleanly (the account stays live and the whole operation can be retried) rather than leave
+	// an erased identity with still-live sessions. Collect every eraser's error so one failure
+	// does not mask another.
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := erase(ctx, userID, opts...); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
+	return s.store.DeleteUser(ctx, userID, opts...)
 }
 
 // RequestEmailVerification mints an email-verification token for the given user. Like the
