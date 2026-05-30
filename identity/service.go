@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JLugagne/libauth/event"
 	"github.com/JLugagne/libauth/passwords"
 	"github.com/google/uuid"
 )
@@ -141,6 +142,7 @@ type service struct {
 	magicLinkTTL         time.Duration
 	emailChangeTTL       time.Duration
 	erasers              []AccountEraser
+	events               event.Sink
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -180,6 +182,26 @@ func WithEmailChangeTTL(d time.Duration) ServiceOption {
 // those itself; wire your other modules' revocation here. Erasers SHOULD be idempotent.
 func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
 	return func(s *service) { s.erasers = append(s.erasers, erasers...) }
+}
+
+// WithEventSink registers a security-event sink (see the event package) that receives login
+// success/failure, lockout, registration, password/email change, verification, magic-link login
+// and account-deletion events. It is optional; without it no events are emitted.
+func WithEventSink(sink event.Sink) ServiceOption {
+	return func(s *service) { s.events = sink }
+}
+
+// emit sends a security event to the configured sink (a no-op when none is set).
+func (s *service) emit(ctx context.Context, e event.Event) {
+	event.Emit(ctx, s.events, e)
+}
+
+// tenantOf extracts the tenant from the call options for event annotation ("" when unset).
+func tenantOf(opts []Option) string {
+	if t := ApplyOptions(opts).TenantID; t != nil {
+		return *t
+	}
+	return ""
 }
 
 // NewService creates a new identity Service. By default it enables account lockout
@@ -236,6 +258,7 @@ func (s *service) Register(ctx context.Context, email, password string, opts ...
 		return nil, err
 	}
 
+	s.emit(ctx, event.Event{Type: event.UserRegistered, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
 }
 
@@ -250,12 +273,21 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 }
 
 func (s *service) Authenticate(ctx context.Context, provider, providerID, password string, opts ...Option) (*User, error) {
+	tenant := tenantOf(opts)
+	// loginFailed emits a uniform failure event. UserID is "" on the enumeration-safe paths
+	// (unknown account) where no user is resolved; the reason is deliberately uniform there so
+	// the audit log mirrors the uniform client response and is not itself an enumeration oracle.
+	loginFailed := func(userID, reason string) {
+		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenant, Reason: reason})
+	}
+
 	if provider == "password" {
 		normalized, nerr := normalizeEmail(providerID)
 		if nerr != nil {
 			// Not a valid email: spend an equivalent hashing cost, then fail uniformly so a
 			// malformed identifier is indistinguishable from a wrong password.
 			s.decoyHash(ctx, password)
+			loginFailed("", "invalid_credentials")
 			return nil, ErrInvalidCredentials
 		}
 		providerID = normalized
@@ -265,28 +297,42 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 			// Constant-time: apply an equivalent hashing cost so an attacker cannot
 			// distinguish a missing user from a wrong password by timing (PRD §108).
 			s.decoyHash(ctx, password)
+			loginFailed("", "invalid_credentials")
 			return nil, ErrInvalidCredentials
 		}
 
 		ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
 		if err != nil {
 			s.decoyHash(ctx, password)
+			loginFailed(user.ID.String(), "invalid_credentials")
 			return nil, ErrInvalidCredentials
 		}
 
 		// If the account is currently locked, reject without comparing the password.
 		if ident.LockedUntil != nil && ident.LockedUntil.After(time.Now()) {
+			loginFailed(user.ID.String(), "account_locked")
 			return nil, ErrAccountLocked
 		}
 
 		if ident.PasswordHash == nil {
 			s.decoyHash(ctx, password)
+			loginFailed(user.ID.String(), "invalid_credentials")
 			return nil, ErrInvalidCredentials
 		}
 
 		if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
-			// Record the failed attempt (and possibly lock the account).
-			_ = s.store.IncrementFailedAttempts(ctx, ident.ID, s.lockThreshold, s.lockDuration, opts...)
+			// Record the failed attempt (and possibly lock the account). The error is not
+			// propagated (the response stays uniform) but it gates the lockout event below.
+			incErr := s.store.IncrementFailedAttempts(ctx, ident.ID, s.lockThreshold, s.lockDuration, opts...)
+			loginFailed(user.ID.String(), "invalid_credentials")
+			// Surface the lockout as its own event — but only when the store actually persisted
+			// the attempt that crosses the threshold. Emitting on a pre-increment prediction even
+			// when the store call errored would assert a lock that never took effect, misleading a
+			// SIEM/audit consumer. (ident.FailedAttempts is the pre-increment count, so +1 is the
+			// value the store would persist; it matches both backends' lock condition.)
+			if incErr == nil && s.lockThreshold > 0 && ident.FailedAttempts+1 >= s.lockThreshold {
+				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenant})
+			}
 			return nil, ErrInvalidCredentials
 		}
 
@@ -295,20 +341,24 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 			_ = s.store.ResetFailedAttempts(ctx, ident.ID, opts...)
 		}
 
+		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenant})
 		return user, nil
 	}
 
 	// Fallback for other providers (if any)
 	ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
 	if err != nil {
+		loginFailed("", "invalid_credentials")
 		return nil, ErrInvalidCredentials
 	}
 
 	user, err := s.store.FindUserByID(ctx, ident.UserID, opts...)
 	if err != nil {
+		loginFailed("", "invalid_credentials")
 		return nil, ErrInvalidCredentials
 	}
 
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenant})
 	return user, nil
 }
 
@@ -396,7 +446,11 @@ func (s *service) ResetPassword(ctx context.Context, token, newPassword string, 
 		return err
 	}
 
-	return s.store.UpdateIdentityPassword(ctx, user.ID, hash, opts...)
+	if err := s.store.UpdateIdentityPassword(ctx, user.ID, hash, opts...); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.PasswordReset, UserID: user.ID.String(), TenantID: user.TenantID})
+	return nil
 }
 
 // ChangePassword re-verifies the user's current password, then validates and applies a new one.
@@ -434,7 +488,11 @@ func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentP
 	if err != nil {
 		return err
 	}
-	return s.store.UpdateIdentityPassword(ctx, userID, hash, opts...)
+	if err := s.store.UpdateIdentityPassword(ctx, userID, hash, opts...); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantOf(opts)})
+	return nil
 }
 
 // RequestEmailChange mints a token that, once confirmed, switches userID's email to newEmail.
@@ -493,6 +551,7 @@ func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...
 	user.Email = newEmail
 	user.EmailVerifiedAt = &now
 	user.UpdatedAt = now
+	s.emit(ctx, event.Event{Type: event.EmailChanged, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
 }
 
@@ -525,7 +584,11 @@ func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...O
 		return errors.Join(errs...)
 	}
 
-	return s.store.DeleteUser(ctx, userID, opts...)
+	if err := s.store.DeleteUser(ctx, userID, opts...); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.AccountDeleted, UserID: userID.String(), TenantID: user.TenantID})
+	return nil
 }
 
 // RequestEmailVerification mints an email-verification token for the given user. Like the
@@ -555,6 +618,7 @@ func (s *service) VerifyEmail(ctx context.Context, token string, opts ...Option)
 	if err := s.store.UpdateUser(ctx, user, opts...); err != nil {
 		return nil, err
 	}
+	s.emit(ctx, event.Event{Type: event.EmailVerified, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
 }
 
@@ -647,5 +711,9 @@ func (s *service) RequestMagicLink(ctx context.Context, email string, opts ...Op
 // reliably revokes pending passwordless logins.
 func (s *service) LoginWithMagicLink(ctx context.Context, token string, opts ...Option) (*User, error) {
 	user, _, err := s.consumeForLiveUser(ctx, token, KindMagicLink, opts...)
-	return user, err
+	if err != nil {
+		return nil, err
+	}
+	s.emit(ctx, event.Event{Type: event.MagicLinkLogin, UserID: user.ID.String(), TenantID: user.TenantID})
+	return user, nil
 }

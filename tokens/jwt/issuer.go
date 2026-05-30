@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JLugagne/libauth/event"
 	"github.com/JLugagne/libauth/tokens"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -46,6 +47,7 @@ type Service[C any] struct {
 	refreshLength  int
 	apiKeyLength   int
 	reuseGrace     time.Duration
+	events         event.Sink
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -86,6 +88,9 @@ type Config[C any] struct {
 	// value selects DefaultReuseGracePeriod; set a negative value for strict mode, where any
 	// replay of a consumed token revokes the family.
 	ReuseGracePeriod time.Duration
+	// EventSink optionally receives security events emitted during rotation — refresh-token
+	// reuse detection and token-family revocation (see the event package). Nil disables emission.
+	EventSink event.Sink
 }
 
 // MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
@@ -224,6 +229,7 @@ func New[C any](cfg Config[C]) *Service[C] {
 		refreshLength:  cfg.RefreshLength,
 		apiKeyLength:   cfg.APIKeyLength,
 		reuseGrace:     cfg.ReuseGracePeriod,
+		events:         cfg.EventSink,
 	}
 }
 
@@ -333,6 +339,10 @@ func (s *Service[C]) Rotate(ctx context.Context, refreshToken string, opts ...to
 			if rerr := s.store.RevokeFamily(ctx, rt.FamilyID, opts...); rerr != nil {
 				return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
 			}
+			event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "refresh_reuse"})
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
+		} else {
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
 		}
 		return nil, tokens.ErrRefreshTokenReused
 	}

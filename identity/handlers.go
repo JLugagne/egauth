@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/JLugagne/libauth/event"
 	"github.com/JLugagne/libauth/passwords"
 	"github.com/JLugagne/libauth/tokens"
 )
@@ -40,6 +41,7 @@ type handlerConfig struct {
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
 	maxBodyBytes         int64
+	events               event.Sink
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -140,6 +142,15 @@ func WithTokenField(name string) HandlerOption {
 // context. When it is unset (or returns ok=false) the handler responds 401.
 func WithUserResolver(f func(*http.Request) (*User, bool)) HandlerOption {
 	return func(h *handlerConfig) { h.userResolver = f }
+}
+
+// WithHandlerEventSink registers a security-event sink (see the event package) for the handlers.
+// Its main use is making swallowed Mailer delivery failures observable: the Request* handlers
+// reply uniformly for enumeration safety and dispatch delivery off the response path, so a Mailer
+// outage is otherwise invisible — with a sink configured it surfaces as a DeliveryFailed event.
+// (The identity Service has its own WithEventSink for service-level lifecycle events.)
+func WithHandlerEventSink(sink event.Sink) HandlerOption {
+	return func(h *handlerConfig) { h.events = sink }
 }
 
 // WithTrustedOrigins enables CSRF origin checking on the form handlers (login/register).
@@ -300,6 +311,30 @@ func (cfg handlerConfig) authOpts(r *http.Request) []Option {
 	return []Option{WithTenant(cfg.tenantResolver(r))}
 }
 
+func (cfg handlerConfig) tenant(r *http.Request) string {
+	if cfg.tenantResolver == nil {
+		return ""
+	}
+	return cfg.tenantResolver(r)
+}
+
+// dispatchDelivery hands a freshly minted credential to the Mailer off the response path (a
+// detached context, so the request finishing does not cancel delivery, and so the Mailer's
+// latency — which only occurs for existing accounts — is not a timing side channel). A delivery
+// failure is otherwise swallowed to keep the enumeration-safe response uniform; emitting a
+// DeliveryFailed event makes that otherwise-invisible outage observable to a configured sink.
+func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) {
+	ctx := context.WithoutCancel(r.Context())
+	tenant := cfg.tenant(r)
+	go func() {
+		if err := send(ctx); err != nil {
+			event.Emit(ctx, cfg.events, event.Event{
+				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID, Err: err,
+			})
+		}
+	}()
+}
+
 // originAllowed reports whether the request passes the CSRF origin check. When no trusted
 // origins are configured the check is disabled (CSRF protection is then the consumer's
 // responsibility, per SECURITY.md). A configured check rejects any request whose Origin
@@ -381,10 +416,9 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
 		token, user, _ := svc.RequestPasswordReset(r.Context(), email, cfg.authOpts(r)...)
 		if token != "" && user != nil && mailer != nil {
-			// Dispatch delivery off the response path (detached context) so the Mailer's
-			// latency, which only occurs for existing accounts, is not a timing side channel.
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendPasswordReset(ctx, user, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendPasswordReset(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -449,8 +483,9 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 		// token is empty when the account is not a live, same-tenant user (swallowed at the
 		// service for enumeration safety); only dispatch delivery when a token was minted.
 		if token != "" && mailer != nil {
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendEmailVerification(ctx, user, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendEmailVerification(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -506,8 +541,9 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
 		token, user, _ := svc.RequestMagicLink(r.Context(), email, cfg.authOpts(r)...)
 		if token != "" && user != nil && mailer != nil {
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendMagicLink(ctx, user, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendMagicLink(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -661,8 +697,9 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 			if n, nerr := normalizeEmail(newEmail); nerr == nil {
 				deliverTo = n
 			}
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendEmailChange(ctx, user, deliverTo, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendEmailChange(ctx, user, deliverTo, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}

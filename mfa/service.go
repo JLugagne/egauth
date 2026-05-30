@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/JLugagne/libauth/event"
 	"github.com/google/uuid"
 )
 
@@ -48,6 +49,7 @@ type service struct {
 	skew              int
 	recoveryCodeCount int
 	now               func() time.Time
+	events            event.Sink
 }
 
 // ServiceOption configures the MFA Service.
@@ -70,6 +72,22 @@ func WithRecoveryCodeCount(n int) ServiceOption { return func(s *service) { s.re
 
 // WithClock overrides the time source (primarily for tests).
 func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
+
+// WithEventSink registers a security-event sink (see the event package) that receives MFA
+// enrollment, confirmation, verification-failure and disable events. Optional; without it no
+// events are emitted.
+func WithEventSink(sink event.Sink) ServiceOption { return func(s *service) { s.events = sink } }
+
+// emit sends a security event to the configured sink (a no-op when none is set).
+func (s *service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }
+
+// tenantOf extracts the tenant from the call options for event annotation ("" when unset).
+func tenantOf(opts []Option) string {
+	if t := ApplyOptions(opts).TenantID; t != nil {
+		return *t
+	}
+	return ""
+}
 
 // NewService builds an MFA Service with RFC 6238 defaults.
 func NewService(store Store, opts ...ServiceOption) Service {
@@ -112,6 +130,7 @@ func (s *service) EnrollTOTP(ctx context.Context, userID uuid.UUID, account stri
 		return nil, err
 	}
 
+	s.emit(ctx, event.Event{Type: event.MFAEnrolled, UserID: userID.String(), TenantID: tenantOf(opts)})
 	return &Enrollment{
 		Secret: secret,
 		URI:    ProvisioningURI(secret, s.issuer, account, s.digits, s.period),
@@ -139,6 +158,7 @@ func (s *service) ConfirmTOTP(ctx context.Context, userID uuid.UUID, code string
 		return nil, err
 	}
 
+	s.emit(ctx, event.Event{Type: event.MFAConfirmed, UserID: userID.String(), TenantID: tenantOf(opts)})
 	return s.mintRecoveryCodes(ctx, userID, opts...)
 }
 
@@ -153,6 +173,7 @@ func (s *service) VerifyTOTP(ctx context.Context, userID uuid.UUID, code string,
 
 	step, ok := validateTOTP(enrollment.Secret, code, s.now(), s.digits, s.period, s.skew)
 	if !ok {
+		s.emit(ctx, event.Event{Type: event.MFAVerificationFailed, UserID: userID.String(), TenantID: tenantOf(opts), Reason: "invalid_code"})
 		return ErrInvalidCode
 	}
 
@@ -162,6 +183,7 @@ func (s *service) VerifyTOTP(ctx context.Context, userID uuid.UUID, code string,
 		return err
 	}
 	if !applied {
+		s.emit(ctx, event.Event{Type: event.MFAVerificationFailed, UserID: userID.String(), TenantID: tenantOf(opts), Reason: "replay"})
 		return ErrInvalidCode
 	}
 	return nil
@@ -186,7 +208,11 @@ func (s *service) DisableTOTP(ctx context.Context, userID uuid.UUID, opts ...Opt
 	if err := s.store.DeleteRecoveryCodes(ctx, userID, opts...); err != nil {
 		return err
 	}
-	return s.store.DeleteTOTP(ctx, userID, opts...)
+	if err := s.store.DeleteTOTP(ctx, userID, opts...); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.MFADisabled, UserID: userID.String(), TenantID: tenantOf(opts)})
+	return nil
 }
 
 func (s *service) IsEnrolled(ctx context.Context, userID uuid.UUID, opts ...Option) (bool, error) {
