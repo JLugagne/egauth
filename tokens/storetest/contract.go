@@ -88,12 +88,14 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		userID := uuid.New()
 		familyID := uuid.New()
 		expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
+		authTime := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 
 		rt := &tokens.RefreshToken{
 			Hash:      tokenHash,
 			FamilyID:  familyID,
 			UserID:    userID,
 			TenantID:  tenantA,
+			AuthTime:  authTime,
 			ExpiresAt: expiresAt,
 			CreatedAt: time.Now().Truncate(time.Second),
 		}
@@ -106,6 +108,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.Equal(t, userID, found.UserID)
 		assert.Equal(t, familyID, found.FamilyID)
 		assert.WithinDuration(t, expiresAt, found.ExpiresAt, time.Second)
+		assert.WithinDuration(t, authTime, found.AuthTime, time.Second, "auth_time must round-trip (step-up freshness)")
 		assert.Nil(t, found.ConsumedAt, "freshly saved token must not be consumed")
 
 		// Consume once succeeds.

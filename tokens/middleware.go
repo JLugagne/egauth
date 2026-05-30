@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/JLugagne/libauth"
 )
@@ -20,6 +21,7 @@ type authConfig[C any] struct {
 	readHeader     bool
 	persistRefresh bool
 	requiredAMR    []string
+	maxAuthAge     time.Duration
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -77,6 +79,20 @@ func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
 }
 
+// WithMaxAuthAge gates the route on step-up ("sudo mode") freshness: the subject must have
+// authenticated within d, measured from the token's auth_time (OIDC) claim — NOT its issue time,
+// so a silent auto-refresh does not reset the clock. A subject whose authentication is older than
+// d (or whose token carries no auth_time) is rejected with 403 "step_up_required" and should
+// re-authenticate to mint a fresh token.
+//
+// This is the enforceable primitive for sensitive actions such as disabling MFA, deleting the
+// account, or changing security settings: wrap their routes with it (it works for any factor, so
+// it covers OAuth-only accounts that cannot re-verify a password). A non-positive d disables the
+// check. See also Claims.FreshAuth for gating outside an HTTP handler.
+func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
+	return func(a *authConfig[C]) { a.maxAuthAge = d }
+}
+
 // RequireAuth wraps an AuthenticatedHandlerFunc to enforce access-token verification.
 //
 // By default it reads a Bearer token from the Authorization header (backward-compatible).
@@ -95,7 +111,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 		if token != "" {
 			claims, err := verifier.VerifyAccessToken(r.Context(), token)
 			if err == nil {
-				if !cfg.amrSatisfied(claims) {
+				if !cfg.stepUpSatisfied(claims) {
 					stepUpRequired(w)
 					return
 				}
@@ -127,7 +143,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 				}
 				cfg.cookies.SetAccess(w, pair.AccessToken)
 				cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-				if !cfg.amrSatisfied(&pair.Claims) {
+				if !cfg.stepUpSatisfied(&pair.Claims) {
 					stepUpRequired(w)
 					return
 				}
@@ -163,6 +179,13 @@ func actorFromClaims[C any](claims *Claims[C]) libauth.Actor {
 		UserID:   claims.Subject,
 		TenantID: claims.TenantID,
 	}
+}
+
+// stepUpSatisfied reports whether the claims clear BOTH step-up gates: the required AMR factors
+// (WithRequiredAMR) and the authentication-freshness window (WithMaxAuthAge). Either gate is a
+// no-op when not configured.
+func (cfg *authConfig[C]) stepUpSatisfied(claims *Claims[C]) bool {
+	return cfg.amrSatisfied(claims) && claims.FreshAuth(cfg.maxAuthAge)
 }
 
 // amrSatisfied reports whether the claims carry every required authentication-method

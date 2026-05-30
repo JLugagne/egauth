@@ -18,6 +18,7 @@ import (
 type claimsWrapper[C any] struct {
 	jwt.RegisteredClaims
 	TenantID string   `json:"tenant_id,omitempty"`
+	AuthTime int64    `json:"auth_time,omitempty"` // OIDC auth_time (unix seconds), preserved across refresh
 	Scopes   []string `json:"scopes,omitempty"`
 	Groups   []string `json:"groups,omitempty"`
 	Roles    []string `json:"roles,omitempty"`
@@ -236,17 +237,32 @@ func New[C any](cfg Config[C]) *Service[C] {
 // IssueTokenPair generates a new Access and Refresh token pair for the given claims,
 // starting a fresh rotation family.
 func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error) {
-	return s.issuePair(ctx, claims, uuid.New())
+	return s.issuePair(ctx, claims, uuid.New(), true)
 }
 
 // issuePair signs an access JWT and mints an opaque refresh token, persisting the refresh
 // token (hash only) within the given family. It is shared by initial issuance (new family)
-// and rotation (existing family).
-func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID) (*tokens.TokenPair[C], error) {
+// and rotation (existing family); initial reports which, so auth_time defaults to the issue
+// time ONLY for a genuine fresh authentication and is never manufactured by a rotation.
+func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
 	now := time.Now()
 	accessExpiresAt := now.Add(s.accessTTL)
 	if !claims.ExpiresAt.IsZero() {
 		accessExpiresAt = claims.ExpiresAt
+	}
+
+	// auth_time anchors step-up freshness. For the INITIAL pair it defaults to the issue time
+	// (the subject just authenticated); on rotation it is the family's preserved value, taken
+	// verbatim — a rotation must NEVER manufacture a fresh auth_time (that would let a silent
+	// refresh defeat the freshness gate). A legacy/zero auth_time therefore stays zero on
+	// rotation, so FreshAuth fails closed and a re-authentication is correctly forced.
+	authTime := claims.AuthTime
+	if authTime.IsZero() && initial {
+		authTime = now
+	}
+	var authTimeUnix int64
+	if !authTime.IsZero() {
+		authTimeUnix = authTime.Unix()
 	}
 
 	wrapper := claimsWrapper[C]{
@@ -259,6 +275,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 			ID:        uuid.New().String(),
 		},
 		TenantID: claims.TenantID,
+		AuthTime: authTimeUnix,
 		Scopes:   claims.Scopes,
 		Groups:   claims.Groups,
 		Roles:    claims.Roles,
@@ -291,6 +308,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		FamilyID:  familyID,
 		UserID:    claims.Subject,
 		TenantID:  claims.TenantID,
+		AuthTime:  authTime,
 		ExpiresAt: refreshExpiresAt,
 		CreatedAt: now,
 	}
@@ -299,8 +317,10 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		return nil, err
 	}
 
-	// Reflect the issuer-controlled access expiry back into the returned claims.
+	// Reflect the issuer-controlled access expiry and the resolved auth_time back into the
+	// returned claims.
 	claims.ExpiresAt = accessExpiresAt
+	claims.AuthTime = authTime
 
 	return &tokens.TokenPair[C]{
 		AccessToken:           accessTokenStr,
@@ -374,9 +394,15 @@ func (s *Service[C]) Rotate(ctx context.Context, refreshToken string, opts ...to
 	// honor a provider-supplied expiry, which could extend a short-lived token unbounded.
 	claims.TenantID = rt.TenantID
 	claims.ExpiresAt = time.Time{}
+	// Preserve the family's original authentication time: a silent refresh re-evaluates the
+	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
+	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
+	claims.AuthTime = rt.AuthTime
 
-	// Issue a new pair within the SAME family to preserve the rotation chain.
-	return s.issuePair(ctx, claims, rt.FamilyID)
+	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
+	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
+	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
+	return s.issuePair(ctx, claims, rt.FamilyID, false)
 }
 
 // IssueAPIKey generates a new API Key with the specified prefix and claims.
@@ -474,6 +500,9 @@ func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*t
 		Roles:     wrapper.Roles,
 		AMR:       wrapper.AMR,
 		Custom:    wrapper.Custom,
+	}
+	if wrapper.AuthTime > 0 {
+		claims.AuthTime = time.Unix(wrapper.AuthTime, 0).UTC()
 	}
 
 	return &claims, nil

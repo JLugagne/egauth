@@ -35,7 +35,10 @@ type Service interface {
 	VerifyRecoveryCode(ctx context.Context, userID uuid.UUID, code string, opts ...Option) error
 	// RegenerateRecoveryCodes invalidates the user's existing codes and returns a fresh set.
 	RegenerateRecoveryCodes(ctx context.Context, userID uuid.UUID, opts ...Option) ([]string, error)
-	// DisableTOTP removes the enrollment and all recovery codes. Idempotent.
+	// DisableTOTP removes the enrollment and all recovery codes. Idempotent. Disabling a second
+	// factor is sensitive: callers SHOULD gate its route behind step-up re-authentication by
+	// wrapping DisableHandler with tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)) so a stale
+	// or hijacked session cannot silently strip MFA.
 	DisableTOTP(ctx context.Context, userID uuid.UUID, opts ...Option) error
 	// IsEnrolled reports whether the user has a CONFIRMED TOTP factor.
 	IsEnrolled(ctx context.Context, userID uuid.UUID, opts ...Option) (bool, error)

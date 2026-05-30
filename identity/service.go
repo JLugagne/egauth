@@ -118,8 +118,9 @@ type Service interface {
 	// matches. Deletion is sensitive and irreversible: callers SHOULD gate it behind a
 	// re-authentication / step-up check (fresh proof of presence) in addition to the session —
 	// this is a stronger bar than the ambient session alone, matching how ChangePassword
-	// re-verifies the current password. libauth does not yet ship an enforceable step-up
-	// primitive (planned); until then the gate is the consumer's responsibility.
+	// re-verifies the current password. Enforce it by wrapping DeleteAccountHandler's route with
+	// tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)): the auth_time freshness gate works for
+	// any factor, so it also covers OAuth-only accounts that cannot re-verify a password.
 	DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...Option) error
 }
 

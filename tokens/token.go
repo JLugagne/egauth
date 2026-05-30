@@ -20,6 +20,12 @@ type Claims[C any] struct {
 	Subject   uuid.UUID
 	TenantID  string
 	IssuedAt  time.Time
+	// AuthTime is when the subject last actually authenticated (OIDC "auth_time"). Unlike
+	// IssuedAt it is NOT advanced by a silent refresh — it is preserved across rotation within a
+	// family — so it anchors step-up / "sudo mode" freshness checks (see middleware
+	// WithMaxAuthAge and Claims.FreshAuth). It is set at issuance (defaulting to the issue time)
+	// and re-verified, never extended, by refresh.
+	AuthTime  time.Time
 	ExpiresAt time.Time
 	Audiences []string
 	Scopes    []string
@@ -31,6 +37,20 @@ type Claims[C any] struct {
 	// returns, so the assurance level is re-evaluated rather than frozen at login.
 	AMR    []string
 	Custom C
+}
+
+// FreshAuth reports whether the subject authenticated within maxAge of now, anchored on AuthTime
+// (OIDC auth_time). It backs step-up / "sudo mode" gating: a sensitive action requires a recent
+// re-authentication. A non-positive maxAge means "no freshness requirement" (always fresh); a
+// zero AuthTime is treated as stale (fails closed) whenever a positive maxAge is required.
+func (c Claims[C]) FreshAuth(maxAge time.Duration) bool {
+	if maxAge <= 0 {
+		return true
+	}
+	if c.AuthTime.IsZero() {
+		return false
+	}
+	return time.Since(c.AuthTime) <= maxAge
 }
 
 // TokenPair represents an access and refresh token pair.
@@ -57,10 +77,14 @@ type APIKey[C any] struct {
 // RefreshToken represents a single-use refresh token belonging to a rotation family.
 // Only the hash of the clear-text token is ever persisted.
 type RefreshToken struct {
-	Hash       string
-	FamilyID   uuid.UUID
-	UserID     uuid.UUID
-	TenantID   string
+	Hash     string
+	FamilyID uuid.UUID
+	UserID   uuid.UUID
+	TenantID string
+	// AuthTime is when the subject authenticated to start this rotation family. It is set on the
+	// initial pair and carried unchanged onto every rotated descendant, so a silent refresh does
+	// not reset step-up freshness (see Claims.AuthTime).
+	AuthTime   time.Time
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 	ConsumedAt *time.Time

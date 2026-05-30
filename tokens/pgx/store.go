@@ -73,14 +73,21 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, rt *tokens.RefreshToken
 		createdAt = time.Now().UTC()
 	}
 
+	// auth_time is stored as NULL when unset so legacy rows and callers that do not track it
+	// scan back to a zero time.
+	var authTime *time.Time
+	if !rt.AuthTime.IsZero() {
+		authTime = &rt.AuthTime
+	}
+
 	query := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, expires_at, created_at, consumed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, expires_at, created_at, consumed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
-		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id,
+		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
 			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, rt.ExpiresAt, createdAt, rt.ConsumedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.ExpiresAt, createdAt, rt.ConsumedAt)
 	return err
 }
 
@@ -89,19 +96,23 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tokenHash string, opts 
 	tenantID := s.getTenantID(opts)
 
 	query := `
-		SELECT token_hash, family_id, user_id, tenant_id, expires_at, created_at, consumed_at
+		SELECT token_hash, family_id, user_id, tenant_id, auth_time, expires_at, created_at, consumed_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, tenantID, tokenHash)
 
 	var rt tokens.RefreshToken
-	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt)
+	var authTime *time.Time
+	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrRefreshTokenNotFound
 		}
 		return nil, err
+	}
+	if authTime != nil {
+		rt.AuthTime = *authTime
 	}
 
 	return &rt, nil
