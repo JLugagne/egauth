@@ -205,9 +205,16 @@ func tenantOf(opts []Option) string {
 	return ""
 }
 
-// NewService creates a new identity Service. By default it enables account lockout
-// after DefaultLockThreshold failed attempts for DefaultLockDuration.
+// NewService creates a new identity Service. By default it enables account lockout after
+// DefaultLockThreshold failed attempts for DefaultLockDuration. It panics on a nil store (always
+// required) to fail fast at startup rather than with a nil-pointer panic deep in a request. The
+// hasher and policy may be nil for a deployment that uses no password flows (e.g. OAuth-only):
+// the password paths (Register/Authenticate/ResetPassword/ChangePassword) require them, but
+// decoyHash and the OAuth/magic-link paths tolerate their absence.
 func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service {
+	if store == nil {
+		panic("identity: NewService requires a non-nil Store")
+	}
 	s := &service{
 		store:                store,
 		hasher:               hasher,

@@ -36,8 +36,12 @@ type service struct {
 	store Store
 }
 
-// NewService creates a new sessions Service.
+// NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
+// startup rather than with a nil-pointer panic deep in a request).
 func NewService(store Store) Service {
+	if store == nil {
+		panic("sessions: NewService requires a non-nil Store")
+	}
 	return &service{
 		store: store,
 	}

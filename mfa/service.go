@@ -92,8 +92,14 @@ func tenantOf(opts []Option) string {
 	return ""
 }
 
-// NewService builds an MFA Service with RFC 6238 defaults.
+// NewService builds an MFA Service with RFC 6238 defaults. It panics on a nil store or on an
+// option that sets a TOTP parameter to a value that cannot produce valid codes (non-positive
+// digits/period, negative skew, non-positive recovery-code count, or a nil clock) — fail fast at
+// startup rather than minting unverifiable codes later.
 func NewService(store Store, opts ...ServiceOption) Service {
+	if store == nil {
+		panic("mfa: NewService requires a non-nil Store")
+	}
 	s := &service{
 		store:             store,
 		issuer:            DefaultIssuer,
@@ -105,6 +111,18 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	}
 	for _, opt := range opts {
 		opt(s)
+	}
+	switch {
+	case s.digits <= 0:
+		panic("mfa: digits must be positive")
+	case s.period <= 0:
+		panic("mfa: period must be positive")
+	case s.skew < 0:
+		panic("mfa: skew must not be negative")
+	case s.recoveryCodeCount <= 0:
+		panic("mfa: recovery-code count must be positive")
+	case s.now == nil:
+		panic("mfa: clock must not be nil")
 	}
 	return s
 }
