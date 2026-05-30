@@ -12,6 +12,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// StrictTenancyTesting asserts that a store built with strict tenancy rejects every operation
+// performed without a tenant (no WithTenant) via ErrTenantRequired, and accepts the same
+// operations once a tenant is supplied. Pass a store constructed WithStrictTenancy.
+func StrictTenancyTesting(t *testing.T, strict otp.Store) {
+	ctx := context.Background()
+	sub := uuid.New()
+
+	// No tenant -> ErrTenantRequired on every tenant-scoped op.
+	err := strict.SaveOTP(ctx, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h", ExpiresAt: time.Now().Add(time.Minute)})
+	assert.ErrorIs(t, err, otp.ErrTenantRequired, "SaveOTP without a tenant must be rejected in strict mode")
+	_, err = strict.GetOTP(ctx, sub, "login")
+	assert.ErrorIs(t, err, otp.ErrTenantRequired)
+	_, err = strict.IncrementOTPAttempts(ctx, sub, "login")
+	assert.ErrorIs(t, err, otp.ErrTenantRequired)
+	_, err = strict.ConsumeOTP(ctx, sub, "login")
+	assert.ErrorIs(t, err, otp.ErrTenantRequired)
+	err = strict.DeleteOTP(ctx, sub, "login")
+	assert.ErrorIs(t, err, otp.ErrTenantRequired)
+
+	// With a tenant the same ops work.
+	require.NoError(t, strict.SaveOTP(ctx, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h", ExpiresAt: time.Now().Add(time.Minute)}, otp.WithTenant("t1")))
+	got, err := strict.GetOTP(ctx, sub, "login", otp.WithTenant("t1"))
+	require.NoError(t, err)
+	assert.Equal(t, "h", got.CodeHash)
+}
+
 // StoreContractTesting exercises any otp.Store implementation: save/get, attempt counting,
 // replacement semantics, idempotent delete and (optionally) tenant isolation.
 func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {

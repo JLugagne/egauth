@@ -43,24 +43,46 @@ type DBQuerier interface {
 
 // Store implements otp.Store for PostgreSQL.
 type Store struct {
-	db DBQuerier
+	db     DBQuerier
+	strict bool
 }
 
-// NewStore creates a new PostgreSQL OTP store.
-func NewStore(db DBQuerier) *Store { return &Store{db: db} }
+// Option configures a Store.
+type Option func(*Store)
 
-func (s *Store) tenantID(opts []otp.Option) string {
-	o := otp.ApplyOptions(opts)
-	if o.TenantID == nil {
-		return ""
+// WithStrictTenancy makes every operation require a non-empty tenant (ErrTenantRequired
+// otherwise). Off by default, where an empty tenant is the default single-tenant partition.
+// Enable it in multi-tenant deployments so a forgotten WithTenant fails loudly instead of
+// silently operating on the shared empty-tenant partition. (DeleteExpired is exempt: it is a
+// maintenance sweep that intentionally spans all tenants when no tenant is given.)
+func WithStrictTenancy() Option { return func(s *Store) { s.strict = true } }
+
+// NewStore creates a new PostgreSQL OTP store.
+func NewStore(db DBQuerier, opts ...Option) *Store {
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
 	}
-	return *o.TenantID
+	return s
+}
+
+// resolveTenant extracts the operation tenant, enforcing ErrTenantRequired in strict mode.
+func (s *Store) resolveTenant(opts []otp.Option) (string, error) {
+	o := otp.ApplyOptions(opts)
+	tenant := ""
+	if o.TenantID != nil {
+		tenant = *o.TenantID
+	}
+	if s.strict && tenant == "" {
+		return "", otp.ErrTenantRequired
+	}
+	return tenant, nil
 }
 
 func (s *Store) SaveOTP(ctx context.Context, o *otp.OTP, opts ...otp.Option) error {
-	tenant := s.tenantID(opts)
-	if tenant == "" {
-		return otp.ErrTenantRequired
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
 	}
 	o.TenantID = tenant
 	if o.CreatedAt.IsZero() {
@@ -76,19 +98,22 @@ func (s *Store) SaveOTP(ctx context.Context, o *otp.OTP, opts ...otp.Option) err
 		    expires_at = EXCLUDED.expires_at,
 		    created_at = EXCLUDED.created_at
 	`
-	_, err := s.db.Exec(ctx, query, tenant, o.SubjectID, o.Purpose, o.CodeHash, o.Attempts, o.ExpiresAt, o.CreatedAt)
+	_, err = s.db.Exec(ctx, query, tenant, o.SubjectID, o.Purpose, o.CodeHash, o.Attempts, o.ExpiresAt, o.CreatedAt)
 	return err
 }
 
 func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (*otp.OTP, error) {
-	tenant := s.tenantID(opts)
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
 	const query = `
 		SELECT code_hash, attempts, expires_at, created_at
 		FROM otp_codes
 		WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3
 	`
 	o := &otp.OTP{SubjectID: subjectID, TenantID: tenant, Purpose: purpose}
-	err := s.db.QueryRow(ctx, query, tenant, subjectID, purpose).Scan(&o.CodeHash, &o.Attempts, &o.ExpiresAt, &o.CreatedAt)
+	err = s.db.QueryRow(ctx, query, tenant, subjectID, purpose).Scan(&o.CodeHash, &o.Attempts, &o.ExpiresAt, &o.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, otp.ErrCodeNotFound
@@ -99,13 +124,17 @@ func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string,
 }
 
 func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (int, error) {
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return 0, err
+	}
 	const query = `
 		UPDATE otp_codes SET attempts = attempts + 1
 		WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3
 		RETURNING attempts
 	`
 	var attempts int
-	err := s.db.QueryRow(ctx, query, s.tenantID(opts), subjectID, purpose).Scan(&attempts)
+	err = s.db.QueryRow(ctx, query, tenant, subjectID, purpose).Scan(&attempts)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, otp.ErrCodeNotFound
@@ -116,7 +145,11 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, p
 }
 
 func (s *Store) ConsumeOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (bool, error) {
-	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, s.tenantID(opts), subjectID, purpose)
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return false, err
+	}
+	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, tenant, subjectID, purpose)
 	if err != nil {
 		return false, err
 	}
@@ -124,7 +157,11 @@ func (s *Store) ConsumeOTP(ctx context.Context, subjectID uuid.UUID, purpose str
 }
 
 func (s *Store) DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, s.tenantID(opts), subjectID, purpose)
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, tenant, subjectID, purpose)
 	return err
 }
 
