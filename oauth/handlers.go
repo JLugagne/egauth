@@ -149,8 +149,19 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 				return
 			}
 		}
-		cfg.setStateCookie(w, packState(state, verifier))
-		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge), http.StatusFound)
+		// For an OIDC-enabled provider, mint a nonce, bind it through the state cookie and send
+		// it on the authorization request so the returned id_token can be tied to this attempt.
+		var nonce string
+		var authOpts []AuthCodeOption
+		if p.oidcEnabled() {
+			if nonce, err = newNonce(); err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			authOpts = append(authOpts, WithAuthNonce(nonce))
+		}
+		cfg.setStateCookie(w, packState(state, verifier, nonce))
+		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge, authOpts...), http.StatusFound)
 	}
 }
 
@@ -167,7 +178,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, ok := unpackState(raw)
+		cookieState, verifier, nonce, ok := unpackState(raw)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
@@ -189,7 +200,11 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		info, err := p.Exchange(r.Context(), code, cfg.resolveRedirectURL(r), verifier)
+		var exchOpts []ExchangeOption
+		if p.oidcEnabled() {
+			exchOpts = append(exchOpts, WithExpectedNonce(nonce))
+		}
+		info, err := p.Exchange(r.Context(), code, cfg.resolveRedirectURL(r), verifier, exchOpts...)
 		if err != nil {
 			cfg.fail(w, r, http.StatusBadGateway, "exchange_failed")
 			return
