@@ -16,22 +16,50 @@ type Store[C any] struct {
 	// SECURITY: only the hash is ever stored, never the clear-text token.
 	refreshTokens map[string]*tokens.RefreshToken
 	apiKeys       map[string]*tokens.APIKey[C]
+	strict        bool
 }
 
+// options accumulates Store-construction options. It is intentionally non-generic so callers
+// write NewStore[C](WithStrictTenancy()) rather than spelling the type parameter on the option.
+type options struct{ strict bool }
+
+// Option configures a Store.
+type Option func(*options)
+
+// WithStrictTenancy makes every tenant-scoped operation require a non-empty tenant
+// (tokens.ErrTenantRequired otherwise). Off by default, where an empty tenant is the valid
+// default single-tenant partition. The "effective" tenant is the one from WithTenant, or, for
+// the Save* operations, the tenant carried on the record itself; strict mode rejects only when
+// that effective tenant is empty — so an explicitly-tenanted record still saves without
+// WithTenant. (DeleteExpired is exempt: it is a maintenance sweep that intentionally spans all
+// tenants when no tenant is given.)
+func WithStrictTenancy() Option { return func(o *options) { o.strict = true } }
+
 // NewStore creates a new in-memory tokens Store.
-func NewStore[C any]() *Store[C] {
+func NewStore[C any](opts ...Option) *Store[C] {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
+	}
 	return &Store[C]{
 		refreshTokens: make(map[string]*tokens.RefreshToken),
 		apiKeys:       make(map[string]*tokens.APIKey[C]),
+		strict:        o.strict,
 	}
 }
 
-func tenantFromOpts(rtTenant string, opts []tokens.Option) string {
+// resolveTenant resolves the operation tenant (WithTenant takes precedence over fallback, the
+// tenant carried on the record) and enforces ErrTenantRequired in strict mode.
+func (s *Store[C]) resolveTenant(fallback string, opts []tokens.Option) (string, error) {
 	opt := tokens.ApplyOptions(opts)
+	tenant := fallback
 	if opt.TenantID != nil {
-		return *opt.TenantID
+		tenant = *opt.TenantID
 	}
-	return rtTenant
+	if s.strict && tenant == "" {
+		return "", tokens.ErrTenantRequired
+	}
+	return tenant, nil
 }
 
 // DeleteExpired purges expired refresh tokens and expired API keys (API keys with no expiry are
@@ -70,8 +98,12 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, rt *tokens.RefreshToken
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tenant, err := s.resolveTenant(rt.TenantID, opts)
+	if err != nil {
+		return err
+	}
 	rtCopy := *rt
-	rtCopy.TenantID = tenantFromOpts(rt.TenantID, opts)
+	rtCopy.TenantID = tenant
 	if rtCopy.ConsumedAt != nil {
 		consumed := *rtCopy.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
@@ -86,7 +118,10 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tokenHash string, opts 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	tenantID := tenantFromOpts("", opts)
+	tenantID, err := s.resolveTenant("", opts)
+	if err != nil {
+		return nil, err
+	}
 
 	entry, exists := s.refreshTokens[tokenHash]
 	if !exists || entry.TenantID != tenantID {
@@ -106,7 +141,10 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tokenHash string, op
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenantID := tenantFromOpts("", opts)
+	tenantID, err := s.resolveTenant("", opts)
+	if err != nil {
+		return err
+	}
 
 	entry, exists := s.refreshTokens[tokenHash]
 	if !exists || entry.TenantID != tenantID {
@@ -128,7 +166,10 @@ func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tokenHash string, opt
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenantID := tenantFromOpts("", opts)
+	tenantID, err := s.resolveTenant("", opts)
+	if err != nil {
+		return err
+	}
 
 	rt, exists := s.refreshTokens[tokenHash]
 	if !exists || rt.TenantID != tenantID {
@@ -145,7 +186,10 @@ func (s *Store[C]) RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ..
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenantID := tenantFromOpts("", opts)
+	tenantID, err := s.resolveTenant("", opts)
+	if err != nil {
+		return err
+	}
 
 	for hash, rt := range s.refreshTokens {
 		if rt.TenantID == tenantID && rt.FamilyID == familyID {
@@ -161,14 +205,14 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, key *tokens.APIKey[C], opts .
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	tenant, err := s.resolveTenant(key.TenantID, opts)
+	if err != nil {
+		return err
+	}
+
 	kCopy := *key
 	kCopy.Token = "" // SECURITY: do not store the clear-text token
-
-	// Ensure the key has the correct tenant ID if provided in options
-	opt := tokens.ApplyOptions(opts)
-	if opt.TenantID != nil {
-		kCopy.TenantID = *opt.TenantID
-	}
+	kCopy.TenantID = tenant
 
 	s.apiKeys[kCopy.Hash] = &kCopy
 
@@ -180,10 +224,9 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tokenHash string, opts 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	opt := tokens.ApplyOptions(opts)
-	tenantID := ""
-	if opt.TenantID != nil {
-		tenantID = *opt.TenantID
+	tenantID, err := s.resolveTenant("", opts)
+	if err != nil {
+		return nil, err
 	}
 
 	key, exists := s.apiKeys[tokenHash]

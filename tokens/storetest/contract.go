@@ -323,3 +323,53 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		})
 	}
 }
+
+// StrictTenancyTesting asserts that a store built WithStrictTenancy rejects every tenant-scoped
+// operation whose effective tenant is empty (no WithTenant and no tenant carried on the record)
+// via tokens.ErrTenantRequired, and that the same operations succeed once a tenant is supplied.
+// DeleteExpired is intentionally NOT asserted: it is an exempt maintenance sweep that spans all
+// tenants when no tenant is given. Pass a store constructed WithStrictTenancy.
+func StrictTenancyTesting[C any](t *testing.T, strict tokens.Store[C], customClaim C) {
+	ctx := context.Background()
+	fam := uuid.New()
+
+	t.Run("strict: every tenant-scoped op rejects an empty tenant", func(t *testing.T) {
+		// No WithTenant AND the record carries no tenant of its own -> rejected.
+		rt := &tokens.RefreshToken{Hash: "strict-rt", FamilyID: fam, UserID: uuid.New(), ExpiresAt: time.Now().Add(time.Hour)}
+		assert.ErrorIs(t, strict.SaveRefreshToken(ctx, rt), tokens.ErrTenantRequired, "SaveRefreshToken without a tenant must be rejected in strict mode")
+
+		_, err := strict.FindRefreshToken(ctx, "strict-rt")
+		assert.ErrorIs(t, err, tokens.ErrTenantRequired)
+
+		assert.ErrorIs(t, strict.ConsumeRefreshToken(ctx, "strict-rt"), tokens.ErrTenantRequired)
+		assert.ErrorIs(t, strict.RevokeRefreshToken(ctx, "strict-rt"), tokens.ErrTenantRequired)
+		assert.ErrorIs(t, strict.RevokeFamily(ctx, fam), tokens.ErrTenantRequired)
+
+		key := &tokens.APIKey[C]{ID: uuid.New(), Hash: "strict-key", Claims: tokens.Claims[C]{Subject: uuid.New(), Custom: customClaim}}
+		assert.ErrorIs(t, strict.SaveAPIKey(ctx, key), tokens.ErrTenantRequired, "SaveAPIKey without a tenant must be rejected in strict mode")
+
+		_, err = strict.FindAPIKeyByHash(ctx, "strict-key")
+		assert.ErrorIs(t, err, tokens.ErrTenantRequired)
+	})
+
+	t.Run("strict: the same ops succeed once a tenant is supplied", func(t *testing.T) {
+		const tenant = "strict-tenant"
+		rt := &tokens.RefreshToken{
+			Hash: "ok-rt", FamilyID: uuid.New(), UserID: uuid.New(), TenantID: tenant,
+			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		}
+		require.NoError(t, strict.SaveRefreshToken(ctx, rt, tokens.WithTenant(tenant)))
+		got, err := strict.FindRefreshToken(ctx, "ok-rt", tokens.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, rt.UserID, got.UserID)
+
+		key := &tokens.APIKey[C]{
+			ID: uuid.New(), TenantID: tenant, Hash: "ok-key",
+			Claims: tokens.Claims[C]{Subject: uuid.New(), Custom: customClaim},
+		}
+		require.NoError(t, strict.SaveAPIKey(ctx, key, tokens.WithTenant(tenant)))
+		foundKey, err := strict.FindAPIKeyByHash(ctx, "ok-key", tokens.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, key.ID, foundKey.ID)
+	})
+}
