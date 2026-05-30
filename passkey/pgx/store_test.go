@@ -45,4 +45,6 @@ func TestPgxStore_Contract(t *testing.T) {
 	require.NoError(t, passkeypgx.Migrate(ctx, pool))
 
 	storetest.StoreContractTesting(t, passkeypgx.NewStore(pool), true)
+
+	storetest.StrictTenancyTesting(t, passkeypgx.NewStore(pool, passkeypgx.WithStrictTenancy()))
 }
