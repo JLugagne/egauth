@@ -55,16 +55,17 @@ Tick items as they are completed + tested. Delete `.audit-fixes/` once the work 
 
 ## Progress (branch fix/audit-completeness, per-item commits)
 - Critical:      3 / 4   (DONE: C1 DoS, C2 rate-limit, C3 change-password; C4 docs deferred to last)
-- Important:    18 / 19  (DONE: I1-I18; only I19 tenant-consistency remains)
+- Important:    19 / 19  (DONE: I1-I19 — all important items complete)
 - Nice-to-have:  0 / 11
-- **Total:      21 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
+- **Total:      22 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
 
-### Remaining important (1): I19 tenant consistency — IN PROGRESS. DESIGN DECIDED (user, 2026-05-30):
-### opt-in strict tenancy — empty tenant stays the default single-tenant partition (non-breaking);
-### a WithStrictTenancy() store option enforces ErrTenantRequired on every tenant-scoped op
-### (DeleteExpired* reapers exempt). otp DONE (commit cf7c8f8) and is the reference pattern; see the
-### I19 entry in 02-important.md for the step-by-step pattern + remaining modules (identity next —
-### relax its UNCONDITIONAL CreateUser/UpdateUserEmail ErrTenantRequired to strict-conditional;
-### then tokens/sessions/mfa/passkey, which are already consistent — uniformity extension only).
-### Then all nice-to-haves (N1-N11), C4 docs, and feature-per-tenant-oidc.md.
-### Resume: read this file + the per-item git log on the branch (git log --oneline main..HEAD).
+### I19 tenant consistency — DONE across all 6 stores (otp cf7c8f8, identity ec515a4, tokens 60f59be,
+### sessions f85e63e, mfa 50f58a9, passkey b2542a2). Opt-in strict tenancy: empty tenant is the default
+### single-tenant partition (non-breaking); WithStrictTenancy() enforces ErrTenantRequired on every
+### tenant-scoped op (DeleteExpired* reapers exempt). NOTE: mfa + passkey also had the identity-style
+### cross-backend bug (pgx rejected empty unconditionally on write paths) — confirmed + fixed, not just
+### uniformity. Two pre-existing review follow-ups noted in 02-important.md (pgx Save* input-struct
+### mutation; tokens Verify* strict-unusability) — out of I19 scope, candidate tickets.
+###
+### NEXT: nice-to-haves N1-N11 (03-nice-to-have.md), then C4 docs (after API settles), then
+### feature-per-tenant-oidc.md. Resume: read this file + git log --oneline main..HEAD.

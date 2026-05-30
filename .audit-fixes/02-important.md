@@ -62,7 +62,7 @@ Expected by serious adopters.
 ## [x] I18 — Config validation / fail-fast at startup — DONE (jwt + identity/sessions/mfa constructors)
 **Where:** `tokens/jwt/issuer.go` New[C] (DONE earlier: panics on empty/malformed key + `Config.Validate`); identity/sessions/mfa NewService (DONE now). **Problem:** jwt.New silently accepted empty SecretKey + zero TTLs; the other constructors silently accepted a nil store etc. **Fix:** jwt panics on an unusable key + Config.Validate; **identity.NewService** panics on a nil Store (always required) — hasher/policy stay optional since OAuth-only/non-password deployments legitimately pass nil (decoyHash and the OAuth/magic-link paths tolerate it; password paths need them); **sessions.NewService** panics on a nil Store; **mfa.NewService** panics on a nil Store or a TOTP parameter that can't produce valid codes (non-positive digits/period, negative skew, non-positive recovery-code count, nil clock). All mirror jwt.New's fail-fast-at-startup posture. **Test:** nil-store panics for each; identity tolerates nil hasher/policy; mfa rejects bad digits/period/skew/clock + accepts a valid config.
 
-## [~] I19 — Tenant enforcement consistency across backends — IN PROGRESS (design decided; otp done)
+## [x] I19 — Tenant enforcement consistency across backends — DONE (all 6 stores)
 **DESIGN DECISION (user-chosen, 2026-05-30): opt-in strict tenancy.** Empty tenant ("") stays the
 valid default single-tenant partition everywhere (non-breaking); a `WithStrictTenancy()` store
 constructor option makes EVERY tenant-scoped op reject an empty tenant with `ErrTenantRequired`
@@ -92,9 +92,26 @@ memory + pgx tests). Adversarial review (3 lenses) raised 2 findings, both refut
 optional consistency tidy-up — memory `DeleteUser`'s identity-anonymization loop now also filters by
 tenant, mirroring pgx and the adjacent token-purge loop (provably no behavioral change; unreachable).
 Whole module builds, vets clean, memory+identity 149 tests + pgx 13 tests green.
-**REMAINING (apply the same pattern):**
-- **tokens, sessions, mfa, passkey** — these are already cross-backend CONSISTENT (all accept empty
-  uniformly, no outlier), so they have no bug; adding `WithStrictTenancy` to them is the uniformity
-  extension so strict mode covers the whole stack. Mechanical, follows the otp + identity pattern.
+**DONE:** tokens (commit 60f59be), sessions (f85e63e), mfa (50f58a9), passkey (b2542a2). The audit's
+"already consistent" note was WRONG for mfa and passkey: like identity, their pgx backends rejected an
+empty tenant UNCONDITIONALLY on the write paths (mfa `SaveTOTP`+`ReplaceRecoveryCodes`; passkey
+`SaveCredential`) while memory accepted it — real cross-backend bugs, each confirmed first with the
+"empty tenant is the default partition" contract subtest (passed on memory, failed on pgx), then relaxed.
+tokens/sessions were genuinely consistent (uniformity extension only). tokens uses a non-generic
+`Option func(*options)`/`func(*storeOptions)` so the generic `Store[C]` keeps clean call sites; the
+`Save*` paths (tokens, sessions) honour a record-tenant fallback (effective tenant = WithTenant else the
+record's TenantID, reject only when that is empty). sessions `FindSessionByHash` keeps nil-means-any in
+non-strict mode and rejects nil-or-empty under strict. All four: `StrictTenancyTesting` wired into both
+backends; build + vet clean; memory + pgx (testcontainers) green. Adversarial review (3 lenses ×2 rounds,
+otp/identity then the four) confirmed 0 introduced bugs.
+
+**REVIEW FOLLOW-UPS (deferred — pre-existing, out of I19 scope, verified via git as unchanged-by-I19):**
+- All pgx `Save*` (SaveTOTP/SaveCredential/SaveAPIKey/CreateSession) mutate the caller's input struct's
+  TenantID (and CreatedAt) where the memory backends copy first — a latent caller-struct-immutability
+  divergence across all four pgx stores. Zero functional/security impact; candidate store-hygiene ticket.
+- tokens issuer `Service.VerifyRefreshToken`/`VerifyAPIKey` call the store without opts, so a tokens store
+  built `WithStrictTenancy()` makes them always return `ErrTenantRequired` (the tenant-less convenience
+  path is unusable under strict). Fixing needs an additive `opts ...Option` on the `Verifier[C]` interface;
+  separate API enhancement.
 **Test:** strict store rejects empty-tenant ops (ErrTenantRequired) on every tenant-scoped method;
 non-strict store accepts them; cross-backend via the shared helper.
