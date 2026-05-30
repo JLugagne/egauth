@@ -59,13 +59,12 @@ Tick items as they are completed + tested. Delete `.audit-fixes/` once the work 
 - Nice-to-have:  0 / 11
 - **Total:      21 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
 
-### Remaining important (1): I19 tenant enforcement consistency across backends (+ the
-### UpdateUserEmail empty-tenant follow-up). NOTE: I19 involves a genuine design fork —
-### "empty tenant = valid default single-tenant partition" vs "tenant required everywhere
-### (ErrTenantRequired)". The codebase today overwhelmingly treats "" as the default partition;
-### only otp-pgx SaveOTP and identity-pgx UpdateUserEmail are ErrTenantRequired outliers that
-### disagree with their memory backends. Resolution should pick a posture, make it uniform
-### across all stores+backends, document it, and add empty-tenant (useMultiTenant=false) contract
-### coverage. Surface this fork before implementing.
+### Remaining important (1): I19 tenant consistency — IN PROGRESS. DESIGN DECIDED (user, 2026-05-30):
+### opt-in strict tenancy — empty tenant stays the default single-tenant partition (non-breaking);
+### a WithStrictTenancy() store option enforces ErrTenantRequired on every tenant-scoped op
+### (DeleteExpired* reapers exempt). otp DONE (commit cf7c8f8) and is the reference pattern; see the
+### I19 entry in 02-important.md for the step-by-step pattern + remaining modules (identity next —
+### relax its UNCONDITIONAL CreateUser/UpdateUserEmail ErrTenantRequired to strict-conditional;
+### then tokens/sessions/mfa/passkey, which are already consistent — uniformity extension only).
 ### Then all nice-to-haves (N1-N11), C4 docs, and feature-per-tenant-oidc.md.
 ### Resume: read this file + the per-item git log on the branch (git log --oneline main..HEAD).

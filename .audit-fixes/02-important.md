@@ -62,6 +62,32 @@ Expected by serious adopters.
 ## [x] I18 — Config validation / fail-fast at startup — DONE (jwt + identity/sessions/mfa constructors)
 **Where:** `tokens/jwt/issuer.go` New[C] (DONE earlier: panics on empty/malformed key + `Config.Validate`); identity/sessions/mfa NewService (DONE now). **Problem:** jwt.New silently accepted empty SecretKey + zero TTLs; the other constructors silently accepted a nil store etc. **Fix:** jwt panics on an unusable key + Config.Validate; **identity.NewService** panics on a nil Store (always required) — hasher/policy stay optional since OAuth-only/non-password deployments legitimately pass nil (decoyHash and the OAuth/magic-link paths tolerate it; password paths need them); **sessions.NewService** panics on a nil Store; **mfa.NewService** panics on a nil Store or a TOTP parameter that can't produce valid codes (non-positive digits/period, negative skew, non-positive recovery-code count, nil clock). All mirror jwt.New's fail-fast-at-startup posture. **Test:** nil-store panics for each; identity tolerates nil hasher/policy; mfa rejects bad digits/period/skew/clock + accepts a valid config.
 
-## [ ] I19 — Tenant enforcement consistency across backends
-**Where:** memory + pgx stores (mfa/otp/passkey + others). **Problem:** pgx enforces ErrTenantRequired only on some writes; reads/deletes query tenant_id=''; memory rarely enforces; never tested. **Fix:** enforce ErrTenantRequired uniformly on all write+read+delete (or define+document empty-tenant default); add contract tests for empty-tenant path. **Test (confirm-first):** empty-tenant read on pgx silently returns empty today; assert consistent behavior.
-> Also in scope (found during I5 review): identity `UpdateUserEmail` follows the same whole-file pattern — pgx returns `ErrTenantRequired` on empty tenant, memory accepts it and succeeds; the `StoreContractTesting` callers all pass `useMultiTenant=true`, so the empty-tenant path is never exercised. Pin empty-tenant behavior for the whole identity Store (incl. `UpdateUserEmail`) here rather than special-casing one method.
+## [~] I19 — Tenant enforcement consistency across backends — IN PROGRESS (design decided; otp done)
+**DESIGN DECISION (user-chosen, 2026-05-30): opt-in strict tenancy.** Empty tenant ("") stays the
+valid default single-tenant partition everywhere (non-breaking); a `WithStrictTenancy()` store
+constructor option makes EVERY tenant-scoped op reject an empty tenant with `ErrTenantRequired`
+(the multi-tenant safety opt-in). `DeleteExpired*` reapers are EXEMPT (maintenance sweeps span all
+tenants when no tenant is given). This makes the two backends agree (both allow empty by default,
+both strict when configured) and fixes the cross-backend inconsistency the audit named.
+
+**ESTABLISHED PATTERN (see `otp/pgx/store.go` + `otp/memory/store.go`, commit cf7c8f8):**
+- add `strict bool` field; `type Option func(*Store)`; `func WithStrictTenancy() Option`; make
+  `NewStore(... , opts ...Option)` variadic (backward compatible).
+- add `resolveTenant(opts) (string, error)` (or a `requireTenant(opts) error` guard) that returns
+  `ErrTenantRequired` when `strict && tenant==""`; call it at the top of every tenant-scoped
+  method; **relax any existing UNCONDITIONAL `ErrTenantRequired` to this conditional form**.
+- shared `StrictTenancyTesting(t, strictStore)` helper in the module's storetest; called from both
+  backends' `*_test.go` (memory + pgx) — asserts empty-tenant ops fail and tenant'd ops succeed.
+
+**DONE:** otp (both backends + strict contract test; pgx `SaveOTP`'s unconditional ErrTenantRequired
+relaxed to strict-only). **REMAINING (apply the same pattern):**
+- **identity** — the I5 follow-up target. NOTE: identity pgx `CreateUser` AND `UpdateUserEmail`
+  currently return `ErrTenantRequired` UNCONDITIONALLY (writes), while reads/deletes and the whole
+  memory backend accept empty — relax both to strict-conditional and add the guard to all ~14
+  tenant-scoped methods (DeleteExpiredVerificationTokens exempt). This is the "fix the class, not
+  one method" the I5 review asked for.
+- **tokens, sessions, mfa, passkey** — these are already cross-backend CONSISTENT (all accept empty
+  uniformly, no outlier), so they have no bug; adding `WithStrictTenancy` to them is the uniformity
+  extension so strict mode covers the whole stack. Mechanical, follows the otp pattern.
+**Test:** strict store rejects empty-tenant ops (ErrTenantRequired) on every tenant-scoped method;
+non-strict store accepts them; cross-backend via the shared helper.
