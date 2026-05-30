@@ -57,6 +57,32 @@ func (s *Store) FindSessionByHash(ctx context.Context, tokenHash string, opts ..
 	return nil, sessions.ErrSessionNotFound
 }
 
+// UpdateSession updates the mutable fields of an existing session (token hash, expiry,
+// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID
+// and tenant are immutable.
+func (s *Store) UpdateSession(ctx context.Context, session *sessions.Session, expectedTokenHash string, opts ...sessions.Option) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := sessions.ApplyOptions(opts)
+	tenantID := ""
+	if opt.TenantID != nil {
+		tenantID = *opt.TenantID
+	}
+
+	existing, ok := s.sessions[session.ID]
+	if !ok || existing.TenantID != tenantID || existing.TokenHash != expectedTokenHash {
+		// Unknown session, wrong tenant, or the token was already rotated away by a concurrent
+		// request (the compare failed).
+		return sessions.ErrSessionNotFound
+	}
+
+	sCopy := *session
+	sCopy.TenantID = existing.TenantID // tenant is immutable
+	s.sessions[session.ID] = &sCopy
+	return nil
+}
+
 // DeleteSession removes a session by its ID.
 func (s *Store) DeleteSession(ctx context.Context, id uuid.UUID, opts ...sessions.Option) error {
 	s.mu.Lock()

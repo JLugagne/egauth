@@ -15,6 +15,7 @@ import (
 type MockStore struct {
 	CreateSessionFunc          func(ctx context.Context, session *sessions.Session, opts ...sessions.Option) error
 	FindSessionByHashFunc      func(ctx context.Context, tokenHash string, opts ...sessions.Option) (*sessions.Session, error)
+	UpdateSessionFunc          func(ctx context.Context, session *sessions.Session, expectedTokenHash string, opts ...sessions.Option) error
 	DeleteSessionFunc          func(ctx context.Context, id uuid.UUID, opts ...sessions.Option) error
 	DeleteSessionsByUserIDFunc func(ctx context.Context, userID uuid.UUID, opts ...sessions.Option) error
 }
@@ -31,6 +32,13 @@ func (m *MockStore) FindSessionByHash(ctx context.Context, tokenHash string, opt
 		panic("called not defined FindSessionByHashFunc")
 	}
 	return m.FindSessionByHashFunc(ctx, tokenHash, opts...)
+}
+
+func (m *MockStore) UpdateSession(ctx context.Context, session *sessions.Session, expectedTokenHash string, opts ...sessions.Option) error {
+	if m.UpdateSessionFunc == nil {
+		panic("called not defined UpdateSessionFunc")
+	}
+	return m.UpdateSessionFunc(ctx, session, expectedTokenHash, opts...)
 }
 
 func (m *MockStore) DeleteSession(ctx context.Context, id uuid.UUID, opts ...sessions.Option) error {
@@ -88,6 +96,49 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 		require.NoError(t, err)
 
 		_, err = store.FindSessionByHash(ctx, tokenHash, sessions.WithTenant(tenantA))
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
+	})
+
+	t.Run("Contract: Update Session (Touch/Rotate)", func(t *testing.T) {
+		userID := uuid.New()
+		sess := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    userID,
+			TokenHash: "update-h1",
+			UserAgent: "UA",
+			IP:        "1.1.1.1",
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, store.CreateSession(ctx, sess, sessions.WithTenant(tenantA)))
+
+		// Rotate the token and extend expiry on the SAME logical session (same ID). The
+		// compare-and-set matches on the current token hash ("update-h1").
+		newExpiry := time.Now().Add(24 * time.Hour)
+		updated := *sess
+		updated.TokenHash = "update-h2"
+		updated.ExpiresAt = newExpiry
+		require.NoError(t, store.UpdateSession(ctx, &updated, "update-h1", sessions.WithTenant(tenantA)))
+
+		// The old token hash no longer resolves; the new one points at the same session.
+		_, err := store.FindSessionByHash(ctx, "update-h1", sessions.WithTenant(tenantA))
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "old token must be invalidated")
+
+		found, err := store.FindSessionByHash(ctx, "update-h2", sessions.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, sess.ID, found.ID, "same logical session")
+		assert.WithinDuration(t, newExpiry, found.ExpiresAt, time.Second, "expiry extended")
+
+		// Compare-and-set: a stale expected hash (the loser of a concurrent rotation) is rejected
+		// rather than silently overwriting the winner's token.
+		stale := updated
+		stale.TokenHash = "update-h3"
+		err = store.UpdateSession(ctx, &stale, "update-h1", sessions.WithTenant(tenantA))
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "stale compare-and-set must be rejected")
+
+		// Updating an unknown session reports not-found.
+		err = store.UpdateSession(ctx, &sessions.Session{ID: uuid.New(), TenantID: tenantA, TokenHash: "x", ExpiresAt: newExpiry}, "whatever", sessions.WithTenant(tenantA))
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 	})
 

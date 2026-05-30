@@ -38,6 +38,15 @@ type Store interface {
 	// FindSessionByHash retrieves a session by its token hash.
 	FindSessionByHash(ctx context.Context, tokenHash string, opts ...Option) (*Session, error)
 
+	// UpdateSession updates a mutable session (its token hash, expiry, and last-seen
+	// user-agent/IP) identified by session.ID. It is a compare-and-set on the token: the update
+	// applies only if the stored token hash still equals expectedTokenHash, otherwise it returns
+	// ErrSessionNotFound (also returned for an unknown id/tenant). This makes the service's Rotate
+	// safe under concurrency — two requests racing to rotate the same token: the first swaps the
+	// hash, the second's compare fails and it gets an honest ErrSessionNotFound rather than a
+	// fresh token that would never validate. The session ID and tenant are immutable.
+	UpdateSession(ctx context.Context, session *Session, expectedTokenHash string, opts ...Option) error
+
 	// DeleteSession removes a session by its ID.
 	DeleteSession(ctx context.Context, id uuid.UUID, opts ...Option) error
 
