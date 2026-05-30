@@ -42,4 +42,6 @@ func TestStoreContract(t *testing.T) {
 
 	store := pgx.NewStore(pool)
 	storetest.StoreContractTesting(t, store, true)
+
+	storetest.StrictTenancyTesting(t, pgx.NewStore(pool, pgx.WithStrictTenancy()))
 }

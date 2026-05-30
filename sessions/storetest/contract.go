@@ -209,3 +209,42 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 		})
 	}
 }
+
+// StrictTenancyTesting asserts that a store built WithStrictTenancy rejects every tenant-scoped
+// operation whose effective tenant is empty (no WithTenant and no tenant carried on the session)
+// via sessions.ErrTenantRequired, and that the same operations succeed once a tenant is supplied.
+// DeleteExpired is intentionally NOT asserted: it is an exempt maintenance sweep that spans all
+// tenants when no tenant is given. Pass a store constructed WithStrictTenancy.
+func StrictTenancyTesting(t *testing.T, strict sessions.Store) {
+	ctx := context.Background()
+	sid := uuid.New()
+	uid := uuid.New()
+
+	t.Run("strict: every tenant-scoped op rejects an empty tenant", func(t *testing.T) {
+		// No WithTenant AND the session carries no tenant of its own -> rejected.
+		sess := &sessions.Session{ID: sid, UserID: uid, TokenHash: "strict-h", ExpiresAt: time.Now().Add(time.Hour)}
+		assert.ErrorIs(t, strict.CreateSession(ctx, sess), sessions.ErrTenantRequired, "CreateSession without a tenant must be rejected in strict mode")
+
+		_, err := strict.FindSessionByHash(ctx, "strict-h")
+		assert.ErrorIs(t, err, sessions.ErrTenantRequired, "FindSessionByHash with no tenant must be rejected (no unscoped lookups in strict mode)")
+
+		err = strict.UpdateSession(ctx, &sessions.Session{ID: sid, TokenHash: "x", ExpiresAt: time.Now().Add(time.Hour)}, "strict-h")
+		assert.ErrorIs(t, err, sessions.ErrTenantRequired)
+
+		assert.ErrorIs(t, strict.DeleteSession(ctx, sid), sessions.ErrTenantRequired)
+		assert.ErrorIs(t, strict.DeleteSessionsByUserID(ctx, uid), sessions.ErrTenantRequired)
+	})
+
+	t.Run("strict: the same ops succeed once a tenant is supplied", func(t *testing.T) {
+		const tenant = "strict-tenant"
+		sess := &sessions.Session{
+			ID: uuid.New(), TenantID: tenant, UserID: uid, TokenHash: "ok-h",
+			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		}
+		require.NoError(t, strict.CreateSession(ctx, sess, sessions.WithTenant(tenant)))
+		got, err := strict.FindSessionByHash(ctx, "ok-h", sessions.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, sess.ID, got.ID)
+		require.NoError(t, strict.DeleteSession(ctx, sess.ID, sessions.WithTenant(tenant)))
+	})
+}
