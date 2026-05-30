@@ -52,4 +52,10 @@ type Store interface {
 
 	// DeleteSessionsByUserID removes all sessions for a user.
 	DeleteSessionsByUserID(ctx context.Context, userID uuid.UUID, opts ...Option) error
+
+	// DeleteExpired purges sessions past their expiry, returning the number deleted. It is the
+	// schedulable GC reaper that keeps the session store from growing unbounded. With WithTenant
+	// it sweeps a single tenant; without it, all tenants. Run it periodically from a background
+	// job.
+	DeleteExpired(ctx context.Context, opts ...Option) (int64, error)
 }

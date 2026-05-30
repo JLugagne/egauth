@@ -389,6 +389,27 @@ func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string
 	return vt.UserID, vt.Metadata, nil
 }
 
+// DeleteExpiredVerificationTokens purges verification tokens past their expiry, returning the
+// number deleted. With WithTenant it sweeps a single tenant, otherwise all.
+func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, opts ...identity.Option) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := identity.ApplyOptions(opts)
+	now := time.Now()
+	var deleted int64
+	for selector, vt := range s.verificationTokens {
+		if opt.TenantID != nil && vt.TenantID != *opt.TenantID {
+			continue
+		}
+		if now.After(vt.ExpiresAt) {
+			delete(s.verificationTokens, selector)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the threshold is reached.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {

@@ -128,4 +128,21 @@ func (s *Store) DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose stri
 	return err
 }
 
+// DeleteExpired purges codes past their expiry, returning the number deleted. With WithTenant it
+// sweeps a single tenant, otherwise all (a cross-tenant maintenance sweep).
+func (s *Store) DeleteExpired(ctx context.Context, opts ...otp.Option) (int64, error) {
+	o := otp.ApplyOptions(opts)
+	query := `DELETE FROM otp_codes WHERE expires_at < now()`
+	args := []any{}
+	if o.TenantID != nil {
+		query += ` AND tenant_id = $1`
+		args = append(args, *o.TenantID)
+	}
+	tag, err := s.db.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 var _ otp.Store = (*Store)(nil)

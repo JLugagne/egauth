@@ -24,4 +24,7 @@ type Store interface {
 	// DeleteOTP removes the outstanding code for the subject+purpose. Idempotent (used for
 	// expiry/burn/invalidate where the row may already be gone).
 	DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) error
+	// DeleteExpired purges codes past their expiry, returning the number deleted. It is the
+	// schedulable GC reaper. With WithTenant it sweeps a single tenant; without it, all tenants.
+	DeleteExpired(ctx context.Context, opts ...Option) (int64, error)
 }

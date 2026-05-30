@@ -76,6 +76,11 @@ type Store interface {
 	// ErrVerificationTokenExpired for a matching-but-expired token.
 	ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...Option) (uuid.UUID, []byte, error)
 
+	// DeleteExpiredVerificationTokens purges verification tokens past their expiry, returning the
+	// number deleted. It is the schedulable GC reaper for the (selector/verifier) token table.
+	// With WithTenant it sweeps a single tenant; without it, all tenants.
+	DeleteExpiredVerificationTokens(ctx context.Context, opts ...Option) (int64, error)
+
 	// Lockout operations
 
 	// IncrementFailedAttempts increments the failed-attempt counter for an identity.

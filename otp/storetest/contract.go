@@ -21,6 +21,25 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 		tenantA, tenantB = "tenant-A", "tenant-B"
 	}
 
+	t.Run("DeleteExpired purges only expired codes", func(t *testing.T) {
+		expiredSub, liveSub := uuid.New(), uuid.New()
+		require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+			SubjectID: expiredSub, Purpose: "login", CodeHash: "exp", ExpiresAt: time.Now().Add(-time.Minute), CreatedAt: time.Now().Add(-time.Hour),
+		}, otp.WithTenant(tenantA)))
+		require.NoError(t, store.SaveOTP(ctx, &otp.OTP{
+			SubjectID: liveSub, Purpose: "login", CodeHash: "live", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
+		}, otp.WithTenant(tenantA)))
+
+		n, err := store.DeleteExpired(ctx, otp.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, int64(1))
+
+		_, err = store.GetOTP(ctx, expiredSub, "login", otp.WithTenant(tenantA))
+		assert.ErrorIs(t, err, otp.ErrCodeNotFound, "expired code must be gone")
+		_, err = store.GetOTP(ctx, liveSub, "login", otp.WithTenant(tenantA))
+		assert.NoError(t, err, "live code must be kept")
+	})
+
 	t.Run("save / get / attempts / delete", func(t *testing.T) {
 		sub := uuid.New()
 		_, err := store.GetOTP(ctx, sub, "login", otp.WithTenant(tenantA))

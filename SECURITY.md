@@ -19,8 +19,12 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
   and mints a new one in the same family; the access-token lifetime is always
   issuer-controlled on rotation, and the family's tenant is immutable across rotations.
-  Replaying a consumed token revokes the **entire family** (forcing re-authentication),
-  and a revocation that fails is surfaced rather than silently swallowed. To avoid logging
+  Replaying a consumed token **that is still within its validity** revokes the **entire
+  family** (forcing re-authentication), and a revocation that fails is surfaced rather than
+  silently swallowed. (Once a token has expired it can no longer be rotated and may have been
+  reaped by the `DeleteExpired` GC, so a *post-expiry* replay reports not-found instead of
+  revoking the family — the theft tripwire spans a token's validity, by which point an expired
+  token grants no access regardless.) To avoid logging
   users out on ordinary request concurrency (parallel tabs, prefetch, concurrent
   sub-resource loads racing the same cookie), a replay within `ReuseGracePeriod`
   (default 10s) of consumption is treated as benign and rejected *without* revoking the

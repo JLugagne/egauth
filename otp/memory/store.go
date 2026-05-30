@@ -4,6 +4,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/JLugagne/libauth/otp"
 	"github.com/google/uuid"
@@ -85,6 +86,27 @@ func (s *Store) DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose stri
 
 	delete(s.codes, key(tenantOf(opts), subjectID, purpose))
 	return nil
+}
+
+// DeleteExpired purges codes past their expiry, returning the number deleted. With WithTenant it
+// sweeps a single tenant, otherwise all.
+func (s *Store) DeleteExpired(ctx context.Context, opts ...otp.Option) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	o := otp.ApplyOptions(opts)
+	now := time.Now()
+	var deleted int64
+	for k, code := range s.codes {
+		if o.TenantID != nil && code.TenantID != *o.TenantID {
+			continue
+		}
+		if code.ExpiresAt.Before(now) {
+			delete(s.codes, k)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 var _ otp.Store = (*Store)(nil)

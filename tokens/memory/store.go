@@ -34,6 +34,37 @@ func tenantFromOpts(rtTenant string, opts []tokens.Option) string {
 	return rtTenant
 }
 
+// DeleteExpired purges expired refresh tokens and expired API keys (API keys with no expiry are
+// kept), returning the number deleted. With WithTenant it sweeps a single tenant, otherwise all.
+func (s *Store[C]) DeleteExpired(ctx context.Context, opts ...tokens.Option) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := tokens.ApplyOptions(opts)
+	now := time.Now()
+	var deleted int64
+
+	for hash, rt := range s.refreshTokens {
+		if opt.TenantID != nil && rt.TenantID != *opt.TenantID {
+			continue
+		}
+		if rt.ExpiresAt.Before(now) {
+			delete(s.refreshTokens, hash)
+			deleted++
+		}
+	}
+	for hash, key := range s.apiKeys {
+		if opt.TenantID != nil && key.TenantID != *opt.TenantID {
+			continue
+		}
+		if key.ExpiresAt != nil && key.ExpiresAt.Before(now) {
+			delete(s.apiKeys, hash)
+			deleted++
+		}
+	}
+	return deleted, nil
+}
+
 // SaveRefreshToken persists a refresh token record (storing only its hash).
 func (s *Store[C]) SaveRefreshToken(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
 	s.mu.Lock()

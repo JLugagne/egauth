@@ -20,6 +20,7 @@ type MockStore[C any] struct {
 	RevokeFamilyFunc        func(ctx context.Context, familyID uuid.UUID, opts ...tokens.Option) error
 	SaveAPIKeyFunc          func(ctx context.Context, key *tokens.APIKey[C], opts ...tokens.Option) error
 	FindAPIKeyByHashFunc    func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.APIKey[C], error)
+	DeleteExpiredFunc       func(ctx context.Context, opts ...tokens.Option) (int64, error)
 }
 
 func (m *MockStore[C]) SaveRefreshToken(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
@@ -71,6 +72,13 @@ func (m *MockStore[C]) FindAPIKeyByHash(ctx context.Context, tokenHash string, o
 	return m.FindAPIKeyByHashFunc(ctx, tokenHash, opts...)
 }
 
+func (m *MockStore[C]) DeleteExpired(ctx context.Context, opts ...tokens.Option) (int64, error) {
+	if m.DeleteExpiredFunc == nil {
+		panic("called not defined DeleteExpiredFunc")
+	}
+	return m.DeleteExpiredFunc(ctx, opts...)
+}
+
 var _ tokens.Store[any] = (*MockStore[any])(nil)
 
 // StoreContractTesting runs a comprehensive suite of tests against any tokens.Store implementation.
@@ -82,6 +90,56 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		tenantA = "tenant-A"
 		tenantB = "tenant-B"
 	}
+
+	t.Run("Contract: DeleteExpired purges only expired records", func(t *testing.T) {
+		userID := uuid.New()
+		// An expired refresh token and a live one.
+		expired := &tokens.RefreshToken{
+			Hash: "reaper-expired", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-2 * time.Hour),
+		}
+		live := &tokens.RefreshToken{
+			Hash: "reaper-live", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
+		}
+		// A consumed-but-not-yet-expired token must be KEPT (needed for reuse detection).
+		consumedAt := time.Now().Add(-time.Minute)
+		consumedLive := &tokens.RefreshToken{
+			Hash: "reaper-consumed-live", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now().Add(-time.Hour), ConsumedAt: &consumedAt,
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, expired, tokens.WithTenant(tenantA)))
+		require.NoError(t, store.SaveRefreshToken(ctx, live, tokens.WithTenant(tenantA)))
+		require.NoError(t, store.SaveRefreshToken(ctx, consumedLive, tokens.WithTenant(tenantA)))
+
+		n, err := store.DeleteExpired(ctx, tokens.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, int64(1), "the expired token must be counted")
+
+		_, err = store.FindRefreshToken(ctx, "reaper-expired", tokens.WithTenant(tenantA))
+		assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound, "expired token must be gone")
+
+		_, err = store.FindRefreshToken(ctx, "reaper-live", tokens.WithTenant(tenantA))
+		assert.NoError(t, err, "live token must be kept")
+
+		got, err := store.FindRefreshToken(ctx, "reaper-consumed-live", tokens.WithTenant(tenantA))
+		require.NoError(t, err, "consumed-but-not-expired token must be kept for reuse detection")
+		assert.NotNil(t, got.ConsumedAt)
+
+		// Documented behavior: a consumed token that is ALSO past its expiry IS reaped (it can no
+		// longer be rotated, so only the late post-expiry replay alarm is given up — see the
+		// DeleteExpired doc). This keeps the GC bounded for long-lived rotating sessions.
+		consumedExpiredAt := time.Now().Add(-30 * time.Minute)
+		consumedExpired := &tokens.RefreshToken{
+			Hash: "reaper-consumed-expired", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-2 * time.Hour), ConsumedAt: &consumedExpiredAt,
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, consumedExpired, tokens.WithTenant(tenantA)))
+		_, err = store.DeleteExpired(ctx, tokens.WithTenant(tenantA))
+		require.NoError(t, err)
+		_, err = store.FindRefreshToken(ctx, "reaper-consumed-expired", tokens.WithTenant(tenantA))
+		assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound, "a consumed-AND-expired token is reaped")
+	})
 
 	t.Run("Contract: Refresh Tokens save/find/consume/revoke", func(t *testing.T) {
 		tokenHash := "refresh_token_hash"

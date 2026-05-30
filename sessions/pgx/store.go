@@ -142,6 +142,25 @@ func (s *Store) DeleteSession(ctx context.Context, id uuid.UUID, opts ...session
 	return nil
 }
 
+// DeleteExpired purges sessions past their expiry, returning the number deleted. With WithTenant
+// it sweeps a single tenant, otherwise all.
+func (s *Store) DeleteExpired(ctx context.Context, opts ...sessions.Option) (int64, error) {
+	options := sessions.ApplyOptions(opts)
+
+	query := `DELETE FROM sessions WHERE expires_at < now()`
+	args := []any{}
+	if options.TenantID != nil {
+		query += ` AND tenant_id = $1`
+		args = append(args, *options.TenantID)
+	}
+
+	tag, err := s.db.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // DeleteSessionsByUserID removes all sessions for a user.
 func (s *Store) DeleteSessionsByUserID(ctx context.Context, userID uuid.UUID, opts ...sessions.Option) error {
 	tenantID := s.getTenantID(opts)

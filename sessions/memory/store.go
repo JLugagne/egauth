@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/JLugagne/libauth/sessions"
 	"github.com/google/uuid"
@@ -102,6 +103,27 @@ func (s *Store) DeleteSession(ctx context.Context, id uuid.UUID, opts ...session
 	delete(s.sessions, id)
 
 	return nil
+}
+
+// DeleteExpired purges sessions past their expiry, returning the number deleted. With WithTenant
+// it sweeps a single tenant, otherwise all.
+func (s *Store) DeleteExpired(ctx context.Context, opts ...sessions.Option) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	opt := sessions.ApplyOptions(opts)
+	now := time.Now()
+	var deleted int64
+	for id, sess := range s.sessions {
+		if opt.TenantID != nil && sess.TenantID != *opt.TenantID {
+			continue
+		}
+		if sess.ExpiresAt.Before(now) {
+			delete(s.sessions, id)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 // DeleteSessionsByUserID removes all sessions for a user.

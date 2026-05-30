@@ -18,6 +18,7 @@ type MockStore struct {
 	UpdateSessionFunc          func(ctx context.Context, session *sessions.Session, expectedTokenHash string, opts ...sessions.Option) error
 	DeleteSessionFunc          func(ctx context.Context, id uuid.UUID, opts ...sessions.Option) error
 	DeleteSessionsByUserIDFunc func(ctx context.Context, userID uuid.UUID, opts ...sessions.Option) error
+	DeleteExpiredFunc          func(ctx context.Context, opts ...sessions.Option) (int64, error)
 }
 
 func (m *MockStore) CreateSession(ctx context.Context, session *sessions.Session, opts ...sessions.Option) error {
@@ -53,6 +54,13 @@ func (m *MockStore) DeleteSessionsByUserID(ctx context.Context, userID uuid.UUID
 		panic("called not defined DeleteSessionsByUserIDFunc")
 	}
 	return m.DeleteSessionsByUserIDFunc(ctx, userID, opts...)
+}
+
+func (m *MockStore) DeleteExpired(ctx context.Context, opts ...sessions.Option) (int64, error) {
+	if m.DeleteExpiredFunc == nil {
+		panic("called not defined DeleteExpiredFunc")
+	}
+	return m.DeleteExpiredFunc(ctx, opts...)
 }
 
 // StoreContractTesting runs a comprehensive suite of tests against any sessions.Store implementation.
@@ -140,6 +148,23 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 		// Updating an unknown session reports not-found.
 		err = store.UpdateSession(ctx, &sessions.Session{ID: uuid.New(), TenantID: tenantA, TokenHash: "x", ExpiresAt: newExpiry}, "whatever", sessions.WithTenant(tenantA))
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
+	})
+
+	t.Run("Contract: DeleteExpired purges only expired sessions", func(t *testing.T) {
+		userID := uuid.New()
+		expired := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "exp-h", ExpiresAt: time.Now().Add(-time.Hour)}
+		live := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "live-h", ExpiresAt: time.Now().Add(time.Hour)}
+		require.NoError(t, store.CreateSession(ctx, expired, sessions.WithTenant(tenantA)))
+		require.NoError(t, store.CreateSession(ctx, live, sessions.WithTenant(tenantA)))
+
+		n, err := store.DeleteExpired(ctx, sessions.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, int64(1))
+
+		_, err = store.FindSessionByHash(ctx, "exp-h", sessions.WithTenant(tenantA))
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "expired session must be gone")
+		_, err = store.FindSessionByHash(ctx, "live-h", sessions.WithTenant(tenantA))
+		assert.NoError(t, err, "live session must be kept")
 	})
 
 	t.Run("Contract: Delete by UserID", func(t *testing.T) {

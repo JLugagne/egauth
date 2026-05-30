@@ -168,6 +168,26 @@ func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tokenHash string, opt
 	return nil
 }
 
+// DeleteExpired purges expired token rows (refresh tokens and any API keys past their expiry),
+// returning the number deleted. Rows with a NULL expires_at (never-expiring API keys) are kept.
+// With WithTenant it sweeps a single tenant, otherwise all.
+func (s *Store[C]) DeleteExpired(ctx context.Context, opts ...tokens.Option) (int64, error) {
+	options := tokens.ApplyOptions(opts)
+
+	query := `DELETE FROM tokens WHERE expires_at IS NOT NULL AND expires_at < now()`
+	args := []any{}
+	if options.TenantID != nil {
+		query += ` AND tenant_id = $1`
+		args = append(args, *options.TenantID)
+	}
+
+	tag, err := s.db.Exec(ctx, query, args...)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // RevokeFamily revokes ALL refresh tokens sharing the given family ID.
 func (s *Store[C]) RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...tokens.Option) error {
 	tenantID := s.getTenantID(opts)

@@ -55,4 +55,19 @@ type Store[C any] interface {
 
 	// FindAPIKeyByHash retrieves an API key by its hash.
 	FindAPIKeyByHash(ctx context.Context, tokenHash string, opts ...Option) (*APIKey[C], error)
+
+	// DeleteExpired purges expired records (refresh tokens and any API keys past their expiry),
+	// returning the number deleted. It is the schedulable GC reaper: refresh-token rows are
+	// retained past consumption for reuse/theft detection, so they accumulate and must be swept
+	// once expired. API keys with no expiry are never touched. With WithTenant it sweeps a single
+	// tenant; without it, all tenants. Run it periodically (e.g. hourly) from a background job.
+	//
+	// Reaping only removes rows past their expiry, so an expired token can no longer be validated
+	// or rotated and a replay WITHIN a token's validity is still detected as reuse (the family is
+	// revoked). The one thing given up is the late alarm: a replay of an ALREADY-EXPIRED consumed
+	// token reports not-found rather than revoking the family — acceptable, since by then the
+	// token grants no access. Keeping consumed rows until their whole family expired would defeat
+	// the GC for long-lived, continuously-rotating sessions, so the reaper trades that late
+	// signal for bounded growth.
+	DeleteExpired(ctx context.Context, opts ...Option) (int64, error)
 }

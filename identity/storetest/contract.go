@@ -34,6 +34,8 @@ type MockStore struct {
 	UpdateIdentityPasswordFunc   func(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error
 	CreateVerificationTokenFunc  func(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error)
 	ConsumeVerificationTokenFunc func(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error)
+
+	DeleteExpiredVerificationTokensFunc func(ctx context.Context, opts ...identity.Option) (int64, error)
 }
 
 var _ identity.Store = (*MockStore)(nil)
@@ -57,6 +59,13 @@ func (m *MockStore) ConsumeVerificationToken(ctx context.Context, token, kind st
 		panic("called not defined ConsumeVerificationTokenFunc")
 	}
 	return m.ConsumeVerificationTokenFunc(ctx, token, kind, opts...)
+}
+
+func (m *MockStore) DeleteExpiredVerificationTokens(ctx context.Context, opts ...identity.Option) (int64, error) {
+	if m.DeleteExpiredVerificationTokensFunc == nil {
+		panic("called not defined DeleteExpiredVerificationTokensFunc")
+	}
+	return m.DeleteExpiredVerificationTokensFunc(ctx, opts...)
 }
 
 func (m *MockStore) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
@@ -448,6 +457,29 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, store.DeleteUser(ctx, user.ID, identity.WithTenant(tenantA)))
 		_, err = store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, nil, identity.WithTenant(tenantA))
 		assert.ErrorIs(t, err, identity.ErrUserNotFound, "must not mint a token for a soft-deleted user")
+	})
+
+	t.Run("Contract: DeleteExpiredVerificationTokens purges only expired", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, "reaper_verif@example.com", identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		expired, err := store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, -time.Minute, nil, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		live, err := store.CreateVerificationToken(ctx, user.ID, identity.KindEmailVerification, time.Hour, nil, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+
+		n, err := store.DeleteExpiredVerificationTokens(ctx, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, n, int64(1))
+
+		// The expired token is GONE (reaped), so consume reports not-found rather than expired.
+		_, _, err = store.ConsumeVerificationToken(ctx, expired, identity.KindPasswordReset, identity.WithTenant(tenantA))
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "expired token must be reaped")
+
+		// The live token still consumes.
+		uid, _, err := store.ConsumeVerificationToken(ctx, live, identity.KindEmailVerification, identity.WithTenant(tenantA))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, uid)
 	})
 
 	if useMultiTenant {
