@@ -21,6 +21,24 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		tenantA, tenantB = "tenant-A", "tenant-B"
 	}
 
+	t.Run("empty tenant is the default partition", func(t *testing.T) {
+		// Without WithTenant, every backend must operate on the default (empty) tenant partition
+		// rather than rejecting the call. A forgotten tenant is only an error under the explicit
+		// WithStrictTenancy opt-in (see StrictTenancyTesting). This pins the cross-backend
+		// agreement (I19): the pgx backend historically rejected an empty tenant on SaveTOTP and
+		// ReplaceRecoveryCodes while the memory backend accepted it.
+		uid := uuid.New()
+		require.NoError(t, store.SaveTOTP(ctx, &mfa.TOTPEnrollment{UserID: uid, Secret: "DEF", CreatedAt: time.Now()}),
+			"empty tenant must be the valid default partition, not rejected")
+		got, err := store.GetTOTP(ctx, uid)
+		require.NoError(t, err)
+		assert.Equal(t, "DEF", got.Secret)
+
+		require.NoError(t, store.ReplaceRecoveryCodes(ctx, uid, []string{"d1"}),
+			"empty tenant must be accepted for recovery codes too")
+		require.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "d1"))
+	})
+
 	t.Run("TOTP save/get/delete", func(t *testing.T) {
 		uid := uuid.New()
 		_, err := store.GetTOTP(ctx, uid, mfa.WithTenant(tenantA))
@@ -105,4 +123,40 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 			require.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "hA", mfa.WithTenant(tenantA)))
 		})
 	}
+}
+
+// StrictTenancyTesting asserts that a store built WithStrictTenancy rejects every tenant-scoped
+// operation performed without a tenant (no WithTenant) via mfa.ErrTenantRequired, and that the
+// same operations succeed once a tenant is supplied. Pass a store constructed WithStrictTenancy.
+func StrictTenancyTesting(t *testing.T, strict mfa.Store) {
+	ctx := context.Background()
+	uid := uuid.New()
+
+	t.Run("strict: every tenant-scoped op rejects an empty tenant", func(t *testing.T) {
+		assert.ErrorIs(t, strict.SaveTOTP(ctx, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}),
+			mfa.ErrTenantRequired, "SaveTOTP without a tenant must be rejected in strict mode")
+
+		_, err := strict.GetTOTP(ctx, uid)
+		assert.ErrorIs(t, err, mfa.ErrTenantRequired)
+
+		assert.ErrorIs(t, strict.DeleteTOTP(ctx, uid), mfa.ErrTenantRequired)
+
+		_, err = strict.MarkTOTPUsed(ctx, uid, 1)
+		assert.ErrorIs(t, err, mfa.ErrTenantRequired)
+
+		assert.ErrorIs(t, strict.ReplaceRecoveryCodes(ctx, uid, []string{"h"}), mfa.ErrTenantRequired)
+		assert.ErrorIs(t, strict.ConsumeRecoveryCode(ctx, uid, "h"), mfa.ErrTenantRequired)
+		assert.ErrorIs(t, strict.DeleteRecoveryCodes(ctx, uid), mfa.ErrTenantRequired)
+	})
+
+	t.Run("strict: the same ops succeed once a tenant is supplied", func(t *testing.T) {
+		const tenant = "strict-tenant"
+		require.NoError(t, strict.SaveTOTP(ctx, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}, mfa.WithTenant(tenant)))
+		got, err := strict.GetTOTP(ctx, uid, mfa.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, "S", got.Secret)
+
+		require.NoError(t, strict.ReplaceRecoveryCodes(ctx, uid, []string{"r1"}, mfa.WithTenant(tenant)))
+		require.NoError(t, strict.ConsumeRecoveryCode(ctx, uid, "r1", mfa.WithTenant(tenant)))
+	})
 }

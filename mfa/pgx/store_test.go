@@ -17,7 +17,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func newStore(t *testing.T) *mfapgx.Store {
+func newStore(t *testing.T, opts ...mfapgx.Option) *mfapgx.Store {
 	t.Helper()
 	ctx := context.Background()
 
@@ -47,11 +47,15 @@ func newStore(t *testing.T) *mfapgx.Store {
 	t.Cleanup(pool.Close)
 
 	require.NoError(t, mfapgx.Migrate(ctx, pool))
-	return mfapgx.NewStore(pool)
+	return mfapgx.NewStore(pool, opts...)
 }
 
 func TestPgxStore_Contract(t *testing.T) {
 	storetest.StoreContractTesting(t, newStore(t), true)
+}
+
+func TestPgxStore_StrictTenancy(t *testing.T) {
+	storetest.StrictTenancyTesting(t, newStore(t, mfapgx.WithStrictTenancy()))
 }
 
 // TestPgxStore_ReplaceRecoveryCodesAtomic verifies the documented atomicity: a replace that

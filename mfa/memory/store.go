@@ -15,22 +15,41 @@ type Store struct {
 	mu       sync.RWMutex
 	totp     map[string]*mfa.TOTPEnrollment
 	recovery map[string][]*mfa.RecoveryCode
+	strict   bool
 }
 
+// Option configures a Store.
+type Option func(*Store)
+
+// WithStrictTenancy makes every tenant-scoped operation require a non-empty tenant
+// (mfa.ErrTenantRequired otherwise). Off by default, where an empty tenant is the valid default
+// single-tenant partition. Enable it in multi-tenant deployments so a forgotten WithTenant fails
+// loudly instead of silently operating on the shared empty-tenant partition.
+func WithStrictTenancy() Option { return func(s *Store) { s.strict = true } }
+
 // NewStore creates a new in-memory Store.
-func NewStore() *Store {
-	return &Store{
+func NewStore(opts ...Option) *Store {
+	s := &Store{
 		totp:     make(map[string]*mfa.TOTPEnrollment),
 		recovery: make(map[string][]*mfa.RecoveryCode),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
-func tenantOf(opts []mfa.Option) string {
+// resolveTenant extracts the operation tenant, enforcing ErrTenantRequired in strict mode.
+func (s *Store) resolveTenant(opts []mfa.Option) (string, error) {
 	o := mfa.ApplyOptions(opts)
-	if o.TenantID == nil {
-		return ""
+	tenant := ""
+	if o.TenantID != nil {
+		tenant = *o.TenantID
 	}
-	return *o.TenantID
+	if s.strict && tenant == "" {
+		return "", mfa.ErrTenantRequired
+	}
+	return tenant, nil
 }
 
 func key(tenant string, userID uuid.UUID) string {
@@ -41,7 +60,10 @@ func (s *Store) SaveTOTP(ctx context.Context, e *mfa.TOTPEnrollment, opts ...mfa
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant := tenantOf(opts)
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
 	stored := *e
 	stored.TenantID = tenant
 	s.totp[key(tenant, e.UserID)] = &stored
@@ -52,7 +74,11 @@ func (s *Store) GetTOTP(ctx context.Context, userID uuid.UUID, opts ...mfa.Optio
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	e, ok := s.totp[key(tenantOf(opts), userID)]
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
+	e, ok := s.totp[key(tenant, userID)]
 	if !ok {
 		return nil, mfa.ErrNotEnrolled
 	}
@@ -64,7 +90,11 @@ func (s *Store) DeleteTOTP(ctx context.Context, userID uuid.UUID, opts ...mfa.Op
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.totp, key(tenantOf(opts), userID))
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
+	delete(s.totp, key(tenant, userID))
 	return nil
 }
 
@@ -72,7 +102,11 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, userID uuid.UUID, step int64, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	e, ok := s.totp[key(tenantOf(opts), userID)]
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return false, err
+	}
+	e, ok := s.totp[key(tenant, userID)]
 	if !ok {
 		// Match the pgx guarded-UPDATE semantics: a missing row simply does not apply.
 		return false, nil
@@ -88,7 +122,10 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID uuid.UUID, code
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant := tenantOf(opts)
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
 	now := time.Now()
 	codes := make([]*mfa.RecoveryCode, 0, len(codeHashes))
 	for _, h := range codeHashes {
@@ -107,7 +144,11 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID uuid.UUID, codeH
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	codes := s.recovery[key(tenantOf(opts), userID)]
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
+	codes := s.recovery[key(tenant, userID)]
 	for _, c := range codes {
 		if c.UsedAt == nil && c.CodeHash == codeHash {
 			now := time.Now()
@@ -122,7 +163,11 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, userID uuid.UUID, opts 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.recovery, key(tenantOf(opts), userID))
+	tenant, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
+	delete(s.recovery, key(tenant, userID))
 	return nil
 }
 
