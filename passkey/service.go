@@ -128,6 +128,52 @@ func (s *Service) FinishLogin(ctx context.Context, userID uuid.UUID, session web
 	return stored, nil
 }
 
+// BeginDiscoverableLogin starts a usernameless ("discoverable credential" / resident-key) login
+// ceremony. Unlike BeginLogin it needs no prior userID: the returned assertion options carry an
+// empty allowCredentials list, so the authenticator offers whichever resident key the user picks
+// and reveals the account via the credential's user handle at FinishDiscoverableLogin. It returns
+// the assertion options for navigator.credentials.get() and the SessionData.
+func (s *Service) BeginDiscoverableLogin() (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
+	return s.wa.BeginDiscoverableLogin()
+}
+
+// FinishDiscoverableLogin verifies a usernameless assertion. It resolves the account from the
+// credential's user handle (the account UUID libauth set as the WebAuthn ID), verifies the
+// assertion against that account's credentials, updates the signature counter (rejecting a
+// regressed counter as a possible clone) and returns the credential used together with the
+// resolved user ID.
+//
+// In a multi-tenant deployment the user handle is globally unique but credential lookup is still
+// tenant-scoped, so pass the tenant (WithTenant) the same way you would for the username-based
+// flow — derive it from the request (host/subdomain) before calling.
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, session webauthn.SessionData, r *http.Request, opts ...Option) (*Credential, uuid.UUID, error) {
+	var resolvedID uuid.UUID
+	handler := func(_, userHandle []byte) (webauthn.User, error) {
+		uid, err := uuid.FromBytes(userHandle)
+		if err != nil {
+			return nil, err
+		}
+		resolvedID = uid
+		return s.loadUser(ctx, uid, "", "", opts...)
+	}
+
+	cred, err := s.wa.FinishDiscoverableLogin(handler, session, r)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if cred.Authenticator.CloneWarning {
+		return nil, uuid.Nil, ErrCredentialCloned
+	}
+	stored, err := toStored(resolvedID, cred)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := s.store.UpdateCredential(ctx, stored, opts...); err != nil {
+		return nil, uuid.Nil, err
+	}
+	return stored, resolvedID, nil
+}
+
 // ListCredentials returns the user's registered credentials.
 func (s *Service) ListCredentials(ctx context.Context, userID uuid.UUID, opts ...Option) ([]*Credential, error) {
 	return s.store.GetCredentials(ctx, userID, opts...)
