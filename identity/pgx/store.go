@@ -43,20 +43,41 @@ type DBQuerier interface {
 
 // Store implements identity.Store for PostgreSQL using pgx.
 type Store struct {
-	db DBQuerier
+	db     DBQuerier
+	strict bool
 }
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithStrictTenancy makes every tenant-scoped operation require a non-empty tenant
+// (identity.ErrTenantRequired otherwise). Off by default, where an empty tenant is the valid
+// default single-tenant partition. Enable it in multi-tenant deployments so a forgotten
+// WithTenant fails loudly instead of silently operating on the shared empty-tenant partition.
+// (DeleteExpiredVerificationTokens is exempt: it is a maintenance sweep that intentionally
+// spans all tenants when no tenant is given.)
+func WithStrictTenancy() Option { return func(s *Store) { s.strict = true } }
 
 // NewStore creates a new PostgreSQL store.
-func NewStore(db DBQuerier) *Store {
-	return &Store{db: db}
+func NewStore(db DBQuerier, opts ...Option) *Store {
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
-func (s *Store) getTenantID(opts []identity.Option) string {
+// resolveTenant extracts the operation tenant, enforcing ErrTenantRequired in strict mode.
+func (s *Store) resolveTenant(opts []identity.Option) (string, error) {
 	options := identity.ApplyOptions(opts)
-	if options.TenantID == nil {
-		return ""
+	tenantID := ""
+	if options.TenantID != nil {
+		tenantID = *options.TenantID
 	}
-	return *options.TenantID
+	if s.strict && tenantID == "" {
+		return "", identity.ErrTenantRequired
+	}
+	return tenantID, nil
 }
 
 func mapError(err error) error {
@@ -79,9 +100,9 @@ func mapError(err error) error {
 }
 
 func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return nil, identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
 	}
 
 	user := &identity.User{
@@ -96,7 +117,7 @@ func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.O
 		INSERT INTO users (id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7)
 	`
-	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
+	_, err = s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -105,7 +126,10 @@ func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.O
 }
 
 func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
 	query := `
 		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
 		FROM users
@@ -114,7 +138,7 @@ func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity
 	row := s.db.QueryRow(ctx, query, id, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err = row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -126,7 +150,10 @@ func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity
 }
 
 func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
 	query := `
 		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
 		FROM users
@@ -135,7 +162,7 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...ident
 	row := s.db.QueryRow(ctx, query, email, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err = row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -147,9 +174,9 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...ident
 }
 
 func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
 	}
 
 	user.UpdatedAt = time.Now().UTC()
@@ -175,9 +202,9 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 // single statement (data-modifying CTEs share one snapshot and one transaction), so a unique
 // violation on either index aborts the whole change.
 func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
 	}
 
 	now := time.Now().UTC()
@@ -218,7 +245,10 @@ func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail 
 // to erase). All three run as data-modifying CTEs gated on the user actually being live, so they
 // commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
 func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
 
 	now := time.Now().UTC()
 	anonymizedEmail := "deleted_" + uuid.New().String() + "@deleted.local"
@@ -242,7 +272,7 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.O
 		SELECT id FROM del
 	`
 	var deletedID uuid.UUID
-	err := s.db.QueryRow(ctx, query, now, anonymizedEmail, id, tenantID).Scan(&deletedID)
+	err = s.db.QueryRow(ctx, query, now, anonymizedEmail, id, tenantID).Scan(&deletedID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// No live, same-tenant user matched, so nothing was deleted.
@@ -254,9 +284,9 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.O
 }
 
 func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
 	}
 
 	ident.ID = uuid.New()
@@ -268,7 +298,7 @@ func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts 
 		INSERT INTO identities (id, user_id, tenant_id, provider, provider_id, password_hash, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 	`
-	_, err := s.db.Exec(ctx, query, ident.ID, ident.UserID, ident.TenantID, ident.Provider, ident.ProviderID, ident.PasswordHash, ident.CreatedAt, ident.UpdatedAt)
+	_, err = s.db.Exec(ctx, query, ident.ID, ident.UserID, ident.TenantID, ident.Provider, ident.ProviderID, ident.PasswordHash, ident.CreatedAt, ident.UpdatedAt)
 	if err != nil {
 		return mapError(err)
 	}
@@ -277,7 +307,10 @@ func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts 
 }
 
 func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	query := `
 		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
@@ -307,7 +340,10 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, op
 }
 
 func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return nil, err
+	}
 
 	query := `
 		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
@@ -317,7 +353,7 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 	row := s.db.QueryRow(ctx, query, provider, providerID, tenantID)
 
 	var ident identity.Identity
-	err := row.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt)
+	err = row.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrIdentityNotFound
@@ -331,9 +367,9 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 // UpdateIdentityPassword sets a new password hash on the user's "password" identity and
 // atomically clears any lockout.
 func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
 	}
 
 	query := `
@@ -356,9 +392,9 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, pa
 // user in the SAME tenant (the bare user_id foreign key alone would accept a cross-tenant or
 // soft-deleted user), so this matches the memory store's invariant exactly.
 func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return "", identity.ErrTenantRequired
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return "", err
 	}
 
 	token, selector, verifierHash, err := identity.GenerateVerificationToken()
@@ -391,7 +427,10 @@ func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, k
 // time, checks expiry, then deletes the row with a guarded DELETE so concurrent consumers
 // cannot both succeed (single-use).
 func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
 
 	selector, verifier, ok := identity.SplitVerificationToken(token)
 	if !ok {
@@ -409,7 +448,7 @@ func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string
 		metadata     []byte
 		expiresAt    time.Time
 	)
-	err := s.db.QueryRow(ctx, selectQuery, selector, tenantID, kind).Scan(&verifierHash, &userID, &metadata, &expiresAt)
+	err = s.db.QueryRow(ctx, selectQuery, selector, tenantID, kind).Scan(&verifierHash, &userID, &metadata, &expiresAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
@@ -464,7 +503,10 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, opts ...ide
 // locking the account when the new count reaches the threshold. It is performed
 // atomically in a single UPDATE statement.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
 
 	query := `
 		UPDATE identities
@@ -488,7 +530,10 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUI
 
 // ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
 func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
+	tenantID, err := s.resolveTenant(opts)
+	if err != nil {
+		return err
+	}
 
 	query := `
 		UPDATE identities

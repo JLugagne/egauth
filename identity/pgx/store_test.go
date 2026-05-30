@@ -56,4 +56,7 @@ func TestPgxStore_Contract(t *testing.T) {
 
 	// 5. Run Contract Test
 	storetest.StoreContractTesting(t, store, true)
+
+	// 6. Strict-tenancy posture: a store built WithStrictTenancy rejects empty-tenant ops.
+	storetest.StrictTenancyTesting(t, pgxstore.NewStore(pool, pgxstore.WithStrictTenancy()))
 }

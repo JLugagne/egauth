@@ -156,6 +156,35 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		tenantB = "tenant-B"
 	}
 
+	t.Run("Contract: empty tenant is the default partition", func(t *testing.T) {
+		// Without WithTenant, every backend must operate on the default (empty) tenant
+		// partition rather than rejecting the call. A forgotten tenant is only an error under
+		// the explicit WithStrictTenancy opt-in (see StrictTenancyTesting). This pins the
+		// cross-backend agreement the audit (I19) flagged: the pgx backend historically
+		// rejected an empty tenant on its write paths while the memory backend accepted it.
+		email := "default_partition@example.com"
+		user, err := store.CreateUser(ctx, email)
+		require.NoError(t, err, "empty tenant must be the valid default partition, not rejected")
+		require.NotNil(t, user)
+		assert.Equal(t, "", user.TenantID)
+
+		got, err := store.FindUserByID(ctx, user.ID)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, got.ID)
+
+		// Writes that previously rejected an empty tenant must now succeed on the default
+		// partition: adding an identity and minting/consuming a verification token.
+		hash := "h"
+		ident := &identity.Identity{UserID: user.ID, Provider: "password", ProviderID: email, PasswordHash: &hash}
+		require.NoError(t, store.AddIdentity(ctx, ident))
+
+		tok, err := store.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, nil)
+		require.NoError(t, err)
+		uid, _, err := store.ConsumeVerificationToken(ctx, tok, identity.KindPasswordReset)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, uid)
+	})
+
 	t.Run("Contract: User CRUD", func(t *testing.T) {
 		email := "test_crud@example.com"
 		user, err := store.CreateUser(ctx, email, identity.WithTenant(tenantA))
@@ -526,4 +555,79 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 			assert.Equal(t, userB.ID, identB.UserID, "Should find the identity specific to Tenant B")
 		})
 	}
+}
+
+// StrictTenancyTesting asserts that a store built WithStrictTenancy rejects every tenant-scoped
+// operation performed without a tenant (no WithTenant) via identity.ErrTenantRequired, and that
+// the same operations succeed once a tenant is supplied. DeleteExpiredVerificationTokens is
+// intentionally NOT asserted here: it is an exempt maintenance sweep that spans all tenants when
+// no tenant is given. Pass a store constructed WithStrictTenancy.
+func StrictTenancyTesting(t *testing.T, strict identity.Store) {
+	ctx := context.Background()
+	uid := uuid.New()
+
+	t.Run("strict: every tenant-scoped op rejects an empty tenant", func(t *testing.T) {
+		_, err := strict.CreateUser(ctx, "strict@example.com")
+		assert.ErrorIs(t, err, identity.ErrTenantRequired, "CreateUser without a tenant must be rejected in strict mode")
+
+		_, err = strict.FindUserByID(ctx, uid)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		_, err = strict.FindUserByEmail(ctx, "strict@example.com")
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.UpdateUser(ctx, &identity.User{ID: uid})
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.UpdateUserEmail(ctx, uid, "new@example.com", time.Now())
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.DeleteUser(ctx, uid)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.AddIdentity(ctx, &identity.Identity{UserID: uid, Provider: "password", ProviderID: "strict@example.com"})
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		_, err = strict.FindIdentitiesByUserID(ctx, uid)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		_, err = strict.FindIdentityByProvider(ctx, "password", "strict@example.com")
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.UpdateIdentityPassword(ctx, uid, "hash")
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		_, err = strict.CreateVerificationToken(ctx, uid, identity.KindPasswordReset, time.Hour, nil)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		_, _, err = strict.ConsumeVerificationToken(ctx, "selector.verifier", identity.KindPasswordReset)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.IncrementFailedAttempts(ctx, uid, defaultTestLockThreshold, defaultTestLockDuration)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+
+		err = strict.ResetFailedAttempts(ctx, uid)
+		assert.ErrorIs(t, err, identity.ErrTenantRequired)
+	})
+
+	t.Run("strict: the same ops succeed once a tenant is supplied", func(t *testing.T) {
+		const tenant = "strict-tenant"
+		user, err := strict.CreateUser(ctx, "ok@example.com", identity.WithTenant(tenant))
+		require.NoError(t, err)
+		require.NotNil(t, user)
+
+		got, err := strict.FindUserByID(ctx, user.ID, identity.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, got.ID)
+
+		hash := "h"
+		ident := &identity.Identity{UserID: user.ID, Provider: "password", ProviderID: "ok@example.com", PasswordHash: &hash}
+		require.NoError(t, strict.AddIdentity(ctx, ident, identity.WithTenant(tenant)))
+
+		tok, err := strict.CreateVerificationToken(ctx, user.ID, identity.KindPasswordReset, time.Hour, nil, identity.WithTenant(tenant))
+		require.NoError(t, err)
+		gotUID, _, err := strict.ConsumeVerificationToken(ctx, tok, identity.KindPasswordReset, identity.WithTenant(tenant))
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, gotUID)
+	})
 }

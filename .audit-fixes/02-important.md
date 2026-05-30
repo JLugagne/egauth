@@ -80,14 +80,21 @@ both strict when configured) and fixes the cross-backend inconsistency the audit
   backends' `*_test.go` (memory + pgx) — asserts empty-tenant ops fail and tenant'd ops succeed.
 
 **DONE:** otp (both backends + strict contract test; pgx `SaveOTP`'s unconditional ErrTenantRequired
-relaxed to strict-only). **REMAINING (apply the same pattern):**
-- **identity** — the I5 follow-up target. NOTE: identity pgx `CreateUser` AND `UpdateUserEmail`
-  currently return `ErrTenantRequired` UNCONDITIONALLY (writes), while reads/deletes and the whole
-  memory backend accept empty — relax both to strict-conditional and add the guard to all ~14
-  tenant-scoped methods (DeleteExpiredVerificationTokens exempt). This is the "fix the class, not
-  one method" the I5 review asked for.
+relaxed to strict-only).
+**DONE:** identity (the I5 "fix the class" follow-up). A new shared contract subtest "empty tenant is
+the default partition" CONFIRMED the cross-backend bug first: it passed on memory but FAILED on pgx,
+which rejected an empty tenant UNCONDITIONALLY on its 6 write paths (CreateUser, UpdateUser,
+UpdateUserEmail, AddIdentity, UpdateIdentityPassword, CreateVerificationToken). All 6 were relaxed to
+the strict-conditional form via a `resolveTenant(opts) (string, error)` guard now called at the top of
+all 14 tenant-scoped methods in BOTH backends (DeleteExpiredVerificationTokens exempt). Added
+`WithStrictTenancy` + variadic `NewStore` to both, and `StrictTenancyTesting` to storetest (wired into
+memory + pgx tests). Adversarial review (3 lenses) raised 2 findings, both refuted; applied one as an
+optional consistency tidy-up — memory `DeleteUser`'s identity-anonymization loop now also filters by
+tenant, mirroring pgx and the adjacent token-purge loop (provably no behavioral change; unreachable).
+Whole module builds, vets clean, memory+identity 149 tests + pgx 13 tests green.
+**REMAINING (apply the same pattern):**
 - **tokens, sessions, mfa, passkey** — these are already cross-backend CONSISTENT (all accept empty
   uniformly, no outlier), so they have no bug; adding `WithStrictTenancy` to them is the uniformity
-  extension so strict mode covers the whole stack. Mechanical, follows the otp pattern.
+  extension so strict mode covers the whole stack. Mechanical, follows the otp + identity pattern.
 **Test:** strict store rejects empty-tenant ops (ErrTenantRequired) on every tenant-scoped method;
 non-strict store accepts them; cross-backend via the shared helper.
