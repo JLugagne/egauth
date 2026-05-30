@@ -241,12 +241,12 @@ func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request) (we
 	}
 	c, err := r.Cookie(cfg.sessionCookie)
 	if err != nil || c.Value == "" {
-		http.Error(w, "session_invalid", http.StatusBadRequest)
+		cfg.fail(w, ErrSessionInvalid)
 		return session, false
 	}
 	raw, ok := cfg.open(c.Value)
 	if !ok || json.Unmarshal(raw, &session) != nil {
-		http.Error(w, "session_invalid", http.StatusBadRequest)
+		cfg.fail(w, ErrSessionInvalid)
 		return session, false
 	}
 	return session, true
@@ -292,6 +292,8 @@ func (cfg handlerConfig) clearSession(w http.ResponseWriter) {
 func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 	var protoErr *protocol.Error
 	switch {
+	case errors.Is(err, ErrSessionInvalid):
+		http.Error(w, "session_invalid", http.StatusBadRequest)
 	case errors.Is(err, ErrNoCredentials):
 		http.Error(w, "no_credentials", http.StatusBadRequest)
 	case errors.Is(err, ErrCredentialCloned):
