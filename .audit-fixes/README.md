@@ -56,8 +56,8 @@ Tick items as they are completed + tested. Delete `.audit-fixes/` once the work 
 ## Progress (branch fix/audit-completeness, per-item commits)
 - Critical:      3 / 4   (DONE: C1 DoS, C2 rate-limit, C3 change-password; C4 docs deferred to last)
 - Important:    19 / 19  (DONE: I1-I19 — all important items complete)
-- Nice-to-have:  0 / 11
-- **Total:      22 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
+- Nice-to-have:  2 / 11  (DONE: N2 rune-length, N6 error taxonomy)
+- **Total:      24 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
 
 ### I19 tenant consistency — DONE across all 6 stores (otp cf7c8f8, identity ec515a4, tokens 60f59be,
 ### sessions f85e63e, mfa 50f58a9, passkey b2542a2). Opt-in strict tenancy: empty tenant is the default

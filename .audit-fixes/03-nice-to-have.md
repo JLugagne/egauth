@@ -1,4 +1,6 @@
-# Nice-to-have fixes (0 / 11)
+# Nice-to-have fixes (2 / 11)
+
+DONE: N2 (rune length — commit 3e34d04), N6 (error taxonomy + dead sentinels — 55971a6).
 
 Polish / maturity.
 
@@ -7,8 +9,9 @@ Polish / maturity.
 ## [ ] N1 — Account recovery via independent verified channel
 **Where:** `identity`. Add enrollment of a recovery email/phone or backup factor; require it for sensitive recovery/factor-reset. Composes with I4/I5/I15 to break the single-email-channel takeover chain.
 
-## [ ] N2 — Password strength + DefaultPolicy rune length
+## [x] N2 — Password strength + DefaultPolicy rune length — DONE (3e34d04)
 **Where:** `passwords/policy/default.go`. **Bug:** uses `len(password)` (bytes) not runes → multibyte mismeasured; DefaultPolicy has no denylist. **Fix:** `utf8.RuneCountInString` (match passphrase.go); optional strength-estimator hook. **Test (confirm-first):** multibyte password mismeasured today.
+**DONE:** switched MinLength/MaxLength to `utf8.RuneCountInString` (confirmed-first test covers both the under-count and over-restrict directions). Denylist/strength-hook left to the passphrase policy (which already has denylist + BreachChecker) — not duplicated into DefaultPolicy.
 
 ## [ ] N3 — Library-wide clock injection
 **Where:** identity (lockout), tokens/jwt (TTL), sessions (expiry) call `time.Now()` directly. **Fix:** `WithClock`/shared clock seam (mfa/otp already have it). **Test:** deterministic expiry/lockout with injected clock.
@@ -19,8 +22,9 @@ Polish / maturity.
 ## [ ] N5 — Migration versioning / rollback
 **Where:** pgx `Migrate()` Execs every .sql each call, no version table, no down path. **Fix:** `schema_migrations` version table applying only un-applied files, or document using an external migration tool. **Test:** re-running Migrate is a no-op after applied.
 
-## [ ] N6 — Error taxonomy consistency + dead sentinels
+## [x] N6 — Error taxonomy consistency + dead sentinels — DONE (55971a6)
 **Where:** identity/tokens/sessions/passwords unprefixed vs mfa/oauth/otp/passkey prefixed; oauth ErrStateMismatch/ErrMissingCode/ErrEmailMissing + passkey ErrSessionInvalid are dead (signaled as raw strings). **Fix:** standardize prefixing; return declared sentinels or remove dead exports. **Test:** errors.Is works against the documented sentinels.
+**DONE:** prefixed identity/tokens/sessions/passwords sentinels with the package name (errors.Is unaffected). oauth's 3 dead sentinels removed (the callback signals via HTTP/redirect, not Go errors — no errors.Is seam; doc note records why). passkey ErrSessionInvalid wired live by routing loadSession failures through the existing fail() switch (same HTTP output). All affected package tests pass.
 
 ## [ ] N7 — Honor context cancellation
 **Where:** library-wide (0 ctx.Err/Done/Cause in non-test). **Fix:** check ctx in long/CPU-bound paths where feasible; at minimum document cancellation is observed only via pgx driver on I/O.
