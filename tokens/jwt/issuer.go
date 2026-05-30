@@ -36,7 +36,10 @@ const DefaultReuseGracePeriod = 10 * time.Second
 type Service[C any] struct {
 	store          tokens.Store[C]
 	claimsProvider tokens.ClaimsProvider[C]
-	secretKey      []byte
+	signingKey     []byte            // active key used to sign new access tokens
+	signingKeyID   string            // "kid" stamped on new tokens ("" in legacy single-key mode)
+	verifyKeys     map[string][]byte // kid -> key, for verifying kid-tagged tokens
+	legacyKey      []byte            // key tried for a token carrying no kid (the configured SecretKey)
 	issuer         string
 	accessTTL      time.Duration
 	refreshTTL     time.Duration
@@ -45,11 +48,31 @@ type Service[C any] struct {
 	reuseGrace     time.Duration
 }
 
+// SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
+// as the JWT "kid" header so a verifier can select the right key; Secret is the HS256 key.
+type SigningKey struct {
+	KeyID  string
+	Secret string
+}
+
 // Config defines the configuration for the JWT Service.
 type Config[C any] struct {
-	Store     tokens.Store[C]
+	Store  tokens.Store[C]
+	Issuer string
+	// SecretKey is the HS256 signing key in single-key mode. When SigningKeys is also set it is
+	// kept only as a "legacy" verification key for tokens minted (without a kid) before rotation
+	// was enabled — it never signs new tokens.
 	SecretKey string
-	Issuer    string
+	// SigningKeys is an optional rotation keyset. When non-empty, the key named by ActiveKeyID
+	// signs new tokens (tagging them with its KeyID as the "kid" header) while EVERY key in the
+	// set can verify — so a token signed by a now-retired key keeps validating until it expires
+	// (overlapping-validity rollover). Roll keys by deploying the set with the new key added and
+	// ActiveKeyID switched to it; once the longest-lived token signed by the old key has expired,
+	// drop the old key from the set.
+	SigningKeys []SigningKey
+	// ActiveKeyID selects which SigningKeys entry signs new tokens. It defaults to the sole entry
+	// when exactly one key is configured, and is required when several are.
+	ActiveKeyID string
 	// ClaimsProvider resolves fresh claims during refresh-token rotation. It is required
 	// for Rotate; IssueTokenPair / IssueAPIKey do not need it.
 	ClaimsProvider tokens.ClaimsProvider[C]
@@ -69,19 +92,48 @@ type Config[C any] struct {
 // shorter than the HMAC-SHA-256 output weakens the signature. Config.Validate enforces it.
 const MinSecretKeyLength = 32
 
-// Validate reports configuration that would make the issuer insecure or non-functional:
-// an empty or too-short SecretKey, an empty Issuer, or a non-positive Access/Refresh TTL.
-// Production callers SHOULD call it at startup (it returns all problems joined). New itself
-// only hard-fails the never-valid empty-key case, so test code may still construct an issuer
-// with, e.g., a deliberately negative AccessTTL to exercise token expiry.
+// Validate reports configuration that would make the issuer insecure or non-functional: an
+// empty/too-short signing key (or keyset), an empty Issuer, or a non-positive Access/Refresh
+// TTL. Production callers SHOULD call it at startup (it returns all problems joined). New itself
+// only hard-fails configurations from which no coherent signer can be built, so test code may
+// still construct an issuer with, e.g., a deliberately negative AccessTTL to exercise expiry.
 func (cfg Config[C]) Validate() error {
 	var errs []error
-	switch {
-	case cfg.SecretKey == "":
-		errs = append(errs, errors.New("jwt: SecretKey must not be empty"))
-	case len(cfg.SecretKey) < MinSecretKeyLength:
-		errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
+
+	if len(cfg.SigningKeys) == 0 {
+		switch {
+		case cfg.SecretKey == "":
+			errs = append(errs, errors.New("jwt: SecretKey must not be empty"))
+		case len(cfg.SecretKey) < MinSecretKeyLength:
+			errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
+		}
+	} else {
+		seen := make(map[string]bool, len(cfg.SigningKeys))
+		for i, k := range cfg.SigningKeys {
+			switch {
+			case k.KeyID == "":
+				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%d] must have a KeyID", i))
+			case seen[k.KeyID]:
+				errs = append(errs, fmt.Errorf("jwt: duplicate SigningKeys KeyID %q", k.KeyID))
+			}
+			seen[k.KeyID] = true
+			if len(k.Secret) < MinSecretKeyLength {
+				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q].Secret must be at least %d bytes for HS256", k.KeyID, MinSecretKeyLength))
+			}
+		}
+		if cfg.ActiveKeyID == "" {
+			if len(cfg.SigningKeys) > 1 {
+				errs = append(errs, errors.New("jwt: ActiveKeyID is required when more than one SigningKeys is configured"))
+			}
+		} else if !seen[cfg.ActiveKeyID] {
+			errs = append(errs, fmt.Errorf("jwt: ActiveKeyID %q is not present in SigningKeys", cfg.ActiveKeyID))
+		}
+		// A legacy SecretKey, if kept for the rollover window, should still be a strong key.
+		if cfg.SecretKey != "" && len(cfg.SecretKey) < MinSecretKeyLength {
+			errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
+		}
 	}
+
 	if cfg.Issuer == "" {
 		errs = append(errs, errors.New("jwt: Issuer must not be empty"))
 	}
@@ -94,12 +146,60 @@ func (cfg Config[C]) Validate() error {
 	return errors.Join(errs...)
 }
 
-// New creates a new JWT Service. It panics on the one configuration that is never valid — an
-// empty SecretKey — to fail fast instead of silently signing tokens with an empty HMAC key.
-// For comprehensive startup validation call Config.Validate before New.
+// resolveKeyset builds the signing/verification material from the config. It returns a structural
+// error only when no coherent signer can be built (no key at all, a keyset entry missing its
+// KeyID or Secret, a duplicate KeyID, or an unresolvable ActiveKeyID).
+func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, verify map[string][]byte, legacy []byte, err error) {
+	verify = map[string][]byte{}
+	if cfg.SecretKey != "" {
+		legacy = []byte(cfg.SecretKey)
+	}
+
+	// Single-key (legacy) mode: sign without a kid; verify a kid-less token with the SecretKey.
+	if len(cfg.SigningKeys) == 0 {
+		if cfg.SecretKey == "" {
+			return nil, "", nil, nil, errors.New("no signing key configured (set SecretKey or SigningKeys)")
+		}
+		return legacy, "", verify, legacy, nil
+	}
+
+	// Keyset mode: every key verifies; ActiveKeyID signs.
+	seen := map[string]bool{}
+	for _, k := range cfg.SigningKeys {
+		if k.KeyID == "" {
+			return nil, "", nil, nil, errors.New("every SigningKeys entry must have a KeyID")
+		}
+		if seen[k.KeyID] {
+			return nil, "", nil, nil, fmt.Errorf("duplicate SigningKeys KeyID %q", k.KeyID)
+		}
+		if k.Secret == "" {
+			return nil, "", nil, nil, fmt.Errorf("SigningKeys[%q] has an empty Secret", k.KeyID)
+		}
+		seen[k.KeyID] = true
+		verify[k.KeyID] = []byte(k.Secret)
+	}
+
+	activeID := cfg.ActiveKeyID
+	if activeID == "" {
+		if len(cfg.SigningKeys) != 1 {
+			return nil, "", nil, nil, errors.New("ActiveKeyID is required when more than one SigningKeys is configured")
+		}
+		activeID = cfg.SigningKeys[0].KeyID
+	}
+	sk, ok := verify[activeID]
+	if !ok {
+		return nil, "", nil, nil, fmt.Errorf("ActiveKeyID %q is not present in SigningKeys", activeID)
+	}
+	return sk, activeID, verify, legacy, nil
+}
+
+// New creates a new JWT Service. It panics on a configuration from which no coherent signer can
+// be built (no signing key, or a malformed keyset) to fail fast instead of silently signing with
+// an unusable key. For comprehensive startup validation call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
-	if cfg.SecretKey == "" {
-		panic("jwt: New called with an empty SecretKey; signing with an empty HMAC key is never valid (call Config.Validate to check configuration)")
+	signKey, signKeyID, verifyKeys, legacyKey, err := resolveKeyset(cfg)
+	if err != nil {
+		panic("jwt: New: " + err.Error() + " (call Config.Validate to check configuration)")
 	}
 	if cfg.RefreshLength == 0 {
 		cfg.RefreshLength = 32
@@ -114,7 +214,10 @@ func New[C any](cfg Config[C]) *Service[C] {
 	return &Service[C]{
 		store:          cfg.Store,
 		claimsProvider: cfg.ClaimsProvider,
-		secretKey:      []byte(cfg.SecretKey),
+		signingKey:     signKey,
+		signingKeyID:   signKeyID,
+		verifyKeys:     verifyKeys,
+		legacyKey:      legacyKey,
 		issuer:         cfg.Issuer,
 		accessTTL:      cfg.AccessTTL,
 		refreshTTL:     cfg.RefreshTTL,
@@ -158,7 +261,12 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, wrapper)
-	accessTokenStr, err := token.SignedString(s.secretKey)
+	// Tag the token with the active key id so verifiers can select the right key during a
+	// rollover. Legacy single-key mode leaves it empty, preserving the original (kid-less) format.
+	if s.signingKeyID != "" {
+		token.Header["kid"] = s.signingKeyID
+	}
+	accessTokenStr, err := token.SignedString(s.signingKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -295,16 +403,39 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 	return key, nil
 }
 
+// verificationKey is the jwt.Keyfunc selecting the HMAC key for a token. It pins the signing
+// method to HMAC (rejecting "none" and alg-confusion) and resolves the key by the "kid" header:
+// a tagged token must match a key in the verification set; a token with NO kid header (legacy,
+// or single-key mode) is verified with the legacy SecretKey. An unknown kid — or a present but
+// malformed kid (non-string, or empty) — is rejected outright rather than falling back to the
+// legacy key, so a present kid header can never be passed off as "kid-less".
+func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
+	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+	}
+	// A present kid header must be a non-empty string and must name a known key. Only a token
+	// that omits kid entirely may fall back to the legacy key.
+	if rawKid, present := token.Header["kid"]; present {
+		kid, ok := rawKid.(string)
+		if !ok || kid == "" {
+			return nil, errors.New("malformed kid header")
+		}
+		if key, ok := s.verifyKeys[kid]; ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("unknown signing key id %q", kid)
+	}
+	if s.legacyKey != nil {
+		return s.legacyKey, nil
+	}
+	return nil, errors.New("token has no kid and no legacy key is configured")
+}
+
 // VerifyAccessToken parses and validates an access token, returning its claims.
 func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
-	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return s.secretKey, nil
-	})
+	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey)
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
