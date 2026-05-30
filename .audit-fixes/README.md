@@ -55,13 +55,17 @@ Tick items as they are completed + tested. Delete `.audit-fixes/` once the work 
 
 ## Progress (branch fix/audit-completeness, per-item commits)
 - Critical:      3 / 4   (DONE: C1 DoS, C2 rate-limit, C3 change-password; C4 docs deferred to last)
-- Important:     6 / 19  (DONE: I1 otp handlers, I2 token CSRF, I3 enum-safety, I4 email normalize, I17 redaction, I18 jwt config-validate)
+- Important:    18 / 19  (DONE: I1-I18; only I19 tenant-consistency remains)
 - Nice-to-have:  0 / 11
-- **Total:       9 / 34**   — whole module builds + `go vet` clean; all touched-pkg tests green
+- **Total:      21 / 34**   — whole module builds + `go vet` clean; all tests green incl. pgx via testcontainers
 
-### Remaining important (13): I5 change-email, I6 account-deletion, I7 HIBP, I8 mailer,
-### I9 OIDC, I10 JWT key rotation, I11 audit hooks, I12 session refresh, I13 passkey
-### discoverable, I14 passkey Finish test, I15 step-up, I16 cleanup/GC, I19 tenant
-### consistency. (I18 has an identity/sessions/mfa constructor follow-up.)
+### Remaining important (1): I19 tenant enforcement consistency across backends (+ the
+### UpdateUserEmail empty-tenant follow-up). NOTE: I19 involves a genuine design fork —
+### "empty tenant = valid default single-tenant partition" vs "tenant required everywhere
+### (ErrTenantRequired)". The codebase today overwhelmingly treats "" as the default partition;
+### only otp-pgx SaveOTP and identity-pgx UpdateUserEmail are ErrTenantRequired outliers that
+### disagree with their memory backends. Resolution should pick a posture, make it uniform
+### across all stores+backends, document it, and add empty-tenant (useMultiTenant=false) contract
+### coverage. Surface this fork before implementing.
 ### Then all nice-to-haves (N1-N11), C4 docs, and feature-per-tenant-oidc.md.
-### Resume: read this file + the per-item git log on the branch.
+### Resume: read this file + the per-item git log on the branch (git log --oneline main..HEAD).
