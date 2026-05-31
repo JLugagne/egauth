@@ -1,6 +1,6 @@
-# Nice-to-have fixes (4 / 11)
+# Nice-to-have fixes (5 / 11)
 
-DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6).
+DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6), N11 (Store Ping seam — b60673a).
 
 Polish / maturity.
 
@@ -46,5 +46,6 @@ Polish / maturity.
 ## [ ] N10 — SemVer / CHANGELOG / stability statement
 **Where:** repo root. **Fix:** tag SemVer releases, add CHANGELOG, publish stability statement once API settles. (git tag -l empty today.)
 
-## [ ] N11 — Health / readiness / Store Ping seam
+## [x] N11 — Health / readiness / Store Ping seam — DONE (b60673a)
 **Where:** Store interfaces. **Fix:** optional `Ping`/`HealthCheck` on Store (or document pinging pgxpool directly). **Test:** Ping surfaces store connectivity.
+**DONE:** New `health` package exposing an optional `Pinger` interface (`Ping(ctx) error`), implemented on all six pgx Stores via a `SELECT 1` round-trip over the existing `DBQuerier` (works for `*pgxpool.Pool` and `pgx.Tx`; no extra pool handle needed by callers). Readiness probes type-assert `store.(health.Pinger)`. In-memory stores deliberately don't implement it (no unhealthy backend), so it stays optional, not part of core `Store`. Tested via testcontainers in sessions/pgx (nil while up, error once the pool is closed) + compile-time conformance assertions in the other five pgx packages.
