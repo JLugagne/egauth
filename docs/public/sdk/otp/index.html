@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/libauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=libauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Otp Module# package otp // import &#34;github.com/JLugagne/egauth/otp&#34; Package otp implements short numeric one-time passcodes (e.g. email or SMS OTP) for passwordless login, verification or step-up. It is deliberately DELIVERY-AGNOSTIC: egauth never sends anything. Issue returns a Challenge containing the plaintext code (and the data needed to compose the message); the application delivers it over whatever channel it likes and later calls Verify. Only the code&#39;s hash is stored, and verification is single-use and attempt-limited. It follows egauth&#39;s conventions — a Store interface (memory &#43; pgx implementations with a shared contract) and a Service for orchestration — and depends only on the standard library plus google/uuid. const DefaultDigits = 6 ... const DefaultMaxBodyBytes int64 = 4 &lt;&lt; 10 var ErrCodeNotFound = errors.New(&#34;otp: no matching code&#34;) ... func HashCode(code string) string func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) error, ...) http.HandlerFunc func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc type Challenge struct{ ... } type HandlerOption func(*handlerConfig) func WithCodeField(name string) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithMaxBodyBytes(n int64) HandlerOption func WithOnVerified(f func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)) HandlerOption func WithPurpose(purpose string) HandlerOption func WithPurposeResolver(f func(*http.Request) string) HandlerOption func WithSubjectResolver(f func(*http.Request) (uuid.UUID, bool)) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithTrustedOrigins(origins ...string) HandlerOption type OTP struct{ ... } type Option func(*StoreOptions) func WithTenant(id string) Option type Service interface{ ... } func NewService(store Store, opts ...ServiceOption) Service type ServiceOption func(*service) func WithClock(now func() time.Time) ServiceOption func WithDigits(n int) ServiceOption func WithMaxAttempts(n int) ServiceOption func WithTTL(d time.Duration) ServiceOption type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/libauth/sdk/otp/">
+	<meta property="og:site_name" content="libauth Documentation">
+	<meta property="og:title" content="Otp Module">
+	<meta property="og:description" content="Otp Module# package otp // import &#34;github.com/JLugagne/egauth/otp&#34; Package otp implements short numeric one-time passcodes (e.g. email or SMS OTP) for passwordless login, verification or step-up. It is deliberately DELIVERY-AGNOSTIC: egauth never sends anything. Issue returns a Challenge containing the plaintext code (and the data needed to compose the message); the application delivers it over whatever channel it likes and later calls Verify. Only the code&#39;s hash is stored, and verification is single-use and attempt-limited. It follows egauth&#39;s conventions — a Store interface (memory &#43; pgx implementations with a shared contract) and a Service for orchestration — and depends only on the standard library plus google/uuid. const DefaultDigits = 6 ... const DefaultMaxBodyBytes int64 = 4 &lt;&lt; 10 var ErrCodeNotFound = errors.New(&#34;otp: no matching code&#34;) ... func HashCode(code string) string func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) error, ...) http.HandlerFunc func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc type Challenge struct{ ... } type HandlerOption func(*handlerConfig) func WithCodeField(name string) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithMaxBodyBytes(n int64) HandlerOption func WithOnVerified(f func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)) HandlerOption func WithPurpose(purpose string) HandlerOption func WithPurposeResolver(f func(*http.Request) string) HandlerOption func WithSubjectResolver(f func(*http.Request) (uuid.UUID, bool)) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithTrustedOrigins(origins ...string) HandlerOption type OTP struct{ ... } type Option func(*StoreOptions) func WithTenant(id string) Option type Service interface{ ... } func NewService(store Store, opts ...ServiceOption) Service type ServiceOption func(*service) func WithClock(now func() time.Time) ServiceOption func WithDigits(n int) ServiceOption func WithMaxAttempts(n int) ServiceOption func WithTTL(d time.Duration) ServiceOption type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+		<meta property="article:section" content="sdk">
+
+
+	<meta itemprop="name" content="Otp Module">
+	<meta itemprop="description" content="Otp Module# package otp // import &#34;github.com/JLugagne/egauth/otp&#34; Package otp implements short numeric one-time passcodes (e.g. email or SMS OTP) for passwordless login, verification or step-up. It is deliberately DELIVERY-AGNOSTIC: egauth never sends anything. Issue returns a Challenge containing the plaintext code (and the data needed to compose the message); the application delivers it over whatever channel it likes and later calls Verify. Only the code&#39;s hash is stored, and verification is single-use and attempt-limited. It follows egauth&#39;s conventions — a Store interface (memory &#43; pgx implementations with a shared contract) and a Service for orchestration — and depends only on the standard library plus google/uuid. const DefaultDigits = 6 ... const DefaultMaxBodyBytes int64 = 4 &lt;&lt; 10 var ErrCodeNotFound = errors.New(&#34;otp: no matching code&#34;) ... func HashCode(code string) string func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) error, ...) http.HandlerFunc func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc type Challenge struct{ ... } type HandlerOption func(*handlerConfig) func WithCodeField(name string) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithMaxBodyBytes(n int64) HandlerOption func WithOnVerified(f func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)) HandlerOption func WithPurpose(purpose string) HandlerOption func WithPurposeResolver(f func(*http.Request) string) HandlerOption func WithSubjectResolver(f func(*http.Request) (uuid.UUID, bool)) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithTrustedOrigins(origins ...string) HandlerOption type OTP struct{ ... } type Option func(*StoreOptions) func WithTenant(id string) Option type Service interface{ ... } func NewService(store Store, opts ...ServiceOption) Service type ServiceOption func(*service) func WithClock(now func() time.Time) ServiceOption func WithDigits(n int) ServiceOption func WithMaxAttempts(n int) ServiceOption func WithTTL(d time.Duration) ServiceOption type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions">
+	<meta itemprop="wordCount" content="260">
+
+<title>Otp Module • libauth Documentation</title>
+<link rel="icon" href="/libauth/favicon.png" >
+<link rel="manifest" href="/libauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/libauth/sdk/otp/">
+<link rel="stylesheet" href="/libauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/libauth/en.search.min.7fc1996c6c6ec71be3a169639c69ed75cf0d6d909184f35fd342aa8f8565e157.js" integrity="sha256-f8GZbGxuxxvjoWljnGntdc8NbZCRhPNf00Kqj4Vl4Vc=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-sdk">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/libauth/"><span>libauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/libauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Otp Module</h3>
+
+  <label for="toc-control">
+    
+    <img src="/libauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents"></nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="otp-module">Otp Module<a class="anchor" href="#otp-module">#</a></h1>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#f92672">package</span> <span style="color:#a6e22e">otp</span> <span style="color:#75715e">// import &#34;github.com/JLugagne/egauth/otp&#34;</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">Package</span> <span style="color:#a6e22e">otp</span> <span style="color:#a6e22e">implements</span> <span style="color:#a6e22e">short</span> <span style="color:#a6e22e">numeric</span> <span style="color:#a6e22e">one</span><span style="color:#f92672">-</span><span style="color:#a6e22e">time</span> <span style="color:#a6e22e">passcodes</span> (<span style="color:#a6e22e">e</span>.<span style="color:#a6e22e">g</span>. <span style="color:#a6e22e">email</span> <span style="color:#a6e22e">or</span> <span style="color:#a6e22e">SMS</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">OTP</span>) <span style="color:#66d9ef">for</span> <span style="color:#a6e22e">passwordless</span> <span style="color:#a6e22e">login</span>, <span style="color:#a6e22e">verification</span> <span style="color:#a6e22e">or</span> <span style="color:#a6e22e">step</span><span style="color:#f92672">-</span><span style="color:#a6e22e">up</span>. <span style="color:#a6e22e">It</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">deliberately</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">DELIVERY</span><span style="color:#f92672">-</span><span style="color:#a6e22e">AGNOSTIC</span>: <span style="color:#a6e22e">egauth</span> <span style="color:#a6e22e">never</span> <span style="color:#a6e22e">sends</span> <span style="color:#a6e22e">anything</span>. <span style="color:#a6e22e">Issue</span> <span style="color:#a6e22e">returns</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">Challenge</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">containing</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">plaintext</span> <span style="color:#a6e22e">code</span> (<span style="color:#a6e22e">and</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">data</span> <span style="color:#a6e22e">needed</span> <span style="color:#a6e22e">to</span> <span style="color:#a6e22e">compose</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">message</span>);
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">the</span> <span style="color:#a6e22e">application</span> <span style="color:#a6e22e">delivers</span> <span style="color:#a6e22e">it</span> <span style="color:#a6e22e">over</span> <span style="color:#a6e22e">whatever</span> <span style="color:#a6e22e">channel</span> <span style="color:#a6e22e">it</span> <span style="color:#a6e22e">likes</span> <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">later</span> <span style="color:#a6e22e">calls</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">Verify</span>. <span style="color:#a6e22e">Only</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">code</span><span style="color:#960050;background-color:#1e0010">&#39;</span><span style="color:#a6e22e">s</span> <span style="color:#a6e22e">hash</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">stored</span>, <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">verification</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">single</span><span style="color:#f92672">-</span><span style="color:#a6e22e">use</span> <span style="color:#a6e22e">and</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">attempt</span><span style="color:#f92672">-</span><span style="color:#a6e22e">limited</span>.
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">It</span> <span style="color:#a6e22e">follows</span> <span style="color:#a6e22e">egauth</span><span style="color:#960050;background-color:#1e0010">&#39;</span><span style="color:#a6e22e">s</span> <span style="color:#a6e22e">conventions</span> <span style="color:#960050;background-color:#1e0010">—</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">Store</span> <span style="color:#66d9ef">interface</span> (<span style="color:#a6e22e">memory</span> <span style="color:#f92672">+</span> <span style="color:#a6e22e">pgx</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">implementations</span> <span style="color:#a6e22e">with</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">shared</span> <span style="color:#a6e22e">contract</span>) <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">Service</span> <span style="color:#66d9ef">for</span> <span style="color:#a6e22e">orchestration</span> <span style="color:#960050;background-color:#1e0010">—</span> <span style="color:#a6e22e">and</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">depends</span> <span style="color:#a6e22e">only</span> <span style="color:#a6e22e">on</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">standard</span> <span style="color:#a6e22e">library</span> <span style="color:#a6e22e">plus</span> <span style="color:#a6e22e">google</span><span style="color:#f92672">/</span><span style="color:#a6e22e">uuid</span>.
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#a6e22e">DefaultDigits</span> = <span style="color:#ae81ff">6</span> <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#a6e22e">DefaultMaxBodyBytes</span> <span style="color:#66d9ef">int64</span> = <span style="color:#ae81ff">4</span> <span style="color:#f92672">&lt;&lt;</span> <span style="color:#ae81ff">10</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">ErrCodeNotFound</span> = <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;otp: no matching code&#34;</span>) <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">HashCode</span>(<span style="color:#a6e22e">code</span> <span style="color:#66d9ef">string</span>) <span style="color:#66d9ef">string</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">IssueHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">deliver</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>, <span style="color:#a6e22e">ch</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Challenge</span>) <span style="color:#66d9ef">error</span>, <span style="color:#f92672">...</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">VerifyHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Challenge</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">HandlerOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">handlerConfig</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithCodeField</span>(<span style="color:#a6e22e">name</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithFailureRedirect</span>(<span style="color:#a6e22e">url</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithMaxBodyBytes</span>(<span style="color:#a6e22e">n</span> <span style="color:#66d9ef">int64</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithOnVerified</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">w</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">ResponseWriter</span>, <span style="color:#a6e22e">r</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>, <span style="color:#a6e22e">subjectID</span> <span style="color:#a6e22e">uuid</span>.<span style="color:#a6e22e">UUID</span>)) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithPurpose</span>(<span style="color:#a6e22e">purpose</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithPurposeResolver</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>) <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSubjectResolver</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>) (<span style="color:#a6e22e">uuid</span>.<span style="color:#a6e22e">UUID</span>, <span style="color:#66d9ef">bool</span>)) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSuccessRedirect</span>(<span style="color:#a6e22e">url</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTenantResolver</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>) <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTrustedOrigins</span>(<span style="color:#a6e22e">origins</span> <span style="color:#f92672">...</span><span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">OTP</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Option</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">StoreOptions</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTenant</span>(<span style="color:#a6e22e">id</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">Option</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Service</span> <span style="color:#66d9ef">interface</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewService</span>(<span style="color:#a6e22e">store</span> <span style="color:#a6e22e">Store</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">ServiceOption</span>) <span style="color:#a6e22e">Service</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">ServiceOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">service</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithClock</span>(<span style="color:#a6e22e">now</span> <span style="color:#66d9ef">func</span>() <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Time</span>) <span style="color:#a6e22e">ServiceOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithDigits</span>(<span style="color:#a6e22e">n</span> <span style="color:#66d9ef">int</span>) <span style="color:#a6e22e">ServiceOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithMaxAttempts</span>(<span style="color:#a6e22e">n</span> <span style="color:#66d9ef">int</span>) <span style="color:#a6e22e">ServiceOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTTL</span>(<span style="color:#a6e22e">d</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>) <span style="color:#a6e22e">ServiceOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Store</span> <span style="color:#66d9ef">interface</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">StoreOptions</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">ApplyOptions</span>(<span style="color:#a6e22e">opts</span> []<span style="color:#a6e22e">Option</span>) <span style="color:#a6e22e">StoreOptions</span></span></span></code></pre></div></article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents"></nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

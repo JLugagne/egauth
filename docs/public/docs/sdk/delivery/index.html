@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/egauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=egauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Email and OTP Delivery# egauth defines “seams” for delivery but deliberately does not fill them itself. It ships with a standard-library SMTP Mailer (satisfying identity.Mailer) and an OTP code Sender wired through an application-supplied contact-resolution seam.
+egauth never sends mail or SMS on its own. Delivery is application infrastructure. Instead, the identity flows hand a freshly minted token to the Mailer, and the OTP handler hands a Challenge to a deliver callback.
+">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/egauth/docs/sdk/delivery/">
+	<meta property="og:site_name" content="egauth Documentation">
+	<meta property="og:title" content="Email & OTP Delivery">
+	<meta property="og:description" content="Email and OTP Delivery# egauth defines “seams” for delivery but deliberately does not fill them itself. It ships with a standard-library SMTP Mailer (satisfying identity.Mailer) and an OTP code Sender wired through an application-supplied contact-resolution seam.
+egauth never sends mail or SMS on its own. Delivery is application infrastructure. Instead, the identity flows hand a freshly minted token to the Mailer, and the OTP handler hands a Challenge to a deliver callback.">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+		<meta property="article:section" content="docs">
+
+
+	<meta itemprop="name" content="Email & OTP Delivery">
+	<meta itemprop="description" content="Email and OTP Delivery# egauth defines “seams” for delivery but deliberately does not fill them itself. It ships with a standard-library SMTP Mailer (satisfying identity.Mailer) and an OTP code Sender wired through an application-supplied contact-resolution seam.
+egauth never sends mail or SMS on its own. Delivery is application infrastructure. Instead, the identity flows hand a freshly minted token to the Mailer, and the OTP handler hands a Challenge to a deliver callback.">
+	<meta itemprop="wordCount" content="321">
+
+<title>Email &amp; OTP Delivery • egauth Documentation</title>
+<link rel="icon" href="/egauth/favicon.png" >
+<link rel="manifest" href="/egauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/egauth/docs/sdk/delivery/">
+<link rel="stylesheet" href="/egauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/egauth/en.search.min.98244d28f4fdb91457d710b367bca5089278c904a3a66e9ac84c3a0ecc558233.js" integrity="sha256-mCRNKPT9uRRX1xCzZ7ylCJJ4yQSjpm6ayEw6DsxVgjM=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-docs">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/egauth/"><span>egauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/architecture/" class="">
+      Architecture</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <input type="checkbox" id="section-cc8824fdbd06f73849c4b533825bcdfa" class="toggle" checked />
+    <label for="section-cc8824fdbd06f73849c4b533825bcdfa" class="flex">
+      <a href="/egauth/docs/sdk/" class="">
+        SDK Usage Samples</a>
+      <img src="/egauth/icons/chevron-right.svg" class="book-icon" alt="Expand" />
+    </label>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/getting-started/" class="">
+      Getting Started</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tenants/" class="">
+      Tenants Configuration</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/identity-and-passwords/" class="">
+      Identity and Passwords</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tokens-and-http/" class="">
+      Tokens and HTTP Routing</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/sessions/" class="">
+      Stateful Sessions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/delivery/" class="active">
+      Email &amp; OTP Delivery</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/egauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Email &amp; OTP Delivery</h3>
+
+  <label for="toc-control">
+    
+    <img src="/egauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#setting-up-the-smtp-mailer">Setting up the SMTP Mailer</a></li>
+    <li><a href="#otp-over-sms">OTP over SMS</a></li>
+  </ul>
+</nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="email-and-otp-delivery">Email and OTP Delivery<a class="anchor" href="#email-and-otp-delivery">#</a></h1>
+<p><code>egauth</code> defines &ldquo;seams&rdquo; for delivery but deliberately does not fill them itself. It ships with a standard-library SMTP Mailer (satisfying <code>identity.Mailer</code>) and an OTP code Sender wired through an application-supplied contact-resolution seam.</p>
+<p><strong><code>egauth</code> never sends mail or SMS on its own.</strong> Delivery is application infrastructure. Instead, the identity flows hand a freshly minted token to the <code>Mailer</code>, and the OTP handler hands a Challenge to a deliver callback.</p>
+<h2 id="setting-up-the-smtp-mailer">Setting up the SMTP Mailer<a class="anchor" href="#setting-up-the-smtp-mailer">#</a></h2>
+<p>The <code>delivery.NewSMTPMailer</code> returns a mailer implementing <code>identity.Mailer</code> for password-reset, email-verification, magic-link, and change-email flows.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#f92672">import</span> <span style="color:#e6db74">&#34;github.com/JLugagne/egauth/delivery&#34;</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">mailer</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">NewSMTPMailer</span>(<span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">SMTPConfig</span>{
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Host</span>:     <span style="color:#e6db74">&#34;smtp.example.com&#34;</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Port</span>:     <span style="color:#ae81ff">587</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Username</span>: <span style="color:#e6db74">&#34;apikey&#34;</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Password</span>: <span style="color:#e6db74">&#34;secret_password&#34;</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">From</span>:     <span style="color:#e6db74">&#34;no-reply@example.com&#34;</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">FromName</span>: <span style="color:#e6db74">&#34;My App Security&#34;</span>,
+</span></span><span style="display:flex;"><span>}, <span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">WithLinks</span>(<span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">LinkConfig</span>{
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">PasswordReset</span>:     <span style="color:#e6db74">&#34;https://app.example.com/reset&#34;</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">EmailVerification</span>: <span style="color:#e6db74">&#34;https://app.example.com/verify&#34;</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">MagicLink</span>:         <span style="color:#e6db74">&#34;https://app.example.com/signin&#34;</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">EmailChange</span>:       <span style="color:#e6db74">&#34;https://app.example.com/confirm-email&#34;</span>,
+</span></span><span style="display:flex;"><span>}))
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// You can now pass this `mailer` to Identity HTTP handlers:</span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// identity.RequestPasswordResetHandler(svc, mailer, ...)</span></span></span></code></pre></div><p>The default messages are plain, provider-neutral text. You can override any of them by adding HTML, branding, or localization using <code>WithTemplate</code> on a <code>TemplateRenderer</code>, or replace the renderer entirely.</p>
+<h2 id="otp-over-sms">OTP over SMS<a class="anchor" href="#otp-over-sms">#</a></h2>
+<p><code>egauth</code> ships <strong>NO SMS Sender</strong>. Bundling one would mean a vendor dependency, an API key, and a billing relationship that does not belong in an auth library.</p>
+<p>Instead, SMS is a one-method seam. You implement the <code>Sender</code> interface against your provider (Twilio, AWS SNS, MessageBird) and pass it to <code>WithSMSSender</code>.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">twilioSender</span> <span style="color:#66d9ef">struct</span>{ 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">client</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">twilio</span>.<span style="color:#a6e22e">RestClient</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">from</span>   <span style="color:#66d9ef">string</span> 
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> (<span style="color:#a6e22e">t</span> <span style="color:#a6e22e">twilioSender</span>) <span style="color:#a6e22e">Send</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>, <span style="color:#a6e22e">phone</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">msg</span> <span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">Message</span>) <span style="color:#66d9ef">error</span> {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// POST the SMS; an SMS Sender uses msg.Text and ignores Subject/HTML.</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">return</span> <span style="color:#a6e22e">t</span>.<span style="color:#a6e22e">client</span>.<span style="color:#a6e22e">SendSMS</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">t</span>.<span style="color:#a6e22e">from</span>, <span style="color:#a6e22e">phone</span>, <span style="color:#a6e22e">msg</span>.<span style="color:#a6e22e">Text</span>)
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// Wire it up to the OTP Delivery builder</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">deliverFunc</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">OTPDelivery</span>(
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">myContactResolver</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">delivery</span>.<span style="color:#a6e22e">WithSMSSender</span>(<span style="color:#a6e22e">twilioSender</span>{<span style="color:#a6e22e">client</span>, <span style="color:#e6db74">&#34;+123456789&#34;</span>}),
+</span></span><span style="display:flex;"><span>)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// Pass `deliverFunc` to `otp.IssueHandler`</span></span></span></code></pre></div><blockquote class='book-hint '>
+<p><strong>Security Note:</strong> The <code>mfa</code> module intentionally excludes SMS as a TOTP/recovery factor due to SIM-swap vulnerabilities (per NIST SP 800-63B). The OTP-over-SMS path is intended for lower-assurance uses like initial phone verification or transactional codes, not for hardening a login as a second factor.</p>
+</blockquote></article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+<div class="flex flex-wrap justify-between">
+    <span>
+    
+      <a href="/egauth/docs/sdk/sessions/" class="flex align-center">
+        <img src="/egauth/icons/backward.svg" class="book-icon" alt="Backward" />
+        <span>Stateful Sessions</span>
+      </a>
+    
+    </span>
+    <span>
+    
+    </span>
+  </div>
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#setting-up-the-smtp-mailer">Setting up the SMTP Mailer</a></li>
+    <li><a href="#otp-over-sms">OTP over SMS</a></li>
+  </ul>
+</nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

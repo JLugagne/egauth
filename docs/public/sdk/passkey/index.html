@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/libauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=libauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Passkey Module# package passkey // import &#34;github.com/JLugagne/egauth/passkey&#34; Package passkey implements WebAuthn / FIDO2 passkeys (registration and login ceremonies) on top of the go-webauthn library, following egauth&#39;s conventions: a credential Store (memory &#43; pgx implementations with a shared contract), a Service that runs the ceremonies, and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is supplied via WithCookieKey and verified before the data is trusted), so the server stays stateless between the two calls without letting the client tamper with the challenge or the user-verification requirement. const DefaultSessionCookieName = &#34;passkey_ceremony&#34; ... var ErrNoCredentials = errors.New(&#34;passkey: no credentials registered&#34;) ... var ErrCredentialCloned = errors.New(&#34;passkey: authenticator signature counter regressed (possible clone)&#34;) func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc type Config struct{ ... } type Credential struct{ ... } type HandlerOption func(*handlerConfig) func WithCookieDomain(domain string) HandlerOption func WithCookieKey(key []byte) HandlerOption func WithInsecureCookies() HandlerOption func WithLoginSuccess(f LoginSuccessFunc) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithSessionCookieName(name string) HandlerOption func WithSessionTTL(d time.Duration) HandlerOption func WithUserResolver(r UserResolver) HandlerOption type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) type Option func(*StoreOptions) func WithTenant(id string) Option type Service struct{ ... } func NewService(store Store, cfg Config) (*Service, error) type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions type UserResolver func(r *http.Request) (userID uuid.UUID, name, displayName, tenant string, ok bool)">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/libauth/sdk/passkey/">
+	<meta property="og:site_name" content="libauth Documentation">
+	<meta property="og:title" content="Passkey Module">
+	<meta property="og:description" content="Passkey Module# package passkey // import &#34;github.com/JLugagne/egauth/passkey&#34; Package passkey implements WebAuthn / FIDO2 passkeys (registration and login ceremonies) on top of the go-webauthn library, following egauth&#39;s conventions: a credential Store (memory &#43; pgx implementations with a shared contract), a Service that runs the ceremonies, and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is supplied via WithCookieKey and verified before the data is trusted), so the server stays stateless between the two calls without letting the client tamper with the challenge or the user-verification requirement. const DefaultSessionCookieName = &#34;passkey_ceremony&#34; ... var ErrNoCredentials = errors.New(&#34;passkey: no credentials registered&#34;) ... var ErrCredentialCloned = errors.New(&#34;passkey: authenticator signature counter regressed (possible clone)&#34;) func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc type Config struct{ ... } type Credential struct{ ... } type HandlerOption func(*handlerConfig) func WithCookieDomain(domain string) HandlerOption func WithCookieKey(key []byte) HandlerOption func WithInsecureCookies() HandlerOption func WithLoginSuccess(f LoginSuccessFunc) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithSessionCookieName(name string) HandlerOption func WithSessionTTL(d time.Duration) HandlerOption func WithUserResolver(r UserResolver) HandlerOption type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) type Option func(*StoreOptions) func WithTenant(id string) Option type Service struct{ ... } func NewService(store Store, cfg Config) (*Service, error) type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions type UserResolver func(r *http.Request) (userID uuid.UUID, name, displayName, tenant string, ok bool)">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+		<meta property="article:section" content="sdk">
+
+
+	<meta itemprop="name" content="Passkey Module">
+	<meta itemprop="description" content="Passkey Module# package passkey // import &#34;github.com/JLugagne/egauth/passkey&#34; Package passkey implements WebAuthn / FIDO2 passkeys (registration and login ceremonies) on top of the go-webauthn library, following egauth&#39;s conventions: a credential Store (memory &#43; pgx implementations with a shared contract), a Service that runs the ceremonies, and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is supplied via WithCookieKey and verified before the data is trusted), so the server stays stateless between the two calls without letting the client tamper with the challenge or the user-verification requirement. const DefaultSessionCookieName = &#34;passkey_ceremony&#34; ... var ErrNoCredentials = errors.New(&#34;passkey: no credentials registered&#34;) ... var ErrCredentialCloned = errors.New(&#34;passkey: authenticator signature counter regressed (possible clone)&#34;) func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc type Config struct{ ... } type Credential struct{ ... } type HandlerOption func(*handlerConfig) func WithCookieDomain(domain string) HandlerOption func WithCookieKey(key []byte) HandlerOption func WithInsecureCookies() HandlerOption func WithLoginSuccess(f LoginSuccessFunc) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithSessionCookieName(name string) HandlerOption func WithSessionTTL(d time.Duration) HandlerOption func WithUserResolver(r UserResolver) HandlerOption type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) type Option func(*StoreOptions) func WithTenant(id string) Option type Service struct{ ... } func NewService(store Store, cfg Config) (*Service, error) type Store interface{ ... } type StoreOptions struct{ ... } func ApplyOptions(opts []Option) StoreOptions type UserResolver func(r *http.Request) (userID uuid.UUID, name, displayName, tenant string, ok bool)">
+	<meta itemprop="wordCount" content="245">
+
+<title>Passkey Module • libauth Documentation</title>
+<link rel="icon" href="/libauth/favicon.png" >
+<link rel="manifest" href="/libauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/libauth/sdk/passkey/">
+<link rel="stylesheet" href="/libauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/libauth/en.search.min.7fc1996c6c6ec71be3a169639c69ed75cf0d6d909184f35fd342aa8f8565e157.js" integrity="sha256-f8GZbGxuxxvjoWljnGntdc8NbZCRhPNf00Kqj4Vl4Vc=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-sdk">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/libauth/"><span>libauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/libauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Passkey Module</h3>
+
+  <label for="toc-control">
+    
+    <img src="/libauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents"></nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="passkey-module">Passkey Module<a class="anchor" href="#passkey-module">#</a></h1>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#f92672">package</span> <span style="color:#a6e22e">passkey</span> <span style="color:#75715e">// import &#34;github.com/JLugagne/egauth/passkey&#34;</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">Package</span> <span style="color:#a6e22e">passkey</span> <span style="color:#a6e22e">implements</span> <span style="color:#a6e22e">WebAuthn</span> <span style="color:#f92672">/</span> <span style="color:#a6e22e">FIDO2</span> <span style="color:#a6e22e">passkeys</span> (<span style="color:#a6e22e">registration</span> <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">login</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">ceremonies</span>) <span style="color:#a6e22e">on</span> <span style="color:#a6e22e">top</span> <span style="color:#a6e22e">of</span> <span style="color:#a6e22e">the</span> <span style="color:#66d9ef">go</span><span style="color:#f92672">-</span><span style="color:#a6e22e">webauthn</span> <span style="color:#a6e22e">library</span>, <span style="color:#a6e22e">following</span> <span style="color:#a6e22e">egauth</span><span style="color:#960050;background-color:#1e0010">&#39;</span><span style="color:#a6e22e">s</span> <span style="color:#a6e22e">conventions</span>:
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">a</span> <span style="color:#a6e22e">credential</span> <span style="color:#a6e22e">Store</span> (<span style="color:#a6e22e">memory</span> <span style="color:#f92672">+</span> <span style="color:#a6e22e">pgx</span> <span style="color:#a6e22e">implementations</span> <span style="color:#a6e22e">with</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">shared</span> <span style="color:#a6e22e">contract</span>),
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">a</span> <span style="color:#a6e22e">Service</span> <span style="color:#a6e22e">that</span> <span style="color:#a6e22e">runs</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">ceremonies</span>, <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">à</span><span style="color:#f92672">-</span><span style="color:#a6e22e">la</span><span style="color:#f92672">-</span><span style="color:#a6e22e">carte</span> <span style="color:#a6e22e">HTTP</span> <span style="color:#a6e22e">handlers</span>. <span style="color:#a6e22e">The</span> <span style="color:#a6e22e">ceremony</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">challenge</span> (<span style="color:#a6e22e">SessionData</span>) <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">carried</span> <span style="color:#a6e22e">between</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">Begin</span> <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">Finish</span> <span style="color:#a6e22e">steps</span> <span style="color:#a6e22e">in</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">a</span> <span style="color:#a6e22e">short</span><span style="color:#f92672">-</span><span style="color:#a6e22e">lived</span>, <span style="color:#a6e22e">HMAC</span><span style="color:#f92672">-</span><span style="color:#a6e22e">signed</span> <span style="color:#a6e22e">secure</span> <span style="color:#a6e22e">cookie</span> (<span style="color:#a6e22e">the</span> <span style="color:#a6e22e">signing</span> <span style="color:#a6e22e">key</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">supplied</span> <span style="color:#a6e22e">via</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">WithCookieKey</span> <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">verified</span> <span style="color:#a6e22e">before</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">data</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">trusted</span>), <span style="color:#a6e22e">so</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">server</span> <span style="color:#a6e22e">stays</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">stateless</span> <span style="color:#a6e22e">between</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">two</span> <span style="color:#a6e22e">calls</span> <span style="color:#a6e22e">without</span> <span style="color:#a6e22e">letting</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">client</span> <span style="color:#a6e22e">tamper</span> <span style="color:#a6e22e">with</span> <span style="color:#a6e22e">the</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">challenge</span> <span style="color:#a6e22e">or</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">user</span><span style="color:#f92672">-</span><span style="color:#a6e22e">verification</span> <span style="color:#a6e22e">requirement</span>.
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#a6e22e">DefaultSessionCookieName</span> = <span style="color:#e6db74">&#34;passkey_ceremony&#34;</span> <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">ErrNoCredentials</span> = <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;passkey: no credentials registered&#34;</span>) <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">ErrCredentialCloned</span> = <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;passkey: authenticator signature counter regressed (possible clone)&#34;</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">BeginLoginHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">BeginRegistrationHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">FinishLoginHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">FinishRegistrationHandler</span>(<span style="color:#a6e22e">svc</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Service</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Config</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Credential</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">HandlerOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">handlerConfig</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithCookieDomain</span>(<span style="color:#a6e22e">domain</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithCookieKey</span>(<span style="color:#a6e22e">key</span> []<span style="color:#66d9ef">byte</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithInsecureCookies</span>() <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithLoginSuccess</span>(<span style="color:#a6e22e">f</span> <span style="color:#a6e22e">LoginSuccessFunc</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSameSite</span>(<span style="color:#a6e22e">mode</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">SameSite</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSessionCookieName</span>(<span style="color:#a6e22e">name</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSessionTTL</span>(<span style="color:#a6e22e">d</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithUserResolver</span>(<span style="color:#a6e22e">r</span> <span style="color:#a6e22e">UserResolver</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">LoginSuccessFunc</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">w</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">ResponseWriter</span>, <span style="color:#a6e22e">r</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>, <span style="color:#a6e22e">userID</span> <span style="color:#a6e22e">uuid</span>.<span style="color:#a6e22e">UUID</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Option</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">StoreOptions</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTenant</span>(<span style="color:#a6e22e">id</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">Option</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Service</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">NewService</span>(<span style="color:#a6e22e">store</span> <span style="color:#a6e22e">Store</span>, <span style="color:#a6e22e">cfg</span> <span style="color:#a6e22e">Config</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">Service</span>, <span style="color:#66d9ef">error</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Store</span> <span style="color:#66d9ef">interface</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">StoreOptions</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">ApplyOptions</span>(<span style="color:#a6e22e">opts</span> []<span style="color:#a6e22e">Option</span>) <span style="color:#a6e22e">StoreOptions</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">UserResolver</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">r</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>) (<span style="color:#a6e22e">userID</span> <span style="color:#a6e22e">uuid</span>.<span style="color:#a6e22e">UUID</span>, <span style="color:#a6e22e">name</span>, <span style="color:#a6e22e">displayName</span>, <span style="color:#a6e22e">tenant</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">ok</span> <span style="color:#66d9ef">bool</span>)</span></span></code></pre></div></article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents"></nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

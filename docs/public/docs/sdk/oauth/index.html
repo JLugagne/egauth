@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/egauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=egauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Oauth Module# package oauth // import &#34;github.com/JLugagne/egauth/oauth&#34; Package oauth implements the OAuth2 authorization-code flow (with PKCE) as stateless, composable HTTP handlers. It ships ready-made Google, GitHub and Discord providers and a generic New constructor for any other compliant provider. Following egauth&#39;s philosophy the package is HTTP-decentralized (it exposes handler builders, not a router) and depends only on the standard library plus the egauth identity/tokens packages — no third-party OAuth SDK. const GoogleIssuer ... const DefaultStateCookieName = &#34;oauth_state&#34; ... var ErrExchangeFailed = errors.New(&#34;oauth: authorization code exchange failed&#34;) ... var ErrIDTokenInvalid = errors.New(&#34;oauth: id_token validation failed&#34;) ... func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], ...) http.HandlerFunc type AuthCodeOption func(*authCodeParams) func WithAuthNonce(nonce string) AuthCodeOption type ExchangeOption func(*exchangeParams) func WithExpectedNonce(nonce string) ExchangeOption type FetchUserFunc func(ctx context.Context, client *http.Client, accessToken string) (*UserInfo, error) type HandlerOption func(*handlerConfig) func WithAllowUnverifiedEmail() HandlerOption func WithCookieDomain(domain string) HandlerOption func WithCookies(c tokens.Cookies) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithInsecureCookies() HandlerOption func WithPersistentRefresh() HandlerOption func WithRedirectURL(rawURL string) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithStateCookieName(name string) HandlerOption func WithStateTTL(d time.Duration) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithoutPKCE() HandlerOption type IdentityLinker interface{ ... } type OIDCConfig struct{ ... } type Provider struct{ ... } func Discord(clientID, clientSecret string, opts ...ProviderOption) *Provider func GitHub(clientID, clientSecret string, opts ...ProviderOption) *Provider func Google(clientID, clientSecret string, opts ...ProviderOption) *Provider func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string, ...) *Provider type ProviderOption func(*Provider) func WithHTTPClient(c *http.Client) ProviderOption func WithOIDC(cfg OIDCConfig) ProviderOption func WithScopes(scopes ...string) ProviderOption type UserInfo struct{ ... }">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/egauth/docs/sdk/oauth/">
+	<meta property="og:site_name" content="egauth Documentation">
+	<meta property="og:title" content="Oauth Module">
+	<meta property="og:description" content="Oauth Module# package oauth // import &#34;github.com/JLugagne/egauth/oauth&#34; Package oauth implements the OAuth2 authorization-code flow (with PKCE) as stateless, composable HTTP handlers. It ships ready-made Google, GitHub and Discord providers and a generic New constructor for any other compliant provider. Following egauth&#39;s philosophy the package is HTTP-decentralized (it exposes handler builders, not a router) and depends only on the standard library plus the egauth identity/tokens packages — no third-party OAuth SDK. const GoogleIssuer ... const DefaultStateCookieName = &#34;oauth_state&#34; ... var ErrExchangeFailed = errors.New(&#34;oauth: authorization code exchange failed&#34;) ... var ErrIDTokenInvalid = errors.New(&#34;oauth: id_token validation failed&#34;) ... func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], ...) http.HandlerFunc type AuthCodeOption func(*authCodeParams) func WithAuthNonce(nonce string) AuthCodeOption type ExchangeOption func(*exchangeParams) func WithExpectedNonce(nonce string) ExchangeOption type FetchUserFunc func(ctx context.Context, client *http.Client, accessToken string) (*UserInfo, error) type HandlerOption func(*handlerConfig) func WithAllowUnverifiedEmail() HandlerOption func WithCookieDomain(domain string) HandlerOption func WithCookies(c tokens.Cookies) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithInsecureCookies() HandlerOption func WithPersistentRefresh() HandlerOption func WithRedirectURL(rawURL string) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithStateCookieName(name string) HandlerOption func WithStateTTL(d time.Duration) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithoutPKCE() HandlerOption type IdentityLinker interface{ ... } type OIDCConfig struct{ ... } type Provider struct{ ... } func Discord(clientID, clientSecret string, opts ...ProviderOption) *Provider func GitHub(clientID, clientSecret string, opts ...ProviderOption) *Provider func Google(clientID, clientSecret string, opts ...ProviderOption) *Provider func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string, ...) *Provider type ProviderOption func(*Provider) func WithHTTPClient(c *http.Client) ProviderOption func WithOIDC(cfg OIDCConfig) ProviderOption func WithScopes(scopes ...string) ProviderOption type UserInfo struct{ ... }">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+		<meta property="article:section" content="docs">
+
+
+	<meta itemprop="name" content="Oauth Module">
+	<meta itemprop="description" content="Oauth Module# package oauth // import &#34;github.com/JLugagne/egauth/oauth&#34; Package oauth implements the OAuth2 authorization-code flow (with PKCE) as stateless, composable HTTP handlers. It ships ready-made Google, GitHub and Discord providers and a generic New constructor for any other compliant provider. Following egauth&#39;s philosophy the package is HTTP-decentralized (it exposes handler builders, not a router) and depends only on the standard library plus the egauth identity/tokens packages — no third-party OAuth SDK. const GoogleIssuer ... const DefaultStateCookieName = &#34;oauth_state&#34; ... var ErrExchangeFailed = errors.New(&#34;oauth: authorization code exchange failed&#34;) ... var ErrIDTokenInvalid = errors.New(&#34;oauth: id_token validation failed&#34;) ... func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], ...) http.HandlerFunc type AuthCodeOption func(*authCodeParams) func WithAuthNonce(nonce string) AuthCodeOption type ExchangeOption func(*exchangeParams) func WithExpectedNonce(nonce string) ExchangeOption type FetchUserFunc func(ctx context.Context, client *http.Client, accessToken string) (*UserInfo, error) type HandlerOption func(*handlerConfig) func WithAllowUnverifiedEmail() HandlerOption func WithCookieDomain(domain string) HandlerOption func WithCookies(c tokens.Cookies) HandlerOption func WithFailureRedirect(url string) HandlerOption func WithInsecureCookies() HandlerOption func WithPersistentRefresh() HandlerOption func WithRedirectURL(rawURL string) HandlerOption func WithSameSite(mode http.SameSite) HandlerOption func WithStateCookieName(name string) HandlerOption func WithStateTTL(d time.Duration) HandlerOption func WithSuccessRedirect(url string) HandlerOption func WithTenantResolver(f func(*http.Request) string) HandlerOption func WithoutPKCE() HandlerOption type IdentityLinker interface{ ... } type OIDCConfig struct{ ... } type Provider struct{ ... } func Discord(clientID, clientSecret string, opts ...ProviderOption) *Provider func GitHub(clientID, clientSecret string, opts ...ProviderOption) *Provider func Google(clientID, clientSecret string, opts ...ProviderOption) *Provider func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string, ...) *Provider type ProviderOption func(*Provider) func WithHTTPClient(c *http.Client) ProviderOption func WithOIDC(cfg OIDCConfig) ProviderOption func WithScopes(scopes ...string) ProviderOption type UserInfo struct{ ... }">
+	<meta itemprop="wordCount" content="254">
+
+<title>Oauth Module • egauth Documentation</title>
+<link rel="icon" href="/egauth/favicon.png" >
+<link rel="manifest" href="/egauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/egauth/docs/sdk/oauth/">
+<link rel="stylesheet" href="/egauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/egauth/en.search.min.98244d28f4fdb91457d710b367bca5089278c904a3a66e9ac84c3a0ecc558233.js" integrity="sha256-mCRNKPT9uRRX1xCzZ7ylCJJ4yQSjpm6ayEw6DsxVgjM=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-docs">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/egauth/"><span>egauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/architecture/" class="">
+      Architecture</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <input type="checkbox" id="section-cc8824fdbd06f73849c4b533825bcdfa" class="toggle" checked />
+    <label for="section-cc8824fdbd06f73849c4b533825bcdfa" class="flex">
+      <a href="/egauth/docs/sdk/" class="">
+        SDK Usage Samples</a>
+      <img src="/egauth/icons/chevron-right.svg" class="book-icon" alt="Expand" />
+    </label>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/getting-started/" class="">
+      Getting Started</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tenants/" class="">
+      Tenants Configuration</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/identity-and-passwords/" class="">
+      Identity and Passwords</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tokens-and-http/" class="">
+      Tokens and HTTP Routing</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/delivery/" class="">
+      Delivery Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/event/" class="">
+      Event Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/health/" class="">
+      Health Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/identity/" class="">
+      Identity Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/mfa/" class="">
+      Mfa Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/oauth/" class="active">
+      Oauth Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/otp/" class="">
+      Otp Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/passkey/" class="">
+      Passkey Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/passwords/" class="">
+      Passwords Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/ratelimit/" class="">
+      Ratelimit Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/sessions/" class="">
+      Sessions Module</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tokens/" class="">
+      Tokens Module</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/egauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Oauth Module</h3>
+
+  <label for="toc-control">
+    
+    <img src="/egauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents"></nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="oauth-module">Oauth Module<a class="anchor" href="#oauth-module">#</a></h1>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#f92672">package</span> <span style="color:#a6e22e">oauth</span> <span style="color:#75715e">// import &#34;github.com/JLugagne/egauth/oauth&#34;</span>
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">Package</span> <span style="color:#a6e22e">oauth</span> <span style="color:#a6e22e">implements</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">OAuth2</span> <span style="color:#a6e22e">authorization</span><span style="color:#f92672">-</span><span style="color:#a6e22e">code</span> <span style="color:#a6e22e">flow</span> (<span style="color:#a6e22e">with</span> <span style="color:#a6e22e">PKCE</span>) <span style="color:#a6e22e">as</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">stateless</span>, <span style="color:#a6e22e">composable</span> <span style="color:#a6e22e">HTTP</span> <span style="color:#a6e22e">handlers</span>. <span style="color:#a6e22e">It</span> <span style="color:#a6e22e">ships</span> <span style="color:#a6e22e">ready</span><span style="color:#f92672">-</span><span style="color:#a6e22e">made</span> <span style="color:#a6e22e">Google</span>, <span style="color:#a6e22e">GitHub</span> <span style="color:#a6e22e">and</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">Discord</span> <span style="color:#a6e22e">providers</span> <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">generic</span> <span style="color:#a6e22e">New</span> <span style="color:#a6e22e">constructor</span> <span style="color:#66d9ef">for</span> <span style="color:#66d9ef">any</span> <span style="color:#a6e22e">other</span> <span style="color:#a6e22e">compliant</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">provider</span>. <span style="color:#a6e22e">Following</span> <span style="color:#a6e22e">egauth</span><span style="color:#960050;background-color:#1e0010">&#39;</span><span style="color:#a6e22e">s</span> <span style="color:#a6e22e">philosophy</span> <span style="color:#a6e22e">the</span> <span style="color:#f92672">package</span> <span style="color:#a6e22e">is</span> <span style="color:#a6e22e">HTTP</span><span style="color:#f92672">-</span><span style="color:#a6e22e">decentralized</span> (<span style="color:#a6e22e">it</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">exposes</span> <span style="color:#a6e22e">handler</span> <span style="color:#a6e22e">builders</span>, <span style="color:#a6e22e">not</span> <span style="color:#a6e22e">a</span> <span style="color:#a6e22e">router</span>) <span style="color:#a6e22e">and</span> <span style="color:#a6e22e">depends</span> <span style="color:#a6e22e">only</span> <span style="color:#a6e22e">on</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">standard</span> <span style="color:#a6e22e">library</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">plus</span> <span style="color:#a6e22e">the</span> <span style="color:#a6e22e">egauth</span> <span style="color:#a6e22e">identity</span><span style="color:#f92672">/</span><span style="color:#a6e22e">tokens</span> <span style="color:#a6e22e">packages</span> <span style="color:#960050;background-color:#1e0010">—</span> <span style="color:#a6e22e">no</span> <span style="color:#a6e22e">third</span><span style="color:#f92672">-</span><span style="color:#a6e22e">party</span> <span style="color:#a6e22e">OAuth</span> <span style="color:#a6e22e">SDK</span>.
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#a6e22e">GoogleIssuer</span> <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">const</span> <span style="color:#a6e22e">DefaultStateCookieName</span> = <span style="color:#e6db74">&#34;oauth_state&#34;</span> <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">ErrExchangeFailed</span> = <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;oauth: authorization code exchange failed&#34;</span>) <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">var</span> <span style="color:#a6e22e">ErrIDTokenInvalid</span> = <span style="color:#a6e22e">errors</span>.<span style="color:#a6e22e">New</span>(<span style="color:#e6db74">&#34;oauth: id_token validation failed&#34;</span>) <span style="color:#f92672">...</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">BeginHandler</span>(<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">HandlerOption</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">func</span> <span style="color:#a6e22e">CallbackHandler</span>[<span style="color:#a6e22e">C</span> <span style="color:#66d9ef">any</span>](<span style="color:#a6e22e">p</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>, <span style="color:#a6e22e">linker</span> <span style="color:#a6e22e">IdentityLinker</span>, <span style="color:#a6e22e">issuer</span> <span style="color:#a6e22e">tokens</span>.<span style="color:#a6e22e">Issuer</span>[<span style="color:#a6e22e">C</span>], <span style="color:#f92672">...</span>) <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">HandlerFunc</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">AuthCodeOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">authCodeParams</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithAuthNonce</span>(<span style="color:#a6e22e">nonce</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">AuthCodeOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">ExchangeOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">exchangeParams</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithExpectedNonce</span>(<span style="color:#a6e22e">nonce</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">ExchangeOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">FetchUserFunc</span> <span style="color:#66d9ef">func</span>(<span style="color:#a6e22e">ctx</span> <span style="color:#a6e22e">context</span>.<span style="color:#a6e22e">Context</span>, <span style="color:#a6e22e">client</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Client</span>, <span style="color:#a6e22e">accessToken</span> <span style="color:#66d9ef">string</span>) (<span style="color:#f92672">*</span><span style="color:#a6e22e">UserInfo</span>, <span style="color:#66d9ef">error</span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">HandlerOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">handlerConfig</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithAllowUnverifiedEmail</span>() <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithCookieDomain</span>(<span style="color:#a6e22e">domain</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithCookies</span>(<span style="color:#a6e22e">c</span> <span style="color:#a6e22e">tokens</span>.<span style="color:#a6e22e">Cookies</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithFailureRedirect</span>(<span style="color:#a6e22e">url</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithInsecureCookies</span>() <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithPersistentRefresh</span>() <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithRedirectURL</span>(<span style="color:#a6e22e">rawURL</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSameSite</span>(<span style="color:#a6e22e">mode</span> <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">SameSite</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithStateCookieName</span>(<span style="color:#a6e22e">name</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithStateTTL</span>(<span style="color:#a6e22e">d</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Duration</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithSuccessRedirect</span>(<span style="color:#a6e22e">url</span> <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithTenantResolver</span>(<span style="color:#a6e22e">f</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Request</span>) <span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithoutPKCE</span>() <span style="color:#a6e22e">HandlerOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">IdentityLinker</span> <span style="color:#66d9ef">interface</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">OIDCConfig</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">Provider</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">Discord</span>(<span style="color:#a6e22e">clientID</span>, <span style="color:#a6e22e">clientSecret</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">ProviderOption</span>) <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">GitHub</span>(<span style="color:#a6e22e">clientID</span>, <span style="color:#a6e22e">clientSecret</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">ProviderOption</span>) <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">Google</span>(<span style="color:#a6e22e">clientID</span>, <span style="color:#a6e22e">clientSecret</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">opts</span> <span style="color:#f92672">...</span><span style="color:#a6e22e">ProviderOption</span>) <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">New</span>(<span style="color:#a6e22e">name</span>, <span style="color:#a6e22e">clientID</span>, <span style="color:#a6e22e">clientSecret</span>, <span style="color:#a6e22e">authURL</span>, <span style="color:#a6e22e">tokenURL</span> <span style="color:#66d9ef">string</span>, <span style="color:#a6e22e">scopes</span> []<span style="color:#66d9ef">string</span>, <span style="color:#f92672">...</span>) <span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">ProviderOption</span> <span style="color:#66d9ef">func</span>(<span style="color:#f92672">*</span><span style="color:#a6e22e">Provider</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithHTTPClient</span>(<span style="color:#a6e22e">c</span> <span style="color:#f92672">*</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Client</span>) <span style="color:#a6e22e">ProviderOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithOIDC</span>(<span style="color:#a6e22e">cfg</span> <span style="color:#a6e22e">OIDCConfig</span>) <span style="color:#a6e22e">ProviderOption</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">func</span> <span style="color:#a6e22e">WithScopes</span>(<span style="color:#a6e22e">scopes</span> <span style="color:#f92672">...</span><span style="color:#66d9ef">string</span>) <span style="color:#a6e22e">ProviderOption</span>
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">type</span> <span style="color:#a6e22e">UserInfo</span> <span style="color:#66d9ef">struct</span>{ <span style="color:#f92672">...</span> }</span></span></code></pre></div></article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+<div class="flex flex-wrap justify-between">
+    <span>
+    
+      <a href="/egauth/docs/sdk/mfa/" class="flex align-center">
+        <img src="/egauth/icons/backward.svg" class="book-icon" alt="Backward" />
+        <span>Mfa Module</span>
+      </a>
+    
+    </span>
+    <span>
+    
+      <a href="/egauth/docs/sdk/otp/" class="flex align-center">
+        <span>Otp Module</span>
+        <img src="/egauth/icons/forward.svg" class="book-icon" alt="Forward" />
+      </a>
+    
+    </span>
+  </div>
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents"></nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

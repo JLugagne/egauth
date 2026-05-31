@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/libauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=libauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Architecture# libauth is designed with modularity in mind.
+Design Principles# State Isolation: Database access is encapsulated in respective modules via Store interfaces: identity (PostgreSQL): Long-term persistence for users, identities (Password, OAuth), and hashes. sessions and tokens (Redis, Postgres, Memory): Ephemeral or revocable states. passwords: Pure business logic (stateless). Decentralized HTTP: There is no monolithic http package. Each module exposes its own handler constructors (e.g., identity.LoginHandler(svc)). You mount only what you need, where you need it. Security by Default: Opaque tokens (Refresh Tokens, Sessions, API Keys) are never stored in plaintext in the database. Only a hash (e.g., SHA-256) is kept to prevent impersonation in case of a DB leak. Type Safety via Generics: Custom token claims are generically typed [C any]. Silent by Default: No forced internal logging. Systematic propagation of context.Context for future tracing (OpenTelemetry). Explicit Errors: Each module exposes its own sentinel errors (e.g., ErrUserNotFound, ErrTokenExpired). Project Structure# libauth/ ├── identity/ # Main stateful module │ ├── store.go # Store interface (CRUD) &#43; Options (WithTenant) │ ├── service.go # Service interface (orchestrates Identity &#43; Passwords) │ └── handlers.go # Builder funcs: LoginHandler, RegisterHandler... ├── sessions/ # Stateful (separated from tokens for Redis, etc.) │ ├── store.go # Store interface (stores session HASH) │ └── middleware.go # Session validation ├── tokens/ # Hybrid (JWT &#43; Store API Keys/Refresh) │ ├── token.go # Generic types TokenPair[C any], Claims[C any] │ └── store.go # Store interface (stores Refresh/APIKeys HASH) ├── passwords/ # PURE LOGIC (Stateless) │ ├── hasher.go # Hasher interface │ └── policy.go # Policy interface └── oauth/ # PURE LOGIC (Stateless orchestration)Advanced Features# Multi-tenancy# All stateful models include a TenantID field of type string. Isolation is managed via the Options pattern in Store calls (e.g., store.FindUserByEmail(ctx, email, identity.WithTenant(&#34;t1&#34;))).
+">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/libauth/architecture/">
+	<meta property="og:site_name" content="libauth Documentation">
+	<meta property="og:title" content="Architecture">
+	<meta property="og:description" content="Architecture# libauth is designed with modularity in mind.
+Design Principles# State Isolation: Database access is encapsulated in respective modules via Store interfaces: identity (PostgreSQL): Long-term persistence for users, identities (Password, OAuth), and hashes. sessions and tokens (Redis, Postgres, Memory): Ephemeral or revocable states. passwords: Pure business logic (stateless). Decentralized HTTP: There is no monolithic http package. Each module exposes its own handler constructors (e.g., identity.LoginHandler(svc)). You mount only what you need, where you need it. Security by Default: Opaque tokens (Refresh Tokens, Sessions, API Keys) are never stored in plaintext in the database. Only a hash (e.g., SHA-256) is kept to prevent impersonation in case of a DB leak. Type Safety via Generics: Custom token claims are generically typed [C any]. Silent by Default: No forced internal logging. Systematic propagation of context.Context for future tracing (OpenTelemetry). Explicit Errors: Each module exposes its own sentinel errors (e.g., ErrUserNotFound, ErrTokenExpired). Project Structure# libauth/ ├── identity/ # Main stateful module │ ├── store.go # Store interface (CRUD) &#43; Options (WithTenant) │ ├── service.go # Service interface (orchestrates Identity &#43; Passwords) │ └── handlers.go # Builder funcs: LoginHandler, RegisterHandler... ├── sessions/ # Stateful (separated from tokens for Redis, etc.) │ ├── store.go # Store interface (stores session HASH) │ └── middleware.go # Session validation ├── tokens/ # Hybrid (JWT &#43; Store API Keys/Refresh) │ ├── token.go # Generic types TokenPair[C any], Claims[C any] │ └── store.go # Store interface (stores Refresh/APIKeys HASH) ├── passwords/ # PURE LOGIC (Stateless) │ ├── hasher.go # Hasher interface │ └── policy.go # Policy interface └── oauth/ # PURE LOGIC (Stateless orchestration)Advanced Features# Multi-tenancy# All stateful models include a TenantID field of type string. Isolation is managed via the Options pattern in Store calls (e.g., store.FindUserByEmail(ctx, email, identity.WithTenant(&#34;t1&#34;))).">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+
+
+	<meta itemprop="name" content="Architecture">
+	<meta itemprop="description" content="Architecture# libauth is designed with modularity in mind.
+Design Principles# State Isolation: Database access is encapsulated in respective modules via Store interfaces: identity (PostgreSQL): Long-term persistence for users, identities (Password, OAuth), and hashes. sessions and tokens (Redis, Postgres, Memory): Ephemeral or revocable states. passwords: Pure business logic (stateless). Decentralized HTTP: There is no monolithic http package. Each module exposes its own handler constructors (e.g., identity.LoginHandler(svc)). You mount only what you need, where you need it. Security by Default: Opaque tokens (Refresh Tokens, Sessions, API Keys) are never stored in plaintext in the database. Only a hash (e.g., SHA-256) is kept to prevent impersonation in case of a DB leak. Type Safety via Generics: Custom token claims are generically typed [C any]. Silent by Default: No forced internal logging. Systematic propagation of context.Context for future tracing (OpenTelemetry). Explicit Errors: Each module exposes its own sentinel errors (e.g., ErrUserNotFound, ErrTokenExpired). Project Structure# libauth/ ├── identity/ # Main stateful module │ ├── store.go # Store interface (CRUD) &#43; Options (WithTenant) │ ├── service.go # Service interface (orchestrates Identity &#43; Passwords) │ └── handlers.go # Builder funcs: LoginHandler, RegisterHandler... ├── sessions/ # Stateful (separated from tokens for Redis, etc.) │ ├── store.go # Store interface (stores session HASH) │ └── middleware.go # Session validation ├── tokens/ # Hybrid (JWT &#43; Store API Keys/Refresh) │ ├── token.go # Generic types TokenPair[C any], Claims[C any] │ └── store.go # Store interface (stores Refresh/APIKeys HASH) ├── passwords/ # PURE LOGIC (Stateless) │ ├── hasher.go # Hasher interface │ └── policy.go # Policy interface └── oauth/ # PURE LOGIC (Stateless orchestration)Advanced Features# Multi-tenancy# All stateful models include a TenantID field of type string. Isolation is managed via the Options pattern in Store calls (e.g., store.FindUserByEmail(ctx, email, identity.WithTenant(&#34;t1&#34;))).">
+	<meta itemprop="wordCount" content="348">
+
+<title>Architecture • libauth Documentation</title>
+<link rel="icon" href="/libauth/favicon.png" >
+<link rel="manifest" href="/libauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/libauth/architecture/">
+<link rel="stylesheet" href="/libauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/libauth/en.search.min.7fc1996c6c6ec71be3a169639c69ed75cf0d6d909184f35fd342aa8f8565e157.js" integrity="sha256-f8GZbGxuxxvjoWljnGntdc8NbZCRhPNf00Kqj4Vl4Vc=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-page">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/libauth/"><span>libauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/libauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Architecture</h3>
+
+  <label for="toc-control">
+    
+    <img src="/libauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#design-principles">Design Principles</a></li>
+    <li><a href="#project-structure">Project Structure</a></li>
+    <li><a href="#advanced-features">Advanced Features</a>
+      <ul>
+        <li><a href="#multi-tenancy">Multi-tenancy</a></li>
+        <li><a href="#multi-provider-identities">Multi-provider Identities</a></li>
+        <li><a href="#soft-delete--anonymization">Soft Delete &amp; Anonymization</a></li>
+      </ul>
+    </li>
+  </ul>
+</nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="architecture">Architecture<a class="anchor" href="#architecture">#</a></h1>
+<p><code>libauth</code> is designed with modularity in mind.</p>
+<h2 id="design-principles">Design Principles<a class="anchor" href="#design-principles">#</a></h2>
+<ul>
+<li><strong>State Isolation:</strong> Database access is encapsulated in respective modules via <code>Store</code> interfaces:
+<ul>
+<li><code>identity</code> (PostgreSQL): Long-term persistence for users, identities (Password, OAuth), and hashes.</li>
+<li><code>sessions</code> and <code>tokens</code> (Redis, Postgres, Memory): Ephemeral or revocable states.</li>
+<li><code>passwords</code>: Pure business logic (stateless).</li>
+</ul>
+</li>
+<li><strong>Decentralized HTTP:</strong> There is no monolithic <code>http</code> package. Each module exposes its own handler constructors (e.g., <code>identity.LoginHandler(svc)</code>). You mount only what you need, where you need it.</li>
+<li><strong>Security by Default:</strong> Opaque tokens (Refresh Tokens, Sessions, API Keys) are <strong>never stored in plaintext</strong> in the database. Only a hash (e.g., SHA-256) is kept to prevent impersonation in case of a DB leak.</li>
+<li><strong>Type Safety via Generics:</strong> Custom token claims are generically typed <code>[C any]</code>.</li>
+<li><strong>Silent by Default:</strong> No forced internal logging. Systematic propagation of <code>context.Context</code> for future tracing (OpenTelemetry).</li>
+<li><strong>Explicit Errors:</strong> Each module exposes its own sentinel errors (e.g., <code>ErrUserNotFound</code>, <code>ErrTokenExpired</code>).</li>
+</ul>
+<h2 id="project-structure">Project Structure<a class="anchor" href="#project-structure">#</a></h2>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-text" data-lang="text"><span style="display:flex;"><span>libauth/
+</span></span><span style="display:flex;"><span>├── identity/                 # Main stateful module
+</span></span><span style="display:flex;"><span>│   ├── store.go              # Store interface (CRUD) + Options (WithTenant)
+</span></span><span style="display:flex;"><span>│   ├── service.go            # Service interface (orchestrates Identity + Passwords)
+</span></span><span style="display:flex;"><span>│   └── handlers.go           # Builder funcs: LoginHandler, RegisterHandler...
+</span></span><span style="display:flex;"><span>├── sessions/                 # Stateful (separated from tokens for Redis, etc.)
+</span></span><span style="display:flex;"><span>│   ├── store.go              # Store interface (stores session HASH)
+</span></span><span style="display:flex;"><span>│   └── middleware.go         # Session validation
+</span></span><span style="display:flex;"><span>├── tokens/                   # Hybrid (JWT + Store API Keys/Refresh)
+</span></span><span style="display:flex;"><span>│   ├── token.go              # Generic types TokenPair[C any], Claims[C any]
+</span></span><span style="display:flex;"><span>│   └── store.go              # Store interface (stores Refresh/APIKeys HASH)
+</span></span><span style="display:flex;"><span>├── passwords/                # PURE LOGIC (Stateless)
+</span></span><span style="display:flex;"><span>│   ├── hasher.go             # Hasher interface
+</span></span><span style="display:flex;"><span>│   └── policy.go             # Policy interface
+</span></span><span style="display:flex;"><span>└── oauth/                    # PURE LOGIC (Stateless orchestration)</span></span></code></pre></div><h2 id="advanced-features">Advanced Features<a class="anchor" href="#advanced-features">#</a></h2>
+<h3 id="multi-tenancy">Multi-tenancy<a class="anchor" href="#multi-tenancy">#</a></h3>
+<p>All stateful models include a <code>TenantID</code> field of type <code>string</code>.
+Isolation is managed via the <strong>Options pattern</strong> in Store calls (e.g., <code>store.FindUserByEmail(ctx, email, identity.WithTenant(&quot;t1&quot;))</code>).</p>
+<h3 id="multi-provider-identities">Multi-provider Identities<a class="anchor" href="#multi-provider-identities">#</a></h3>
+<p>Authentication is separated from the user account.
+<code>User</code> represents the account (ID, primary Email).
+<code>Identity</code> represents an authentication method linked to the user (e.g., &ldquo;password&rdquo;, &ldquo;google&rdquo;, &ldquo;github&rdquo;).</p>
+<h3 id="soft-delete--anonymization">Soft Delete &amp; Anonymization<a class="anchor" href="#soft-delete--anonymization">#</a></h3>
+<p>When a user is deleted via <code>identity.Store.DeleteUser</code>, the <code>DeletedAt</code> field is set, and the <strong>Email</strong> is anonymized to allow re-registration while maintaining referential integrity (GDPR compliant).</p>
+</article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#design-principles">Design Principles</a></li>
+    <li><a href="#project-structure">Project Structure</a></li>
+    <li><a href="#advanced-features">Advanced Features</a>
+      <ul>
+        <li><a href="#multi-tenancy">Multi-tenancy</a></li>
+        <li><a href="#multi-provider-identities">Multi-provider Identities</a></li>
+        <li><a href="#soft-delete--anonymization">Soft Delete &amp; Anonymization</a></li>
+      </ul>
+    </li>
+  </ul>
+</nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

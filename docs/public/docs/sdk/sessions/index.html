@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en-us" dir="ltr">
+<head><script src="/egauth/livereload.js?mindelay=10&amp;v=2&amp;port=1313&amp;path=egauth/livereload" data-no-instant defer></script>
+  <!--
+Made with Book Theme
+https://github.com/alex-shpak/hugo-book
+-->
+
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="Stateful Sessions# While the tokens module is excellent for stateless JWTs, many applications require stateful sessions (e.g., for immediate revocation, strict device tracking, or administrative dashboards).
+egauth provides a robust sessions module that handles opaque token generation, secure hashing at rest, and lifecycle management (creation, rotation, sliding expiration).
+Setting Up the Session Service# Just like other egauth modules, you instantiate a store (in-memory, Redis, or PostgreSQL) and pass it to the service.
+">
+<meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#2e3440">
+<meta name="color-scheme" content="light dark"><meta property="og:url" content="http://localhost:1313/egauth/docs/sdk/sessions/">
+	<meta property="og:site_name" content="egauth Documentation">
+	<meta property="og:title" content="Stateful Sessions">
+	<meta property="og:description" content="Stateful Sessions# While the tokens module is excellent for stateless JWTs, many applications require stateful sessions (e.g., for immediate revocation, strict device tracking, or administrative dashboards).
+egauth provides a robust sessions module that handles opaque token generation, secure hashing at rest, and lifecycle management (creation, rotation, sliding expiration).
+Setting Up the Session Service# Just like other egauth modules, you instantiate a store (in-memory, Redis, or PostgreSQL) and pass it to the service.">
+	<meta property="og:locale" content="en_us">
+	<meta property="og:type" content="article">
+		<meta property="article:section" content="docs">
+
+
+	<meta itemprop="name" content="Stateful Sessions">
+	<meta itemprop="description" content="Stateful Sessions# While the tokens module is excellent for stateless JWTs, many applications require stateful sessions (e.g., for immediate revocation, strict device tracking, or administrative dashboards).
+egauth provides a robust sessions module that handles opaque token generation, secure hashing at rest, and lifecycle management (creation, rotation, sliding expiration).
+Setting Up the Session Service# Just like other egauth modules, you instantiate a store (in-memory, Redis, or PostgreSQL) and pass it to the service.">
+	<meta itemprop="wordCount" content="368">
+
+<title>Stateful Sessions • egauth Documentation</title>
+<link rel="icon" href="/egauth/favicon.png" >
+<link rel="manifest" href="/egauth/manifest.json">
+<link rel="canonical" href="http://localhost:1313/egauth/docs/sdk/sessions/">
+<link rel="stylesheet" href="/egauth/book.min.98c83e4c8e1c8661368bcb29bbaf4dcc9d31b8164f76aae322d82d86a9750c65.css" integrity="sha256-mMg&#43;TI4chmE2i8spu69NzJ0xuBZPdqrjItgthql1DGU=" crossorigin="anonymous">
+
+
+  <script defer type="module" src="/egauth/en.search.min.98244d28f4fdb91457d710b367bca5089278c904a3a66e9ac84c3a0ecc558233.js" integrity="sha256-mCRNKPT9uRRX1xCzZ7ylCJJ4yQSjpm6ayEw6DsxVgjM=" crossorigin="anonymous"></script>
+
+  
+</head>
+<body dir="ltr" class="book-kind-page book-type-docs">
+  <input type="checkbox" class="hidden toggle" id="menu-control" />
+  <input type="checkbox" class="hidden toggle" id="toc-control" />
+  <main class="container flex">
+    
+<aside class="book-menu">
+  <div class="book-menu-content">
+    
+  <nav>
+<h2 class="book-brand">
+  <a class="flex align-center" href="/egauth/"><span>egauth Documentation</span>
+  </a>
+</h2>
+
+
+<div class="book-search hidden">
+  <input id="book-search-input" type="text" 
+    placeholder="Search"
+    aria-label="Search"
+    maxlength="64" />
+  <div class="book-search-spinner hidden"></div>
+  <ul id="book-search-results"></ul>
+</div>
+<script>document.querySelector(".book-search").classList.remove("hidden")</script>
+
+
+
+
+
+
+
+
+
+
+  
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/architecture/" class="">
+      Architecture</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <input type="checkbox" id="section-cc8824fdbd06f73849c4b533825bcdfa" class="toggle" checked />
+    <label for="section-cc8824fdbd06f73849c4b533825bcdfa" class="flex">
+      <a href="/egauth/docs/sdk/" class="">
+        SDK Usage Samples</a>
+      <img src="/egauth/icons/chevron-right.svg" class="book-icon" alt="Expand" />
+    </label>
+  
+
+          
+  <ul>
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/getting-started/" class="">
+      Getting Started</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tenants/" class="">
+      Tenants Configuration</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/identity-and-passwords/" class="">
+      Identity and Passwords</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/tokens-and-http/" class="">
+      Tokens and HTTP Routing</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/sessions/" class="active">
+      Stateful Sessions</a>
+  
+
+        </li>
+      
+    
+      
+        <li>
+          
+  
+  
+
+  
+    <a href="/egauth/docs/sdk/delivery/" class="">
+      Email &amp; OTP Delivery</a>
+  
+
+        </li>
+      
+    
+  </ul>
+
+        </li>
+      
+    
+  </ul>
+
+
+
+
+
+
+
+
+
+
+
+
+
+</nav>
+
+
+
+
+  <script>(function(){var e=document.querySelector("aside .book-menu-content");addEventListener("beforeunload",function(){localStorage.setItem("menu.scrollTop",e.scrollTop)}),e.scrollTop=localStorage.getItem("menu.scrollTop")})()</script>
+
+
+
+  </div>
+</aside>
+ 
+
+    <div class="book-page">
+      <header class="book-header hidden">
+        
+  <div class="flex align-center justify-between">
+  <label for="menu-control">
+    <img src="/egauth/icons/menu.svg" class="book-icon" alt="Menu" />
+  </label>
+
+  <h3>Stateful Sessions</h3>
+
+  <label for="toc-control">
+    
+    <img src="/egauth/icons/toc.svg" class="book-icon" alt="Table of Contents" />
+    
+  </label>
+</div>
+
+
+  
+  <aside class="hidden">
+    
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#setting-up-the-session-service">Setting Up the Session Service</a></li>
+    <li><a href="#creating-a-session">Creating a Session</a></li>
+    <li><a href="#validating-and-sliding-sessions">Validating and Sliding Sessions</a>
+      <ul>
+        <li><a href="#idle-timeout-touch">Idle Timeout (Touch)</a></li>
+      </ul>
+    </li>
+    <li><a href="#defeating-session-fixation-rotate">Defeating Session Fixation (Rotate)</a></li>
+  </ul>
+</nav>
+
+
+
+  </aside>
+  
+ 
+      </header>
+
+      
+      
+  <article class="markdown book-article"><h1 id="stateful-sessions">Stateful Sessions<a class="anchor" href="#stateful-sessions">#</a></h1>
+<p>While the <code>tokens</code> module is excellent for stateless JWTs, many applications require stateful sessions (e.g., for immediate revocation, strict device tracking, or administrative dashboards).</p>
+<p><code>egauth</code> provides a robust <code>sessions</code> module that handles opaque token generation, secure hashing at rest, and lifecycle management (creation, rotation, sliding expiration).</p>
+<h2 id="setting-up-the-session-service">Setting Up the Session Service<a class="anchor" href="#setting-up-the-session-service">#</a></h2>
+<p>Just like other <code>egauth</code> modules, you instantiate a store (in-memory, Redis, or PostgreSQL) and pass it to the service.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#f92672">import</span> (
+</span></span><span style="display:flex;"><span>    <span style="color:#e6db74">&#34;time&#34;</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#e6db74">&#34;github.com/JLugagne/egauth/sessions&#34;</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#e6db74">&#34;github.com/JLugagne/egauth/sessions/pgx&#34;</span> <span style="color:#75715e">// Assuming a PostgreSQL backend</span>
+</span></span><span style="display:flex;"><span>)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 1. Initialize the Session Store</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">sessionStore</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">pgx</span>.<span style="color:#a6e22e">NewStore</span>(<span style="color:#a6e22e">dbPool</span>)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// 2. Create the Session Service</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">sessionService</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sessions</span>.<span style="color:#a6e22e">NewService</span>(<span style="color:#a6e22e">sessionStore</span>)</span></span></code></pre></div><h2 id="creating-a-session">Creating a Session<a class="anchor" href="#creating-a-session">#</a></h2>
+<p>When a user logs in, you generate a new session. <code>egauth</code> will mint a secure, high-entropy token, return it to you in plaintext (to send to the client as a cookie), and store only the <strong>SHA-256 hash</strong> in the database.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#75715e">// Inside your login handler:</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">session</span>, <span style="color:#a6e22e">plaintextToken</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sessionService</span>.<span style="color:#a6e22e">CreateSession</span>(
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">ctx</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">authUser</span>.<span style="color:#a6e22e">ID</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#e6db74">&#34;tenant-abc&#34;</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">r</span>.<span style="color:#a6e22e">UserAgent</span>(), 
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">r</span>.<span style="color:#a6e22e">RemoteAddr</span>, 
+</span></span><span style="display:flex;"><span>    <span style="color:#ae81ff">24</span> <span style="color:#f92672">*</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Hour</span>, <span style="color:#75715e">// Session lifetime</span>
+</span></span><span style="display:flex;"><span>)
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Handle error</span>
+</span></span><span style="display:flex;"><span>}
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// Send plaintextToken to the user via a secure, HTTP-only cookie</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">SetCookie</span>(<span style="color:#a6e22e">w</span>, <span style="color:#f92672">&amp;</span><span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Cookie</span>{
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Name</span>:     <span style="color:#e6db74">&#34;session_id&#34;</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Value</span>:    <span style="color:#a6e22e">plaintextToken</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">HttpOnly</span>: <span style="color:#66d9ef">true</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Secure</span>:   <span style="color:#66d9ef">true</span>,
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">Path</span>:     <span style="color:#e6db74">&#34;/&#34;</span>,
+</span></span><span style="display:flex;"><span>})</span></span></code></pre></div><h2 id="validating-and-sliding-sessions">Validating and Sliding Sessions<a class="anchor" href="#validating-and-sliding-sessions">#</a></h2>
+<p>To protect routes with stateful sessions, you extract the token from the cookie and validate it.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#a6e22e">token</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">extractTokenFromCookie</span>(<span style="color:#a6e22e">r</span>)
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// Validate the session</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">session</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sessionService</span>.<span style="color:#a6e22e">ValidateSession</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">token</span>, <span style="color:#a6e22e">sessions</span>.<span style="color:#a6e22e">WithTenant</span>(<span style="color:#e6db74">&#34;tenant-abc&#34;</span>))
+</span></span><span style="display:flex;"><span><span style="color:#66d9ef">if</span> <span style="color:#a6e22e">err</span> <span style="color:#f92672">!=</span> <span style="color:#66d9ef">nil</span> {
+</span></span><span style="display:flex;"><span>    <span style="color:#75715e">// Session is invalid, expired, or doesn&#39;t exist</span>
+</span></span><span style="display:flex;"><span>    <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">Error</span>(<span style="color:#a6e22e">w</span>, <span style="color:#e6db74">&#34;Unauthorized&#34;</span>, <span style="color:#a6e22e">http</span>.<span style="color:#a6e22e">StatusUnauthorized</span>)
+</span></span><span style="display:flex;"><span>    <span style="color:#66d9ef">return</span>
+</span></span><span style="display:flex;"><span>}</span></span></code></pre></div><h3 id="idle-timeout-touch">Idle Timeout (Touch)<a class="anchor" href="#idle-timeout-touch">#</a></h3>
+<p>To implement an idle timeout (where active users stay logged in, but inactive users are logged out), use the <code>Touch</code> method. It slides the expiration time forward without altering the session token.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#75715e">// Slide the expiration to 30 minutes from now</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">session</span>, <span style="color:#a6e22e">err</span> = <span style="color:#a6e22e">sessionService</span>.<span style="color:#a6e22e">Touch</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">token</span>, <span style="color:#ae81ff">30</span> <span style="color:#f92672">*</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Minute</span>, <span style="color:#a6e22e">sessions</span>.<span style="color:#a6e22e">WithTenant</span>(<span style="color:#a6e22e">session</span>.<span style="color:#a6e22e">TenantID</span>))</span></span></code></pre></div><h2 id="defeating-session-fixation-rotate">Defeating Session Fixation (Rotate)<a class="anchor" href="#defeating-session-fixation-rotate">#</a></h2>
+<p>When a user&rsquo;s privileges change—such as stepping up with MFA, upgrading their role, or logging in from an anonymous session—you <strong>must</strong> rotate their session token to defeat session fixation attacks.</p>
+<div class="highlight"><pre tabindex="0" style="color:#f8f8f2;background-color:#272822;-moz-tab-size:4;-o-tab-size:4;tab-size:4;-webkit-text-size-adjust:none;"><code class="language-go" data-lang="go"><span style="display:flex;"><span><span style="color:#75715e">// Rotate invalidates the old token and returns a fresh one for the SAME logical session</span>
+</span></span><span style="display:flex;"><span><span style="color:#a6e22e">session</span>, <span style="color:#a6e22e">newPlaintextToken</span>, <span style="color:#a6e22e">err</span> <span style="color:#f92672">:=</span> <span style="color:#a6e22e">sessionService</span>.<span style="color:#a6e22e">Rotate</span>(<span style="color:#a6e22e">ctx</span>, <span style="color:#a6e22e">token</span>, <span style="color:#ae81ff">24</span> <span style="color:#f92672">*</span> <span style="color:#a6e22e">time</span>.<span style="color:#a6e22e">Hour</span>, <span style="color:#a6e22e">sessions</span>.<span style="color:#a6e22e">WithTenant</span>(<span style="color:#a6e22e">session</span>.<span style="color:#a6e22e">TenantID</span>))
+</span></span><span style="display:flex;"><span>
+</span></span><span style="display:flex;"><span><span style="color:#75715e">// Update the user&#39;s cookie with the new token</span></span></span></code></pre></div></article>
+ 
+      
+
+      <footer class="book-footer">
+        
+  <div class="flex flex-wrap justify-between">
+
+<div>
+
+</div>
+
+<div>
+
+</div>
+
+</div>
+
+<div class="flex flex-wrap justify-between">
+    <span>
+    
+      <a href="/egauth/docs/sdk/tokens-and-http/" class="flex align-center">
+        <img src="/egauth/icons/backward.svg" class="book-icon" alt="Backward" />
+        <span>Tokens and HTTP Routing</span>
+      </a>
+    
+    </span>
+    <span>
+    
+      <a href="/egauth/docs/sdk/delivery/" class="flex align-center">
+        <span>Email &amp; OTP Delivery</span>
+        <img src="/egauth/icons/forward.svg" class="book-icon" alt="Forward" />
+      </a>
+    
+    </span>
+  </div>
+
+ 
+        
+  
+  <div class="book-comments">
+
+</div>
+  
+ 
+        
+        
+  
+ 
+        
+  
+    <script>(function(){document.querySelectorAll("pre:has(code)").forEach(e=>{e.addEventListener("click",e.focus),e.addEventListener("copy",function(t){if(t.preventDefault(),navigator.clipboard){const t=window.getSelection().toString()||e.textContent;navigator.clipboard.writeText(t)}})})})()</script>
+  
+
+      </footer>
+
+      <label for="menu-control" class="hidden book-menu-overlay"></label>
+    </div>
+
+    
+  
+  <aside class="book-toc">
+    <div class="book-toc-content">
+      
+  
+<nav id="TableOfContents">
+  <ul>
+    <li><a href="#setting-up-the-session-service">Setting Up the Session Service</a></li>
+    <li><a href="#creating-a-session">Creating a Session</a></li>
+    <li><a href="#validating-and-sliding-sessions">Validating and Sliding Sessions</a>
+      <ul>
+        <li><a href="#idle-timeout-touch">Idle Timeout (Touch)</a></li>
+      </ul>
+    </li>
+    <li><a href="#defeating-session-fixation-rotate">Defeating Session Fixation (Rotate)</a></li>
+  </ul>
+</nav>
+
+
+
+    </div>
+  </aside>
+  
+ 
+  </main>
+
+  
+</body>
+</html>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
