@@ -1,5 +1,5 @@
 // Package pgxmigrate provides the shared migration runner used by every pgx-backed store in
-// libauth (sessions, identity, tokens, mfa, otp, passkey). Each store keeps its own embedded
+// egauth (sessions, identity, tokens, mfa, otp, passkey). Each store keeps its own embedded
 // migrations/*.sql directory and a one-line Migrate delegate; the versioning logic lives here
 // so it is defined and tested once.
 //

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/ratelimit"
+	"github.com/JLugagne/egauth/ratelimit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

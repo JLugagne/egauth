@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/mfa"
-	mfamemory "github.com/JLugagne/libauth/mfa/memory"
+	"github.com/JLugagne/egauth/mfa"
+	mfamemory "github.com/JLugagne/egauth/mfa/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

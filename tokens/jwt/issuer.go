@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/JLugagne/libauth/event"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 )

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

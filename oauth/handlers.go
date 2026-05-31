@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/tokens"
 )
 
 // Default state-cookie configuration.

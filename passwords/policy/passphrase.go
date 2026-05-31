@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 )
 
 // Passphrase-policy defaults aligned with NIST SP 800-63B.

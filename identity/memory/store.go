@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/egauth/identity"
 	"github.com/google/uuid"
 )
 

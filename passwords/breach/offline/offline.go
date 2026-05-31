@@ -18,7 +18,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 )
 
 // Checker reports a password as breached when its uppercase-hex SHA-1 is in the loaded set.

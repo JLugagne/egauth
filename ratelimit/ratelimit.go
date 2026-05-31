@@ -1,9 +1,9 @@
-// Package ratelimit provides a small, pluggable request-throttling seam for the libauth
+// Package ratelimit provides a small, pluggable request-throttling seam for the egauth
 // HTTP handlers and a dependency-free in-memory token-bucket reference implementation.
 //
 // Authentication endpoints (login, password-reset / magic-link / verification requests, and
 // OTP/TOTP verification) MUST be throttled to resist brute force, credential stuffing and
-// email-bombing (OWASP ASVS, NIST SP 800-63B). libauth keeps the policy pluggable: supply a
+// email-bombing (OWASP ASVS, NIST SP 800-63B). egauth keeps the policy pluggable: supply a
 // Limiter and wrap any http.Handler with Middleware, keyed per client IP and/or per account.
 //
 // The reference TokenBucket is process-local. For a multi-instance deployment back the

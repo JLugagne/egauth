@@ -16,8 +16,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

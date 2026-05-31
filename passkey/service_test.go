@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/passkey"
-	"github.com/JLugagne/libauth/passkey/memory"
+	"github.com/JLugagne/egauth/passkey"
+	"github.com/JLugagne/egauth/passkey/memory"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"

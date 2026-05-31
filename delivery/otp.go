@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/JLugagne/libauth/otp"
+	"github.com/JLugagne/egauth/otp"
 	"github.com/google/uuid"
 )
 
@@ -27,7 +27,7 @@ type Contact struct {
 }
 
 // ContactResolver maps an OTP subject (with its tenant and purpose) to a delivery Contact. It is
-// the application's seam: libauth stores only the opaque subject UUID for a challenge, so the
+// the application's seam: egauth stores only the opaque subject UUID for a challenge, so the
 // app must look up where the code should go. Returning an error aborts delivery; returning an
 // empty Contact means "no reachable address", which is also treated as an error.
 type ContactResolver interface {

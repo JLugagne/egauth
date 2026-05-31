@@ -3,7 +3,7 @@ package delivery
 import (
 	"testing"
 
-	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/egauth/identity"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

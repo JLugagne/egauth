@@ -3,7 +3,7 @@ package passwords
 import "context"
 
 // BreachChecker reports whether a candidate password appears in a corpus of known-compromised
-// credentials (a "have I been pwned"-style check). It is a HOOK: libauth ships no
+// credentials (a "have I been pwned"-style check). It is a HOOK: egauth ships no
 // implementation and makes no network calls of its own — the consumer wires one in.
 //
 // The canonical, privacy-preserving implementation is the k-anonymity range query (e.g.

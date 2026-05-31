@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	gojwt "github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -23,7 +23,7 @@ func keysetService(t *testing.T, keys []jwt.SigningKey, active string) *jwt.Serv
 	t.Helper()
 	return jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          memory.NewStore[struct{}](),
-		Issuer:         "libauth-test",
+		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     24 * time.Hour,
 		ClaimsProvider: okProvider(t),
@@ -114,7 +114,7 @@ func TestKeyset_LegacyTokenVerifiesAfterEnablingRotation(t *testing.T) {
 	svcLegacy := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          memory.NewStore[struct{}](),
 		SecretKey:      oldSecret,
-		Issuer:         "libauth-test",
+		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     24 * time.Hour,
 		ClaimsProvider: okProvider(t),
@@ -129,7 +129,7 @@ func TestKeyset_LegacyTokenVerifiesAfterEnablingRotation(t *testing.T) {
 		SecretKey:      oldSecret, // kept as legacy verifier
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}},
 		ActiveKeyID:    "k-new",
-		Issuer:         "libauth-test",
+		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     24 * time.Hour,
 		ClaimsProvider: okProvider(t),
@@ -150,7 +150,7 @@ func TestKeyset_KidlessTokenRejectedWithoutLegacyKey(t *testing.T) {
 	ctx := context.Background()
 	// Legacy token (no kid).
 	svcLegacy := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store: memory.NewStore[struct{}](), SecretKey: oldSecret, Issuer: "libauth-test",
+		Store: memory.NewStore[struct{}](), SecretKey: oldSecret, Issuer: "egauth-test",
 		AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour, ClaimsProvider: okProvider(t),
 	})
 	legacyPair, err := svcLegacy.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
@@ -168,7 +168,7 @@ func TestKeyset_RotateRefreshAcrossKeyChange(t *testing.T) {
 
 	// Issue under the old active key.
 	svcOld := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store: store, Issuer: "libauth-test", AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour,
+		Store: store, Issuer: "egauth-test", AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour,
 		ClaimsProvider: okProvider(t),
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}}, ActiveKeyID: "k-old",
 	})
@@ -178,7 +178,7 @@ func TestKeyset_RotateRefreshAcrossKeyChange(t *testing.T) {
 	// Same store, key rolled to new. Rotating the (opaque) refresh token yields a pair signed
 	// with the new key, and the rotation family is preserved.
 	svcNew := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store: store, Issuer: "libauth-test", AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour,
+		Store: store, Issuer: "egauth-test", AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour,
 		ClaimsProvider: okProvider(t),
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}, {KeyID: "k-new", Secret: newSecret}},
 		ActiveKeyID:    "k-new",
@@ -198,7 +198,7 @@ func TestKeyset_MalformedKidRejected(t *testing.T) {
 		SecretKey:      oldSecret, // legacy verifier present
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}},
 		ActiveKeyID:    "k-new",
-		Issuer:         "libauth-test",
+		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     24 * time.Hour,
 		ClaimsProvider: okProvider(t),
@@ -210,7 +210,7 @@ func TestKeyset_MalformedKidRejected(t *testing.T) {
 	makeToken := func(kid any) string {
 		claims := gojwt.MapClaims{
 			"sub": uuid.New().String(),
-			"iss": "libauth-test",
+			"iss": "egauth-test",
 			"exp": float64(time.Now().Add(time.Hour).Unix()),
 			"iat": float64(time.Now().Add(-time.Minute).Unix()),
 		}
@@ -234,7 +234,7 @@ func TestKeyset_MalformedKidRejected(t *testing.T) {
 func TestNew_PanicsOnMalformedKeyset(t *testing.T) {
 	base := func(keys []jwt.SigningKey, active string) jwt.Config[struct{}] {
 		return jwt.Config[struct{}]{
-			Store: memory.NewStore[struct{}](), Issuer: "libauth-test",
+			Store: memory.NewStore[struct{}](), Issuer: "egauth-test",
 			AccessTTL: time.Minute, RefreshTTL: time.Hour, SigningKeys: keys, ActiveKeyID: active,
 		}
 	}
@@ -258,7 +258,7 @@ func TestNew_PanicsOnMalformedKeyset(t *testing.T) {
 
 func TestValidate_Keyset(t *testing.T) {
 	good := jwt.Config[struct{}]{
-		Issuer: "libauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
+		Issuer: "egauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
 		SigningKeys: []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, ActiveKeyID: "k-new",
 	}
 	require.NoError(t, good.Validate())

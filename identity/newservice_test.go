@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/JLugagne/libauth/identity"
-	identitymemory "github.com/JLugagne/libauth/identity/memory"
-	"github.com/JLugagne/libauth/passwords/hashertest"
+	"github.com/JLugagne/egauth/identity"
+	identitymemory "github.com/JLugagne/egauth/identity/memory"
+	"github.com/JLugagne/egauth/passwords/hashertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

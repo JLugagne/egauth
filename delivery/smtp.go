@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/egauth/identity"
 )
 
 // TLSMode selects how the SMTP connection is secured.

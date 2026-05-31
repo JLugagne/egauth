@@ -11,7 +11,7 @@ import (
 type Service interface {
 	// Issue mints a fresh code for the subject+purpose (replacing any outstanding one) and
 	// returns the Challenge — including the plaintext Code — for the application to deliver.
-	// libauth does not send anything.
+	// egauth does not send anything.
 	Issue(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) (*Challenge, error)
 	// Verify checks a presented code: single-use on success, attempt-limited on failure.
 	// Returns ErrInvalidCode, ErrCodeNotFound or ErrTooManyAttempts.

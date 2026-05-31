@@ -5,12 +5,12 @@ import (
 	"errors"
 	"time"
 
-	"github.com/JLugagne/libauth/event"
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
 // DefaultIssuer labels credentials in the authenticator app when none is configured.
-const DefaultIssuer = "libauth"
+const DefaultIssuer = "egauth"
 
 // Enrollment is returned when starting TOTP enrollment: the shared secret and the otpauth URI
 // to render as a QR code. Both must be shown to the user only during enrollment.
@@ -58,7 +58,7 @@ type service struct {
 // ServiceOption configures the MFA Service.
 type ServiceOption func(*service)
 
-// WithIssuer sets the issuer label shown in the authenticator app (default "libauth").
+// WithIssuer sets the issuer label shown in the authenticator app (default "egauth").
 func WithIssuer(issuer string) ServiceOption { return func(s *service) { s.issuer = issuer } }
 
 // WithDigits sets the number of TOTP digits (default 6).

@@ -5,7 +5,7 @@
 // match is resolved locally. The full password and full hash never leave the process.
 //
 // SHA-1 is used solely because the HIBP API is defined in terms of it; it is not a security
-// choice by libauth.
+// choice by egauth.
 //
 // Failure posture: by default IsBreached returns the upstream error (network failure, non-200,
 // malformed body). Wired into a passwords.Policy that propagates the error, this fails CLOSED —
@@ -26,12 +26,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 )
 
 const (
 	defaultBaseURL   = "https://api.pwnedpasswords.com"
-	defaultUserAgent = "libauth-hibp"
+	defaultUserAgent = "egauth-hibp"
 	defaultTimeout   = 10 * time.Second
 	// maxResponseBytes caps the range response. Real responses are tens of KB even with padding;
 	// the cap defends against a misbehaving/hostile endpoint streaming unbounded data.

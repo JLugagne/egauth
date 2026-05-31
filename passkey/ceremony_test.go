@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/JLugagne/libauth/passkey"
+	"github.com/JLugagne/egauth/passkey"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/sessions/pgx"
-	"github.com/JLugagne/libauth/sessions/storetest"
+	"github.com/JLugagne/egauth/sessions/pgx"
+	"github.com/JLugagne/egauth/sessions/storetest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"

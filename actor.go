@@ -1,4 +1,4 @@
-package libauth
+package egauth
 
 import (
 	"github.com/google/uuid"

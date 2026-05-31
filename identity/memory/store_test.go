@@ -3,8 +3,8 @@ package memory_test
 import (
 	"testing"
 
-	"github.com/JLugagne/libauth/identity/memory"
-	"github.com/JLugagne/libauth/identity/storetest"
+	"github.com/JLugagne/egauth/identity/memory"
+	"github.com/JLugagne/egauth/identity/storetest"
 )
 
 func TestStoreContract(t *testing.T) {

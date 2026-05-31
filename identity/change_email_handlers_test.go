@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/identity/servicetest"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/identity/servicetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )

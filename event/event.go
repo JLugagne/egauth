@@ -1,4 +1,4 @@
-// Package event defines libauth's optional security-event seam. Services emit lifecycle and
+// Package event defines egauth's optional security-event seam. Services emit lifecycle and
 // security events — login success/failure, account lockout, refresh-token reuse, MFA changes,
 // delivery failures, ... — to a Sink the application supplies. It is entirely optional (a nil
 // Sink disables emission) and dependency-free, so any module can emit without coupling to a
@@ -22,7 +22,7 @@ import (
 // Type identifies a security or lifecycle event.
 type Type string
 
-// The event types libauth emits.
+// The event types egauth emits.
 const (
 	LoginSucceeded        Type = "login.succeeded"
 	LoginFailed           Type = "login.failed"
@@ -125,7 +125,7 @@ func (s *slogSink) EmitEvent(ctx context.Context, e Event) {
 	if e.Err != nil {
 		attrs = append(attrs, slog.Any("error", e.Err))
 	}
-	s.logger.LogAttrs(ctx, levelFor(e), "libauth security event", attrs...)
+	s.logger.LogAttrs(ctx, levelFor(e), "egauth security event", attrs...)
 }
 
 func levelFor(e Event) slog.Level {

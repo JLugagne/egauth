@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/event"
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -43,7 +43,7 @@ func TestJWTEvents_ReuseDetectedAndFamilyRevoked(t *testing.T) {
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:            memory.NewStore[struct{}](),
 		SecretKey:        "rotation-secret-aaaaaaaaaaaaaaaaaaaaaaaa",
-		Issuer:           "libauth-test",
+		Issuer:           "egauth-test",
 		AccessTTL:        5 * time.Minute,
 		RefreshTTL:       24 * time.Hour,
 		ClaimsProvider:   okProvider(t),

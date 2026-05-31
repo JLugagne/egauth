@@ -105,7 +105,7 @@ func CompareVerifier(verifierHash, verifier string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(verifierHash)) == 1
 }
 
-// Mailer delivers verification credentials to a user. libauth never sends email itself (a
+// Mailer delivers verification credentials to a user. egauth never sends email itself (a
 // non-objective in the PRD); it only defines this interface so the HTTP request handlers can
 // hand a freshly minted token to the application's delivery mechanism. Implementations
 // receive the plaintext token and MUST treat it as a credential (embed it in a link/code,

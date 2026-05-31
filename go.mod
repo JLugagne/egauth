@@ -1,4 +1,4 @@
-module github.com/JLugagne/libauth
+module github.com/JLugagne/egauth
 
 go 1.26.3
 

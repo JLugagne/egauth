@@ -1,6 +1,6 @@
 // Package mfa implements multi-factor authentication: time-based one-time passwords (TOTP,
 // RFC 6238 / RFC 4226) for authenticator apps, and single-use recovery codes. It follows
-// libauth's conventions — a stateful Store interface (memory + pgx implementations, a shared
+// egauth's conventions — a stateful Store interface (memory + pgx implementations, a shared
 // contract suite), a stateless-ish Service for orchestration, and à-la-carte HTTP handlers —
 // and depends only on the standard library plus google/uuid.
 //

@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/passwords/breach/hibp"
+	"github.com/JLugagne/egauth/passwords"
+	"github.com/JLugagne/egauth/passwords/breach/hibp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

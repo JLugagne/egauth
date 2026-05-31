@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 	"golang.org/x/crypto/argon2"
 )
 

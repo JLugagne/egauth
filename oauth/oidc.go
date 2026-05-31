@@ -303,7 +303,7 @@ func lookupKey(keys map[string]crypto.PublicKey, kid string) (crypto.PublicKey, 
 	return k, nil
 }
 
-// jwk is a single JSON Web Key (the subset libauth understands: RSA and EC signing keys).
+// jwk is a single JSON Web Key (the subset egauth understands: RSA and EC signing keys).
 type jwk struct {
 	Kty string `json:"kty"`
 	Kid string `json:"kid"`

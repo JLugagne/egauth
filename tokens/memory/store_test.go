@@ -3,7 +3,7 @@ package memory
 import (
 	"testing"
 
-	"github.com/JLugagne/libauth/tokens/storetest"
+	"github.com/JLugagne/egauth/tokens/storetest"
 )
 
 type CustomClaims struct {

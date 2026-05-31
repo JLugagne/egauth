@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JLugagne/libauth/otp"
+	"github.com/JLugagne/egauth/otp"
 	"github.com/google/uuid"
 )
 

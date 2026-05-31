@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/sessions"
-	"github.com/JLugagne/libauth/sessions/storetest"
+	"github.com/JLugagne/egauth/sessions"
+	"github.com/JLugagne/egauth/sessions/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

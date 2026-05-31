@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/issuertest"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/storetest"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,7 +52,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 	cfg := jwt.Config[MyCustomClaims]{
 		Store:      mockStore,
 		SecretKey:  "super-secret-key-for-testing",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 	}

@@ -3,8 +3,8 @@ package sessions_test
 import (
 	"testing"
 
-	"github.com/JLugagne/libauth/sessions"
-	"github.com/JLugagne/libauth/sessions/memory"
+	"github.com/JLugagne/egauth/sessions"
+	"github.com/JLugagne/egauth/sessions/memory"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

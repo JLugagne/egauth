@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/mfa"
-	"github.com/JLugagne/libauth/mfa/memory"
+	"github.com/JLugagne/egauth/mfa"
+	"github.com/JLugagne/egauth/mfa/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

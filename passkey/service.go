@@ -138,7 +138,7 @@ func (s *Service) BeginDiscoverableLogin() (*protocol.CredentialAssertion, *weba
 }
 
 // FinishDiscoverableLogin verifies a usernameless assertion. It resolves the account from the
-// credential's user handle (the account UUID libauth set as the WebAuthn ID), verifies the
+// credential's user handle (the account UUID egauth set as the WebAuthn ID), verifies the
 // assertion against that account's credentials, updates the signature counter (rejecting a
 // regressed counter as a possible clone) and returns the credential used together with the
 // resolved user ID.
@@ -216,7 +216,7 @@ func toStored(userID uuid.UUID, cred *webauthn.Credential) (*Credential, error) 
 	}, nil
 }
 
-// waUser adapts a libauth user to the go-webauthn User interface. The WebAuthn user handle is
+// waUser adapts a egauth user to the go-webauthn User interface. The WebAuthn user handle is
 // the account's UUID bytes (opaque, stable, not displayed).
 type waUser struct {
 	id          uuid.UUID

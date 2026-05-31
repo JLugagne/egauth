@@ -5,9 +5,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/JLugagne/libauth/passwords"
-	argon2hasher "github.com/JLugagne/libauth/passwords/argon2"
-	"github.com/JLugagne/libauth/passwords/hashertest"
+	"github.com/JLugagne/egauth/passwords"
+	argon2hasher "github.com/JLugagne/egauth/passwords/argon2"
+	"github.com/JLugagne/egauth/passwords/hashertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/stretchr/testify/assert"
 )
 

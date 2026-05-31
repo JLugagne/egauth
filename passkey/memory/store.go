@@ -8,7 +8,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/JLugagne/libauth/passkey"
+	"github.com/JLugagne/egauth/passkey"
 	"github.com/google/uuid"
 )
 

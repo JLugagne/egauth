@@ -1,8 +1,8 @@
 // Package oauth implements the OAuth2 authorization-code flow (with PKCE) as stateless,
 // composable HTTP handlers. It ships ready-made Google, GitHub and Discord providers and a
-// generic New constructor for any other compliant provider. Following libauth's philosophy
+// generic New constructor for any other compliant provider. Following egauth's philosophy
 // the package is HTTP-decentralized (it exposes handler builders, not a router) and depends
-// only on the standard library plus the libauth identity/tokens packages — no third-party
+// only on the standard library plus the egauth identity/tokens packages — no third-party
 // OAuth SDK.
 package oauth
 
@@ -151,7 +151,7 @@ func (p *Provider) AuthCodeURL(state, redirectURI, codeChallenge string, opts ..
 	return p.authURL + sep + v.Encode()
 }
 
-// tokenResponse is the subset of the token-endpoint response libauth uses.
+// tokenResponse is the subset of the token-endpoint response egauth uses.
 type tokenResponse struct {
 	AccessToken string `json:"access_token"`
 	TokenType   string `json:"token_type"`
@@ -241,7 +241,7 @@ func getJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, ds
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "libauth")
+	req.Header.Set("User-Agent", "egauth")
 
 	resp, err := c.Do(req)
 	if err != nil {

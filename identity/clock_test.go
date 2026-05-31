@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/identity/storetest"
-	"github.com/JLugagne/libauth/passwords/hashertest"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/identity/storetest"
+	"github.com/JLugagne/egauth/passwords/hashertest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

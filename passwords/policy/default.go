@@ -6,7 +6,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 )
 
 // DefaultPolicy enforces standard password complexity rules.

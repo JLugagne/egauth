@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/issuertest"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +23,7 @@ func newRotator(t *testing.T) (*jwt.Service[struct{}], *memory.Store[struct{}]) 
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      store,
 		SecretKey:  "handlers-secret",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {

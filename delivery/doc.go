@@ -1,9 +1,9 @@
-// Package delivery provides reference implementations of the message-delivery seams libauth
+// Package delivery provides reference implementations of the message-delivery seams egauth
 // defines but deliberately does not fill itself: a standard-library SMTP Mailer (satisfying
 // identity.Mailer), a Go-template-based message renderer you can fully override, and an OTP code
 // Sender wired through an application-supplied contact-resolution seam.
 //
-// libauth never sends mail or SMS on its own — delivery is application infrastructure, and
+// egauth never sends mail or SMS on its own — delivery is application infrastructure, and
 // baking in a transport would force a dependency and an opinion on every adopter. Instead the
 // identity flows hand a freshly minted token to identity.Mailer, and otp.IssueHandler hands a
 // Challenge to a deliver callback. This package is the batteries-included answer for the common
@@ -43,7 +43,7 @@
 //
 // # The SMS story
 //
-// libauth ships NO SMS Sender. Every SMS provider is a paid, account-bound third-party API
+// egauth ships NO SMS Sender. Every SMS provider is a paid, account-bound third-party API
 // (Twilio, AWS SNS, Vonage, MessageBird, ...); bundling one would mean a vendor dependency, an
 // API key, and a billing relationship that does not belong in an auth library. Instead SMS is a
 // one-method seam: implement Sender against your provider and pass it to WithSMSSender.

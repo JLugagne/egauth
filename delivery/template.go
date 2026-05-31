@@ -7,7 +7,7 @@ import (
 	"strings"
 	texttemplate "text/template"
 
-	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/egauth/identity"
 )
 
 // Event identifies which identity delivery message is being rendered. It selects the template

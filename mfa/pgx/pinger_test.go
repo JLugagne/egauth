@@ -1,8 +1,8 @@
 package pgx_test
 
 import (
-	"github.com/JLugagne/libauth/health"
-	"github.com/JLugagne/libauth/mfa/pgx"
+	"github.com/JLugagne/egauth/health"
+	"github.com/JLugagne/egauth/mfa/pgx"
 )
 
 // Compile-time assertion that the pgx Store satisfies the optional health.Pinger seam (N11).

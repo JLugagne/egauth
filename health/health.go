@@ -1,4 +1,4 @@
-// Package health defines the optional health-check seam implemented by libauth's pgx-backed
+// Package health defines the optional health-check seam implemented by egauth's pgx-backed
 // stores, so readiness/liveness probes can be written against any store without depending on a
 // specific backend or holding a separate handle to the underlying connection pool.
 package health

@@ -3,7 +3,7 @@ package memory
 import (
 	"testing"
 
-	"github.com/JLugagne/libauth/sessions/storetest"
+	"github.com/JLugagne/egauth/sessions/storetest"
 )
 
 func TestStore(t *testing.T) {

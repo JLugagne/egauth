@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/mfa"
-	mfapgx "github.com/JLugagne/libauth/mfa/pgx"
-	"github.com/JLugagne/libauth/mfa/storetest"
+	"github.com/JLugagne/egauth/mfa"
+	mfapgx "github.com/JLugagne/egauth/mfa/pgx"
+	"github.com/JLugagne/egauth/mfa/storetest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"

@@ -7,13 +7,13 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/JLugagne/libauth/event"
-	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/passwords"
+	"github.com/JLugagne/egauth/tokens"
 )
 
 // ClaimsBuilder maps an authenticated user to the claims embedded in their issued tokens.
-// The application supplies it so libauth stays agnostic about the custom claim type C.
+// The application supplies it so egauth stays agnostic about the custom claim type C.
 // Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
 // applies.
 type ClaimsBuilder[C any] func(*User) tokens.Claims[C]

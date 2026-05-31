@@ -7,8 +7,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/JLugagne/libauth/internal/pgxmigrate"
-	"github.com/JLugagne/libauth/mfa"
+	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/mfa"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

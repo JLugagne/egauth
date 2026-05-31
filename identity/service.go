@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JLugagne/libauth/event"
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/passwords"
 	"github.com/google/uuid"
 )
 
@@ -125,7 +125,7 @@ type Service interface {
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
-// refresh-token families, MFA enrollments, passkeys) as part of DeleteAccount. libauth keeps
+// refresh-token families, MFA enrollments, passkeys) as part of DeleteAccount. egauth keeps
 // its modules decoupled — the identity service cannot reach the sessions/tokens/mfa/passkey
 // stores itself — so account deletion runs whatever erasers the application registers via
 // WithAccountErasers. Each eraser SHOULD be idempotent, since deletion may be retried after a
@@ -180,7 +180,7 @@ func WithEmailChangeTTL(d time.Duration) ServiceOption {
 
 // WithAccountErasers registers cross-module revocation hooks run by DeleteAccount, in the order
 // given, to revoke the deleted user's sessions, refresh-token families, MFA enrollments,
-// passkeys, etc. libauth keeps its modules decoupled, so the identity service cannot revoke
+// passkeys, etc. egauth keeps its modules decoupled, so the identity service cannot revoke
 // those itself; wire your other modules' revocation here. Erasers SHOULD be idempotent.
 func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
 	return func(s *service) { s.erasers = append(s.erasers, erasers...) }

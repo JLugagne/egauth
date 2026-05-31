@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/JLugagne/libauth/internal/pgxmigrate"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

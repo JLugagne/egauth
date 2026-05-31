@@ -8,7 +8,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/JLugagne/libauth/event"
+	"github.com/JLugagne/egauth/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

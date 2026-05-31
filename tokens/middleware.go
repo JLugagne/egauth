@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JLugagne/libauth"
+	"github.com/JLugagne/egauth"
 )
 
 // AuthenticatedHandlerFunc is an HTTP handler that explicitly requires an authenticated
 // actor and custom claims as parameters, ensuring business data is never hidden in the context.
-type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, customClaims C)
+type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, customClaims C)
 
 // authConfig holds the optional behavior of RequireAuth, configured via AuthOption.
 type authConfig[C any] struct {
@@ -97,7 +97,7 @@ func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
 //
 // By default it reads a Bearer token from the Authorization header (backward-compatible).
 // Options enable reading from a cookie (WithCookieAuth) and opt-in transparent rotation
-// (WithAutoRefresh). On success it explicitly passes the extracted libauth.Actor and custom
+// (WithAutoRefresh). On success it explicitly passes the extracted egauth.Actor and custom
 // claims to the next handler.
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc {
 	cfg := authConfig[C]{readHeader: true}
@@ -174,8 +174,8 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 	return "", false
 }
 
-func actorFromClaims[C any](claims *Claims[C]) libauth.Actor {
-	return libauth.Actor{
+func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
+	return egauth.Actor{
 		UserID:   claims.Subject,
 		TenantID: claims.TenantID,
 	}

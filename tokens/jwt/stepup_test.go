@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -96,7 +96,7 @@ func TestWithMaxAuthAge_StepUpGate(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := tokens.RequireAuth[struct{}](svc,
-		func(w http.ResponseWriter, _ *http.Request, _ libauth.Actor, _ struct{}) { w.WriteHeader(http.StatusOK) },
+		func(w http.ResponseWriter, _ *http.Request, _ egauth.Actor, _ struct{}) { w.WriteHeader(http.StatusOK) },
 		tokens.WithMaxAuthAge[struct{}](5*time.Minute))
 
 	call := func(accessToken string) *httptest.ResponseRecorder {
@@ -124,7 +124,7 @@ func TestWithMaxAuthAge_DisabledByDefault(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := tokens.RequireAuth[struct{}](svc,
-		func(w http.ResponseWriter, _ *http.Request, _ libauth.Actor, _ struct{}) { w.WriteHeader(http.StatusOK) })
+		func(w http.ResponseWriter, _ *http.Request, _ egauth.Actor, _ struct{}) { w.WriteHeader(http.StatusOK) })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/", nil)

@@ -1,5 +1,5 @@
 // Package passkey implements WebAuthn / FIDO2 passkeys (registration and login ceremonies) on
-// top of the go-webauthn library, following libauth's conventions: a credential Store
+// top of the go-webauthn library, following egauth's conventions: a credential Store
 // (memory + pgx implementations with a shared contract), a Service that runs the ceremonies,
 // and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the
 // Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is

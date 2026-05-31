@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,7 +23,7 @@ func TestNew_PanicsOnEmptySecretKey(t *testing.T) {
 func TestConfig_Validate(t *testing.T) {
 	good := jwt.Config[struct{}]{
 		SecretKey:  "0123456789abcdef0123456789abcdef", // 32 bytes
-		Issuer:     "libauth",
+		Issuer:     "egauth",
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 	}

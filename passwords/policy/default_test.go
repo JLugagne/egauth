@@ -6,8 +6,8 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/passwords/policy"
+	"github.com/JLugagne/egauth/passwords"
+	"github.com/JLugagne/egauth/passwords/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/JLugagne/libauth/passkey"
-	passkeymemory "github.com/JLugagne/libauth/passkey/memory"
+	"github.com/JLugagne/egauth/passkey"
+	passkeymemory "github.com/JLugagne/egauth/passkey/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
