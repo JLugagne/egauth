@@ -34,18 +34,34 @@ type Service interface {
 
 type service struct {
 	store Store
+	now   func() time.Time
 }
 
 // NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
 // startup rather than with a nil-pointer panic deep in a request).
-func NewService(store Store) Service {
+func NewService(store Store, opts ...ServiceOption) Service {
 	if store == nil {
 		panic("sessions: NewService requires a non-nil Store")
 	}
-	return &service{
+	s := &service{
 		store: store,
+		now:   time.Now,
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.now == nil {
+		s.now = time.Now
+	}
+	return s
 }
+
+// ServiceOption configures a sessions Service at construction time.
+type ServiceOption func(*service)
+
+// WithClock overrides the time source used for session creation, expiry checks, and slide
+// (primarily for tests). A nil clock is ignored; NewService falls back to time.Now.
+func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
 
 // generateToken mints a fresh, high-entropy opaque session token.
 func generateToken() (string, error) {
@@ -62,6 +78,7 @@ func (s *service) CreateSession(ctx context.Context, userID uuid.UUID, tenantID 
 		return nil, "", err
 	}
 	hash := s.hashToken(token)
+	now := s.now()
 
 	session := &Session{
 		ID:        uuid.New(),
@@ -70,8 +87,8 @@ func (s *service) CreateSession(ctx context.Context, userID uuid.UUID, tenantID 
 		TokenHash: hash,
 		UserAgent: userAgent,
 		IP:        ip,
-		ExpiresAt: time.Now().Add(duration),
-		CreatedAt: time.Now(),
+		ExpiresAt: now.Add(duration),
+		CreatedAt: now,
 	}
 
 	if err := s.store.CreateSession(ctx, session, WithTenant(tenantID)); err != nil {
@@ -89,7 +106,7 @@ func (s *service) ValidateSession(ctx context.Context, token string, opts ...Opt
 		return nil, err
 	}
 
-	if time.Now().After(session.ExpiresAt) {
+	if s.now().After(session.ExpiresAt) {
 		return nil, ErrSessionNotFound
 	}
 
@@ -103,7 +120,7 @@ func (s *service) Touch(ctx context.Context, token string, duration time.Duratio
 		return nil, err
 	}
 	currentHash := session.TokenHash // unchanged by Touch; the compare-and-set key
-	session.ExpiresAt = time.Now().Add(duration)
+	session.ExpiresAt = s.now().Add(duration)
 	if err := s.store.UpdateSession(ctx, session, currentHash, WithTenant(session.TenantID)); err != nil {
 		return nil, err
 	}
@@ -127,7 +144,7 @@ func (s *service) Rotate(ctx context.Context, token string, duration time.Durati
 	// rather than receive a token that would never validate.
 	oldHash := session.TokenHash
 	session.TokenHash = s.hashToken(newToken)
-	session.ExpiresAt = time.Now().Add(duration)
+	session.ExpiresAt = s.now().Add(duration)
 	if err := s.store.UpdateSession(ctx, session, oldHash, WithTenant(session.TenantID)); err != nil {
 		return nil, "", err
 	}
