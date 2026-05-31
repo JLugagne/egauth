@@ -144,6 +144,7 @@ type service struct {
 	emailChangeTTL       time.Duration
 	erasers              []AccountEraser
 	events               event.Sink
+	now                  func() time.Time
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -192,6 +193,15 @@ func WithEventSink(sink event.Sink) ServiceOption {
 	return func(s *service) { s.events = sink }
 }
 
+// WithClock overrides the time source used for the account-lockout gate and for the
+// EmailVerifiedAt/UpdatedAt stamps written on email change and OAuth provisioning (primarily
+// for tests). A nil clock is ignored; NewService falls back to time.Now. Note the lockout
+// STAMP (LockedUntil = now + lockDuration) is computed by the Store, not the service, so it
+// is not affected by this clock.
+func WithClock(now func() time.Time) ServiceOption {
+	return func(s *service) { s.now = now }
+}
+
 // emit sends a security event to the configured sink (a no-op when none is set).
 func (s *service) emit(ctx context.Context, e event.Event) {
 	event.Emit(ctx, s.events, e)
@@ -225,11 +235,16 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 		emailVerificationTTL: DefaultEmailVerificationTTL,
 		magicLinkTTL:         DefaultMagicLinkTTL,
 		emailChangeTTL:       DefaultEmailChangeTTL,
+		now:                  time.Now,
 	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if s.now == nil {
+		s.now = time.Now
+	}
 	return s
+
 }
 
 func (s *service) Register(ctx context.Context, email, password string, opts ...Option) (*User, error) {
@@ -317,7 +332,7 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 		}
 
 		// If the account is currently locked, reject without comparing the password.
-		if ident.LockedUntil != nil && ident.LockedUntil.After(time.Now()) {
+		if ident.LockedUntil != nil && ident.LockedUntil.After(s.now()) {
 			loginFailed(user.ID.String(), "account_locked")
 			return nil, ErrAccountLocked
 		}
@@ -546,7 +561,7 @@ func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...
 		return nil, err
 	}
 
-	now := time.Now()
+	now := s.now()
 	// UpdateUserEmail is the atomic swap point: it switches the user email AND re-keys the
 	// password identity (which is keyed by email) in one operation, enforcing email uniqueness,
 	// so a target claimed since the token was minted yields ErrEmailAlreadyExists rather than a
@@ -670,7 +685,7 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 		return nil, err
 	}
 	if emailVerified {
-		now := time.Now()
+		now := s.now()
 		user.EmailVerifiedAt = &now
 		if err := s.store.UpdateUser(ctx, user, opts...); err != nil {
 			return nil, err
