@@ -210,3 +210,11 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, userID uuid.UUID, opts 
 }
 
 var _ mfa.Store = (*Store)(nil)
+
+// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
+// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
+// backend is unreachable and honors ctx for cancellation/deadline.
+func (s *Store) Ping(ctx context.Context) error {
+	var ok int
+	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}
