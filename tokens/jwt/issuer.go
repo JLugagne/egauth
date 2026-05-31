@@ -49,6 +49,7 @@ type Service[C any] struct {
 	apiKeyLength   int
 	reuseGrace     time.Duration
 	events         event.Sink
+	now            func() time.Time
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -92,6 +93,10 @@ type Config[C any] struct {
 	// EventSink optionally receives security events emitted during rotation — refresh-token
 	// reuse detection and token-family revocation (see the event package). Nil disables emission.
 	EventSink event.Sink
+	// Clock overrides the time source used for access-token TTL stamping and for exp/nbf
+	// validation on the verify path (it is wired into the JWT parser too). Its primary use is
+	// deterministic testing. The zero value defaults to time.Now.
+	Clock func() time.Time
 }
 
 // MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
@@ -216,6 +221,9 @@ func New[C any](cfg Config[C]) *Service[C] {
 	if cfg.ReuseGracePeriod == 0 {
 		cfg.ReuseGracePeriod = DefaultReuseGracePeriod
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 
 	return &Service[C]{
 		store:          cfg.Store,
@@ -231,6 +239,7 @@ func New[C any](cfg Config[C]) *Service[C] {
 		apiKeyLength:   cfg.APIKeyLength,
 		reuseGrace:     cfg.ReuseGracePeriod,
 		events:         cfg.EventSink,
+		now:            cfg.Clock,
 	}
 }
 
@@ -245,7 +254,7 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 // and rotation (existing family); initial reports which, so auth_time defaults to the issue
 // time ONLY for a genuine fresh authentication and is never manufactured by a rotation.
 func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
-	now := time.Now()
+	now := s.now()
 	accessExpiresAt := now.Add(s.accessTTL)
 	if !claims.ExpiresAt.IsZero() {
 		accessExpiresAt = claims.ExpiresAt
@@ -367,7 +376,7 @@ func (s *Service[C]) Rotate(ctx context.Context, refreshToken string, opts ...to
 		return nil, tokens.ErrRefreshTokenReused
 	}
 
-	if time.Now().After(rt.ExpiresAt) {
+	if s.now().After(rt.ExpiresAt) {
 		return nil, tokens.ErrTokenExpired
 	}
 
@@ -471,7 +480,10 @@ func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
 func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
-	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey)
+	// WithTimeFunc routes the library's exp/nbf validation through the same injected clock the
+	// issuer stamps with, so the verify path is deterministic under a test clock (and honors a
+	// custom clock in production). Without it golang-jwt would validate exp against time.Now().
+	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey, jwt.WithTimeFunc(s.now))
 
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
@@ -523,7 +535,7 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tok
 		return nil, tokens.ErrRefreshTokenReused
 	}
 
-	if time.Now().After(rt.ExpiresAt) {
+	if s.now().After(rt.ExpiresAt) {
 		return nil, tokens.ErrTokenExpired
 	}
 
@@ -543,7 +555,7 @@ func (s *Service[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Clai
 		return nil, err
 	}
 
-	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(time.Now()) {
+	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
 		return nil, tokens.ErrTokenExpired
 	}
 
