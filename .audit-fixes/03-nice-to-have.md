@@ -1,6 +1,6 @@
-# Nice-to-have fixes (2 / 11)
+# Nice-to-have fixes (3 / 11)
 
-DONE: N2 (rune length — commit 3e34d04), N6 (error taxonomy + dead sentinels — 55971a6).
+DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N6 (error taxonomy + dead sentinels — 55971a6).
 
 Polish / maturity.
 
@@ -13,8 +13,14 @@ Polish / maturity.
 **Where:** `passwords/policy/default.go`. **Bug:** uses `len(password)` (bytes) not runes → multibyte mismeasured; DefaultPolicy has no denylist. **Fix:** `utf8.RuneCountInString` (match passphrase.go); optional strength-estimator hook. **Test (confirm-first):** multibyte password mismeasured today.
 **DONE:** switched MinLength/MaxLength to `utf8.RuneCountInString` (confirmed-first test covers both the under-count and over-restrict directions). Denylist/strength-hook left to the passphrase policy (which already has denylist + BreachChecker) — not duplicated into DefaultPolicy.
 
-## [ ] N3 — Library-wide clock injection
+## [x] N3 — Library-wide clock injection — DONE (aaca811 sessions, cbeb699 identity, 2f8163a jwt)
 **Where:** identity (lockout), tokens/jwt (TTL), sessions (expiry) call `time.Now()` directly. **Fix:** `WithClock`/shared clock seam (mfa/otp already have it). **Test:** deterministic expiry/lockout with injected clock.
+**DONE:** Added the mfa/otp-style `now func() time.Time` seam to all three service layers, each defaulted to `time.Now` and nil-guarded in the constructor:
+- **sessions** — `WithClock` ServiceOption (NewService gained `opts ...ServiceOption`; distinct from the existing store-level `Option`). Routes CreateSession (single captured `now` for consistent ExpiresAt/CreatedAt), ValidateSession, Touch, Rotate.
+- **identity** — `WithClock` ServiceOption. Routes the lockout GATE in Authenticate (`LockedUntil.After`) and the EmailVerifiedAt/UpdatedAt stamps in ConfirmEmailChange + LinkOrCreateIdentity. Deterministic test drives the gate locked→unlocked via a MockStore-supplied `LockedUntil` and an advancing clock.
+- **tokens/jwt** — `Clock func() time.Time` field on Config (struct-config package, no functional options). Routes issuePair TTL + Rotate/VerifyRefreshToken/VerifyAPIKey expiry checks, AND wires `jwt.WithTimeFunc(s.now)` into VerifyAccessToken's `ParseWithClaims` so golang-jwt validates exp/nbf against the same clock (verified by a mutation test: removing WithTimeFunc fails the deterministic-expiry test).
+
+**Deferred (out of this item's scope):** the lockout STAMP (`LockedUntil = now + lockDuration`) is computed by the identity Store (memory `time.Now().Add`, pgx SQL `now() + interval`), not the service, so it stays on the store's own clock; the storetest contract still covers it with a real clock. End-to-end deterministic lockout across the real `lockDuration` would require threading a clock into the memory/pgx stores (pgx passes a duration to SQL `now()`, not a timestamp, so its IncrementFailedAttempts contract would change) — a separate, larger change. The "identity (lockout)" tick here means the service GATE, not full store-clock injection.
 
 ## [ ] N4 — Top-level facade / document composable design
 **Where:** root pkg (only exports Actor). **Fix:** optional convenience facade wiring the common stack, OR explicitly document the database/sql-style composable intent + wiring snippet (overlaps C4).
