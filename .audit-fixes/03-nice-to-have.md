@@ -1,6 +1,6 @@
-# Nice-to-have fixes (3 / 11)
+# Nice-to-have fixes (4 / 11)
 
-DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N6 (error taxonomy + dead sentinels — 55971a6).
+DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6).
 
 Polish / maturity.
 
@@ -25,8 +25,10 @@ Polish / maturity.
 ## [ ] N4 — Top-level facade / document composable design
 **Where:** root pkg (only exports Actor). **Fix:** optional convenience facade wiring the common stack, OR explicitly document the database/sql-style composable intent + wiring snippet (overlaps C4).
 
-## [ ] N5 — Migration versioning / rollback
+## [x] N5 — Migration versioning / rollback — DONE (f0fbfa2)
 **Where:** pgx `Migrate()` Execs every .sql each call, no version table, no down path. **Fix:** `schema_migrations` version table applying only un-applied files, or document using an external migration tool. **Test:** re-running Migrate is a no-op after applied.
+**DONE:** Added a shared `internal/pgxmigrate` helper (`Run(ctx, Querier, fs.FS)`) recording each applied file in a `schema_migrations(version PRIMARY KEY, applied_at)` table and skipping already-recorded files; the six byte-identical Migrate bodies collapsed to one-line delegates (`pgxmigrate.Run(ctx, db, MigrationsFS)`), each package keeping its own embedded FS. The helper's `Querier` (Exec + QueryRow) is satisfied structurally by every store's `DBQuerier`, `*pgxpool.Pool`, and `pgx.Tx`. Atomicity without a `Begin`: the version INSERT is appended to the migration body and Exec'd in one no-arg call, so the simple-query protocol's implicit transaction commits DDL + version row together even on a bare pool (`ON CONFLICT DO NOTHING`, quote-escaped literal). Documented contract: migrations must be idempotent, single-implicit-transaction-compatible (no CONCURRENTLY/VACUUM/explicit BEGIN), never edited once applied; the table is a re-run optimization, not crash-safe exactly-once. Tested via testcontainers (no-op proven with a non-idempotent migration that would error/double-insert if re-run; incremental application of only un-applied files).
+**Not done (explicitly out of scope):** no down/rollback path — this library ships forward-only migrations; a rollback path or external-tool integration (golang-migrate, etc.) remains a separate decision if ever needed.
 
 ## [x] N6 — Error taxonomy consistency + dead sentinels — DONE (55971a6)
 **Where:** identity/tokens/sessions/passwords unprefixed vs mfa/oauth/otp/passkey prefixed; oauth ErrStateMismatch/ErrMissingCode/ErrEmailMissing + passkey ErrSessionInvalid are dead (signaled as raw strings). **Fix:** standardize prefixing; return declared sentinels or remove dead exports. **Test:** errors.Is works against the documented sentinels.
