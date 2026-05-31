@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/libauth/internal/pgxmigrate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,22 +17,11 @@ import (
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 
-// Migrate executes all the embedded SQL migrations against the provided DBQuerier.
+// Migrate applies the embedded SQL migrations against db, skipping any already recorded in the
+// schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
+// migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	entries, err := MigrationsFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		content, err := MigrationsFS.ReadFile("migrations/" + entry.Name())
-		if err != nil {
-			return err
-		}
-		if _, err := db.Exec(ctx, string(content)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pgxmigrate.Run(ctx, db, MigrationsFS)
 }
 
 // DBQuerier is an interface that matches both *pgxpool.Pool and pgx.Tx.
