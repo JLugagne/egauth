@@ -342,3 +342,35 @@ func withErrorParam(rawURL, code string) string {
 	u.RawQuery = q.Encode()
 	return u.String()
 }
+
+// DynamicBeginHandler is like BeginHandler but resolves the Provider dynamically using a
+// ProviderStore. This is useful for multi-tenant applications where each tenant brings
+// their own OIDC/OAuth configuration.
+func DynamicBeginHandler(store ProviderStore, providerName string, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenant := cfg.tenant(r)
+		p, err := store.GetProvider(r.Context(), tenant, providerName)
+		if err != nil {
+			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
+			return
+		}
+		// Delegate to the static handler
+		BeginHandler(p, opts...)(w, r)
+	}
+}
+
+// DynamicCallbackHandler is like CallbackHandler but resolves the Provider dynamically.
+func DynamicCallbackHandler[C any](store ProviderStore, providerName string, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		tenant := cfg.tenant(r)
+		p, err := store.GetProvider(r.Context(), tenant, providerName)
+		if err != nil {
+			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
+			return
+		}
+		// Delegate to the static handler
+		CallbackHandler(p, linker, issuer, claimsOf, opts...)(w, r)
+	}
+}
