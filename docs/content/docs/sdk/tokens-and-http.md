@@ -1,86 +1,72 @@
 ---
-title: "Tokens and HTTP Routing"
+title: "Tokens and HTTP"
 weight: 3
 ---
 
-# Tokens and HTTP Routing
+# Tokens and HTTP Protection
 
-Once a user is successfully authenticated via the Identity module, you typically want to issue an Access Token (like a JWT) so they can access your APIs. `egauth` provides a strictly-typed `tokens` module for this.
+The `tokens` module manages stateless Access Tokens (JWT) and stateful Refresh Tokens. It incorporates advanced theft-detection mechanics.
 
-## Setting Up the JWT Issuer
+## Generating Tokens
 
-First, instantiate an in-memory or PostgreSQL store for tracking refresh tokens or API keys, and configure the JWT service. Note how `egauth` heavily utilizes **Generics** to allow you to inject Custom Claims.
+`egauth` uses Go Generics to allow you to inject custom claims safely into your JWTs.
 
 ```go
-import (
-    "time"
-    "github.com/JLugagne/egauth/tokens"
-    "github.com/JLugagne/egauth/tokens/jwt"
-    "github.com/JLugagne/egauth/tokens/memory"
+import "github.com/JLugagne/egauth/tokens"
+
+// Define your custom claims struct
+type MyClaims struct {
+	Role  string `json:"role"`
+	OrgID string `json:"org_id"`
+}
+
+// Initialize the Token Service
+tokenService := tokens.NewService[MyClaims](
+	tokensStore,
+	tokens.WithIssuer("my-app"),
+	tokens.WithSymmetricKey([]byte("super-secret-32-byte-key-here!!!")),
 )
 
-// Define your application's custom claims
-type MyCustomClaims struct {
-    Role string `json:"role"`
-}
+// Issue a Token Pair (Access + Refresh)
+pair, err := tokenService.Issue(ctx, userID, MyClaims{
+	Role:  "admin",
+	OrgID: "org-xyz",
+}, tokens.WithTenant("tenant-123"))
 
-// 1. Initialize the Token Store
-tokenStore := memory.NewStore[MyCustomClaims]()
-
-// 2. Configure the JWT Service
-cfg := jwt.Config[MyCustomClaims]{
-    Store:      tokenStore,
-    SecretKey:  "super-secret-key-change-me-in-production",
-    Issuer:     "my-app",
-    AccessTTL:  15 * time.Minute,
-    RefreshTTL: 7 * 24 * time.Hour,
-}
-jwtService := jwt.New[MyCustomClaims](cfg)
+fmt.Println("Access Token:", pair.AccessToken)
 ```
 
-## Issuing a Token
+> **Security Note:** Refresh tokens are opaque strings. Only their SHA-256 hash is stored in the database.
 
-In your login HTTP handler, after verifying the password with `identityService`, you issue a Token Pair.
+## Refresh Token Rotation & Theft Detection
+
+Refresh tokens are single-use. When a user refreshes their access token, they are issued a completely new Token Pair.
+
+If an attacker steals a Refresh Token and uses it, the user's client will eventually try to use the *same* Refresh Token. The `tokens` module detects this replay and immediately revokes the **entire token family**, forcing everyone (including the attacker) to re-authenticate.
 
 ```go
-claims := tokens.Claims[MyCustomClaims]{
-    Subject:  authUser.ID,
-    TenantID: "tenant-abc",
-    Custom:   MyCustomClaims{Role: "admin"},
-}
-
-pair, err := jwtService.IssueTokenPair(ctx, claims)
+newPair, err := tokenService.Refresh(ctx, oldRefreshToken, tokens.WithTenant("tenant-123"))
 if err != nil {
-    // Handle error
+	// If err == tokens.ErrTokenTheftDetected, the family was wiped.
 }
-
-// Return `pair.AccessToken` to the client
 ```
 
 ## Protecting HTTP Routes
 
-To protect your API endpoints, use the provided HTTP middlewares. `egauth` has a clean `RequireAuth` wrapper that automatically handles token extraction and passes the Actor and custom claims down to your handler.
+The SDK provides generic HTTP middlewares to validate Access Tokens natively.
 
 ```go
-import (
-    "net/http"
-    "github.com/JLugagne/egauth"
-    "github.com/JLugagne/egauth/tokens"
+authMiddleware := tokens.RequireAuth(
+	tokenService,
+	// Optional: Enforce specific Authentication Method References (e.g., MFA)
+	tokens.WithRequiredAMR("mfa"),
 )
 
-// Create an authenticated handler
-protectedHandler := tokens.RequireAuth[MyCustomClaims](
-    jwtService, 
-    func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom MyCustomClaims) {
-        
-        // You have immediate, type-safe access to the Actor and Custom Claims!
-        fmt.Fprintf(w, "Hello User %s! Your role is %s", actor.UserID, custom.Role)
-    },
-)
-
-// Mount the route using your favorite mux router
-mux := http.NewServeMux()
-mux.Handle("/api/protected", protectedHandler)
+mux.Handle("/api/private", authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Extract the validated generic claims from the request context
+	claims, ok := tokens.ClaimsFromContext[MyClaims](r.Context())
+	if ok {
+		fmt.Printf("User Role: %s", claims.Custom.Role)
+	}
+})))
 ```
-
-This pattern guarantees that the endpoint is unreachable without a valid, non-expired token containing a matching signature.

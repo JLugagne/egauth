@@ -3,21 +3,25 @@ title: "Getting Started"
 weight: 1
 ---
 
-# Getting Started with egauth
+# Getting Started with `egauth`
 
-Welcome to the `egauth` user manual! `egauth` provides composable, unopinionated modules for Identity and Authentication in Go. Rather than forcing you into a specific web framework, `egauth` supplies the foundational blocks (Stores, Services, and optionally HTTP Handlers) that you plug into your own architecture.
+This guide covers how to embed the `egauth` SDK into your Go application, initialize the database stores, and wire up the dependency injection.
 
-## Installation
+## 1. Installation
 
-Install the library using `go get`:
+Install the module using `go get`:
 
 ```bash
 go get github.com/JLugagne/egauth
 ```
 
-## Basic Setup (PostgreSQL)
+## 2. Infrastructure & Database
 
-`egauth` relies on database abstractions (like PostgreSQL via `pgx`) or in-memory stores for testing. Below is an example of how to connect to Postgres, run the migrations, and set up your core services.
+`egauth` relies heavily on interfaces for its storage (e.g., `identity.Store`, `tokens.Store`). Out of the box, it provides robust, production-ready PostgreSQL adapters using `jackc/pgx/v5`, as well as zero-dependency in-memory adapters for testing.
+
+### Setting up PostgreSQL
+
+You should use the `pgxpool` to manage your database connections. `egauth` packages come with built-in `//go:embed` migrations.
 
 ```go
 package main
@@ -27,37 +31,55 @@ import (
 	"log"
 
 	"github.com/JLugagne/egauth/identity"
-	pgxstore "github.com/JLugagne/egauth/identity/pgx"
+	identitypg "github.com/JLugagne/egauth/identity/pgx"
+	
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
+	
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func main() {
 	ctx := context.Background()
 
-	// 1. Connect to PostgreSQL using pgxpool
+	// 1. Initialize the connection pool
 	pool, err := pgxpool.New(ctx, "postgres://user:pass@localhost:5432/mydb")
 	if err != nil {
-		log.Fatal(err)
+		log.Fatalf("failed to connect to db: %v", err)
 	}
 	defer pool.Close()
 
-	// 2. Run migrations automatically
-	if err := pgxstore.Migrate(ctx, pool); err != nil {
-		log.Fatal("failed to migrate:", err)
+	// 2. Run Automatic Migrations
+	// Each module (identity, tokens, sessions) has its own pgx subpackage with Migrations.
+	if err := identitypg.Migrate(ctx, pool); err != nil {
+		log.Fatalf("identity migration failed: %v", err)
 	}
 
-	// 3. Instantiate the core components
-	store := pgxstore.NewStore(pool)
-	hasher := argon2.NewHasher()
-	pol := policy.NewDefaultPolicy()
-	
-	// 4. Create the Identity Service
-	identityService := identity.NewService(store, hasher, pol)
-    
-    // Your service is ready! You can now register and authenticate users.
+	// 3. Initialize Stores
+	identityStore := identitypg.NewStore(pool)
+
+	// 4. Initialize Core Logic (e.g. Hasher and Password Policy)
+	hasher := argon2.NewHasher(argon2.WithMemory(64*1024), argon2.WithIterations(1))
+	passwordPolicy := policy.NewDefaultPolicy() // 12 char minimum
+
+	// 5. Wire the Service
+	identityService := identity.NewService(identityStore, hasher, passwordPolicy)
+
+	// Ready to use!
 }
 ```
 
-In the next sections, we'll see how to actually use the `identityService` to register users, as well as how to generate tokens for API access.
+## 3. Emitting Audit Events
+
+`egauth` operates silently by default, but it can emit critical security events (failed logins, lockouts) without logging sensitive data. Implement an `event.Sink` to capture these:
+
+```go
+import "github.com/JLugagne/egauth/event"
+
+// ... inside main ...
+loggerSink := event.NewSlogSink(slog.Default())
+identityService := identity.NewService(
+    identityStore, hasher, passwordPolicy,
+    identity.WithEventSink(loggerSink),
+)
+```

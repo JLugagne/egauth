@@ -3,52 +3,29 @@ title: "Architecture"
 weight: 10
 ---
 
-# Architecture
+# Architecture & Design Philosophy
 
-`egauth` is designed with modularity in mind.
+`egauth` is designed specifically for Go engineers who want the security of an enterprise Identity Provider (like Keycloak or Auth0) without the operational overhead of managing a separate microservice, and without surrendering architectural control to a heavy framework.
 
-## Design Principles
+## 1. Composable by Design
 
-- **State Isolation:** Database access is encapsulated in respective modules via `Store` interfaces:
-  - `identity` (PostgreSQL): Long-term persistence for users, identities (Password, OAuth), and hashes.
-  - `sessions` and `tokens` (Redis, Postgres, Memory): Ephemeral or revocable states.
-  - `passwords`: Pure business logic (stateless).
-- **Decentralized HTTP:** There is no monolithic `http` package. Each module exposes its own handler constructors (e.g., `identity.LoginHandler(svc)`). You mount only what you need, where you need it.
-- **Security by Default:** Opaque tokens (Refresh Tokens, Sessions, API Keys) are **never stored in plaintext** in the database. Only a hash (e.g., SHA-256) is kept to prevent impersonation in case of a DB leak.
-- **Type Safety via Generics:** Custom token claims are generically typed `[C any]`.
-- **Silent by Default:** No forced internal logging. Systematic propagation of `context.Context` for future tracing (OpenTelemetry).
-- **Explicit Errors:** Each module exposes its own sentinel errors (e.g., `ErrUserNotFound`, `ErrTokenExpired`).
+It operates similarly to the Go standard library's `database/sql` package: you only import the domains you need, and you wire them together explicitly. 
 
-## Project Structure
+If you just need JWT tokens, import `tokens`. If you need user management, import `identity`. They do not strictly depend on each other, preventing bloated binaries.
 
-```text
-egauth/
-├── identity/                 # Main stateful module
-│   ├── store.go              # Store interface (CRUD) + Options (WithTenant)
-│   ├── service.go            # Service interface (orchestrates Identity + Passwords)
-│   └── handlers.go           # Builder funcs: LoginHandler, RegisterHandler...
-├── sessions/                 # Stateful (separated from tokens for Redis, etc.)
-│   ├── store.go              # Store interface (stores session HASH)
-│   └── middleware.go         # Session validation
-├── tokens/                   # Hybrid (JWT + Store API Keys/Refresh)
-│   ├── token.go              # Generic types TokenPair[C any], Claims[C any]
-│   └── store.go              # Store interface (stores Refresh/APIKeys HASH)
-├── passwords/                # PURE LOGIC (Stateless)
-│   ├── hasher.go             # Hasher interface
-│   └── policy.go             # Policy interface
-└── oauth/                    # PURE LOGIC (Stateless orchestration)
-```
+## 2. Infrastructure Agnostic
 
-## Advanced Features
+Rather than coupling to a specific ORM (like GORM or Ent), every module defines its own minimal `Store` interface.
+- **`pgx`**: Robust PostgreSQL adapters are provided out of the box using `jackc/pgx/v5`. SQL migrations are co-located and embedded via `//go:embed`.
+- **`memory`**: Every module ships with a concurrency-safe, zero-dependency in-memory store. This allows you to write blazing fast unit tests for your HTTP handlers without mocking the database.
 
-### Multi-tenancy
-All stateful models include a `TenantID` field of type `string`.
-Isolation is managed via the **Options pattern** in Store calls (e.g., `store.FindUserByEmail(ctx, email, identity.WithTenant("t1"))`).
+## 3. Security Hardened
 
-### Multi-provider Identities
-Authentication is separated from the user account.
-`User` represents the account (ID, primary Email).
-`Identity` represents an authentication method linked to the user (e.g., "password", "google", "github").
+Security is structurally enforced:
+- **Opaque Tokens**: Refresh tokens, session tokens, and API keys are high-entropy strings. Only their SHA-256 hashes are persisted. Database leaks do not expose usable credentials.
+- **Timing Defense**: Enumeration attacks (testing if an email exists by measuring response time) are neutralized through "decoy hashing."
+- **Data Redaction**: Sensitive structures implement `slog.LogValuer` to render as `REDACTED` in application logs, preventing accidental leaks.
 
-### Soft Delete & Anonymization
-When a user is deleted via `identity.Store.DeleteUser`, the `DeletedAt` field is set, and the **Email** is anonymized to allow re-registration while maintaining referential integrity (GDPR compliant).
+## 4. Bring Your Own Routing
+
+`egauth` exposes `http.HandlerFunc` factories instead of a monolithic router. This ensures it integrates seamlessly whether you use `gorilla/mux`, `chi`, `gin`, or the standard library `http.ServeMux`. You maintain total control over your middleware stack (CORS, Request IDs, Tracing).

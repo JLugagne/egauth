@@ -5,58 +5,70 @@ weight: 2
 
 # Identity and Passwords
 
-The Identity module is the heart of user management. It securely handles user creation, soft-deletion, and authentication (verifying credentials).
+The `identity` module safely manages user accounts, credentials, password resetting, and GDPR-compliant soft-deletion.
 
-## Registering a User
+## Registering Users
 
-When registering a user, the `identity.Service` hashes the password using your configured `Hasher` (e.g., Argon2) and enforces the `Policy` you defined (length, symbols, etc.). 
-
-If you are using multi-tenancy, you must specify the tenant via `identity.WithTenant`. If you are running a single-tenant application, simply omit the tenant option.
+Registration automatically hashes passwords using your configured KDF (e.g., Argon2id) and validates complexity against your policy.
 
 ```go
-// Example: Registering a user inside a specific tenant
 user, err := identityService.Register(
-    ctx, 
-    "alice@example.com", 
-    "StrongPassword123!", 
-    identity.WithTenant("tenant-abc"),
+	ctx, 
+	"alice@example.com", 
+	"CorrectHorseBatteryStaple!", 
+	// Tenant isolation is natively required for all stateful operations
+	identity.WithTenant("tenant-123"), 
 )
 
 if err != nil {
-    // Handle error (e.g. email already exists, weak password)
+	// Errors like ErrEmailAlreadyExists or password policy failures are returned here
+	log.Println("Registration failed:", err)
+	return
 }
-fmt.Printf("User created with ID: %s\n", user.ID)
+
+fmt.Printf("Registered user %s successfully", user.ID)
 ```
 
-## Authenticating a User
+## Authentication & Decoy Hashing
 
-To log a user in, use the `Authenticate` method. It will retrieve the identity and safely compare the hashes.
+To authenticate a user, call `Authenticate()`. This method implements decoy hashing, ensuring that the response time is indistinguishable whether the user exists or not, preventing username enumeration attacks.
 
 ```go
-// Authenticate using the "password" provider
 authUser, err := identityService.Authenticate(
-    ctx, 
-    "password", 
-    "alice@example.com", 
-    "StrongPassword123!", 
-    identity.WithTenant("tenant-abc"),
+	ctx, 
+	"password", // Authentication Provider type
+	"alice@example.com", 
+	"CorrectHorseBatteryStaple!", 
+	identity.WithTenant("tenant-123"),
 )
 
 if err != nil {
-    // Handle error (e.g., identity.ErrInvalidCredentials)
-    return
+	// Never reveal IF the user exists to the client
+	http.Error(w, "invalid email or password", http.StatusUnauthorized)
+	return
 }
-fmt.Println("User authenticated successfully!")
 ```
 
-## User Lifecycle and Soft-Deletes
+## User Lifecycle: Soft Deletes
 
-If a user requests account deletion, `egauth` supports soft-deletes via the store. This anonymizes the email address to remain GDPR-compliant, while allowing the user to sign up again with the exact same email later.
+For compliance (like GDPR), deleting a user anonymizes their Personally Identifiable Information (PII) rather than dropping the row entirely, which protects your database's relational integrity.
 
 ```go
-// Deleting a user
-err = store.DeleteUser(ctx, authUser.ID, identity.WithTenant("tenant-abc"))
-if err != nil {
-    // Handle error
-}
+err := identityService.DeleteAccount(ctx, authUser.ID, identity.WithTenant("tenant-123"))
+// The user's email is replaced with a random UUID, and their credentials are wiped.
+```
+
+## Password Resets
+
+The Identity module handles generating secure password reset tokens. You must implement the `identity.Mailer` interface to actually deliver the email.
+
+```go
+// 1. Generate the token (Decoy enabled: returns no error if user doesn't exist)
+err := identityService.RequestPasswordReset(ctx, "bob@example.com", identity.WithTenant("tenant-123"))
+
+// 2. In your Mailer implementation, send the reset link:
+// https://yourapp.com/reset?token=<token>
+
+// 3. Complete the reset
+err = identityService.ResetPassword(ctx, tokenFromURL, "NewSecurePassword123!")
 ```

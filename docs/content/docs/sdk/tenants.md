@@ -1,46 +1,35 @@
 ---
-title: "Tenants Configuration"
-weight: 1
+title: "Tenants"
+weight: 7
 ---
 
-# Multi-tenancy Settings
+# Multi-Tenancy
 
-`egauth` supports native multi-tenancy via the Options pattern.
+`egauth` was built from the ground up to support native multi-tenancy. Every stateful operation across all modules (Identity, Tokens, Sessions, MFA) requires a Tenant ID. This physically guarantees isolation and prevents Cross-Tenant Insecure Direct Object References (IDORs).
 
-## Without Tenants
+## Explicit Tenancy
 
-If your application does not use tenants (single-tenant mode), you can simply omit the tenant option when interacting with the stores. Ensure that your service is configured with tenant mode **disabled**.
-
-```go
-// Tenant mode disabled in configuration
-// Calls to the store do not require WithTenant option
-user, err := store.FindUserByEmail(ctx, "user@example.com")
-if err != nil {
-    // handle error
-}
-```
-
-## With Tenants
-
-When multi-tenancy is activated, every call to a stateful store MUST include the `WithTenant` option. If it is omitted, the store will return an error to prevent accidental data leaks across tenants.
+When calling any service method, inject the tenant context via the functional option.
 
 ```go
-import "github.com/JLugagne/egauth/identity"
-
-// Finding a user for a specific tenant
-tenantID := "tenant_abc123"
-user, err := store.FindUserByEmail(ctx, "user@example.com", identity.WithTenant(tenantID))
-if err != nil {
-    // handle error
-}
-
-// Creating a new user for a specific tenant
-newUser, err := store.CreateUser(ctx, "new@example.com", identity.WithTenant(tenantID))
-if err != nil {
-    // handle error
-}
+user, err := identityService.Register(
+	ctx, 
+	"bob@example.com", 
+	"Password123!", 
+	identity.WithTenant("org-abc-123"), 
+)
 ```
 
-### Constraints
-In the database, uniqueness constraints reflect this partitioning. For example, a user's email is unique per tenant:
-`UNIQUE(tenant_id, email)`
+## Single-Tenant Mode
+
+If your application does not require multi-tenancy, you can safely use the predefined "Single Tenant" wrappers, which automatically inject an empty string `""` partition into all database queries under the hood.
+
+```go
+// identity.SingleTenant() acts as the default partition.
+user, err := identityService.Register(
+	ctx, 
+	"bob@example.com", 
+	"Password123!", 
+	identity.SingleTenant(),
+)
+```

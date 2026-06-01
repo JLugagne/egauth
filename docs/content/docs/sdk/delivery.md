@@ -1,65 +1,46 @@
 ---
-title: "Email & OTP Delivery"
-weight: 7
+title: "Delivery & External Services"
+weight: 8
 ---
 
-# Email and OTP Delivery
+# Delivery & External Services
 
-`egauth` defines "seams" for delivery but deliberately does not fill them itself. It ships with a standard-library SMTP Mailer (satisfying `identity.Mailer`) and an OTP code Sender wired through an application-supplied contact-resolution seam.
+Because `egauth` is designed to run without taking over your infrastructure, it does not hardcode connections to AWS SES, SendGrid, Twilio, or Redis. Instead, it exposes interfaces for you to implement.
 
-**`egauth` never sends mail or SMS on its own.** Delivery is application infrastructure. Instead, the identity flows hand a freshly minted token to the `Mailer`, and the OTP handler hands a Challenge to a deliver callback. 
+## Mailer Interface
 
-## Setting up the SMTP Mailer
-
-The `delivery.NewSMTPMailer` returns a mailer implementing `identity.Mailer` for password-reset, email-verification, magic-link, and change-email flows.
+When a user requests a magic link or a password reset, `egauth` delegates the actual delivery to you.
 
 ```go
-import "github.com/JLugagne/egauth/delivery"
+type MyMailer struct {}
 
-mailer, err := delivery.NewSMTPMailer(delivery.SMTPConfig{
-    Host:     "smtp.example.com", 
-    Port:     587,
-    Username: "apikey", 
-    Password: "secret_password",
-    From:     "no-reply@example.com", 
-    FromName: "My App Security",
-}, delivery.WithLinks(delivery.LinkConfig{
-    PasswordReset:     "https://app.example.com/reset",
-    EmailVerification: "https://app.example.com/verify",
-    MagicLink:         "https://app.example.com/signin",
-    EmailChange:       "https://app.example.com/confirm-email",
-}))
-
-// You can now pass this `mailer` to Identity HTTP handlers:
-// identity.RequestPasswordResetHandler(svc, mailer, ...)
+func (m *MyMailer) SendPasswordReset(ctx context.Context, email, token string) error {
+	// Construct the URL
+	url := fmt.Sprintf("https://myapp.com/reset?token=%s", token)
+	
+	// Example: Call SendGrid API
+	// return sendgridClient.Send(email, "Reset your password", url)
+	return nil
+}
 ```
 
-The default messages are plain, provider-neutral text. You can override any of them by adding HTML, branding, or localization using `WithTemplate` on a `TemplateRenderer`, or replace the renderer entirely.
+You then inject this mailer into the handlers or services.
 
-## OTP over SMS
+## Rate Limiting
 
-`egauth` ships **NO SMS Sender**. Bundling one would mean a vendor dependency, an API key, and a billing relationship that does not belong in an auth library. 
+To prevent brute force attacks, you should rate limit identity endpoints. `egauth` exposes a `ratelimit.Limiter` interface.
 
-Instead, SMS is a one-method seam. You implement the `Sender` interface against your provider (Twilio, AWS SNS, MessageBird) and pass it to `WithSMSSender`.
+You can implement this interface using Redis, or use a lightweight in-memory Token Bucket for smaller deployments.
 
 ```go
-type twilioSender struct{ 
-    client *twilio.RestClient
-    from   string 
-}
+import "github.com/JLugagne/egauth/ratelimit"
 
-func (t twilioSender) Send(ctx context.Context, phone string, msg delivery.Message) error {
-    // POST the SMS; an SMS Sender uses msg.Text and ignores Subject/HTML.
-    return t.client.SendSMS(ctx, t.from, phone, msg.Text)
-}
+// A simple in-memory limiter allowing 5 requests per minute
+limiter := ratelimit.NewMemoryLimiter(5, time.Minute)
 
-// Wire it up to the OTP Delivery builder
-deliverFunc, err := delivery.OTPDelivery(
-    myContactResolver,
-    delivery.WithSMSSender(twilioSender{client, "+123456789"}),
+// Pass it to the Identity Service to automatically throttle authentication attempts
+identitySvc := identity.NewService(
+	store, hasher, policy,
+	identity.WithRateLimiter(limiter),
 )
-
-// Pass `deliverFunc` to `otp.IssueHandler`
 ```
-
-> **Security Note:** The `mfa` module intentionally excludes SMS as a TOTP/recovery factor due to SIM-swap vulnerabilities (per NIST SP 800-63B). The OTP-over-SMS path is intended for lower-assurance uses like initial phone verification or transactional codes, not for hardening a login as a second factor.

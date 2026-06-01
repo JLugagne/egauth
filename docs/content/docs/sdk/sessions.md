@@ -1,92 +1,62 @@
 ---
-title: "Stateful Sessions"
+title: "Sessions"
 weight: 4
 ---
 
-# Stateful Sessions
+# Sessions
 
-While the `tokens` module is excellent for stateless JWTs, many applications require stateful sessions (e.g., for immediate revocation, strict device tracking, or administrative dashboards). 
+If you prefer stateful, server-side tracking over JWTs, use the `sessions` module. This is particularly useful for monolithic web applications or admin dashboards where immediate, guaranteed revocation is critical.
 
-`egauth` provides a robust `sessions` module that handles opaque token generation, secure hashing at rest, and lifecycle management (creation, rotation, sliding expiration).
-
-## Setting Up the Session Service
-
-Just like other `egauth` modules, you instantiate a store (in-memory, Redis, or PostgreSQL) and pass it to the service.
+## Initializing Sessions
 
 ```go
-import (
-    "time"
-    "github.com/JLugagne/egauth/sessions"
-    "github.com/JLugagne/egauth/sessions/pgx" // Assuming a PostgreSQL backend
+import "github.com/JLugagne/egauth/sessions"
+
+sessionStore := sessionspg.NewStore(pool)
+sessionSvc := sessions.NewService(
+	sessionStore,
+	sessions.WithIdleTimeout(30 * time.Minute),
+	sessions.WithAbsoluteTimeout(12 * time.Hour),
 )
-
-// 1. Initialize the Session Store
-sessionStore := pgx.NewStore(dbPool)
-
-// 2. Create the Session Service
-sessionService := sessions.NewService(sessionStore)
 ```
 
-## Creating a Session
+## Creating & Rotating Sessions
 
-When a user logs in, you generate a new session. `egauth` will mint a secure, high-entropy token, return it to you in plaintext (to send to the client as a cookie), and store only the **SHA-256 hash** in the database.
+Creating a session returns a secure, high-entropy opaque token.
 
 ```go
-// Inside your login handler:
-session, plaintextToken, err := sessionService.CreateSession(
-    ctx, 
-    authUser.ID, 
-    "tenant-abc", 
-    r.UserAgent(), 
-    r.RemoteAddr, 
-    24 * time.Hour, // Session lifetime
-)
-if err != nil {
-    // Handle error
-}
+sess, err := sessionSvc.Create(ctx, userID, sessions.WithTenant("tenant-123"))
 
-// Send plaintextToken to the user via a secure, HTTP-only cookie
+// Send `sess.Token` to the client in an HttpOnly, Secure, SameSite=Lax cookie
 http.SetCookie(w, &http.Cookie{
-    Name:     "session_id",
-    Value:    plaintextToken,
-    HttpOnly: true,
-    Secure:   true,
-    Path:     "/",
+	Name:     "session_id",
+	Value:    sess.Token,
+	HttpOnly: true,
+	Secure:   true,
+	SameSite: http.SameSiteLaxMode,
 })
 ```
 
-## Validating and Sliding Sessions
+### Session Fixation Defense
 
-To protect routes with stateful sessions, you extract the token from the cookie and validate it. 
+When a user's privilege level changes (e.g., they log in, or complete MFA), you **must** rotate the session token to prevent Session Fixation attacks.
 
 ```go
-token := extractTokenFromCookie(r)
+rotatedSess, err := sessionSvc.Rotate(ctx, oldSessionToken)
+// Update the client's cookie with rotatedSess.Token
+```
 
-// Validate the session
-session, err := sessionService.ValidateSession(ctx, token, sessions.WithTenant("tenant-abc"))
+## Validating & Touching Sessions
+
+When a request comes in, you validate the session. To keep the session alive (preventing the Idle Timeout), you can optionally `Touch` it.
+
+```go
+sess, err := sessionSvc.Verify(ctx, tokenFromCookie)
 if err != nil {
-    // Session is invalid, expired, or doesn't exist
-    http.Error(w, "Unauthorized", http.StatusUnauthorized)
-    return
+	// Invalid or expired
+	return
 }
-```
 
-### Idle Timeout (Touch)
-
-To implement an idle timeout (where active users stay logged in, but inactive users are logged out), use the `Touch` method. It slides the expiration time forward without altering the session token.
-
-```go
-// Slide the expiration to 30 minutes from now
-session, err = sessionService.Touch(ctx, token, 30 * time.Minute, sessions.WithTenant(session.TenantID))
-```
-
-## Defeating Session Fixation (Rotate)
-
-When a user's privileges change—such as stepping up with MFA, upgrading their role, or logging in from an anonymous session—you **must** rotate their session token to defeat session fixation attacks.
-
-```go
-// Rotate invalidates the old token and returns a fresh one for the SAME logical session
-session, newPlaintextToken, err := sessionService.Rotate(ctx, token, 24 * time.Hour, sessions.WithTenant(session.TenantID))
-
-// Update the user's cookie with the new token
+// Optionally extend the idle timeout (updates the LastActiveAt timestamp in the DB)
+_ = sessionSvc.Touch(ctx, sess.ID)
 ```
