@@ -2,7 +2,6 @@ package pgx
 
 import (
 	"context"
-	"database/sql/driver"
 	"embed"
 	"encoding/json"
 	"errors"
