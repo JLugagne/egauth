@@ -1,15 +1,16 @@
-# Nice-to-have fixes (7 / 11)
+# Nice-to-have fixes (8 / 11)
 
-DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6), N7 (context cancellation — 9cb29ac), N9 (phone/SMS verification — 4944917), N11 (Store Ping seam — b60673a).
+DONE: N1 (recovery channel — 917b906), N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6), N7 (context cancellation — 9cb29ac), N9 (phone/SMS verification — 4944917), N11 (Store Ping seam — b60673a).
 
-REMAINING (not in scope for this pass): N1 (recovery channel — in progress), N4 (root facade/doc), N8 (CAPTCHA/webhook hooks), N10 (SemVer/CHANGELOG). Per the user, this pass does N9 + N7 + N1 only.
+REMAINING (not in scope for this pass — per the user, this pass did N9 + N7 + N1 only): N4 (root facade/doc), N8 (CAPTCHA/webhook hooks), N10 (SemVer/CHANGELOG).
 
 Polish / maturity.
 
 ---
 
-## [ ] N1 — Account recovery via independent verified channel
+## [x] N1 — Account recovery via independent verified channel — DONE (917b906)
 **Where:** `identity`. Add enrollment of a recovery email/phone or backup factor; require it for sensitive recovery/factor-reset. Composes with I4/I5/I15 to break the single-email-channel takeover chain.
+**DONE:** built on N9's phone (already an independent channel) plus a new verified RECOVERY EMAIL. `identity.User` gains `RecoveryEmail *string` + `RecoveryEmailVerifiedAt *time.Time`. Service: `RequestRecoveryEmail`/`ConfirmRecoveryEmail` enroll+verify a recovery email exactly like the change-email/phone flows (token kind `recovery_email_verification`, address carried as metadata and delivered to it so confirming proves control; rejects the primary address as the recovery address via `ErrRecoveryEmailIsPrimary`, normalization-aware so a case-variant of the primary is caught; emits `event.RecoveryChannelEnrolled`). `RecoveryChannels(ctx,tenantID,userID) (RecoveryChannels{RecoveryEmail,Phone}, error)` with `.Any()` is the GATE PRIMITIVE for sensitive factor-reset (pair with `tokens.WithMaxAuthAge` step-up, per I15). `RequestPasswordResetViaRecovery` mints a normal reset token but directs it to a VERIFIED independent channel instead of the primary inbox — enumeration-uniform (unknown account, OAuth-only account, and known-account-without-a-channel all return the same empty no-error response, mirroring `RequestPasswordReset`). Store: `UpdateUserRecoveryEmail` across memory + pgx (migration 005 adds the two columns; the recovery email is a CONTACT attribute, not a login key — intentionally NOT unique and never re-keys an identity, unlike the primary email) + a cross-backend `Contract: Recovery Email` case. Handlers: `RequestRecoveryEmailHandler` (auth-gated) / `ConfirmRecoveryEmailHandler` (token-authed) / `RequestPasswordResetViaRecoveryHandler` (uniform, delivers reset to the recovery email and/or phone). `Mailer.SendRecoveryEmailVerification` added (SMTPMailer reuses the address-verification template/link). 11 service tests + 17 handler tests; whole module + vet green incl. pgx via testcontainers. SECURITY.md documents the recovery-channel model. **Not built (out of scope):** a "backup factor" recovery (e.g. recovery codes as a recovery gate) — the verified-channel model (recovery email + phone) is the audit's primary ask and the higher-value, composable win; the mfa module already ships recovery CODES for the MFA-bypass case separately.
 
 ## [x] N2 — Password strength + DefaultPolicy rune length — DONE (3e34d04)
 **Where:** `passwords/policy/default.go`. **Bug:** uses `len(password)` (bytes) not runes → multibyte mismeasured; DefaultPolicy has no denylist. **Fix:** `utf8.RuneCountInString` (match passphrase.go); optional strength-estimator hook. **Test (confirm-first):** multibyte password mismeasured today.
