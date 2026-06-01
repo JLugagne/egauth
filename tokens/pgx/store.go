@@ -210,29 +210,6 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	return &key, nil
 }
 
-type claimsWrapper[C any] struct {
-	Claims *tokens.Claims[C]
-}
-
-func (w claimsWrapper[C]) Value() (driver.Value, error) {
-	if w.Claims == nil {
-		return nil, nil
-	}
-	return json.Marshal(w.Claims)
-}
-
-func (w *claimsWrapper[C]) Scan(value any) error {
-	if value == nil {
-		w.Claims = nil
-		return nil
-	}
-	b, ok := value.([]byte)
-	if !ok {
-		return fmt.Errorf("type assertion to []byte failed")
-	}
-	return json.Unmarshal(b, &w.Claims)
-}
-
 // Ping reports backend connectivity by issuing a trivial round-trip query over the store's
 // handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
 // backend is unreachable and honors ctx for cancellation/deadline.

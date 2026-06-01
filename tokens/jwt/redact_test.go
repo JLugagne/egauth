@@ -41,7 +41,7 @@ func TestConfig_RedactsSigningSecretsWhenPrinted(t *testing.T) {
 	for _, s := range []string{
 		cfg.String(),
 		fmt.Sprintf("%v", cfg),
-		fmt.Sprintf("%s", cfg),
+		cfg.String(),
 		fmt.Sprintf("%+v", cfg),
 		fmt.Sprintf("%#v", cfg),
 	} {

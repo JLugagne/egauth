@@ -61,12 +61,12 @@ func stubProviderServer(t *testing.T, body *string) (*Provider, *httptest.Server
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"access_token":"at-123","token_type":"bearer"}`)
+		_, _ = io.WriteString(w, `{"access_token":"at-123","token_type":"bearer"}`)
 	})
 	mux.HandleFunc("/userinfo", func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer at-123", r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, *body)
+		_, _ = io.WriteString(w, *body)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)

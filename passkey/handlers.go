@@ -100,15 +100,6 @@ func WithCookieKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) { h.cookieKey = key }
 }
 
-// tenant extracts the tenant string from the request via the UserResolver.
-func (cfg handlerConfig) tenant(r *http.Request) string {
-	if cfg.resolve == nil {
-		return ""
-	}
-	_, _, _, t, _ := cfg.resolve(r)
-	return t
-}
-
 // BeginRegistrationHandler returns the credential-creation options (for
 // navigator.credentials.create) as JSON and stores the ceremony SessionData in a secure cookie.
 func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {

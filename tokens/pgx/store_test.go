@@ -32,7 +32,7 @@ func TestStoreContract(t *testing.T) {
 				WithStartupTimeout(30*time.Second)),
 	)
 	require.NoError(t, err)
-	defer pgContainer.Terminate(ctx)
+	defer func() { _ = pgContainer.Terminate(ctx) }()
 
 	connStr, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)

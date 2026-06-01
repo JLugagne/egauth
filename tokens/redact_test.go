@@ -19,7 +19,7 @@ func TestTokenPair_RedactsSecretsWhenPrinted(t *testing.T) {
 	for _, s := range []string{
 		pair.String(),
 		fmt.Sprintf("%v", pair),
-		fmt.Sprintf("%s", pair),
+		pair.String(),
 		fmt.Sprintf("%#v", pair),
 	} {
 		assert.NotContains(t, s, "super-secret-access")

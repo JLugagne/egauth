@@ -43,11 +43,11 @@ func newOIDCIssuer(t *testing.T) *oidcIssuer {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, ti.jwksJSON())
+		_, _ = io.WriteString(w, ti.jwksJSON())
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, ti.tokenBody)
+		_, _ = io.WriteString(w, ti.tokenBody)
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
