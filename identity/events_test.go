@@ -158,18 +158,14 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 }
 
 // failMailer fails every delivery, to exercise the swallowed-delivery-error path.
-type failMailer struct{ err error }
-
-func (m failMailer) SendPasswordReset(context.Context, *identity.User, string) error { return m.err }
-func (m failMailer) SendEmailVerification(context.Context, *identity.User, string) error {
-	return m.err
-}
-func (m failMailer) SendMagicLink(context.Context, *identity.User, string) error { return m.err }
-func (m failMailer) SendEmailChange(context.Context, *identity.User, string, string) error {
-	return m.err
-}
-func (m failMailer) SendRecoveryEmailVerification(context.Context, *identity.User, string, string) error {
-	return m.err
+func newFailMailer(err error) identity.Mailer {
+	return identity.Mailer{
+		PasswordReset:             func(context.Context, identity.PasswordResetMail) error { return err },
+		EmailVerification:         func(context.Context, identity.EmailVerificationMail) error { return err },
+		MagicLink:                 func(context.Context, identity.MagicLinkMail) error { return err },
+		EmailChange:               func(context.Context, identity.EmailChangeMail) error { return err },
+		RecoveryEmailVerification: func(context.Context, identity.RecoveryEmailMail) error { return err },
+	}
 }
 
 func TestEvents_HandlerEmitsDeliveryFailed(t *testing.T) {
@@ -182,7 +178,7 @@ func TestEvents_HandlerEmitsDeliveryFailed(t *testing.T) {
 	require.NoError(t, err)
 
 	sink := &captureSink{}
-	handler := identity.RequestPasswordResetHandler(svc, failMailer{err: errors.New("smtp down")},
+	handler := identity.RequestPasswordResetHandler(svc, newFailMailer(errors.New("smtp down")),
 		identity.WithHandlerEventSink(sink))
 
 	rec := httptest.NewRecorder()

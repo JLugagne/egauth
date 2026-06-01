@@ -424,9 +424,9 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
 		token, user, _ := svc.RequestPasswordReset(r.Context(), cfg.tenant(r), email)
-		if token != "" && user != nil && mailer != nil {
+		if token != "" && user != nil && mailer.PasswordReset != nil {
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.SendPasswordReset(ctx, user, token)
+				return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -491,9 +491,9 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 		}
 		// token is empty when the account is not a live, same-tenant user (swallowed at the
 		// service for enumeration safety); only dispatch delivery when a token was minted.
-		if token != "" && mailer != nil {
+		if token != "" && mailer.EmailVerification != nil {
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.SendEmailVerification(ctx, user, token)
+				return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -549,9 +549,9 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
 		token, user, _ := svc.RequestMagicLink(r.Context(), cfg.tenant(r), email)
-		if token != "" && user != nil && mailer != nil {
+		if token != "" && user != nil && mailer.MagicLink != nil {
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.SendMagicLink(ctx, user, token)
+				return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -699,7 +699,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 			}
 			return
 		}
-		if token != "" && mailer != nil {
+		if token != "" && mailer.EmailChange != nil {
 			// Deliver to the canonical form of the new address — the same normalization the
 			// service applied before binding it to the token.
 			deliverTo := newEmail
@@ -707,7 +707,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 				deliverTo = n
 			}
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.SendEmailChange(ctx, user, deliverTo, token)
+				return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -929,7 +929,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 			}
 			return
 		}
-		if token != "" && sender != nil {
+		if token != "" && sender.PhoneVerification != nil {
 			// Deliver to the canonical form of the number — the same normalization the service
 			// applied before binding it to the token.
 			deliverTo := phone
@@ -937,7 +937,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 				deliverTo = n
 			}
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return sender.SendPhoneVerification(ctx, user, deliverTo, token)
+				return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -1023,13 +1023,13 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			}
 			return
 		}
-		if token != "" && mailer != nil {
+		if token != "" && mailer.RecoveryEmailVerification != nil {
 			deliverTo := recoveryEmail
 			if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
 				deliverTo = n
 			}
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.SendRecoveryEmailVerification(ctx, user, deliverTo, token)
+				return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
 			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -1098,18 +1098,18 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		// Uniform response regardless of account existence or recovery-channel availability; deliver
 		// off the response path to the verified channels only (token/user are empty otherwise).
 		if token != "" && user != nil {
-			if channels.RecoveryEmail && mailer != nil && user.RecoveryEmail != nil {
+			if channels.RecoveryEmail && mailer.PasswordReset != nil && user.RecoveryEmail != nil {
 				recoveryEmail := *user.RecoveryEmail
 				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-					return mailer.SendPasswordReset(ctx, &User{
+					return mailer.PasswordReset(ctx, PasswordResetMail{User: &User{
 						ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
-					}, token)
+					}, Token: token})
 				})
 			}
-			if channels.Phone && sms != nil && user.Phone != nil {
+			if channels.Phone && sms.PhoneVerification != nil && user.Phone != nil {
 				phone := *user.Phone
 				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-					return sms.SendPhoneVerification(ctx, user, phone, token)
+					return sms.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: phone, Token: token})
 				})
 			}
 		}

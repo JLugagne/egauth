@@ -45,29 +45,29 @@ func newMockMailer() *mockMailer {
 	}
 }
 
-func (m *mockMailer) SendPasswordReset(_ context.Context, user *identity.User, token string) error {
-	m.resetCh <- deliveredMail{user: user, token: token}
-	return nil
-}
-
-func (m *mockMailer) SendEmailVerification(_ context.Context, user *identity.User, token string) error {
-	m.verifyCh <- deliveredMail{user: user, token: token}
-	return nil
-}
-
-func (m *mockMailer) SendMagicLink(_ context.Context, user *identity.User, token string) error {
-	m.magicCh <- deliveredMail{user: user, token: token}
-	return nil
-}
-
-func (m *mockMailer) SendEmailChange(_ context.Context, user *identity.User, newEmail, token string) error {
-	m.changeCh <- deliveredMail{user: user, newEmail: newEmail, token: token}
-	return nil
-}
-
-func (m *mockMailer) SendRecoveryEmailVerification(_ context.Context, user *identity.User, recoveryEmail, token string) error {
-	m.recoveryCh <- deliveredMail{user: user, newEmail: recoveryEmail, token: token}
-	return nil
+func (m *mockMailer) asMailer() identity.Mailer {
+	return identity.Mailer{
+		PasswordReset: func(_ context.Context, mail identity.PasswordResetMail) error {
+			m.resetCh <- deliveredMail{user: mail.User, token: mail.Token}
+			return nil
+		},
+		EmailVerification: func(_ context.Context, mail identity.EmailVerificationMail) error {
+			m.verifyCh <- deliveredMail{user: mail.User, token: mail.Token}
+			return nil
+		},
+		MagicLink: func(_ context.Context, mail identity.MagicLinkMail) error {
+			m.magicCh <- deliveredMail{user: mail.User, token: mail.Token}
+			return nil
+		},
+		EmailChange: func(_ context.Context, mail identity.EmailChangeMail) error {
+			m.changeCh <- deliveredMail{user: mail.User, newEmail: mail.NewEmail, token: mail.Token}
+			return nil
+		},
+		RecoveryEmailVerification: func(_ context.Context, mail identity.RecoveryEmailMail) error {
+			m.recoveryCh <- deliveredMail{user: mail.User, newEmail: mail.RecoveryEmail, token: mail.Token}
+			return nil
+		},
+	}
 }
 
 func requireMail(t *testing.T, ch chan deliveredMail) deliveredMail {
@@ -107,7 +107,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestPasswordResetHandler(svc, mailer)
+		h := identity.RequestPasswordResetHandler(svc, mailer.asMailer())
 
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"email": {"u@example.com"}}))
@@ -123,7 +123,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestPasswordResetHandler(svc, mailer)
+		h := identity.RequestPasswordResetHandler(svc, mailer.asMailer())
 
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"email": {"ghost@example.com"}}))
@@ -139,7 +139,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestPasswordResetHandler(svc, mailer)
+		h := identity.RequestPasswordResetHandler(svc, mailer.asMailer())
 
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"email": {"u@example.com"}}))
@@ -214,7 +214,7 @@ func TestRequestMagicLinkHandler(t *testing.T) {
 		}
 		mailer := newMockMailer()
 		rec := httptest.NewRecorder()
-		identity.RequestMagicLinkHandler(svc, mailer)(rec, postForm(url.Values{"email": {"ml@example.com"}}))
+		identity.RequestMagicLinkHandler(svc, mailer.asMailer())(rec, postForm(url.Values{"email": {"ml@example.com"}}))
 		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.Equal(t, "sel.ver", requireMail(t, mailer.magicCh).token)
 	})
@@ -227,7 +227,7 @@ func TestRequestMagicLinkHandler(t *testing.T) {
 		}
 		mailer := newMockMailer()
 		rec := httptest.NewRecorder()
-		identity.RequestMagicLinkHandler(svc, mailer)(rec, postForm(url.Values{"email": {"ghost@example.com"}}))
+		identity.RequestMagicLinkHandler(svc, mailer.asMailer())(rec, postForm(url.Values{"email": {"ghost@example.com"}}))
 		assert.Equal(t, http.StatusNoContent, rec.Code)
 		requireNoMail(t, mailer.magicCh)
 	})
@@ -268,7 +268,7 @@ func TestRequestEmailVerificationHandler_RequiresResolvedUser(t *testing.T) {
 	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
 
 	t.Run("no resolver -> 401", func(t *testing.T) {
-		h := identity.RequestEmailVerificationHandler(&servicetest.MockService{}, newMockMailer())
+		h := identity.RequestEmailVerificationHandler(&servicetest.MockService{}, newMockMailer().asMailer())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{}))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -282,7 +282,7 @@ func TestRequestEmailVerificationHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestEmailVerificationHandler(svc, mailer,
+		h := identity.RequestEmailVerificationHandler(svc, mailer.asMailer(),
 			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{}))

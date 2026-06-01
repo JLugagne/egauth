@@ -15,7 +15,7 @@ import (
 
 func TestRequestRecoveryEmailHandler_RequiresResolvedUser(t *testing.T) {
 	t.Run("no resolver -> 401", func(t *testing.T) {
-		h := identity.RequestRecoveryEmailHandler(&servicetest.MockService{}, newMockMailer())
+		h := identity.RequestRecoveryEmailHandler(&servicetest.MockService{}, newMockMailer().asMailer())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"recovery_email": {"rec@elsewhere.example"}}))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -31,7 +31,7 @@ func TestRequestRecoveryEmailHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestRecoveryEmailHandler(svc, mailer,
+		h := identity.RequestRecoveryEmailHandler(svc, mailer.asMailer(),
 			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"recovery_email": {"rec@elsewhere.example"}}))
@@ -63,7 +63,7 @@ func TestRequestRecoveryEmailHandler_ErrorMapping(t *testing.T) {
 				},
 			}
 			mailer := newMockMailer()
-			h := identity.RequestRecoveryEmailHandler(svc, mailer,
+			h := identity.RequestRecoveryEmailHandler(svc, mailer.asMailer(),
 				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{"recovery_email": {"rec@elsewhere.example"}}))
@@ -120,7 +120,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 		}
 		mailer := newMockMailer()
 		sms := newMockSMSSender()
-		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer, sms)
+		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer.asMailer(), sms.asSMSSender())
 		w := httptest.NewRecorder()
 		h(w, postForm(url.Values{"email": {"primary@example.com"}}))
 		assert.Equal(t, http.StatusNoContent, w.Code)
@@ -138,7 +138,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 		}
 		mailer := newMockMailer()
 		sms := newMockSMSSender()
-		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer, sms)
+		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer.asMailer(), sms.asSMSSender())
 		w := httptest.NewRecorder()
 		h(w, postForm(url.Values{"email": {"primary@example.com"}}))
 		assert.Equal(t, http.StatusNoContent, w.Code)
@@ -158,7 +158,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 		}
 		mailer := newMockMailer()
 		sms := newMockSMSSender()
-		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer, sms)
+		h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer.asMailer(), sms.asSMSSender())
 		w := httptest.NewRecorder()
 		h(w, postForm(url.Values{"email": {"primary@example.com"}}))
 		assert.Equal(t, http.StatusNoContent, w.Code)
@@ -169,7 +169,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 	})
 
 	t.Run("rejects GET", func(t *testing.T) {
-		h := identity.RequestPasswordResetViaRecoveryHandler(&servicetest.MockService{}, newMockMailer(), newMockSMSSender())
+		h := identity.RequestPasswordResetViaRecoveryHandler(&servicetest.MockService{}, newMockMailer().asMailer(), newMockSMSSender().asSMSSender())
 		w := httptest.NewRecorder()
 		h(w, httptest.NewRequest(http.MethodGet, "/", nil))
 		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
