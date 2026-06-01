@@ -155,7 +155,7 @@ func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Consume the refresh token once so presenting it again is a replay.
-	_, err = f.svc.Rotate(ctx, pair.RefreshToken)
+	_, err = f.svc.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 
 	called := false

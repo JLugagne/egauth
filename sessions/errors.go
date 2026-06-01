@@ -6,7 +6,7 @@ var (
 	// ErrSessionNotFound is returned when a session cannot be found.
 	ErrSessionNotFound = errors.New("sessions: session not found")
 
-	// ErrTenantRequired is returned by a store built WithStrictTenancy when a tenant-scoped
-	// operation is performed without a tenant (neither via WithTenant nor carried on the record).
-	ErrTenantRequired = errors.New("sessions: tenant ID is required")
+	// ErrTenantMismatch is returned when a session record's TenantID does not match the
+	// tenantID argument supplied to a Save/Update operation.
+	ErrTenantMismatch = errors.New("sessions: tenant ID mismatch")
 )

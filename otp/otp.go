@@ -49,25 +49,3 @@ type OTP struct {
 	ExpiresAt time.Time
 	CreatedAt time.Time
 }
-
-// StoreOptions holds options for Store operations, such as multi-tenancy.
-type StoreOptions struct {
-	TenantID *string
-}
-
-// Option configures StoreOptions.
-type Option func(*StoreOptions)
-
-// WithTenant scopes a Store operation to a tenant.
-func WithTenant(id string) Option {
-	return func(o *StoreOptions) { o.TenantID = &id }
-}
-
-// ApplyOptions applies opts to a fresh StoreOptions.
-func ApplyOptions(opts []Option) StoreOptions {
-	var o StoreOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
-}

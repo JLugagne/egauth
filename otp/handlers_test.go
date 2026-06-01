@@ -62,7 +62,7 @@ func TestIssueHandler_UnknownSubjectStillReturns204(t *testing.T) {
 func TestVerifyHandler_Success(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
 	subject := uuid.New()
-	ch, err := svc.Issue(context.Background(), subject, "login")
+	ch, err := svc.Issue(context.Background(), "", subject, "login")
 	require.NoError(t, err)
 
 	h := otp.VerifyHandler(svc, otp.WithSubjectResolver(func(r *http.Request) (uuid.UUID, bool) {
@@ -80,7 +80,7 @@ func TestVerifyHandler_CollapsesAllFailures(t *testing.T) {
 	// Wrong code (a challenge exists) and no-challenge-at-all must be indistinguishable.
 	t.Run("wrong code", func(t *testing.T) {
 		svc := otp.NewService(memory.NewStore())
-		_, err := svc.Issue(context.Background(), subject, "login")
+		_, err := svc.Issue(context.Background(), "", subject, "login")
 		require.NoError(t, err)
 		rec := httptest.NewRecorder()
 		otp.VerifyHandler(svc, withSubject).ServeHTTP(rec, codeForm("000000"))

@@ -10,7 +10,3 @@ import (
 func TestMemoryStore_Contract(t *testing.T) {
 	storetest.StoreContractTesting(t, memory.NewStore(), true)
 }
-
-func TestMemoryStore_StrictTenancy(t *testing.T) {
-	storetest.StrictTenancyTesting(t, memory.NewStore(memory.WithStrictTenancy()))
-}

@@ -44,44 +44,47 @@ const (
 )
 
 // Service defines the business logic for user identity operations.
+//
+// Every operation is scoped to a tenant via a mandatory tenantID argument. An empty string is a
+// legal tenant key (the single-tenant default partition); it must still be passed explicitly.
 type Service interface {
-	Register(ctx context.Context, email, password string, opts ...Option) (*User, error)
-	Authenticate(ctx context.Context, provider, providerID, password string, opts ...Option) (*User, error)
+	Register(ctx context.Context, tenantID string, email, password string) (*User, error)
+	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error)
 
 	// RequestPasswordReset mints a password-reset token for the account owning email. To
 	// avoid account enumeration it returns ("", nil, nil) when no such account exists, so the
 	// caller can present an identical response either way. When a token is returned the user
 	// is returned too, so the caller can deliver the token (e.g. via a Mailer).
-	RequestPasswordReset(ctx context.Context, email string, opts ...Option) (token string, user *User, err error)
+	RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 
 	// ResetPassword validates newPassword against the policy, then consumes the reset token
 	// (single-use) and sets the new password, clearing any lockout.
-	ResetPassword(ctx context.Context, token, newPassword string, opts ...Option) error
+	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
 
 	// RequestEmailVerification mints an email-verification token for the given user.
-	RequestEmailVerification(ctx context.Context, userID uuid.UUID, opts ...Option) (token string, err error)
+	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
 
 	// VerifyEmail consumes an email-verification token and marks the user's email verified,
 	// returning the updated user.
-	VerifyEmail(ctx context.Context, token string, opts ...Option) (*User, error)
+	VerifyEmail(ctx context.Context, tenantID string, token string) (*User, error)
 
 	// LinkOrCreateIdentity resolves the user behind an external (e.g. OAuth) identity: it
 	// returns the existing user when (provider, providerID) is already linked, otherwise it
 	// just-in-time provisions a new user+identity. It refuses to silently attach the identity
 	// to a pre-existing account that merely shares the email (returns ErrEmailAlreadyExists),
 	// since auto-linking by email is an account-takeover vector.
-	LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...Option) (*User, error)
+	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
 
 	// RequestMagicLink mints a passwordless login token for the account owning email and
 	// returns it together with the user (for delivery, e.g. via a Mailer). Like
 	// RequestPasswordReset it returns ("", nil, nil) for an unknown account to avoid
 	// enumeration. It works for any account (including OAuth-only) since it grants a session
 	// rather than touching a password.
-	RequestMagicLink(ctx context.Context, email string, opts ...Option) (token string, user *User, err error)
+	RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 
 	// LoginWithMagicLink consumes a magic-link token (single-use) and returns the user it
 	// authenticates, so the caller can issue a session/token pair.
-	LoginWithMagicLink(ctx context.Context, token string, opts ...Option) (*User, error)
+	LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
 
 	// ChangePassword re-verifies the user's current password and, on success, validates the
 	// new password against the policy and replaces the stored hash. It is the authenticated
@@ -90,7 +93,7 @@ type Service interface {
 	// identity (e.g. OAuth-only), or a passwords.Policy error when the new password is
 	// rejected. After a successful change the caller SHOULD revoke the user's other sessions
 	// and refresh-token families (that is cross-module and left to the consumer).
-	ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...Option) error
+	ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
 
 	// RequestEmailChange starts the authenticated change-email flow for userID. It validates
 	// and normalizes newEmail, rejects an address already owned by another live account in the
@@ -99,14 +102,14 @@ type Service interface {
 	// control of the new address before the swap, so a hijacked session cannot silently move
 	// the account to an attacker-controlled address. It returns ErrInvalidEmail for a malformed
 	// address and ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
-	RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...Option) (token string, err error)
+	RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
 
 	// ConfirmEmailChange consumes a change-email token (single-use) and atomically switches the
 	// owning user's email to the address the token was minted for, marking it verified (the
 	// confirmation, delivered to the new address, proves control). It returns the updated user.
 	// It returns ErrEmailAlreadyExists when the target was claimed by another account in the
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
-	ConfirmEmailChange(ctx context.Context, token string, opts ...Option) (*User, error)
+	ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
 
 	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
 	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
@@ -121,7 +124,7 @@ type Service interface {
 	// re-verifies the current password. Enforce it by wrapping DeleteAccountHandler's route with
 	// tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)): the auth_time freshness gate works for
 	// any factor, so it also covers OAuth-only accounts that cannot re-verify a password.
-	DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...Option) error
+	DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
@@ -130,7 +133,7 @@ type Service interface {
 // stores itself — so account deletion runs whatever erasers the application registers via
 // WithAccountErasers. Each eraser SHOULD be idempotent, since deletion may be retried after a
 // partial failure.
-type AccountEraser func(ctx context.Context, userID uuid.UUID, opts ...Option) error
+type AccountEraser func(ctx context.Context, tenantID string, userID uuid.UUID) error
 
 type service struct {
 	store                Store
@@ -207,14 +210,6 @@ func (s *service) emit(ctx context.Context, e event.Event) {
 	event.Emit(ctx, s.events, e)
 }
 
-// tenantOf extracts the tenant from the call options for event annotation ("" when unset).
-func tenantOf(opts []Option) string {
-	if t := ApplyOptions(opts).TenantID; t != nil {
-		return *t
-	}
-	return ""
-}
-
 // NewService creates a new identity Service. By default it enables account lockout after
 // DefaultLockThreshold failed attempts for DefaultLockDuration. It panics on a nil store (always
 // required) to fail fast at startup rather than with a nil-pointer panic deep in a request. The
@@ -247,7 +242,7 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 
 }
 
-func (s *service) Register(ctx context.Context, email, password string, opts ...Option) (*User, error) {
+func (s *service) Register(ctx context.Context, tenantID string, email, password string) (*User, error) {
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, err
@@ -261,7 +256,7 @@ func (s *service) Register(ctx context.Context, email, password string, opts ...
 		return nil, err
 	}
 
-	user, err := s.store.CreateUser(ctx, email, opts...)
+	user, err := s.store.CreateUser(ctx, tenantID, email)
 	if err != nil {
 		return nil, err
 	}
@@ -272,12 +267,12 @@ func (s *service) Register(ctx context.Context, email, password string, opts ...
 		ProviderID:   email,
 		PasswordHash: &hash,
 	}
-	if err := s.store.AddIdentity(ctx, ident, opts...); err != nil {
+	if err := s.store.AddIdentity(ctx, tenantID, ident); err != nil {
 		// The store has no cross-call transaction, so a failed AddIdentity would otherwise
 		// leave an orphaned user that permanently blocks re-registration of this email
 		// (the live-row unique index keeps matching it). Compensate by soft-deleting the
 		// just-created user, which anonymizes its email and frees the slot. Best-effort.
-		_ = s.store.DeleteUser(ctx, user.ID, opts...)
+		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
 		return nil, err
 	}
 
@@ -295,13 +290,12 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 	_, _ = s.hasher.Hash(ctx, password)
 }
 
-func (s *service) Authenticate(ctx context.Context, provider, providerID, password string, opts ...Option) (*User, error) {
-	tenant := tenantOf(opts)
+func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error) {
 	// loginFailed emits a uniform failure event. UserID is "" on the enumeration-safe paths
 	// (unknown account) where no user is resolved; the reason is deliberately uniform there so
 	// the audit log mirrors the uniform client response and is not itself an enumeration oracle.
 	loginFailed := func(userID, reason string) {
-		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenant, Reason: reason})
+		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenantID, Reason: reason})
 	}
 
 	if provider == "password" {
@@ -315,7 +309,7 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 		}
 		providerID = normalized
 
-		user, err := s.store.FindUserByEmail(ctx, providerID, opts...)
+		user, err := s.store.FindUserByEmail(ctx, tenantID, providerID)
 		if err != nil {
 			// Constant-time: apply an equivalent hashing cost so an attacker cannot
 			// distinguish a missing user from a wrong password by timing (PRD §108).
@@ -324,7 +318,7 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 			return nil, ErrInvalidCredentials
 		}
 
-		ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
+		ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 		if err != nil {
 			s.decoyHash(ctx, password)
 			loginFailed(user.ID.String(), "invalid_credentials")
@@ -346,7 +340,7 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 		if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
 			// Record the failed attempt (and possibly lock the account). The error is not
 			// propagated (the response stays uniform) but it gates the lockout event below.
-			incErr := s.store.IncrementFailedAttempts(ctx, ident.ID, s.lockThreshold, s.lockDuration, opts...)
+			incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
 			loginFailed(user.ID.String(), "invalid_credentials")
 			// Surface the lockout as its own event — but only when the store actually persisted
 			// the attempt that crosses the threshold. Emitting on a pre-increment prediction even
@@ -354,45 +348,45 @@ func (s *service) Authenticate(ctx context.Context, provider, providerID, passwo
 			// SIEM/audit consumer. (ident.FailedAttempts is the pre-increment count, so +1 is the
 			// value the store would persist; it matches both backends' lock condition.)
 			if incErr == nil && s.lockThreshold > 0 && ident.FailedAttempts+1 >= s.lockThreshold {
-				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenant})
+				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenantID})
 			}
 			return nil, ErrInvalidCredentials
 		}
 
 		// Successful authentication: reset the counter only if there were prior attempts.
 		if ident.FailedAttempts > 0 {
-			_ = s.store.ResetFailedAttempts(ctx, ident.ID, opts...)
+			_ = s.store.ResetFailedAttempts(ctx, tenantID, ident.ID)
 		}
 
-		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenant})
+		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
 		return user, nil
 	}
 
 	// Fallback for other providers (if any)
-	ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
+	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 	if err != nil {
 		loginFailed("", "invalid_credentials")
 		return nil, ErrInvalidCredentials
 	}
 
-	user, err := s.store.FindUserByID(ctx, ident.UserID, opts...)
+	user, err := s.store.FindUserByID(ctx, tenantID, ident.UserID)
 	if err != nil {
 		loginFailed("", "invalid_credentials")
 		return nil, ErrInvalidCredentials
 	}
 
-	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenant})
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
 	return user, nil
 }
 
 // RequestPasswordReset mints a password-reset token for the account owning email.
-func (s *service) RequestPasswordReset(ctx context.Context, email string, opts ...Option) (string, *User, error) {
+func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, email string) (string, *User, error) {
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
 		// Stay uniform: a malformed email behaves exactly like an unknown account.
 		return "", nil, nil
 	}
-	user, err := s.store.FindUserByEmail(ctx, email, opts...)
+	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			// Do not reveal whether the account exists.
@@ -405,7 +399,7 @@ func (s *service) RequestPasswordReset(ctx context.Context, email string, opts .
 	// OAuth-only account would hand the holder a single-use token that ResetPassword can never
 	// apply (no password identity), burning it for nothing. Stay uniform: behave as if the
 	// account did not exist (no token, no error).
-	idents, err := s.store.FindIdentitiesByUserID(ctx, user.ID, opts...)
+	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, user.ID)
 	if err != nil {
 		return "", nil, err
 	}
@@ -413,7 +407,7 @@ func (s *service) RequestPasswordReset(ctx context.Context, email string, opts .
 		return "", nil, nil
 	}
 
-	token, err := s.store.CreateVerificationToken(ctx, user.ID, KindPasswordReset, s.passwordResetTTL, nil, opts...)
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, user.ID, KindPasswordReset, s.passwordResetTTL, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -437,12 +431,12 @@ func hasPasswordIdentity(idents []*Identity) bool {
 // liveness gate remains as belt-and-suspenders: FindUserByID deliberately still returns
 // soft-deleted users (the store contract depends on that for inspection), so should any token
 // ever outlive its account, it still cannot resurrect a deactivated account or grant a session.
-func (s *service) consumeForLiveUser(ctx context.Context, token, kind string, opts ...Option) (*User, []byte, error) {
-	userID, metadata, err := s.store.ConsumeVerificationToken(ctx, token, kind, opts...)
+func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token, kind string) (*User, []byte, error) {
+	userID, metadata, err := s.store.ConsumeVerificationToken(ctx, tenantID, token, kind)
 	if err != nil {
 		return nil, nil, err
 	}
-	user, err := s.store.FindUserByID(ctx, userID, opts...)
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -453,7 +447,7 @@ func (s *service) consumeForLiveUser(ctx context.Context, token, kind string, op
 }
 
 // ResetPassword validates the new password, consumes the token and sets the password.
-func (s *service) ResetPassword(ctx context.Context, token, newPassword string, opts ...Option) error {
+func (s *service) ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error {
 	// Validate and hash BEFORE consuming, so a weak password or a hashing failure does not
 	// burn a single-use token.
 	if err := s.policy.Verify(ctx, newPassword); err != nil {
@@ -464,12 +458,12 @@ func (s *service) ResetPassword(ctx context.Context, token, newPassword string, 
 		return err
 	}
 
-	user, _, err := s.consumeForLiveUser(ctx, token, KindPasswordReset, opts...)
+	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindPasswordReset)
 	if err != nil {
 		return err
 	}
 
-	if err := s.store.UpdateIdentityPassword(ctx, user.ID, hash, opts...); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash); err != nil {
 		return err
 	}
 	s.emit(ctx, event.Event{Type: event.PasswordReset, UserID: user.ID.String(), TenantID: user.TenantID})
@@ -477,14 +471,14 @@ func (s *service) ResetPassword(ctx context.Context, token, newPassword string, 
 }
 
 // ChangePassword re-verifies the user's current password, then validates and applies a new one.
-func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentPassword, newPassword string, opts ...Option) error {
+func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error {
 	// Validate the new password against the policy first: a weak new password must fail fast,
 	// before we spend a KDF comparison on the current credential or touch the store.
 	if err := s.policy.Verify(ctx, newPassword); err != nil {
 		return err
 	}
 
-	idents, err := s.store.FindIdentitiesByUserID(ctx, userID, opts...)
+	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, userID)
 	if err != nil {
 		return err
 	}
@@ -511,15 +505,15 @@ func (s *service) ChangePassword(ctx context.Context, userID uuid.UUID, currentP
 	if err != nil {
 		return err
 	}
-	if err := s.store.UpdateIdentityPassword(ctx, userID, hash, opts...); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash); err != nil {
 		return err
 	}
-	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantOf(opts)})
+	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID})
 	return nil
 }
 
 // RequestEmailChange mints a token that, once confirmed, switches userID's email to newEmail.
-func (s *service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, opts ...Option) (string, error) {
+func (s *service) RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (string, error) {
 	newEmail, err := normalizeEmail(newEmail)
 	if err != nil {
 		return "", err
@@ -530,7 +524,7 @@ func (s *service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newE
 	// only advisory — the store's unique index is the authoritative guard at confirm time, which
 	// closes the request→confirm race. Finding the *same* user (newEmail is already theirs) is
 	// not a conflict; confirming would simply re-verify it.
-	if existing, ferr := s.store.FindUserByEmail(ctx, newEmail, opts...); ferr == nil {
+	if existing, ferr := s.store.FindUserByEmail(ctx, tenantID, newEmail); ferr == nil {
 		if existing.ID != userID {
 			return "", ErrEmailAlreadyExists
 		}
@@ -540,7 +534,7 @@ func (s *service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newE
 
 	// Bind the requested address to the token as metadata. CreateVerificationToken also gates
 	// on userID being a live, same-tenant account (returning ErrUserNotFound otherwise).
-	token, err := s.store.CreateVerificationToken(ctx, userID, KindEmailChange, s.emailChangeTTL, []byte(newEmail), opts...)
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, userID, KindEmailChange, s.emailChangeTTL, []byte(newEmail))
 	if err != nil {
 		return "", err
 	}
@@ -548,8 +542,8 @@ func (s *service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newE
 }
 
 // ConfirmEmailChange consumes a change-email token and atomically applies the new address.
-func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...Option) (*User, error) {
-	user, metadata, err := s.consumeForLiveUser(ctx, token, KindEmailChange, opts...)
+func (s *service) ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error) {
+	user, metadata, err := s.consumeForLiveUser(ctx, tenantID, token, KindEmailChange)
 	if err != nil {
 		return nil, err
 	}
@@ -567,7 +561,7 @@ func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...
 	// so a target claimed since the token was minted yields ErrEmailAlreadyExists rather than a
 	// duplicate live email or a password identity left stranded on the old address. Confirming a
 	// token delivered to the new address proves control of it, so the address is marked verified.
-	if err := s.store.UpdateUserEmail(ctx, user.ID, newEmail, now, opts...); err != nil {
+	if err := s.store.UpdateUserEmail(ctx, tenantID, user.ID, newEmail, now); err != nil {
 		return nil, err
 	}
 	// Reflect the post-swap state on the returned user (it was loaded pre-swap).
@@ -579,10 +573,10 @@ func (s *service) ConfirmEmailChange(ctx context.Context, token string, opts ...
 }
 
 // DeleteAccount revokes the user's cross-module artifacts, then soft-deletes the identity.
-func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...Option) error {
+func (s *service) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
 	// Gate on a live, same-tenant user first so we report ErrUserNotFound (and skip the erasers)
 	// for an unknown, soft-deleted or cross-tenant account.
-	user, err := s.store.FindUserByID(ctx, userID, opts...)
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
 	if err != nil {
 		return err
 	}
@@ -599,7 +593,7 @@ func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...O
 		if erase == nil {
 			continue
 		}
-		if err := erase(ctx, userID, opts...); err != nil {
+		if err := erase(ctx, tenantID, userID); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -607,7 +601,7 @@ func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...O
 		return errors.Join(errs...)
 	}
 
-	if err := s.store.DeleteUser(ctx, userID, opts...); err != nil {
+	if err := s.store.DeleteUser(ctx, tenantID, userID); err != nil {
 		return err
 	}
 	s.emit(ctx, event.Event{Type: event.AccountDeleted, UserID: userID.String(), TenantID: user.TenantID})
@@ -618,8 +612,8 @@ func (s *service) DeleteAccount(ctx context.Context, userID uuid.UUID, opts ...O
 // other Request* flows it is enumeration-safe: a non-existent, soft-deleted or cross-tenant
 // user yields ("", nil) rather than a distinct error, so a caller cannot use the 500-vs-204
 // (or latency) difference as an oracle for whether a userID is a live, same-tenant account.
-func (s *service) RequestEmailVerification(ctx context.Context, userID uuid.UUID, opts ...Option) (string, error) {
-	token, err := s.store.CreateVerificationToken(ctx, userID, KindEmailVerification, s.emailVerificationTTL, nil, opts...)
+func (s *service) RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (string, error) {
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, userID, KindEmailVerification, s.emailVerificationTTL, nil)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			return "", nil
@@ -630,15 +624,15 @@ func (s *service) RequestEmailVerification(ctx context.Context, userID uuid.UUID
 }
 
 // VerifyEmail consumes an email-verification token and marks the email verified.
-func (s *service) VerifyEmail(ctx context.Context, token string, opts ...Option) (*User, error) {
-	user, _, err := s.consumeForLiveUser(ctx, token, KindEmailVerification, opts...)
+func (s *service) VerifyEmail(ctx context.Context, tenantID string, token string) (*User, error) {
+	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindEmailVerification)
 	if err != nil {
 		return nil, err
 	}
 
 	now := time.Now()
 	user.EmailVerifiedAt = &now
-	if err := s.store.UpdateUser(ctx, user, opts...); err != nil {
+	if err := s.store.UpdateUser(ctx, tenantID, user); err != nil {
 		return nil, err
 	}
 	s.emit(ctx, event.Event{Type: event.EmailVerified, UserID: user.ID.String(), TenantID: user.TenantID})
@@ -647,7 +641,7 @@ func (s *service) VerifyEmail(ctx context.Context, token string, opts ...Option)
 
 // LinkOrCreateIdentity resolves the user behind an external identity, JIT-provisioning when
 // the provider identity is unknown.
-func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...Option) (*User, error) {
+func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error) {
 	// Canonicalize the provider-supplied email so the takeover-by-email guard and account
 	// linking compare on the same normalized form the password flow stores. An unparseable
 	// value is dropped (provision without an email) rather than persisted verbatim.
@@ -660,9 +654,9 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 	}
 
 	// 1. Already linked? Return the owning user.
-	ident, err := s.store.FindIdentityByProvider(ctx, provider, providerID, opts...)
+	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 	if err == nil {
-		return s.store.FindUserByID(ctx, ident.UserID, opts...)
+		return s.store.FindUserByID(ctx, tenantID, ident.UserID)
 	}
 	if !errors.Is(err, ErrIdentityNotFound) {
 		return nil, err
@@ -672,7 +666,7 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 	//    email — that would be an account-takeover vector. The application must drive
 	//    explicit linking from an authenticated session instead.
 	if email != "" {
-		if _, ferr := s.store.FindUserByEmail(ctx, email, opts...); ferr == nil {
+		if _, ferr := s.store.FindUserByEmail(ctx, tenantID, email); ferr == nil {
 			return nil, ErrEmailAlreadyExists
 		} else if !errors.Is(ferr, ErrUserNotFound) {
 			return nil, ferr
@@ -680,14 +674,14 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 	}
 
 	// 3. JIT-provision a new user and link the identity.
-	user, err := s.store.CreateUser(ctx, email, opts...)
+	user, err := s.store.CreateUser(ctx, tenantID, email)
 	if err != nil {
 		return nil, err
 	}
 	if emailVerified {
 		now := s.now()
 		user.EmailVerifiedAt = &now
-		if err := s.store.UpdateUser(ctx, user, opts...); err != nil {
+		if err := s.store.UpdateUser(ctx, tenantID, user); err != nil {
 			return nil, err
 		}
 	}
@@ -697,24 +691,24 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, provider, providerID
 		Provider:   provider,
 		ProviderID: providerID,
 	}
-	if err := s.store.AddIdentity(ctx, link, opts...); err != nil {
+	if err := s.store.AddIdentity(ctx, tenantID, link); err != nil {
 		// Compensate for the lack of a transaction: drop the just-provisioned user so a
 		// failed link does not leave an orphan that blocks future provisioning of this
 		// email. Best-effort.
-		_ = s.store.DeleteUser(ctx, user.ID, opts...)
+		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
 		return nil, err
 	}
 	return user, nil
 }
 
 // RequestMagicLink mints a passwordless login token for the account owning email.
-func (s *service) RequestMagicLink(ctx context.Context, email string, opts ...Option) (string, *User, error) {
+func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email string) (string, *User, error) {
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
 		// Stay uniform: a malformed email behaves exactly like an unknown account.
 		return "", nil, nil
 	}
-	user, err := s.store.FindUserByEmail(ctx, email, opts...)
+	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			return "", nil, nil // do not reveal whether the account exists
@@ -722,7 +716,7 @@ func (s *service) RequestMagicLink(ctx context.Context, email string, opts ...Op
 		return "", nil, err
 	}
 
-	token, err := s.store.CreateVerificationToken(ctx, user.ID, KindMagicLink, s.magicLinkTTL, nil, opts...)
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, user.ID, KindMagicLink, s.magicLinkTTL, nil)
 	if err != nil {
 		return "", nil, err
 	}
@@ -732,8 +726,8 @@ func (s *service) RequestMagicLink(ctx context.Context, email string, opts ...Op
 // LoginWithMagicLink consumes a magic-link token and returns the user it authenticates. A
 // token for a since-deactivated account is rejected (ErrUserNotFound) so account suspension
 // reliably revokes pending passwordless logins.
-func (s *service) LoginWithMagicLink(ctx context.Context, token string, opts ...Option) (*User, error) {
-	user, _, err := s.consumeForLiveUser(ctx, token, KindMagicLink, opts...)
+func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error) {
+	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindMagicLink)
 	if err != nil {
 		return nil, err
 	}

@@ -14,7 +14,3 @@ func TestStore(t *testing.T) {
 	store := NewStore[CustomClaims]()
 	storetest.StoreContractTesting(t, store, true, CustomClaims{Foo: "bar"})
 }
-
-func TestStrictTenancy(t *testing.T) {
-	storetest.StrictTenancyTesting(t, NewStore[CustomClaims](WithStrictTenancy()), CustomClaims{Foo: "bar"})
-}

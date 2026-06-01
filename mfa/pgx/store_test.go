@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/egauth/mfa"
 	mfapgx "github.com/JLugagne/egauth/mfa/pgx"
 	"github.com/JLugagne/egauth/mfa/storetest"
 	"github.com/google/uuid"
@@ -17,7 +16,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func newStore(t *testing.T, opts ...mfapgx.Option) *mfapgx.Store {
+func newStore(t *testing.T) *mfapgx.Store {
 	t.Helper()
 	ctx := context.Background()
 
@@ -47,15 +46,11 @@ func newStore(t *testing.T, opts ...mfapgx.Option) *mfapgx.Store {
 	t.Cleanup(pool.Close)
 
 	require.NoError(t, mfapgx.Migrate(ctx, pool))
-	return mfapgx.NewStore(pool, opts...)
+	return mfapgx.NewStore(pool)
 }
 
 func TestPgxStore_Contract(t *testing.T) {
 	storetest.StoreContractTesting(t, newStore(t), true)
-}
-
-func TestPgxStore_StrictTenancy(t *testing.T) {
-	storetest.StrictTenancyTesting(t, newStore(t, mfapgx.WithStrictTenancy()))
 }
 
 // TestPgxStore_ReplaceRecoveryCodesAtomic verifies the documented atomicity: a replace that
@@ -66,14 +61,14 @@ func TestPgxStore_ReplaceRecoveryCodesAtomic(t *testing.T) {
 	store := newStore(t)
 	uid := uuid.New()
 
-	require.NoError(t, store.ReplaceRecoveryCodes(ctx, uid, []string{"keepA", "keepB"}, mfa.WithTenant("t1")))
+	require.NoError(t, store.ReplaceRecoveryCodes(ctx, "t1", uid, []string{"keepA", "keepB"}))
 
 	// A duplicate hash makes the second INSERT violate the PK, failing the replace mid-loop.
-	err := store.ReplaceRecoveryCodes(ctx, uid, []string{"dup", "dup"}, mfa.WithTenant("t1"))
+	err := store.ReplaceRecoveryCodes(ctx, "t1", uid, []string{"dup", "dup"})
 	require.Error(t, err)
 
 	// Because the replace is transactional, the original codes must still be intact.
-	assert.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "keepA", mfa.WithTenant("t1")),
+	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "keepA"),
 		"a failed replace must roll back, leaving the previous recovery codes usable")
-	assert.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "keepB", mfa.WithTenant("t1")))
+	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "keepB"))
 }

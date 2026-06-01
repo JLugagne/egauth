@@ -94,7 +94,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 
 	t.Run("known account: mailer receives the token", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestPasswordResetFunc: func(_ context.Context, email string, _ ...identity.Option) (string, *identity.User, error) {
+			RequestPasswordResetFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
 				assert.Equal(t, "u@example.com", email)
 				return "sel.ver", user, nil
 			},
@@ -111,7 +111,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 
 	t.Run("unknown account: same response, no mail", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestPasswordResetFunc: func(_ context.Context, _ string, _ ...identity.Option) (string, *identity.User, error) {
+			RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 				return "", nil, nil // service hides non-existence
 			},
 		}
@@ -127,7 +127,7 @@ func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
 
 	t.Run("backend error: still uniform success, no enumeration via status", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestPasswordResetFunc: func(_ context.Context, _ string, _ ...identity.Option) (string, *identity.User, error) {
+			RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 				return "", nil, errors.New("database is down")
 			},
 		}
@@ -159,7 +159,7 @@ func TestResetPasswordHandler_ErrorMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &servicetest.MockService{
-				ResetPasswordFunc: func(_ context.Context, token, pw string, _ ...identity.Option) error {
+				ResetPasswordFunc: func(_ context.Context, _ string, token, pw string) error {
 					assert.Equal(t, "sel.ver", token)
 					assert.Equal(t, "NewPassw0rd!", pw)
 					return tc.err
@@ -183,7 +183,7 @@ func TestVerifyEmailHandler(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			VerifyEmailFunc: func(_ context.Context, token string, _ ...identity.Option) (*identity.User, error) {
+			VerifyEmailFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
 				return &identity.User{ID: uuid.New()}, nil
 			},
@@ -200,7 +200,7 @@ func TestRequestMagicLinkHandler(t *testing.T) {
 
 	t.Run("known account: mailer receives the link token", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestMagicLinkFunc: func(_ context.Context, email string, _ ...identity.Option) (string, *identity.User, error) {
+			RequestMagicLinkFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
 				assert.Equal(t, "ml@example.com", email)
 				return "sel.ver", user, nil
 			},
@@ -214,7 +214,7 @@ func TestRequestMagicLinkHandler(t *testing.T) {
 
 	t.Run("unknown account: uniform, no mail", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestMagicLinkFunc: func(_ context.Context, _ string, _ ...identity.Option) (string, *identity.User, error) {
+			RequestMagicLinkFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 				return "", nil, nil
 			},
 		}
@@ -230,7 +230,7 @@ func TestMagicLinkLoginHandler(t *testing.T) {
 	t.Run("success issues auth cookies", func(t *testing.T) {
 		uid := uuid.New()
 		svc := &servicetest.MockService{
-			LoginWithMagicLinkFunc: func(_ context.Context, token string, _ ...identity.Option) (*identity.User, error) {
+			LoginWithMagicLinkFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
 				return &identity.User{ID: uid}, nil
 			},
@@ -246,7 +246,7 @@ func TestMagicLinkLoginHandler(t *testing.T) {
 
 	t.Run("invalid token is mapped", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			LoginWithMagicLinkFunc: func(_ context.Context, _ string, _ ...identity.Option) (*identity.User, error) {
+			LoginWithMagicLinkFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {
 				return nil, identity.ErrVerificationTokenNotFound
 			},
 		}
@@ -269,7 +269,7 @@ func TestRequestEmailVerificationHandler_RequiresResolvedUser(t *testing.T) {
 
 	t.Run("resolved user -> mail sent", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			RequestEmailVerificationFunc: func(_ context.Context, userID uuid.UUID, _ ...identity.Option) (string, error) {
+			RequestEmailVerificationFunc: func(_ context.Context, _ string, userID uuid.UUID) (string, error) {
 				assert.Equal(t, user.ID, userID)
 				return "sel.ver", nil
 			},

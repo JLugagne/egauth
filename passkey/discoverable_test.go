@@ -34,11 +34,11 @@ func register(t *testing.T, svc *passkey.Service, userID uuid.UUID) *softAuthent
 	ctx := context.Background()
 	auth := newSoftAuthenticator(t, testRPID, testOrigin)
 
-	cc, session, err := svc.BeginRegistration(ctx, userID, "user@example.com", "User")
+	cc, session, err := svc.BeginRegistration(ctx, "", userID, "user@example.com", "User")
 	require.NoError(t, err)
 	require.NotNil(t, cc)
 
-	cred, err := svc.FinishRegistration(ctx, userID, "user@example.com", "User", *session,
+	cred, err := svc.FinishRegistration(ctx, "", userID, "user@example.com", "User", *session,
 		auth.registrationRequest(t, session.Challenge))
 	require.NoError(t, err)
 	require.Equal(t, auth.credID, cred.ID)
@@ -68,7 +68,7 @@ func TestFinishDiscoverableLogin_ResolvesUserFromUserHandle(t *testing.T) {
 	_, session, err := svc.BeginDiscoverableLogin()
 	require.NoError(t, err)
 
-	cred, resolvedID, err := svc.FinishDiscoverableLogin(ctx, *session,
+	cred, resolvedID, err := svc.FinishDiscoverableLogin(ctx, "", *session,
 		auth.loginRequest(t, session.Challenge, userHandleOf(userID)))
 	require.NoError(t, err)
 	assert.Equal(t, userID, resolvedID, "the user must be resolved from the credential's user handle")
@@ -88,7 +88,7 @@ func TestFinishDiscoverableLogin_UnknownUserHandleRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	// Present a user handle for an account with no credentials: verification must fail.
-	_, _, err = svc.FinishDiscoverableLogin(ctx, *session,
+	_, _, err = svc.FinishDiscoverableLogin(ctx, "", *session,
 		auth.loginRequest(t, session.Challenge, userHandleOf(uuid.New())))
 	require.Error(t, err)
 }

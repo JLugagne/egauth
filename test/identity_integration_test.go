@@ -71,13 +71,13 @@ func TestIdentityLifecycle_Integration(t *testing.T) {
 
 	t.Run("End-to-End Success", func(t *testing.T) {
 		// Register in Tenant A
-		user, err := service.Register(ctx, email, password, identity.WithTenant(tenantA))
+		user, err := service.Register(ctx, tenantA, email, password)
 		require.NoError(t, err)
 		assert.NotNil(t, user)
 		assert.Equal(t, email, user.Email)
 
 		// Authenticate with correct password in Tenant A
-		authUser, err := service.Authenticate(ctx, "password", email, password, identity.WithTenant(tenantA))
+		authUser, err := service.Authenticate(ctx, tenantA, "password", email, password)
 		require.NoError(t, err)
 		assert.NotNil(t, authUser)
 		assert.Equal(t, user.ID, authUser.ID)
@@ -85,7 +85,7 @@ func TestIdentityLifecycle_Integration(t *testing.T) {
 
 	t.Run("Tenant Isolation", func(t *testing.T) {
 		// Attempt to authenticate with same email/password in Tenant B
-		authUser, err := service.Authenticate(ctx, "password", email, password, identity.WithTenant(tenantB))
+		authUser, err := service.Authenticate(ctx, tenantB, "password", email, password)
 		require.Error(t, err)
 		assert.Nil(t, authUser)
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
@@ -93,22 +93,22 @@ func TestIdentityLifecycle_Integration(t *testing.T) {
 
 	t.Run("Soft Delete and Re-register", func(t *testing.T) {
 		// Authenticate to get the user ID
-		authUser, err := service.Authenticate(ctx, "password", email, password, identity.WithTenant(tenantA))
+		authUser, err := service.Authenticate(ctx, tenantA, "password", email, password)
 		require.NoError(t, err)
 
 		// Soft delete via store
-		err = store.DeleteUser(ctx, authUser.ID, identity.WithTenant(tenantA))
+		err = store.DeleteUser(ctx, tenantA, authUser.ID)
 		require.NoError(t, err)
 
 		// Re-register with the EXACT same email and tenant
-		newUser, err := service.Register(ctx, email, password, identity.WithTenant(tenantA))
+		newUser, err := service.Register(ctx, tenantA, email, password)
 		require.NoError(t, err)
 		assert.NotNil(t, newUser)
 		assert.NotEqual(t, authUser.ID, newUser.ID)
 		assert.Equal(t, email, newUser.Email)
 
 		// Authenticate with the new user
-		newAuthUser, err := service.Authenticate(ctx, "password", email, password, identity.WithTenant(tenantA))
+		newAuthUser, err := service.Authenticate(ctx, tenantA, "password", email, password)
 		require.NoError(t, err)
 		assert.NotNil(t, newAuthUser)
 		assert.Equal(t, newUser.ID, newAuthUser.ID)

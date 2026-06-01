@@ -46,21 +46,21 @@ func TestMFAEvents_Lifecycle(t *testing.T) {
 
 	userID := uuid.New()
 
-	enr, err := svc.EnrollTOTP(ctx, userID, "user@example.com")
+	enr, err := svc.EnrollTOTP(ctx, "", userID, "user@example.com")
 	require.NoError(t, err)
 	assert.True(t, sink.has(event.MFAEnrolled), "enrollment must emit MFAEnrolled")
 
 	code, err := mfa.GenerateCode(enr.Secret, at, mfa.DefaultDigits, mfa.DefaultPeriod)
 	require.NoError(t, err)
-	_, err = svc.ConfirmTOTP(ctx, userID, code)
+	_, err = svc.ConfirmTOTP(ctx, "", userID, code)
 	require.NoError(t, err)
 	assert.True(t, sink.has(event.MFAConfirmed), "confirmation must emit MFAConfirmed")
 
 	// A bad code must emit MFAVerificationFailed.
-	err = svc.VerifyTOTP(ctx, userID, "")
+	err = svc.VerifyTOTP(ctx, "", userID, "")
 	require.ErrorIs(t, err, mfa.ErrInvalidCode)
 	assert.True(t, sink.has(event.MFAVerificationFailed), "a failed verification must emit MFAVerificationFailed")
 
-	require.NoError(t, svc.DisableTOTP(ctx, userID))
+	require.NoError(t, svc.DisableTOTP(ctx, "", userID))
 	assert.True(t, sink.has(event.MFADisabled), "disabling must emit MFADisabled")
 }

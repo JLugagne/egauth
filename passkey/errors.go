@@ -18,6 +18,7 @@ var (
 	// expired between the Begin and Finish steps.
 	ErrSessionInvalid = errors.New("passkey: ceremony session is missing or invalid")
 
-	// ErrTenantRequired is returned when the store requires a tenant but none was provided.
-	ErrTenantRequired = errors.New("passkey: tenant ID is required")
+	// ErrTenantMismatch is returned when the record's TenantID does not match the tenantID
+	// argument supplied to Save* operations.
+	ErrTenantMismatch = errors.New("passkey: tenant ID mismatch")
 )

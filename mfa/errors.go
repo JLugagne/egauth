@@ -21,6 +21,7 @@ var (
 	// ErrRecoveryCodeNotFound is returned when a recovery code does not match an unused code.
 	ErrRecoveryCodeNotFound = errors.New("mfa: recovery code not found")
 
-	// ErrTenantRequired is returned when the store requires a tenant but none was provided.
-	ErrTenantRequired = errors.New("mfa: tenant ID is required")
+	// ErrTenantMismatch is returned when a Save* call is given a tenantID that conflicts with
+	// a non-empty TenantID already set on the record being saved.
+	ErrTenantMismatch = errors.New("mfa: tenant ID mismatch")
 )

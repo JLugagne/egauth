@@ -20,7 +20,7 @@ func TestMiddleware(t *testing.T) {
 	token := "valid_token"
 
 	mockStore := &storetest.MockStore{
-		FindSessionByHashFunc: func(ctx context.Context, hash string, opts ...sessions.Option) (*sessions.Session, error) {
+		FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 			// In service, hash is hex(sha256(token))
 			return &sessions.Session{
 				UserID:    userID,
@@ -71,7 +71,7 @@ func TestMiddleware(t *testing.T) {
 
 	t.Run("Invalid session", func(t *testing.T) {
 		mockStoreError := &storetest.MockStore{
-			FindSessionByHashFunc: func(ctx context.Context, hash string, opts ...sessions.Option) (*sessions.Session, error) {
+			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 				return nil, sessions.ErrSessionNotFound
 			},
 		}

@@ -11,7 +11,3 @@ func TestStoreContract(t *testing.T) {
 	store := memory.NewStore()
 	storetest.StoreContractTesting(t, store, true)
 }
-
-func TestStrictTenancy(t *testing.T) {
-	storetest.StrictTenancyTesting(t, memory.NewStore(memory.WithStrictTenancy()))
-}

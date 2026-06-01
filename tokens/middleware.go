@@ -129,11 +129,11 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 		// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
 		if cfg.rotator != nil && cfg.cookies != nil {
 			if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-				var ropts []Option
+				var tenantID string
 				if cfg.tenantResolver != nil {
-					ropts = append(ropts, WithTenant(cfg.tenantResolver(r)))
+					tenantID = cfg.tenantResolver(r)
 				}
-				pair, err := cfg.rotator.Rotate(r.Context(), refreshToken, ropts...)
+				pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
 				if err != nil {
 					// Rotation failed (reuse/expired/not found): clear cookies so a
 					// poisoned family cannot keep retrying, then reject.

@@ -12,7 +12,13 @@ type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request
 
 // RequireSession is a middleware that validates a session token from cookies or the Authorization header.
 // It injects the Actor and Session explicitly into the handler.
-func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc) http.HandlerFunc {
+// The tenant is resolved via the optional tenantResolver; when nil, the empty string is used
+// (the single-tenant default partition).
+func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts ...HandlerOption) http.HandlerFunc {
+	cfg := handlerConfig{}
+	for _, o := range opts {
+		o(&cfg)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := ""
 
@@ -35,8 +41,12 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc) http.H
 			return
 		}
 
-		// Validate session (Note: here we don't have tenant yet, so we hope the service can find it)
-		session, err := svc.ValidateSession(r.Context(), token)
+		tenantID := ""
+		if cfg.tenantResolver != nil {
+			tenantID = cfg.tenantResolver(r)
+		}
+
+		session, err := svc.ValidateSession(r.Context(), tenantID, token)
 		if err != nil {
 			http.Error(w, "Unauthorized: invalid or expired session", http.StatusUnauthorized)
 			return
@@ -50,4 +60,18 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc) http.H
 		// Call the handler with explicit arguments
 		handler(w, r, actor, *session)
 	}
+}
+
+// HandlerOption configures RequireSession behaviour.
+type HandlerOption func(*handlerConfig)
+
+type handlerConfig struct {
+	tenantResolver func(*http.Request) string
+}
+
+// WithTenantResolver sets a function that extracts the tenant ID from an incoming request
+// (e.g. from a host header, path segment, or JWT claim). The session lookup is scoped to
+// the returned tenant. When not set, the empty string (single-tenant partition) is used.
+func WithTenantResolver(f func(*http.Request) string) HandlerOption {
+	return func(c *handlerConfig) { c.tenantResolver = f }
 }

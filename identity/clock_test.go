@@ -31,10 +31,10 @@ func TestWithClock_DeterministicLockoutGate(t *testing.T) {
 
 	user := &identity.User{ID: uuid.New(), Email: email}
 	store := &storetest.MockStore{
-		FindUserByEmailFunc: func(ctx context.Context, e string, opts ...identity.Option) (*identity.User, error) {
+		FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 			return user, nil
 		},
-		FindIdentityByProviderFunc: func(ctx context.Context, p, pid string, opts ...identity.Option) (*identity.Identity, error) {
+		FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 			lockedUntil := base.Add(5 * time.Minute)
 			return &identity.Identity{
 				UserID:       user.ID,
@@ -44,7 +44,7 @@ func TestWithClock_DeterministicLockoutGate(t *testing.T) {
 				LockedUntil:  &lockedUntil,
 			}, nil
 		},
-		ResetFailedAttemptsFunc: func(ctx context.Context, id uuid.UUID, opts ...identity.Option) error { return nil },
+		ResetFailedAttemptsFunc: func(ctx context.Context, tenantID string, id uuid.UUID) error { return nil },
 	}
 
 	hasher := &hashertest.MockHasher{
@@ -56,13 +56,13 @@ func TestWithClock_DeterministicLockoutGate(t *testing.T) {
 	// At base+1m the lock (set to base+5m) is still in the future: the gate must reject
 	// before the password is ever compared.
 	now = base.Add(1 * time.Minute)
-	_, err := svc.Authenticate(ctx, "password", email, password)
+	_, err := svc.Authenticate(ctx, "", "password", email, password)
 	assert.ErrorIs(t, err, identity.ErrAccountLocked, "account must be locked while clock < LockedUntil")
 
 	// Advance the SAME injected clock past the lock: the gate no longer fires, so the
 	// (correct) password is compared and authentication succeeds.
 	now = base.Add(6 * time.Minute)
-	got, err := svc.Authenticate(ctx, "password", email, password)
+	got, err := svc.Authenticate(ctx, "", "password", email, password)
 	require.NoError(t, err, "lock must have expired once clock >= LockedUntil")
 	assert.Equal(t, user.ID, got.ID)
 }

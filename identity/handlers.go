@@ -26,14 +26,14 @@ const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
 
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
-	provider       string
-	cookies        tokens.Cookies
-	tenantResolver func(*http.Request) string
-	successURL     string
-	failureURL     string
-	emailField     string
-	passwordField  string
-	rememberField  string
+	provider             string
+	cookies              tokens.Cookies
+	tenantResolver       func(*http.Request) string
+	successURL           string
+	failureURL           string
+	emailField           string
+	passwordField        string
+	rememberField        string
 	tokenField           string
 	currentPasswordField string
 	newPasswordField     string
@@ -49,10 +49,10 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		provider:      "password",
-		cookies:       tokens.DefaultCookies(),
-		emailField:    "email",
-		passwordField: "password",
+		provider:             "password",
+		cookies:              tokens.DefaultCookies(),
+		emailField:           "email",
+		passwordField:        "password",
 		rememberField:        "remember_me",
 		tokenField:           "token",
 		currentPasswordField: "current_password",
@@ -239,7 +239,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Authenticate(r.Context(), cfg.provider, email, password, cfg.authOpts(r)...)
+		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password)
 		if err != nil {
 			status, code := mapAuthError(err)
 			cfg.fail(w, r, status, code)
@@ -276,7 +276,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Register(r.Context(), email, password, cfg.authOpts(r)...)
+		user, err := svc.Register(r.Context(), cfg.tenant(r), email, password)
 		if err != nil {
 			status, code := mapRegisterError(err)
 			cfg.fail(w, r, status, code)
@@ -302,13 +302,6 @@ func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg h
 	cfg.cookies.SetAccess(w, pair.AccessToken)
 	cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, remember)
 	return nil
-}
-
-func (cfg handlerConfig) authOpts(r *http.Request) []Option {
-	if cfg.tenantResolver == nil {
-		return nil
-	}
-	return []Option{WithTenant(cfg.tenantResolver(r))}
 }
 
 func (cfg handlerConfig) tenant(r *http.Request) string {
@@ -414,7 +407,7 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// not the email maps to an account, so a backend error must NOT be surfaced as a
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
-		token, user, _ := svc.RequestPasswordReset(r.Context(), email, cfg.authOpts(r)...)
+		token, user, _ := svc.RequestPasswordReset(r.Context(), cfg.tenant(r), email)
 		if token != "" && user != nil && mailer != nil {
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
 				return mailer.SendPasswordReset(ctx, user, token)
@@ -445,7 +438,7 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 
 		token := r.PostForm.Get(cfg.tokenField)
 		password := r.PostForm.Get(cfg.passwordField)
-		if err := svc.ResetPassword(r.Context(), token, password, cfg.authOpts(r)...); err != nil {
+		if err := svc.ResetPassword(r.Context(), cfg.tenant(r), token, password); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -475,7 +468,7 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			return
 		}
 
-		token, err := svc.RequestEmailVerification(r.Context(), user.ID, cfg.authOpts(r)...)
+		token, err := svc.RequestEmailVerification(r.Context(), cfg.tenant(r), user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "verification_request_failed")
 			return
@@ -508,7 +501,7 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.VerifyEmail(r.Context(), token, cfg.authOpts(r)...); err != nil {
+		if _, err := svc.VerifyEmail(r.Context(), cfg.tenant(r), token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -539,7 +532,7 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 		}
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
-		token, user, _ := svc.RequestMagicLink(r.Context(), email, cfg.authOpts(r)...)
+		token, user, _ := svc.RequestMagicLink(r.Context(), cfg.tenant(r), email)
 		if token != "" && user != nil && mailer != nil {
 			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
 				return mailer.SendMagicLink(ctx, user, token)
@@ -573,7 +566,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		token := r.PostForm.Get(cfg.tokenField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.LoginWithMagicLink(r.Context(), token, cfg.authOpts(r)...)
+		user, err := svc.LoginWithMagicLink(r.Context(), cfg.tenant(r), token)
 		if err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
@@ -626,7 +619,7 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 		current := r.PostForm.Get(cfg.currentPasswordField)
 		newPassword := r.PostForm.Get(cfg.newPasswordField)
 
-		if err := svc.ChangePassword(r.Context(), user.ID, current, newPassword, cfg.authOpts(r)...); err != nil {
+		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidCredentials):
 				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
@@ -675,7 +668,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 		}
 
 		newEmail := strings.TrimSpace(r.PostForm.Get(cfg.newEmailField))
-		token, err := svc.RequestEmailChange(r.Context(), user.ID, newEmail, cfg.authOpts(r)...)
+		token, err := svc.RequestEmailChange(r.Context(), cfg.tenant(r), user.ID, newEmail)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidEmail):
@@ -727,7 +720,7 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.ConfirmEmailChange(r.Context(), token, cfg.authOpts(r)...); err != nil {
+		if _, err := svc.ConfirmEmailChange(r.Context(), cfg.tenant(r), token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -766,7 +759,7 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			return
 		}
 
-		if err := svc.DeleteAccount(r.Context(), user.ID, cfg.authOpts(r)...); err != nil {
+		if err := svc.DeleteAccount(r.Context(), cfg.tenant(r), user.ID); err != nil {
 			switch {
 			case errors.Is(err, ErrUserNotFound):
 				cfg.fail(w, r, http.StatusNotFound, "not_found")
@@ -829,8 +822,6 @@ func mapRegisterError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrEmailAlreadyExists):
 		return http.StatusConflict, "email_taken"
-	case errors.Is(err, ErrTenantRequired):
-		return http.StatusBadRequest, "tenant_required"
 	default:
 		// Password-policy violations and other validation failures.
 		return http.StatusBadRequest, "registration_failed"

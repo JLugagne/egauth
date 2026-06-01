@@ -183,7 +183,7 @@ func TestKeyset_RotateRefreshAcrossKeyChange(t *testing.T) {
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}, {KeyID: "k-new", Secret: newSecret}},
 		ActiveKeyID:    "k-new",
 	})
-	rotated, err := svcNew.Rotate(ctx, pair.RefreshToken)
+	rotated, err := svcNew.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 	assert.Equal(t, "k-new", kidOf(t, rotated.AccessToken))
 	_, err = svcNew.VerifyAccessToken(ctx, rotated.AccessToken)

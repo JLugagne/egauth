@@ -63,7 +63,7 @@ func cookieByName(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 func TestLoginHandler_SuccessSetsCookies(t *testing.T) {
 	uid := uuid.New()
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			assert.Equal(t, "password", provider)
 			assert.Equal(t, "user@example.com", providerID)
 			return &identity.User{ID: uid}, nil
@@ -87,7 +87,7 @@ func TestLoginHandler_SuccessSetsCookies(t *testing.T) {
 
 func TestLoginHandler_RememberMePersistsRefresh(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return &identity.User{ID: uuid.New()}, nil
 		},
 	}
@@ -126,7 +126,7 @@ func TestChangePasswordHandler(t *testing.T) {
 
 	t.Run("wrong current password returns 401", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPassword string) error {
 				assert.Equal(t, uid, userID)
 				return identity.ErrInvalidCredentials
 			},
@@ -139,7 +139,7 @@ func TestChangePasswordHandler(t *testing.T) {
 
 	t.Run("policy rejection returns 400", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPassword string) error {
 				return passwords.ErrPasswordTooShort
 			},
 		}
@@ -152,7 +152,7 @@ func TestChangePasswordHandler(t *testing.T) {
 	t.Run("success returns 204 and passes the fields through", func(t *testing.T) {
 		called := false
 		svc := &servicetest.MockService{
-			ChangePasswordFunc: func(ctx context.Context, userID uuid.UUID, current, newPassword string, opts ...identity.Option) error {
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPassword string) error {
 				called = true
 				assert.Equal(t, "old-pass", current)
 				assert.Equal(t, "NewValidPass123!", newPassword)
@@ -169,7 +169,7 @@ func TestChangePasswordHandler(t *testing.T) {
 func TestLoginHandler_RejectsOversizedBody(t *testing.T) {
 	called := false
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			called = true
 			return &identity.User{ID: uuid.New()}, nil
 		},
@@ -189,7 +189,7 @@ func TestLoginHandler_RejectsOversizedBody(t *testing.T) {
 
 func TestLoginHandler_InvalidCredentials(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return nil, identity.ErrInvalidCredentials
 		},
 	}
@@ -206,7 +206,7 @@ func TestLoginHandler_InvalidCredentials(t *testing.T) {
 
 func TestLoginHandler_AccountLocked(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return nil, identity.ErrAccountLocked
 		},
 	}
@@ -221,7 +221,7 @@ func TestLoginHandler_AccountLocked(t *testing.T) {
 
 func TestLoginHandler_FailureRedirect(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return nil, identity.ErrInvalidCredentials
 		},
 	}
@@ -237,7 +237,7 @@ func TestLoginHandler_FailureRedirect(t *testing.T) {
 
 func TestLoginHandler_SuccessRedirect(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return &identity.User{ID: uuid.New()}, nil
 		},
 	}
@@ -261,11 +261,8 @@ func TestLoginHandler_MethodNotAllowed(t *testing.T) {
 func TestLoginHandler_TenantResolverPropagates(t *testing.T) {
 	var capturedTenant string
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
-			o := identity.ApplyOptions(opts)
-			if o.TenantID != nil {
-				capturedTenant = *o.TenantID
-			}
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			capturedTenant = tenantID
 			return &identity.User{ID: uuid.New(), TenantID: capturedTenant}, nil
 		},
 	}
@@ -296,7 +293,7 @@ func TestLoginHandler_CSRFOriginBlocked(t *testing.T) {
 
 func TestLoginHandler_CSRFOriginAllowed(t *testing.T) {
 	svc := &servicetest.MockService{
-		AuthenticateFunc: func(ctx context.Context, provider, providerID, password string, opts ...identity.Option) (*identity.User, error) {
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return &identity.User{ID: uuid.New()}, nil
 		},
 	}
@@ -325,7 +322,7 @@ func TestLoginHandler_CSRFMissingOriginRejected(t *testing.T) {
 
 func TestRegisterHandler_SuccessAutoLogin(t *testing.T) {
 	svc := &servicetest.MockService{
-		RegisterFunc: func(ctx context.Context, email, password string, opts ...identity.Option) (*identity.User, error) {
+		RegisterFunc: func(ctx context.Context, tenantID string, email, password string) (*identity.User, error) {
 			return &identity.User{ID: uuid.New(), Email: email}, nil
 		},
 	}
@@ -340,7 +337,7 @@ func TestRegisterHandler_SuccessAutoLogin(t *testing.T) {
 
 func TestRegisterHandler_EmailTaken(t *testing.T) {
 	svc := &servicetest.MockService{
-		RegisterFunc: func(ctx context.Context, email, password string, opts ...identity.Option) (*identity.User, error) {
+		RegisterFunc: func(ctx context.Context, tenantID string, email, password string) (*identity.User, error) {
 			return nil, identity.ErrEmailAlreadyExists
 		},
 	}

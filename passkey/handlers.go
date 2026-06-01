@@ -100,6 +100,15 @@ func WithCookieKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) { h.cookieKey = key }
 }
 
+// tenant extracts the tenant string from the request via the UserResolver.
+func (cfg handlerConfig) tenant(r *http.Request) string {
+	if cfg.resolve == nil {
+		return ""
+	}
+	_, _, _, t, _ := cfg.resolve(r)
+	return t
+}
+
 // BeginRegistrationHandler returns the credential-creation options (for
 // navigator.credentials.create) as JSON and stores the ceremony SessionData in a secure cookie.
 func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
@@ -109,7 +118,7 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 		if !ok {
 			return
 		}
-		creation, session, err := svc.BeginRegistration(r.Context(), uid, name, displayName, tenantOpt(tenant)...)
+		creation, session, err := svc.BeginRegistration(r.Context(), tenant, uid, name, displayName)
 		if err != nil {
 			cfg.fail(w, err)
 			return
@@ -134,7 +143,7 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 		if !ok {
 			return
 		}
-		if _, err := svc.FinishRegistration(r.Context(), uid, name, displayName, session, r, tenantOpt(tenant)...); err != nil {
+		if _, err := svc.FinishRegistration(r.Context(), tenant, uid, name, displayName, session, r); err != nil {
 			cfg.fail(w, err)
 			return
 		}
@@ -151,7 +160,7 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		assertion, session, err := svc.BeginLogin(r.Context(), uid, tenantOpt(tenant)...)
+		assertion, session, err := svc.BeginLogin(r.Context(), tenant, uid)
 		if err != nil {
 			cfg.fail(w, err)
 			return
@@ -176,7 +185,7 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		if _, err := svc.FinishLogin(r.Context(), uid, session, r, tenantOpt(tenant)...); err != nil {
+		if _, err := svc.FinishLogin(r.Context(), tenant, uid, session, r); err != nil {
 			cfg.fail(w, err)
 			return
 		}
@@ -310,13 +319,6 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 		// mislabeled as a client verification failure (and operators keep the error signal).
 		http.Error(w, "internal_error", http.StatusInternalServerError)
 	}
-}
-
-func tenantOpt(tenant string) []Option {
-	if tenant == "" {
-		return nil
-	}
-	return []Option{WithTenant(tenant)}
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

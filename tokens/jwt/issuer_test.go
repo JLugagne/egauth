@@ -24,23 +24,23 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 	apiKeys := make(map[string]*tokens.APIKey[MyCustomClaims])
 
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
 			rtCopy := *rt
 			refreshTokens[rt.Hash] = &rtCopy
 			return nil
 		},
-		FindRefreshTokenFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.RefreshToken, error) {
+		FindRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
 			rt, ok := refreshTokens[tokenHash]
 			if !ok {
 				return nil, tokens.ErrRefreshTokenNotFound
 			}
 			return rt, nil
 		},
-		SaveAPIKeyFunc: func(ctx context.Context, key *tokens.APIKey[MyCustomClaims], opts ...tokens.Option) error {
+		SaveAPIKeyFunc: func(ctx context.Context, tenantID string, key *tokens.APIKey[MyCustomClaims]) error {
 			apiKeys[key.Hash] = key
 			return nil
 		},
-		FindAPIKeyByHashFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.APIKey[MyCustomClaims], error) {
+		FindAPIKeyByHashFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[MyCustomClaims], error) {
 			key, ok := apiKeys[tokenHash]
 			if !ok {
 				return nil, tokens.ErrAPIKeyNotFound
@@ -64,7 +64,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
 			return nil
 		},
 	}

@@ -1,5 +1,5 @@
 // Package memory provides an in-memory passkey.Store, primarily for tests and single-process
-// use.
+// deployments.
 package memory
 
 import (
@@ -14,40 +14,13 @@ import (
 
 // Store is an in-memory implementation of passkey.Store.
 type Store struct {
-	mu     sync.RWMutex
-	creds  map[string][]*passkey.Credential // key: tenant \x00 userID
-	strict bool
+	mu    sync.RWMutex
+	creds map[string][]*passkey.Credential // key: tenant \x00 userID
 }
-
-// Option configures a Store.
-type Option func(*Store)
-
-// WithStrictTenancy makes every tenant-scoped operation require a non-empty tenant
-// (passkey.ErrTenantRequired otherwise). Off by default, where an empty tenant is the valid
-// default single-tenant partition. Enable it in multi-tenant deployments so a forgotten
-// WithTenant fails loudly instead of silently operating on the shared empty-tenant partition.
-func WithStrictTenancy() Option { return func(s *Store) { s.strict = true } }
 
 // NewStore creates a new in-memory Store.
-func NewStore(opts ...Option) *Store {
-	s := &Store{creds: make(map[string][]*passkey.Credential)}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
-}
-
-// resolveTenant extracts the operation tenant, enforcing ErrTenantRequired in strict mode.
-func (s *Store) resolveTenant(opts []passkey.Option) (string, error) {
-	o := passkey.ApplyOptions(opts)
-	tenant := ""
-	if o.TenantID != nil {
-		tenant = *o.TenantID
-	}
-	if s.strict && tenant == "" {
-		return "", passkey.ErrTenantRequired
-	}
-	return tenant, nil
+func NewStore() *Store {
+	return &Store{creds: make(map[string][]*passkey.Credential)}
 }
 
 func key(tenant string, userID uuid.UUID) string {
@@ -62,17 +35,19 @@ func clone(c *passkey.Credential) *passkey.Credential {
 	return &cp
 }
 
-func (s *Store) SaveCredential(ctx context.Context, c *passkey.Credential, opts ...passkey.Option) error {
+// SaveCredential persists a newly registered credential. If c.TenantID is non-empty and
+// differs from tenantID, it returns ErrTenantMismatch; otherwise it sets c.TenantID = tenantID.
+func (s *Store) SaveCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
+	if c.TenantID != "" && c.TenantID != tenantID {
+		return passkey.ErrTenantMismatch
 	}
+
 	// Enforce the same uniqueness the pgx PRIMARY KEY (tenant_id, credential_id) does: a
 	// credential ID is unique tenant-wide, across all users.
-	prefix := tenant + "\x00"
+	prefix := tenantID + "\x00"
 	for k, list := range s.creds {
 		if !strings.HasPrefix(k, prefix) {
 			continue
@@ -85,21 +60,18 @@ func (s *Store) SaveCredential(ctx context.Context, c *passkey.Credential, opts 
 	}
 
 	stored := clone(c)
-	stored.TenantID = tenant
-	k := key(tenant, c.UserID)
+	stored.TenantID = tenantID
+	k := key(tenantID, c.UserID)
 	s.creds[k] = append(s.creds[k], stored)
 	return nil
 }
 
-func (s *Store) GetCredentials(ctx context.Context, userID uuid.UUID, opts ...passkey.Option) ([]*passkey.Credential, error) {
+// GetCredentials returns all credentials registered by the user (empty slice if none).
+func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid.UUID) ([]*passkey.Credential, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	tenant, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
-	stored := s.creds[key(tenant, userID)]
+	stored := s.creds[key(tenantID, userID)]
 	out := make([]*passkey.Credential, 0, len(stored))
 	for _, c := range stored {
 		out = append(out, clone(c))
@@ -107,15 +79,13 @@ func (s *Store) GetCredentials(ctx context.Context, userID uuid.UUID, opts ...pa
 	return out, nil
 }
 
-func (s *Store) UpdateCredential(ctx context.Context, c *passkey.Credential, opts ...passkey.Option) error {
+// UpdateCredential persists changes to an existing credential (notably the signature counter
+// after a successful login). Returns ErrCredentialNotFound if absent.
+func (s *Store) UpdateCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
-	list := s.creds[key(tenant, c.UserID)]
+	list := s.creds[key(tenantID, c.UserID)]
 	for i, existing := range list {
 		if bytes.Equal(existing.ID, c.ID) {
 			updated := clone(c)
@@ -128,15 +98,13 @@ func (s *Store) UpdateCredential(ctx context.Context, c *passkey.Credential, opt
 	return passkey.ErrCredentialNotFound
 }
 
-func (s *Store) DeleteCredential(ctx context.Context, userID uuid.UUID, credentialID []byte, opts ...passkey.Option) error {
+// DeleteCredential removes one of the user's credentials by its credential ID. Returns
+// ErrCredentialNotFound if absent.
+func (s *Store) DeleteCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
-	k := key(tenant, userID)
+	k := key(tenantID, userID)
 	list := s.creds[k]
 	for i, existing := range list {
 		if bytes.Equal(existing.ID, credentialID) {

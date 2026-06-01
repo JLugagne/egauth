@@ -44,7 +44,7 @@ func postWithRefresh(value string) *http.Request {
 func TestRefreshHandler_CSRFBlocksCrossOrigin(t *testing.T) {
 	called := false
 	rot := &issuertest.MockRotator[struct{}]{
-		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
 			called = true
 			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}, nil
 		},
@@ -151,7 +151,7 @@ func TestRefreshHandler_MissingCookie(t *testing.T) {
 
 func TestRefreshHandler_ReuseClearsCookies(t *testing.T) {
 	rot := &issuertest.MockRotator[struct{}]{
-		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
 			return nil, tokens.ErrRefreshTokenReused
 		},
 	}
@@ -171,7 +171,7 @@ func TestRefreshHandler_ReuseClearsCookies(t *testing.T) {
 
 func TestRefreshHandler_FailureRedirect(t *testing.T) {
 	rot := &issuertest.MockRotator[struct{}]{
-		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
 			return nil, tokens.ErrRefreshTokenReused
 		},
 	}
@@ -211,7 +211,7 @@ func TestLogoutHandler_RevokesFamilyAndClears(t *testing.T) {
 	assert.Less(t, refresh.MaxAge, 0)
 
 	// The family must have been revoked: the token is gone.
-	_, err = store.FindRefreshToken(ctx, tokens.HashToken(pair.RefreshToken))
+	_, err = store.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
 	require.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
 }
 

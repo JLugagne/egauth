@@ -17,16 +17,16 @@ import (
 // failingStore makes every operation fail, to exercise store-error handling.
 type failingStore struct{}
 
-func (failingStore) SaveCredential(context.Context, *passkey.Credential, ...passkey.Option) error {
+func (failingStore) SaveCredential(_ context.Context, _ string, _ *passkey.Credential) error {
 	return errors.New("db down")
 }
-func (failingStore) GetCredentials(context.Context, uuid.UUID, ...passkey.Option) ([]*passkey.Credential, error) {
+func (failingStore) GetCredentials(_ context.Context, _ string, _ uuid.UUID) ([]*passkey.Credential, error) {
 	return nil, errors.New("db down")
 }
-func (failingStore) UpdateCredential(context.Context, *passkey.Credential, ...passkey.Option) error {
+func (failingStore) UpdateCredential(_ context.Context, _ string, _ *passkey.Credential) error {
 	return errors.New("db down")
 }
-func (failingStore) DeleteCredential(context.Context, uuid.UUID, []byte, ...passkey.Option) error {
+func (failingStore) DeleteCredential(_ context.Context, _ string, _ uuid.UUID, _ []byte) error {
 	return errors.New("db down")
 }
 

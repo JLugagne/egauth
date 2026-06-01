@@ -21,7 +21,7 @@ const (
 // satisfies it; the callback handler depends only on this narrow method so it stays
 // decoupled from the rest of the identity service.
 type IdentityLinker interface {
-	LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...identity.Option) (*identity.User, error)
+	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
 }
 
 // handlerConfig holds the configurable behavior of the OAuth handlers.
@@ -221,7 +221,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		user, err := linker.LinkOrCreateIdentity(r.Context(), p.Name(), info.ProviderID, info.Email, info.EmailVerified, cfg.linkOpts(r)...)
+		user, err := linker.LinkOrCreateIdentity(r.Context(), cfg.tenant(r), p.Name(), info.ProviderID, info.Email, info.EmailVerified)
 		if err != nil {
 			status, code := mapLinkError(err)
 			cfg.fail(w, r, status, code)
@@ -296,11 +296,13 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-func (cfg handlerConfig) linkOpts(r *http.Request) []identity.Option {
+// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
+// configured (the single-tenant default partition).
+func (cfg handlerConfig) tenant(r *http.Request) string {
 	if cfg.tenantResolver == nil {
-		return nil
+		return ""
 	}
-	return []identity.Option{identity.WithTenant(cfg.tenantResolver(r))}
+	return cfg.tenantResolver(r)
 }
 
 func mapLinkError(err error) (int, string) {

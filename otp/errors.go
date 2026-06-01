@@ -15,6 +15,7 @@ var (
 	// code is burned and the subject must request a new one.
 	ErrTooManyAttempts = errors.New("otp: too many attempts")
 
-	// ErrTenantRequired is returned when the store requires a tenant but none was provided.
-	ErrTenantRequired = errors.New("otp: tenant ID is required")
+	// ErrTenantMismatch is returned by a SaveOTP operation when the record already carries a
+	// non-empty TenantID that differs from the tenantID argument passed to the call.
+	ErrTenantMismatch = errors.New("otp: tenant ID mismatch")
 )

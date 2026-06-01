@@ -55,12 +55,12 @@ func TestJWTEvents_ReuseDetectedAndFamilyRevoked(t *testing.T) {
 	require.NoError(t, err)
 
 	// First rotation consumes the token.
-	_, err = svc.Rotate(ctx, pair.RefreshToken)
+	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 
 	// Replaying the now-consumed token is treated as theft (strict mode): reuse detected and the
 	// family revoked.
-	_, err = svc.Rotate(ctx, pair.RefreshToken)
+	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
 	require.ErrorIs(t, err, tokens.ErrRefreshTokenReused)
 	assert.True(t, sink.has(event.RefreshReuseDetected), "a replayed consumed token must emit RefreshReuseDetected")
 	assert.True(t, sink.has(event.TokenFamilyRevoked), "strict-mode reuse must emit TokenFamilyRevoked")

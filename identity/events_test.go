@@ -61,11 +61,11 @@ func TestEvents_RegisterAndLogin(t *testing.T) {
 	}
 	svc := identity.NewService(store, hasher, okPolicy(), identity.WithEventSink(sink))
 
-	user, err := svc.Register(ctx, "user@example.com", "pw")
+	user, err := svc.Register(ctx, "", "user@example.com", "pw")
 	require.NoError(t, err)
 	assert.True(t, sink.has(event.UserRegistered))
 
-	_, err = svc.Authenticate(ctx, "password", "user@example.com", "pw")
+	_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "pw")
 	require.NoError(t, err)
 	assert.True(t, sink.has(event.LoginSucceeded))
 
@@ -93,17 +93,17 @@ func TestEvents_LoginFailureAndLockout(t *testing.T) {
 	svc := identity.NewService(store, hasher, okPolicy(),
 		identity.WithEventSink(sink), identity.WithLockout(2, time.Hour))
 
-	_, err := svc.Register(ctx, "user@example.com", "pw")
+	_, err := svc.Register(ctx, "", "user@example.com", "pw")
 	require.NoError(t, err)
 
 	// First failure: LoginFailed, no lockout yet.
-	_, err = svc.Authenticate(ctx, "password", "user@example.com", "wrong")
+	_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
 	require.ErrorIs(t, err, identity.ErrInvalidCredentials)
 	assert.Equal(t, 1, sink.count(event.LoginFailed))
 	assert.False(t, sink.has(event.AccountLocked))
 
 	// Second failure: crosses the threshold -> AccountLocked emitted.
-	_, err = svc.Authenticate(ctx, "password", "user@example.com", "wrong")
+	_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
 	require.ErrorIs(t, err, identity.ErrInvalidCredentials)
 	assert.Equal(t, 2, sink.count(event.LoginFailed))
 	assert.True(t, sink.has(event.AccountLocked))
@@ -115,7 +115,7 @@ func TestEvents_LoginFailureUnknownAccountCarriesNoUserID(t *testing.T) {
 	hasher := &hashertest.MockHasher{HashFunc: func(context.Context, string) (string, error) { return "h", nil }}
 	svc := identity.NewService(identitymemory.NewStore(), hasher, okPolicy(), identity.WithEventSink(sink))
 
-	_, err := svc.Authenticate(ctx, "password", "ghost@example.com", "pw")
+	_, err := svc.Authenticate(ctx, "", "password", "ghost@example.com", "pw")
 	require.ErrorIs(t, err, identity.ErrInvalidCredentials)
 
 	sink.mu.Lock()
@@ -131,15 +131,15 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 	uid := uuid.New()
 	hash := "h"
 	store := &storetest.MockStore{
-		FindUserByEmailFunc: func(_ context.Context, email string, _ ...identity.Option) (*identity.User, error) {
+		FindUserByEmailFunc: func(_ context.Context, _ string, email string) (*identity.User, error) {
 			return &identity.User{ID: uid, Email: email}, nil
 		},
-		FindIdentityByProviderFunc: func(_ context.Context, provider, providerID string, _ ...identity.Option) (*identity.Identity, error) {
+		FindIdentityByProviderFunc: func(_ context.Context, _ string, provider, providerID string) (*identity.Identity, error) {
 			// FailedAttempts=1 so the next attempt would cross a threshold of 2 — but the store
 			// increment below errors, so no lock is actually persisted.
 			return &identity.Identity{ID: uuid.New(), UserID: uid, Provider: provider, ProviderID: providerID, PasswordHash: &hash, FailedAttempts: 1}, nil
 		},
-		IncrementFailedAttemptsFunc: func(context.Context, uuid.UUID, int, time.Duration, ...identity.Option) error {
+		IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) error {
 			return errors.New("store unavailable")
 		},
 	}
@@ -150,7 +150,7 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 	svc := identity.NewService(store, hasher, okPolicy(),
 		identity.WithEventSink(sink), identity.WithLockout(2, time.Hour))
 
-	_, err := svc.Authenticate(ctx, "password", "user@example.com", "wrong")
+	_, err := svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
 	require.ErrorIs(t, err, identity.ErrInvalidCredentials)
 	assert.True(t, sink.has(event.LoginFailed), "the failed attempt is still recorded")
 	assert.False(t, sink.has(event.AccountLocked),
@@ -173,7 +173,7 @@ func TestEvents_HandlerEmitsDeliveryFailed(t *testing.T) {
 	hasher := &hashertest.MockHasher{HashFunc: func(context.Context, string) (string, error) { return "h", nil }}
 	svc := identity.NewService(store, hasher, okPolicy())
 
-	_, err := svc.Register(ctx, "user@example.com", "pw")
+	_, err := svc.Register(ctx, "", "user@example.com", "pw")
 	require.NoError(t, err)
 
 	sink := &captureSink{}

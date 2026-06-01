@@ -26,7 +26,7 @@ var (
 	// ClaimsProvider, which is required to resolve fresh claims during refresh-token rotation.
 	ErrNoClaimsProvider = errors.New("tokens: no claims provider configured for rotation")
 
-	// ErrTenantRequired is returned by a store built WithStrictTenancy when a tenant-scoped
-	// operation is performed without a tenant (neither via WithTenant nor carried on the record).
-	ErrTenantRequired = errors.New("tokens: tenant ID is required")
+	// ErrTenantMismatch is returned by a Save* operation when the record already carries a
+	// non-empty TenantID that differs from the tenantID argument passed to the call.
+	ErrTenantMismatch = errors.New("tokens: tenant ID mismatch")
 )

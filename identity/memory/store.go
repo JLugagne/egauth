@@ -15,55 +15,21 @@ type Store struct {
 	users              map[uuid.UUID]*identity.User
 	identities         map[uuid.UUID]*identity.Identity
 	verificationTokens map[string]*identity.VerificationToken // keyed by selector
-	strict             bool
 }
 
-// Option configures a Store.
-type Option func(*Store)
-
-// WithStrictTenancy makes every tenant-scoped operation require a non-empty tenant
-// (identity.ErrTenantRequired otherwise). Off by default, where an empty tenant is the valid
-// default single-tenant partition. Enable it in multi-tenant deployments so a forgotten
-// WithTenant fails loudly instead of silently operating on the shared empty-tenant partition.
-// (DeleteExpiredVerificationTokens is exempt: it is a maintenance sweep that intentionally
-// spans all tenants when no tenant is given.)
-func WithStrictTenancy() Option { return func(s *Store) { s.strict = true } }
-
 // NewStore creates a new in-memory Store.
-func NewStore(opts ...Option) *Store {
-	s := &Store{
+func NewStore() *Store {
+	return &Store{
 		users:              make(map[uuid.UUID]*identity.User),
 		identities:         make(map[uuid.UUID]*identity.Identity),
 		verificationTokens: make(map[string]*identity.VerificationToken),
 	}
-	for _, opt := range opts {
-		opt(s)
-	}
-	return s
-}
-
-// resolveTenant extracts the operation tenant, enforcing ErrTenantRequired in strict mode.
-func (s *Store) resolveTenant(opts []identity.Option) (string, error) {
-	o := identity.ApplyOptions(opts)
-	tenantID := ""
-	if o.TenantID != nil {
-		tenantID = *o.TenantID
-	}
-	if s.strict && tenantID == "" {
-		return "", identity.ErrTenantRequired
-	}
-	return tenantID, nil
 }
 
 // CreateUser creates a new user.
-func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
+func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	for _, u := range s.users {
 		if u.TenantID == tenantID && u.Email == email && u.DeletedAt == nil {
@@ -88,14 +54,9 @@ func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.O
 }
 
 // FindUserByID finds a user by their ID.
-func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
+func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	user, exists := s.users[id]
 	if !exists || user.TenantID != tenantID {
@@ -107,14 +68,9 @@ func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity
 }
 
 // FindUserByEmail finds a user by their email.
-func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
+func (s *Store) FindUserByEmail(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	for _, u := range s.users {
 		if u.TenantID == tenantID && u.Email == email {
@@ -130,13 +86,12 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...ident
 }
 
 // UpdateUser updates an existing user.
-func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...identity.Option) error {
+func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
+	if user.TenantID != "" && user.TenantID != tenantID {
+		return identity.ErrTenantMismatch
 	}
 
 	existing, exists := s.users[user.ID]
@@ -153,6 +108,7 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 	}
 
 	uCopy := *user
+	uCopy.TenantID = tenantID
 	uCopy.UpdatedAt = time.Now()
 	s.users[user.ID] = &uCopy
 
@@ -160,14 +116,9 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 }
 
 // UpdateUserEmail atomically swaps a live user's email and re-keys its password identity.
-func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail string, verifiedAt time.Time, opts ...identity.Option) error {
+func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
 
 	user, exists := s.users[userID]
 	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
@@ -201,14 +152,9 @@ func (s *Store) UpdateUserEmail(ctx context.Context, userID uuid.UUID, newEmail 
 }
 
 // DeleteUser performs a soft delete and anonymizes the email.
-func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
+func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
 
 	existing, exists := s.users[id]
 	if !exists || existing.TenantID != tenantID || existing.DeletedAt != nil {
@@ -239,13 +185,12 @@ func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.O
 }
 
 // AddIdentity adds an identity to a user.
-func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
+func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identity.Identity) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
+	if ident.TenantID != "" && ident.TenantID != tenantID {
+		return identity.ErrTenantMismatch
 	}
 
 	user, exists := s.users[ident.UserID]
@@ -272,14 +217,9 @@ func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts 
 }
 
 // FindIdentitiesByUserID returns all identities for a user.
-func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
+func (s *Store) FindIdentitiesByUserID(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	var res []*identity.Identity
 	for _, id := range s.identities {
@@ -293,14 +233,9 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, op
 }
 
 // FindIdentityByProvider finds an identity by its provider and provider ID.
-func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
+func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return nil, err
-	}
 
 	for _, id := range s.identities {
 		if id.TenantID == tenantID && id.Provider == provider && id.ProviderID == providerID {
@@ -314,14 +249,9 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 
 // UpdateIdentityPassword sets a new password hash on the user's "password" identity and
 // clears any lockout.
-func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
+func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
 
 	for _, ident := range s.identities {
 		if ident.UserID == userID && ident.TenantID == tenantID && ident.Provider == "password" {
@@ -338,14 +268,9 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, pa
 }
 
 // CreateVerificationToken mints, persists and returns a single-use plaintext token.
-func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
+func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return "", err
-	}
 
 	// Mirror the pgx foreign-key constraint: the user must exist (and be live) in the tenant.
 	user, exists := s.users[userID]
@@ -375,14 +300,9 @@ func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, k
 }
 
 // ConsumeVerificationToken validates and atomically consumes a verification token.
-func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
+func (s *Store) ConsumeVerificationToken(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return uuid.Nil, nil, err
-	}
 
 	selector, verifier, ok := identity.SplitVerificationToken(token)
 	if !ok {
@@ -406,17 +326,16 @@ func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string
 	return vt.UserID, vt.Metadata, nil
 }
 
-// DeleteExpiredVerificationTokens purges verification tokens past their expiry, returning the
-// number deleted. With WithTenant it sweeps a single tenant, otherwise all.
-func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, opts ...identity.Option) (int64, error) {
+// DeleteExpiredVerificationTokens purges verification tokens past their expiry within the given
+// tenant, returning the number deleted.
+func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	opt := identity.ApplyOptions(opts)
 	now := time.Now()
 	var deleted int64
 	for selector, vt := range s.verificationTokens {
-		if opt.TenantID != nil && vt.TenantID != *opt.TenantID {
+		if vt.TenantID != tenantID {
 			continue
 		}
 		if now.After(vt.ExpiresAt) {
@@ -429,14 +348,9 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, opts ...ide
 
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the threshold is reached.
-func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
+func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
 
 	ident, exists := s.identities[identityID]
 	if !exists || ident.TenantID != tenantID {
@@ -454,14 +368,9 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUI
 }
 
 // ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
-func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
+func (s *Store) ResetFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-
-	tenantID, err := s.resolveTenant(opts)
-	if err != nil {
-		return err
-	}
 
 	ident, exists := s.identities[identityID]
 	if !exists || ident.TenantID != tenantID {

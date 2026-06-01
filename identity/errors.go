@@ -22,8 +22,9 @@ var (
 	// that already exists for a given provider and provider_id in a tenant.
 	ErrIdentityAlreadyExists = errors.New("identity: identity already exists")
 
-	// ErrTenantRequired is returned when the store requires a tenant but none was provided.
-	ErrTenantRequired = errors.New("identity: tenant ID is required")
+	// ErrTenantMismatch is returned by a Save/Create operation when the record already
+	// carries a non-empty TenantID that differs from the tenantID argument passed to the call.
+	ErrTenantMismatch = errors.New("identity: tenant ID mismatch")
 
 	// ErrInvalidCredentials is returned when authentication fails due to invalid credentials.
 	ErrInvalidCredentials = errors.New("identity: invalid credentials")

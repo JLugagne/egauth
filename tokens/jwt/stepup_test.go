@@ -40,7 +40,7 @@ func TestAuthTime_SetOnIssueAndPreservedAcrossRotate(t *testing.T) {
 	assert.WithinDuration(t, past, c1.AuthTime, 2*time.Second, "auth_time is carried on the access token")
 
 	// A silent refresh must NOT reset auth_time, even though IssuedAt advances.
-	rotated, err := svc.Rotate(ctx, pair.RefreshToken)
+	rotated, err := svc.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 	c2, err := svc.VerifyAccessToken(ctx, rotated.AccessToken)
 	require.NoError(t, err)
@@ -68,7 +68,7 @@ func TestAuthTime_RotationOfLegacyTokenDoesNotManufactureFreshness(t *testing.T)
 
 	// Simulate a legacy refresh token: persisted directly with a ZERO AuthTime.
 	plaintext := "legacy-refresh-token-plaintext-value"
-	require.NoError(t, store.SaveRefreshToken(ctx, &tokens.RefreshToken{
+	require.NoError(t, store.SaveRefreshToken(ctx, "", &tokens.RefreshToken{
 		Hash:      tokens.HashToken(plaintext),
 		FamilyID:  uuid.New(),
 		UserID:    uuid.New(),
@@ -77,7 +77,7 @@ func TestAuthTime_RotationOfLegacyTokenDoesNotManufactureFreshness(t *testing.T)
 		// AuthTime intentionally zero.
 	}))
 
-	rotated, err := svc.Rotate(ctx, plaintext)
+	rotated, err := svc.Rotate(ctx, "", plaintext)
 	require.NoError(t, err)
 
 	claims, err := svc.VerifyAccessToken(ctx, rotated.AccessToken)

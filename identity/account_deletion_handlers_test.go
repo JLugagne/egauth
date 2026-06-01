@@ -35,7 +35,7 @@ func TestDeleteAccountHandler_SuccessClearsCookies(t *testing.T) {
 	user := &identity.User{ID: uuid.New(), Email: "gone@example.com"}
 	var deleted uuid.UUID
 	svc := &servicetest.MockService{
-		DeleteAccountFunc: func(_ context.Context, userID uuid.UUID, _ ...identity.Option) error {
+		DeleteAccountFunc: func(_ context.Context, _ string, userID uuid.UUID) error {
 			deleted = userID
 			return nil
 		},
@@ -70,7 +70,7 @@ func TestDeleteAccountHandler_ErrorMapping(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			svc := &servicetest.MockService{
-				DeleteAccountFunc: func(_ context.Context, _ uuid.UUID, _ ...identity.Option) error {
+				DeleteAccountFunc: func(_ context.Context, _ string, _ uuid.UUID) error {
 					return tc.err
 				},
 			}

@@ -12,12 +12,12 @@ type Service interface {
 	// Issue mints a fresh code for the subject+purpose (replacing any outstanding one) and
 	// returns the Challenge — including the plaintext Code — for the application to deliver.
 	// egauth does not send anything.
-	Issue(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) (*Challenge, error)
+	Issue(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*Challenge, error)
 	// Verify checks a presented code: single-use on success, attempt-limited on failure.
 	// Returns ErrInvalidCode, ErrCodeNotFound or ErrTooManyAttempts.
-	Verify(ctx context.Context, subjectID uuid.UUID, purpose, code string, opts ...Option) error
+	Verify(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, code string) error
 	// Invalidate discards any outstanding code for the subject+purpose. Idempotent.
-	Invalidate(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) error
+	Invalidate(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error
 }
 
 type service struct {
@@ -69,7 +69,7 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	return s
 }
 
-func (s *service) Issue(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) (*Challenge, error) {
+func (s *service) Issue(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*Challenge, error) {
 	code, err := generateCode(s.digits)
 	if err != nil {
 		return nil, err
@@ -77,40 +77,35 @@ func (s *service) Issue(ctx context.Context, subjectID uuid.UUID, purpose string
 	now := s.now()
 	expiresAt := now.Add(s.ttl)
 
-	tenant := ""
-	if o := ApplyOptions(opts); o.TenantID != nil {
-		tenant = *o.TenantID
-	}
-
 	record := &OTP{
 		SubjectID: subjectID,
-		TenantID:  tenant,
+		TenantID:  tenantID,
 		Purpose:   purpose,
 		CodeHash:  HashCode(code),
 		ExpiresAt: expiresAt,
 		CreatedAt: now,
 	}
-	if err := s.store.SaveOTP(ctx, record, opts...); err != nil {
+	if err := s.store.SaveOTP(ctx, tenantID, record); err != nil {
 		return nil, err
 	}
 
 	return &Challenge{
 		SubjectID: subjectID,
-		TenantID:  tenant,
+		TenantID:  tenantID,
 		Purpose:   purpose,
 		Code:      code,
 		ExpiresAt: expiresAt,
 	}, nil
 }
 
-func (s *service) Verify(ctx context.Context, subjectID uuid.UUID, purpose, code string, opts ...Option) error {
-	record, err := s.store.GetOTP(ctx, subjectID, purpose, opts...)
+func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, code string) error {
+	record, err := s.store.GetOTP(ctx, tenantID, subjectID, purpose)
 	if err != nil {
 		return err
 	}
 
 	if s.now().After(record.ExpiresAt) {
-		_ = s.store.DeleteOTP(ctx, subjectID, purpose, opts...)
+		_ = s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
 		return ErrCodeNotFound
 	}
 
@@ -118,19 +113,19 @@ func (s *service) Verify(ctx context.Context, subjectID uuid.UUID, purpose, code
 	// concurrent caller a unique, monotonically increasing count, so at most maxAttempts
 	// callers ever reach compareCode — concurrent guesses cannot run more comparisons than the
 	// limit (the gate is the atomic counter, not the stale read above).
-	n, err := s.store.IncrementOTPAttempts(ctx, subjectID, purpose, opts...)
+	n, err := s.store.IncrementOTPAttempts(ctx, tenantID, subjectID, purpose)
 	if err != nil {
 		return err // ErrCodeNotFound if it was consumed/burned by a concurrent verify
 	}
 	if n > s.maxAttempts {
-		_ = s.store.DeleteOTP(ctx, subjectID, purpose, opts...)
+		_ = s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
 		return ErrTooManyAttempts
 	}
 
 	if !compareCode(record.CodeHash, code) {
 		if n >= s.maxAttempts {
 			// Last allowed guess was wrong: burn the code.
-			_ = s.store.DeleteOTP(ctx, subjectID, purpose, opts...)
+			_ = s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
 			return ErrTooManyAttempts
 		}
 		return ErrInvalidCode
@@ -139,7 +134,7 @@ func (s *service) Verify(ctx context.Context, subjectID uuid.UUID, purpose, code
 	// Correct code: consume atomically. Only the caller that actually removes the row wins, so
 	// a single code can never authorize more than one verification (single-use under
 	// concurrency).
-	consumed, err := s.store.ConsumeOTP(ctx, subjectID, purpose, opts...)
+	consumed, err := s.store.ConsumeOTP(ctx, tenantID, subjectID, purpose)
 	if err != nil {
 		return err
 	}
@@ -149,6 +144,6 @@ func (s *service) Verify(ctx context.Context, subjectID uuid.UUID, purpose, code
 	return nil
 }
 
-func (s *service) Invalidate(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...Option) error {
-	return s.store.DeleteOTP(ctx, subjectID, purpose, opts...)
+func (s *service) Invalidate(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error {
+	return s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
 }

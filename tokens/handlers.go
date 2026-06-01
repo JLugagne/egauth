@@ -12,8 +12,8 @@ import (
 // FamilyRevoker is the minimal store capability LogoutHandler needs to revoke a rotation
 // family. tokens.Store[C] satisfies it for any C (neither method depends on C).
 type FamilyRevoker interface {
-	FindRefreshToken(ctx context.Context, tokenHash string, opts ...Option) (*RefreshToken, error)
-	RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...Option) error
+	FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*RefreshToken, error)
+	RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
 }
 
 // handlerConfig holds the configurable behavior of the tokens HTTP handlers.
@@ -136,7 +136,7 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			return
 		}
 
-		pair, err := rotator.Rotate(r.Context(), refreshToken, cfg.tenantOpts(r)...)
+		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
 		if err != nil {
 			// Including the reuse case: Rotate already revoked the family; we only need to
 			// clear the client's now-useless cookies.
@@ -169,10 +169,10 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 		}
 
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-			ropts := cfg.tenantOpts(r)
+			tenantID := cfg.tenant(r)
 			hash := HashToken(refreshToken)
-			if rt, err := revoker.FindRefreshToken(r.Context(), hash, ropts...); err == nil {
-				_ = revoker.RevokeFamily(r.Context(), rt.FamilyID, ropts...)
+			if rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash); err == nil {
+				_ = revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID)
 			}
 		}
 
@@ -212,13 +212,13 @@ func requestOriginHost(r *http.Request) string {
 	return ""
 }
 
-// tenantOpts returns the store options derived from the request's tenant, if a resolver is
-// configured.
-func (cfg handlerConfig) tenantOpts(r *http.Request) []Option {
+// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
+// configured (the single-tenant default partition).
+func (cfg handlerConfig) tenant(r *http.Request) string {
 	if cfg.tenantResolver == nil {
-		return nil
+		return ""
 	}
-	return []Option{WithTenant(cfg.tenantResolver(r))}
+	return cfg.tenantResolver(r)
 }
 
 // fail emits a failure response: a 303 redirect to the configured failure URL (carrying an

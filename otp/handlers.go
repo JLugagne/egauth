@@ -128,7 +128,7 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 		}
 
 		if subjectID, ok := cfg.subjectResolver(r); ok {
-			if ch, err := svc.Issue(r.Context(), subjectID, cfg.purposeOf(r), cfg.tenantOpts(r)...); err == nil && deliver != nil {
+			if ch, err := svc.Issue(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r)); err == nil && deliver != nil {
 				ctx := context.WithoutCancel(r.Context())
 				go func() { _ = deliver(ctx, ch) }()
 			}
@@ -169,7 +169,7 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
-		if err := svc.Verify(r.Context(), subjectID, cfg.purposeOf(r), code, cfg.tenantOpts(r)...); err != nil {
+		if err := svc.Verify(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r), code); err != nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
@@ -189,11 +189,13 @@ func (cfg handlerConfig) purposeOf(r *http.Request) string {
 	return cfg.purpose
 }
 
-func (cfg handlerConfig) tenantOpts(r *http.Request) []Option {
+// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
+// configured (the single-tenant default partition).
+func (cfg handlerConfig) tenant(r *http.Request) string {
 	if cfg.tenantResolver == nil {
-		return nil
+		return ""
 	}
-	return []Option{WithTenant(cfg.tenantResolver(r))}
+	return cfg.tenantResolver(r)
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {

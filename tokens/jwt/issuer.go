@@ -322,7 +322,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		CreatedAt: now,
 	}
 
-	if err := s.store.SaveRefreshToken(ctx, rt, tokens.WithTenant(claims.TenantID)); err != nil {
+	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
 		return nil, err
 	}
 
@@ -339,79 +339,6 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		RefreshTokenExpiresAt: refreshExpiresAt,
 		Claims:                claims,
 	}, nil
-}
-
-// Rotate consumes the presented refresh token and issues a fresh pair within the same
-// family. A replayed (already-consumed) token triggers revocation of the whole family.
-func (s *Service[C]) Rotate(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[C], error) {
-	if s.claimsProvider == nil {
-		return nil, tokens.ErrNoClaimsProvider
-	}
-
-	hash := tokens.HashToken(refreshToken)
-
-	rt, err := s.store.FindRefreshToken(ctx, hash, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	// A consumed token was presented again. Within the reuse grace window this is treated
-	// as benign concurrency (the legitimate client raced itself): the request is rejected
-	// but the family is kept alive. Outside the window it is treated as theft — a stale
-	// token resurfacing long after it was rotated away — and the whole family is revoked so
-	// every descendant is invalidated. If the revocation itself fails we must NOT report a
-	// clean reuse rejection (which the caller treats as "theft handled"); surface the
-	// failure so the family is never silently assumed revoked. Wrapping keeps
-	// errors.Is(…Reused) true for callers and cookie-clearing handlers.
-	if rt.ConsumedAt != nil {
-		if time.Since(*rt.ConsumedAt) > s.reuseGrace {
-			if rerr := s.store.RevokeFamily(ctx, rt.FamilyID, opts...); rerr != nil {
-				return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
-			}
-			event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "refresh_reuse"})
-			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
-		} else {
-			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
-		}
-		return nil, tokens.ErrRefreshTokenReused
-	}
-
-	if s.now().After(rt.ExpiresAt) {
-		return nil, tokens.ErrTokenExpired
-	}
-
-	// Atomically consume (single-use). Losing this race means another in-flight request
-	// rotated the SAME not-yet-consumed token first. That is benign concurrency (parallel
-	// tabs, link prefetch, concurrent sub-resource loads), NOT theft — so we reject this
-	// request WITHOUT revoking the family. A genuine replay is still caught above on the
-	// next presentation, once ConsumedAt has been set by the completed rotation.
-	if err := s.store.ConsumeRefreshToken(ctx, hash, opts...); err != nil {
-		return nil, err
-	}
-
-	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
-	// trusting values frozen at login.
-	claims, err := s.claimsProvider.ClaimsForUser(ctx, rt.UserID, rt.TenantID)
-	if err != nil {
-		return nil, err
-	}
-
-	// The tenant is immutable within a rotation family: keep the descendant in the SAME
-	// partition used to find/consume/revoke, regardless of what the provider returns —
-	// otherwise a divergent tenant would orphan the token out of reach of family
-	// revocation. And the access-token lifetime is issuer-controlled on refresh: never
-	// honor a provider-supplied expiry, which could extend a short-lived token unbounded.
-	claims.TenantID = rt.TenantID
-	claims.ExpiresAt = time.Time{}
-	// Preserve the family's original authentication time: a silent refresh re-evaluates the
-	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
-	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
-	claims.AuthTime = rt.AuthTime
-
-	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
-	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
-	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
-	return s.issuePair(ctx, claims, rt.FamilyID, false)
 }
 
 // IssueAPIKey generates a new API Key with the specified prefix and claims.
@@ -441,7 +368,7 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 		Claims:    claims,
 	}
 
-	if err := s.store.SaveAPIKey(ctx, key, tokens.WithTenant(claims.TenantID)); err != nil {
+	if err := s.store.SaveAPIKey(ctx, claims.TenantID, key); err != nil {
 		return nil, err
 	}
 
@@ -526,7 +453,7 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tok
 
 	// Since we don't store full claims for refresh tokens in this simple Store,
 	// we just verify existence and return a minimal Claims object with the Subject.
-	rt, err := s.store.FindRefreshToken(ctx, hash)
+	rt, err := s.store.FindRefreshToken(ctx, "", hash)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +477,7 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tok
 func (s *Service[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
 	hash := tokens.HashToken(key)
 
-	apiKey, err := s.store.FindAPIKeyByHash(ctx, hash)
+	apiKey, err := s.store.FindAPIKeyByHash(ctx, "", hash)
 	if err != nil {
 		return nil, err
 	}
@@ -568,3 +495,76 @@ var (
 	_ tokens.Verifier[any] = (*Service[any])(nil)
 	_ tokens.Rotator[any]  = (*Service[any])(nil)
 )
+
+// Rotate consumes the presented refresh token and issues a fresh pair within the same
+// family. A replayed (already-consumed) token triggers revocation of the whole family.
+func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[C], error) {
+	if s.claimsProvider == nil {
+		return nil, tokens.ErrNoClaimsProvider
+	}
+
+	hash := tokens.HashToken(refreshToken)
+
+	rt, err := s.store.FindRefreshToken(ctx, tenantID, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	// A consumed token was presented again. Within the reuse grace window this is treated
+	// as benign concurrency (the legitimate client raced itself): the request is rejected
+	// but the family is kept alive. Outside the window it is treated as theft — a stale
+	// token resurfacing long after it was rotated away — and the whole family is revoked so
+	// every descendant is invalidated. If the revocation itself fails we must NOT report a
+	// clean reuse rejection (which the caller treats as "theft handled"); surface the
+	// failure so the family is never silently assumed revoked. Wrapping keeps
+	// errors.Is(…Reused) true for callers and cookie-clearing handlers.
+	if rt.ConsumedAt != nil {
+		if time.Since(*rt.ConsumedAt) > s.reuseGrace {
+			if rerr := s.store.RevokeFamily(ctx, tenantID, rt.FamilyID); rerr != nil {
+				return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
+			}
+			event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "refresh_reuse"})
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
+		} else {
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
+		}
+		return nil, tokens.ErrRefreshTokenReused
+	}
+
+	if s.now().After(rt.ExpiresAt) {
+		return nil, tokens.ErrTokenExpired
+	}
+
+	// Atomically consume (single-use). Losing this race means another in-flight request
+	// rotated the SAME not-yet-consumed token first. That is benign concurrency (parallel
+	// tabs, link prefetch, concurrent sub-resource loads), NOT theft — so we reject this
+	// request WITHOUT revoking the family. A genuine replay is still caught above on the
+	// next presentation, once ConsumedAt has been set by the completed rotation.
+	if err := s.store.ConsumeRefreshToken(ctx, tenantID, hash); err != nil {
+		return nil, err
+	}
+
+	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
+	// trusting values frozen at login.
+	claims, err := s.claimsProvider.ClaimsForUser(ctx, rt.UserID, rt.TenantID)
+	if err != nil {
+		return nil, err
+	}
+
+	// The tenant is immutable within a rotation family: keep the descendant in the SAME
+	// partition used to find/consume/revoke, regardless of what the provider returns —
+	// otherwise a divergent tenant would orphan the token out of reach of family
+	// revocation. And the access-token lifetime is issuer-controlled on refresh: never
+	// honor a provider-supplied expiry, which could extend a short-lived token unbounded.
+	claims.TenantID = rt.TenantID
+	claims.ExpiresAt = time.Time{}
+	// Preserve the family's original authentication time: a silent refresh re-evaluates the
+	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
+	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
+	claims.AuthTime = rt.AuthTime
+
+	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
+	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
+	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
+	return s.issuePair(ctx, claims, rt.FamilyID, false)
+}
