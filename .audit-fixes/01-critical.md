@@ -1,4 +1,4 @@
-# Critical fixes (0 / 4)
+# Critical fixes (4 / 4)
 
 Block "safe-by-default" and "complete". Do these first.
 
@@ -31,10 +31,10 @@ Block "safe-by-default" and "complete". Do these first.
 **Fix:** `ChangePassword(ctx, userID, current, new) error` — re-verify current (constant-time), validate+hash new via policy, `UpdateIdentityPassword`, then revoke other refresh families / sessions. Authenticated handler behind middleware.
 **Test:** wrong current → error, no mutation; correct → hash changes, old sessions revoked; new password must pass policy.
 
-## [ ] C4 — Onboarding docs: README quickstart + examples + doc.go
+## [x] C4 — Onboarding docs: README quickstart + examples + doc.go — DONE
 
-**Status:** todo (do LAST, after API settles)
-**Where:** `README.md` (9 bytes), new `example_test.go`, `doc.go` in identity/tokens/sessions/passwords.
-**Problem:** Only usage model is "wire it yourself" but zero guidance; no `Example` funcs; no package docs on the 4 login-critical packages.
-**Fix:** README with copy-pasteable login+refresh wiring; `Example*` funcs for the recommended stack; `doc.go` package overviews; state the composable-packages design intent explicitly.
-**Test:** `Example` funcs compile and run (`go test`); `go doc` renders.
+**Status:** DONE (done last, after the tenancy-API refactor settled — docs reflect the explicit-`tenantID` API, the `SingleTenant` facades, and the `egauth` module path).
+**Where:** `README.md` (rewritten from the 1-line stub), `identity/example_test.go` (new), `doc.go` in identity/tokens/sessions/passwords (new).
+**Problem:** Only usage model was "wire it yourself" with zero guidance; no `Example` funcs; no package docs on the 4 login-critical packages.
+**Fix DONE:** `README.md` — module table, install, a copy-pasteable login+refresh quickstart (the runnable Example, in-memory backends), the à-la-carte HTTP wiring, multi-tenancy + SingleTenant, pgx/migrations, a security summary linking SECURITY.md, and a stability note. `doc.go` on identity/tokens/sessions/passwords — each states the database/sql-style composable design intent explicitly, the module's role, a wiring snippet, and its security posture. `Example`/`ExampleNewSingleTenant`/`ExampleLoginHandler` in `identity/example_test.go` cover the recommended stack end-to-end (register → issue pair → Rotate → verify) and the HTTP handler wiring.
+**Verified:** the 3 `Example` funcs compile AND run with verified `Output:` (so the quickstart code is provably correct, including the corrected `LogoutHandler(tokenStore)` wiring — `LogoutHandler` takes the token Store/`FamilyRevoker`, not the issuer); `go doc` renders the package overviews; `go vet` + `gofmt` clean; 563 tests green incl. pgx.
