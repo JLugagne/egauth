@@ -59,8 +59,6 @@ jobs:
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v6
-        with:
-          version: latest
-          # --timeout limits the execution time, preventing hang-ups.
-          args: --timeout=5m
+        # Use go run to ensure golangci-lint is compiled with the same Go version
+        # as the project, bypassing the "lower than targeted Go version" error.
+        run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run --timeout=5m
