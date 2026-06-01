@@ -1,6 +1,8 @@
-# Nice-to-have fixes (5 / 11)
+# Nice-to-have fixes (7 / 11)
 
-DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6), N11 (Store Ping seam — b60673a).
+DONE: N2 (rune length — commit 3e34d04), N3 (clock injection — aaca811/cbeb699/2f8163a), N5 (migration versioning — f0fbfa2), N6 (error taxonomy + dead sentinels — 55971a6), N7 (context cancellation — 9cb29ac), N9 (phone/SMS verification — 4944917), N11 (Store Ping seam — b60673a).
+
+REMAINING (not in scope for this pass): N1 (recovery channel — in progress), N4 (root facade/doc), N8 (CAPTCHA/webhook hooks), N10 (SemVer/CHANGELOG). Per the user, this pass does N9 + N7 + N1 only.
 
 Polish / maturity.
 
@@ -34,14 +36,16 @@ Polish / maturity.
 **Where:** identity/tokens/sessions/passwords unprefixed vs mfa/oauth/otp/passkey prefixed; oauth ErrStateMismatch/ErrMissingCode/ErrEmailMissing + passkey ErrSessionInvalid are dead (signaled as raw strings). **Fix:** standardize prefixing; return declared sentinels or remove dead exports. **Test:** errors.Is works against the documented sentinels.
 **DONE:** prefixed identity/tokens/sessions/passwords sentinels with the package name (errors.Is unaffected). oauth's 3 dead sentinels removed (the callback signals via HTTP/redirect, not Go errors — no errors.Is seam; doc note records why). passkey ErrSessionInvalid wired live by routing loadSession failures through the existing fail() switch (same HTTP output). All affected package tests pass.
 
-## [ ] N7 — Honor context cancellation
+## [x] N7 — Honor context cancellation — DONE (9cb29ac)
 **Where:** library-wide (0 ctx.Err/Done/Cause in non-test). **Fix:** check ctx in long/CPU-bound paths where feasible; at minimum document cancellation is observed only via pgx driver on I/O.
+**DONE:** added `ctx.Err()` guards on the deliberately expensive in-process paths, BEFORE the costly work, so a client that has gone away cannot keep burning resources: `passwords/argon2` `Hash`/`Compare` short-circuit before the Argon2id KDF (not interruptible mid-hash, so a pre-call check is the only available point); `passwords/breach/offline` `IsBreached` fails fast (it was discarding ctx via `_`); `identity.DeleteAccount` aborts its cross-module eraser cascade between erasers and before the soft-delete (account stays live + cleanly retriable). I/O cancellation already flows through the pgx driver and the HIBP client's `http.NewRequestWithContext` — left as-is. NOT changed: `LoadHashes`/`LoadPasswords` take only `io.Reader` (startup one-shot; adding ctx would break the public API for little gain — I/O cancellation flows through the reader); in-memory store full-scans are µs-scale map iterations (per-iteration checks would be noise). Confirm-first tests for all three guards (each fails red against the un-guarded code). SECURITY.md documents the cancellation model.
 
 ## [ ] N8 — CAPTCHA / bot hooks + webhooks
 **Where:** sensitive handlers. **Fix:** optional CAPTCHA/bot-check hook + webhook/event-emission seam (overlaps I11). **Test:** hook invoked; request blocked when check fails.
 
-## [ ] N9 — Phone / SMS verification flow
+## [x] N9 — Phone / SMS verification flow — DONE (4944917)
 **Where:** identity + otp + SMS delivery (I8). **Fix:** phone field + verification flow layering otp with SMS delivery; OR document the exclusion at top level. Currently mfa explicitly excludes SMS.
+**DONE (built, not documented-out):** added an optional verified phone number to accounts as a LOWER-ASSURANCE contact channel — NIST SP 800-63B excludes SMS as an authentication factor, so this is explicitly NOT an MFA factor and the mfa module still rejects SMS. `identity.User` gains `Phone *string` + `PhoneVerifiedAt *time.Time`. Store: `FindUserByPhone` (per-tenant unique, live-only) + `UpdateUserPhone` (atomic set + mark verified; `ErrPhoneAlreadyExists` on conflict, `ErrPhoneAlreadyExists`/`ErrInvalidPhone` new sentinels) across memory + pgx (migration 004 adds the columns + a partial unique index `(tenant_id, phone) WHERE deleted_at IS NULL AND phone IS NOT NULL`) + a cross-backend `Contract: Phone` case (memory + pgx). Service: `RequestPhoneVerification`/`ConfirmPhoneVerification` mirror the change-email flow exactly (token kind `phone_verification`, the requested number carried as token metadata and delivered to it by SMS so confirming proves control, single-use, normalized to E.164 via a dependency-free `normalizePhone` — `+` then 8–15 digits, strips spaces/dashes/parens/dots; emits `event.PhoneVerified`; honors the injected clock). Handlers: `RequestPhoneVerificationHandler` (auth-gated via WithUserResolver, origin-checked, SMS dispatched off the response path, `WithPhoneField`) + `ConfirmPhoneVerificationHandler` (token-authenticated, POST-only). Delivery: `delivery.PhoneVerifier` wraps an SMS `Sender` to implement the new `identity.SMSSender` seam (egauth still ships no SMS Sender — every provider is a paid vendor SDK — but the adapter + `NewPhoneVerifier`/`WithPhoneLink`/`WithPhoneMessage` make wiring a one-liner). 11 service tests (round-trip, normalize, malformed, taken-up-front, claimed-in-interim, single-use, kind-isolation, unknown-user, deactivated-account, clock) + 19 handler tests + 6 delivery tests; whole module + vet green incl. pgx via testcontainers. `delivery/doc.go` N9-follow-up note updated to reflect the built flow.
 
 ## [ ] N10 — SemVer / CHANGELOG / stability statement
 **Where:** repo root. **Fix:** tag SemVer releases, add CHANGELOG, publish stability statement once API settles. (git tag -l empty today.)
