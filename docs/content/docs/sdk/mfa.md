@@ -20,8 +20,8 @@ import "github.com/JLugagne/egauth/mfa"
 
 mfaSvc := mfa.NewService(mfaStore, mfa.WithIssuer("MyApp"))
 
-// 1. Begin Enrollment
-enrollment, err := mfaSvc.Enroll(ctx, userID, mfa.WithTenant("tenant-123"))
+// 1. Begin Enrollment (takes tenantID as the second argument)
+enrollment, err := mfaSvc.Enroll(ctx, "tenant-123", userID)
 
 // 2. Show the URI as a QR Code to the user:
 fmt.Println(enrollment.URI) // e.g., otpauth://totp/MyApp:alice@example.com?secret=JBSWY...
@@ -30,7 +30,7 @@ fmt.Println(enrollment.URI) // e.g., otpauth://totp/MyApp:alice@example.com?secr
 The enrollment remains pending until the user confirms they set it up correctly by providing the first code.
 
 ```go
-err := mfaSvc.Confirm(ctx, enrollment.ID, "123456")
+err := mfaSvc.Confirm(ctx, "tenant-123", enrollment.ID, "123456")
 if err == nil {
 	// MFA is now fully enabled.
 }
@@ -42,7 +42,7 @@ During the login flow, if the user requires MFA, you prompt them for a code.
 
 ```go
 // Verify the 6-digit code
-err := mfaSvc.Verify(ctx, userID, "123456", mfa.WithTenant("tenant-123"))
+err := mfaSvc.Verify(ctx, "tenant-123", userID, "123456")
 
 if err == nil {
 	// Step-up authentication succeeded!

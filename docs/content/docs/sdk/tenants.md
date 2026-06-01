@@ -9,27 +9,30 @@ weight: 7
 
 ## Explicit Tenancy
 
-When calling any service method, inject the tenant context via the functional option.
+When calling any service method, the `tenantID` is explicitly passed as the second argument (immediately following the `context.Context`).
 
 ```go
 user, err := identityService.Register(
 	ctx, 
+	"org-abc-123", // the tenantID
 	"bob@example.com", 
 	"Password123!", 
-	identity.WithTenant("org-abc-123"), 
 )
 ```
 
 ## Single-Tenant Mode
 
-If your application does not require multi-tenancy, you can safely use the predefined "Single Tenant" wrappers, which automatically inject an empty string `""` partition into all database queries under the hood.
+If your application does not require multi-tenancy, the empty string `""` acts as the valid default partition.
+
+To avoid passing `""` everywhere, each module provides a `NewSingleTenant` facade that automatically wraps the service and strips away the `tenantID` argument from the method signatures.
 
 ```go
-// identity.SingleTenant() acts as the default partition.
-user, err := identityService.Register(
-	ctx, 
-	"bob@example.com", 
-	"Password123!", 
-	identity.SingleTenant(),
-)
+// 1. Create the core service
+svc := identity.NewService(store, hasher, policy)
+
+// 2. Wrap it in the SingleTenant facade
+app := identity.NewSingleTenant(svc) 
+
+// 3. Call methods without the tenant argument!
+user, err := app.Register(ctx, "bob@example.com", "Password123!")
 ```

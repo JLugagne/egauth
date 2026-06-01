@@ -28,10 +28,11 @@ tokenService := tokens.NewService[MyClaims](
 )
 
 // Issue a Token Pair (Access + Refresh)
-pair, err := tokenService.Issue(ctx, userID, MyClaims{
+// Note: tenantID is the explicit second argument
+pair, err := tokenService.Issue(ctx, "tenant-123", userID, MyClaims{
 	Role:  "admin",
 	OrgID: "org-xyz",
-}, tokens.WithTenant("tenant-123"))
+})
 
 fmt.Println("Access Token:", pair.AccessToken)
 ```
@@ -45,7 +46,7 @@ Refresh tokens are single-use. When a user refreshes their access token, they ar
 If an attacker steals a Refresh Token and uses it, the user's client will eventually try to use the *same* Refresh Token. The `tokens` module detects this replay and immediately revokes the **entire token family**, forcing everyone (including the attacker) to re-authenticate.
 
 ```go
-newPair, err := tokenService.Refresh(ctx, oldRefreshToken, tokens.WithTenant("tenant-123"))
+newPair, err := tokenService.Refresh(ctx, "tenant-123", oldRefreshToken)
 if err != nil {
 	// If err == tokens.ErrTokenTheftDetected, the family was wiped.
 }

@@ -25,7 +25,8 @@ sessionSvc := sessions.NewService(
 Creating a session returns a secure, high-entropy opaque token.
 
 ```go
-sess, err := sessionSvc.Create(ctx, userID, sessions.WithTenant("tenant-123"))
+// Create takes tenantID as the explicit second argument
+sess, err := sessionSvc.Create(ctx, "tenant-123", userID)
 
 // Send `sess.Token` to the client in an HttpOnly, Secure, SameSite=Lax cookie
 http.SetCookie(w, &http.Cookie{
@@ -42,7 +43,7 @@ http.SetCookie(w, &http.Cookie{
 When a user's privilege level changes (e.g., they log in, or complete MFA), you **must** rotate the session token to prevent Session Fixation attacks.
 
 ```go
-rotatedSess, err := sessionSvc.Rotate(ctx, oldSessionToken)
+rotatedSess, err := sessionSvc.Rotate(ctx, "tenant-123", oldSessionToken)
 // Update the client's cookie with rotatedSess.Token
 ```
 

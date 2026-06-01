@@ -9,15 +9,14 @@ The `identity` module safely manages user accounts, credentials, password resett
 
 ## Registering Users
 
-Registration automatically hashes passwords using your configured KDF (e.g., Argon2id) and validates complexity against your policy.
+Registration automatically hashes passwords using your configured KDF (e.g., Argon2id) and validates complexity against your policy. Every stateful operation takes a `tenantID` string as its second argument.
 
 ```go
 user, err := identityService.Register(
 	ctx, 
+	"tenant-123", // Tenant isolation is natively required for all stateful operations
 	"alice@example.com", 
 	"CorrectHorseBatteryStaple!", 
-	// Tenant isolation is natively required for all stateful operations
-	identity.WithTenant("tenant-123"), 
 )
 
 if err != nil {
@@ -36,10 +35,10 @@ To authenticate a user, call `Authenticate()`. This method implements decoy hash
 ```go
 authUser, err := identityService.Authenticate(
 	ctx, 
+	"tenant-123",
 	"password", // Authentication Provider type
 	"alice@example.com", 
 	"CorrectHorseBatteryStaple!", 
-	identity.WithTenant("tenant-123"),
 )
 
 if err != nil {
@@ -54,7 +53,7 @@ if err != nil {
 For compliance (like GDPR), deleting a user anonymizes their Personally Identifiable Information (PII) rather than dropping the row entirely, which protects your database's relational integrity.
 
 ```go
-err := identityService.DeleteAccount(ctx, authUser.ID, identity.WithTenant("tenant-123"))
+err := identityService.DeleteAccount(ctx, "tenant-123", authUser.ID)
 // The user's email is replaced with a random UUID, and their credentials are wiped.
 ```
 
@@ -64,11 +63,11 @@ The Identity module handles generating secure password reset tokens. You must im
 
 ```go
 // 1. Generate the token (Decoy enabled: returns no error if user doesn't exist)
-err := identityService.RequestPasswordReset(ctx, "bob@example.com", identity.WithTenant("tenant-123"))
+token, _, err := identityService.RequestPasswordReset(ctx, "tenant-123", "bob@example.com")
 
 // 2. In your Mailer implementation, send the reset link:
 // https://yourapp.com/reset?token=<token>
 
 // 3. Complete the reset
-err = identityService.ResetPassword(ctx, tokenFromURL, "NewSecurePassword123!")
+err = identityService.ResetPassword(ctx, "tenant-123", tokenFromURL, "NewSecurePassword123!")
 ```
