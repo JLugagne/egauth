@@ -322,7 +322,7 @@ func TestOIDCVerify_ES256(t *testing.T) {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
-		io.WriteString(w, fmt.Sprintf(`{"keys":[{"kty":"EC","kid":%q,"crv":"P-256","x":%q,"y":%q}]}`, kid, ex, ey))
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"keys":[{"kty":"EC","kid":%q,"crv":"P-256","x":%q,"y":%q}]}`, kid, ex, ey))
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
