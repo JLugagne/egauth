@@ -15,7 +15,7 @@ import (
 
 func TestRequestEmailChangeHandler_RequiresResolvedUser(t *testing.T) {
 	t.Run("no resolver -> 401", func(t *testing.T) {
-		h := identity.RequestEmailChangeHandler(&servicetest.MockService{}, newMockMailer())
+		h := identity.RequestEmailChangeHandler(&servicetest.MockService{}, newMockMailer().asMailer())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"new_email": {"new@example.com"}}))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -31,7 +31,7 @@ func TestRequestEmailChangeHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
-		h := identity.RequestEmailChangeHandler(svc, mailer,
+		h := identity.RequestEmailChangeHandler(svc, mailer.asMailer(),
 			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"new_email": {"new@example.com"}}))
@@ -62,7 +62,7 @@ func TestRequestEmailChangeHandler_ErrorMapping(t *testing.T) {
 				},
 			}
 			mailer := newMockMailer()
-			h := identity.RequestEmailChangeHandler(svc, mailer,
+			h := identity.RequestEmailChangeHandler(svc, mailer.asMailer(),
 				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{"new_email": {"taken@example.com"}}))
