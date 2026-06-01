@@ -38,6 +38,7 @@ type handlerConfig struct {
 	currentPasswordField string
 	newPasswordField     string
 	newEmailField        string
+	phoneField           string
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
 	maxBodyBytes         int64
@@ -58,6 +59,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		currentPasswordField: "current_password",
 		newPasswordField:     "new_password",
 		newEmailField:        "new_email",
+		phoneField:           "phone",
 		maxBodyBytes:         DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
@@ -184,6 +186,12 @@ func WithPasswordChangeFields(current, newField string) HandlerOption {
 // RequestEmailChangeHandler (default "new_email").
 func WithEmailChangeField(name string) HandlerOption {
 	return func(h *handlerConfig) { h.newEmailField = name }
+}
+
+// WithPhoneField overrides the form field carrying the requested phone number in
+// RequestPhoneVerificationHandler (default "phone").
+func WithPhoneField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.phoneField = name }
 }
 
 // WithMaxBodyBytes overrides the request-body size cap applied before form parsing
@@ -792,9 +800,15 @@ func mapVerificationError(err error) (int, string) {
 	case errors.Is(err, ErrEmailAlreadyExists):
 		// Change-email: the target address was claimed by another account in the interim.
 		return http.StatusConflict, "email_taken"
+	case errors.Is(err, ErrPhoneAlreadyExists):
+		// Phone-verification: the target number was claimed by another account in the interim.
+		return http.StatusConflict, "phone_taken"
 	case errors.Is(err, ErrInvalidEmail):
 		// Change-email: the token's stored address failed re-validation (defensive).
 		return http.StatusBadRequest, "invalid_email"
+	case errors.Is(err, ErrInvalidPhone):
+		// Phone-verification: the token's stored number failed re-validation (defensive).
+		return http.StatusBadRequest, "invalid_phone"
 	case isPasswordPolicyError(err):
 		return http.StatusBadRequest, "password_rejected"
 	default:
@@ -855,4 +869,101 @@ func withErrorParam(rawURL, code string) string {
 	q.Set("error", code)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// RequestPhoneVerificationHandler builds an authenticated HTTP handler that starts the
+// phone-verification flow for the signed-in user. The current user is obtained via
+// WithUserResolver (typically reading whatever the application's auth middleware stashed on the
+// request); if no resolver is configured or it reports no user, the handler responds 401. It reads
+// the requested phone number from the form (field configurable via WithPhoneField, default
+// "phone"), mints a verification token via Service.RequestPhoneVerification and hands it to the
+// SMSSender for delivery to that number — delivery is dispatched off the response path. A malformed
+// number maps to 400; a number already taken by another account maps to 409. Phone is a
+// lower-assurance contact channel and is NOT an MFA factor (NIST SP 800-63B excludes SMS).
+func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		phone := strings.TrimSpace(r.PostForm.Get(cfg.phoneField))
+		token, err := svc.RequestPhoneVerification(r.Context(), cfg.tenant(r), user.ID, phone)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidPhone):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_phone")
+			case errors.Is(err, ErrPhoneAlreadyExists):
+				cfg.fail(w, r, http.StatusConflict, "phone_taken")
+			case errors.Is(err, ErrUserNotFound):
+				// The session resolved to an account that is no longer live; treat as unauthorized.
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && sender != nil {
+			// Deliver to the canonical form of the number — the same normalization the service
+			// applied before binding it to the token.
+			deliverTo := phone
+			if n, nerr := normalizePhone(phone); nerr == nil {
+				deliverTo = n
+			}
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return sender.SendPhoneVerification(ctx, user, deliverTo, token)
+			})
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmPhoneVerificationHandler builds an HTTP handler that completes the phone-verification
+// flow: it reads the token from the form, consumes it (single-use) and atomically sets the
+// account's phone to the confirmed number, marking it verified. It is authenticated by the
+// single-use token (delivered by SMS to the number), so it needs no resolved session — like
+// VerifyEmailHandler / ConfirmEmailChangeHandler. It is POST-only so a link prefetcher cannot
+// trigger the change.
+func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmPhoneVerification(r.Context(), cfg.tenant(r), token); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
 }

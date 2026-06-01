@@ -22,6 +22,8 @@ type MockService struct {
 	ChangePasswordFunc           func(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
 	RequestEmailChangeFunc       func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (string, error)
 	ConfirmEmailChangeFunc       func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	RequestPhoneVerificationFunc func(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (string, error)
+	ConfirmPhoneVerificationFunc func(ctx context.Context, tenantID string, token string) (*identity.User, error)
 	DeleteAccountFunc            func(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
@@ -116,4 +118,18 @@ func (m *MockService) Authenticate(ctx context.Context, tenantID string, provide
 		panic("called not defined AuthenticateFunc")
 	}
 	return m.AuthenticateFunc(ctx, tenantID, provider, providerID, password)
+}
+
+func (m *MockService) RequestPhoneVerification(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (string, error) {
+	if m.RequestPhoneVerificationFunc == nil {
+		panic("called not defined RequestPhoneVerificationFunc")
+	}
+	return m.RequestPhoneVerificationFunc(ctx, tenantID, userID, phone)
+}
+
+func (m *MockService) ConfirmPhoneVerification(ctx context.Context, tenantID string, token string) (*identity.User, error) {
+	if m.ConfirmPhoneVerificationFunc == nil {
+		panic("called not defined ConfirmPhoneVerificationFunc")
+	}
+	return m.ConfirmPhoneVerificationFunc(ctx, tenantID, token)
 }

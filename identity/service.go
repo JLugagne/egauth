@@ -41,6 +41,10 @@ const (
 	// short (reset-class, not the longer email-verification window) because switching the
 	// account's login address is a sensitive, takeover-relevant action.
 	DefaultEmailChangeTTL = time.Hour
+	// DefaultPhoneVerificationTTL is the lifetime of a phone-verification token. It is kept short
+	// because SMS-delivered codes are expected to be entered promptly and a stale code is a
+	// liability.
+	DefaultPhoneVerificationTTL = 15 * time.Minute
 )
 
 // Service defines the business logic for user identity operations.
@@ -111,6 +115,23 @@ type Service interface {
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
 	ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
 
+	// RequestPhoneVerification starts the phone-verification flow for userID. It validates and
+	// normalizes phone to E.164, rejects a number already owned by another live account in the
+	// tenant (ErrPhoneAlreadyExists), and mints a single-use token bound to phone (carried as the
+	// token's metadata). The token MUST be delivered to phone over SMS — confirming it proves
+	// control of the number before it is set on the account. It returns ErrInvalidPhone for a
+	// malformed number and ErrUserNotFound for an unknown/soft-deleted/cross-tenant user. This is
+	// a lower-assurance contact channel (NIST SP 800-63B excludes SMS as an authentication
+	// factor); the mfa module still does not accept SMS.
+	RequestPhoneVerification(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (token string, err error)
+
+	// ConfirmPhoneVerification consumes a phone-verification token (single-use) and atomically
+	// sets the owning user's phone to the number the token was minted for, marking it verified
+	// (the confirmation, delivered to that number, proves control). It returns the updated user.
+	// It returns ErrPhoneAlreadyExists when the number was claimed by another account in the
+	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
+	ConfirmPhoneVerification(ctx context.Context, tenantID string, token string) (*User, error)
+
 	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
 	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
 	// MFA, passkeys — see WithAccountErasers) and then soft-deletes and anonymizes the identity
@@ -145,6 +166,7 @@ type service struct {
 	emailVerificationTTL time.Duration
 	magicLinkTTL         time.Duration
 	emailChangeTTL       time.Duration
+	phoneVerificationTTL time.Duration
 	erasers              []AccountEraser
 	events               event.Sink
 	now                  func() time.Time
@@ -179,6 +201,11 @@ func WithMagicLinkTTL(d time.Duration) ServiceOption {
 // WithEmailChangeTTL overrides how long a change-email confirmation token stays valid.
 func WithEmailChangeTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.emailChangeTTL = d }
+}
+
+// WithPhoneVerificationTTL overrides how long a phone-verification token stays valid.
+func WithPhoneVerificationTTL(d time.Duration) ServiceOption {
+	return func(s *service) { s.phoneVerificationTTL = d }
 }
 
 // WithAccountErasers registers cross-module revocation hooks run by DeleteAccount, in the order
@@ -230,6 +257,7 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 		emailVerificationTTL: DefaultEmailVerificationTTL,
 		magicLinkTTL:         DefaultMagicLinkTTL,
 		emailChangeTTL:       DefaultEmailChangeTTL,
+		phoneVerificationTTL: DefaultPhoneVerificationTTL,
 		now:                  time.Now,
 	}
 	for _, opt := range opts {
@@ -741,5 +769,94 @@ func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token
 		return nil, err
 	}
 	s.emit(ctx, event.Event{Type: event.MagicLinkLogin, UserID: user.ID.String(), TenantID: user.TenantID})
+	return user, nil
+}
+
+// normalizePhone validates a phone number and returns its canonical E.164 form. It strips the
+// common human-formatting characters (spaces, dashes, parentheses, and dots) and then requires a
+// leading '+' followed by 8 to 15 digits, the E.164 range. libauth deliberately does NOT do
+// region-aware parsing or carrier lookup (that needs a heavyweight dependency and live data); the
+// goal is a cheap, dependency-free sanity check so uniqueness and delivery operate on a canonical
+// string. Callers that need stricter validation can normalize upstream and pass an E.164 number.
+func normalizePhone(phone string) (string, error) {
+	var b strings.Builder
+	for _, r := range strings.TrimSpace(phone) {
+		switch r {
+		case ' ', '-', '(', ')', '.':
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	cleaned := b.String()
+	if len(cleaned) < 2 || cleaned[0] != '+' {
+		return "", ErrInvalidPhone
+	}
+	digits := cleaned[1:]
+	if len(digits) < 8 || len(digits) > 15 {
+		return "", ErrInvalidPhone
+	}
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return "", ErrInvalidPhone
+		}
+	}
+	return cleaned, nil
+}
+
+// RequestPhoneVerification mints a token that, once confirmed, sets userID's phone to phone.
+func (s *service) RequestPhoneVerification(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (string, error) {
+	phone, err := normalizePhone(phone)
+	if err != nil {
+		return "", err
+	}
+
+	// Pre-flight uniqueness check: reject up front when another live account in the tenant already
+	// owns the number. This is only advisory — the store's unique index is the authoritative guard
+	// at confirm time, which closes the request->confirm race. Finding the *same* user (the number
+	// is already theirs) is not a conflict; confirming would simply re-verify it.
+	if existing, ferr := s.store.FindUserByPhone(ctx, tenantID, phone); ferr == nil {
+		if existing.ID != userID {
+			return "", ErrPhoneAlreadyExists
+		}
+	} else if !errors.Is(ferr, ErrUserNotFound) {
+		return "", ferr
+	}
+
+	// Bind the requested number to the token as metadata. CreateVerificationToken also gates on
+	// userID being a live, same-tenant account (returning ErrUserNotFound otherwise).
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, userID, KindPhoneVerification, s.phoneVerificationTTL, []byte(phone))
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConfirmPhoneVerification consumes a phone-verification token and atomically sets the number.
+func (s *service) ConfirmPhoneVerification(ctx context.Context, tenantID string, token string) (*User, error) {
+	user, metadata, err := s.consumeForLiveUser(ctx, tenantID, token, KindPhoneVerification)
+	if err != nil {
+		return nil, err
+	}
+
+	// The token carries the (already-normalized) number. Re-normalize defensively rather than
+	// trusting stored bytes blindly.
+	phone, err := normalizePhone(string(metadata))
+	if err != nil {
+		return nil, err
+	}
+
+	now := s.now()
+	// UpdateUserPhone is the atomic set point: it sets the user's phone and marks it verified in
+	// one operation, enforcing phone uniqueness, so a number claimed since the token was minted
+	// yields ErrPhoneAlreadyExists rather than a duplicate live number. Confirming a token
+	// delivered to the number proves control of it, so it is marked verified.
+	if err := s.store.UpdateUserPhone(ctx, tenantID, user.ID, phone, now); err != nil {
+		return nil, err
+	}
+	user.Phone = &phone
+	user.PhoneVerifiedAt = &now
+	user.UpdatedAt = now
+	s.emit(ctx, event.Event{Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
 }

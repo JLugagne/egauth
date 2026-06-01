@@ -32,6 +32,7 @@ const (
 	PasswordChanged       Type = "password.changed" // authenticated self-service change
 	EmailVerified         Type = "email.verified"
 	EmailChanged          Type = "email.changed"
+	PhoneVerified         Type = "phone.verified"
 	MagicLinkLogin        Type = "magic_link.login"
 	AccountDeleted        Type = "account.deleted"
 	RefreshReuseDetected  Type = "refresh.reuse_detected"

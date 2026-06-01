@@ -62,7 +62,10 @@
 //     them due to SIM-swap and interception). Use TOTP or passkeys for MFA. The OTP-over-SMS
 //     path here is for lower-assurance uses such as phone-number verification or transactional
 //     codes, not for hardening a login.
-//   - Phone verification. A full phone-number verification flow (a phone field on the account, a
-//     verify endpoint layering otp over an SMS Sender) is not yet built; this package supplies
-//     the delivery half. See the N9 follow-up.
+//   - Phone verification. The identity module now carries an optional verified phone number
+//     (identity.User.Phone) with a request/confirm flow (Service.RequestPhoneVerification /
+//     ConfirmPhoneVerification and the matching handlers). This package supplies the SMS-delivery
+//     half: PhoneVerifier wraps an SMS Sender to implement identity.SMSSender, so wiring the flow
+//     is NewPhoneVerifier(yourSMSSender) passed to RequestPhoneVerificationHandler. It is a
+//     lower-assurance contact channel, not an MFA factor (see the MFA note above).
 package delivery

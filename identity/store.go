@@ -21,6 +21,11 @@ type Store interface {
 	FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*User, error)
 	FindUserByEmail(ctx context.Context, tenantID string, email string) (*User, error)
 
+	// FindUserByPhone finds the live user in the tenant whose phone equals phone (the normalized
+	// E.164 form). It returns ErrUserNotFound when none matches. Used by the phone-verification
+	// flow's pre-flight uniqueness check.
+	FindUserByPhone(ctx context.Context, tenantID string, phone string) (*User, error)
+
 	// UpdateUser persists changes to an existing user. If the user record carries a non-empty
 	// TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	UpdateUser(ctx context.Context, tenantID string, user *User) error
@@ -35,6 +40,13 @@ type Store interface {
 	// no live user matches. An account with no password identity (e.g. OAuth-only) simply has
 	// its user email updated.
 	UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
+
+	// UpdateUserPhone atomically sets a live user's phone to newPhone and marks it verified
+	// (phone_verified_at = verifiedAt). Unlike UpdateUserEmail it does not re-key any identity:
+	// phone is a contact attribute, never a login key. It returns ErrPhoneAlreadyExists when
+	// newPhone is already taken by another live account in the tenant and ErrUserNotFound when no
+	// live user matches.
+	UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
 
 	DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error
 

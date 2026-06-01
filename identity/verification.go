@@ -26,6 +26,10 @@ const (
 	// token carries the requested new email address as its metadata and is delivered to that
 	// new address, so confirming it proves control of the new address before the swap.
 	KindEmailChange = "email_change"
+	// KindPhoneVerification identifies tokens minted for the phone-verification flow. The token
+	// carries the requested phone number as its metadata and is delivered to that number by SMS,
+	// so confirming it proves control of the number before it is set on the account.
+	KindPhoneVerification = "phone_verification"
 )
 
 const (
@@ -125,4 +129,19 @@ type Mailer interface {
 	// notification to the current address (user.Email) so the legitimate owner is alerted to a
 	// pending change they did not initiate.
 	SendEmailChange(ctx context.Context, user *User, newEmail, token string) error
+}
+
+// SMSSender delivers a phone-verification credential to a phone number over SMS. It is a separate
+// seam from Mailer because SMS is a distinct delivery channel that not every deployment uses, and
+// egauth never sends SMS itself (delivery is a non-objective): the handlers hand a freshly minted
+// token to the application's SMS provider via this interface. Implementations receive the plaintext
+// token and MUST treat it as a credential (embed it in the message, never log it). Programmatic
+// callers can bypass this and use the Service methods, which return the token directly. The
+// delivery package's Sender seam (an SMS provider adapter) satisfies the spirit of this contract;
+// wire a thin adapter that formats the verification message.
+type SMSSender interface {
+	// SendPhoneVerification delivers a phone-verification token to the requested phone number
+	// (the number being verified, which may differ from the account's currently-stored Phone),
+	// e.g. as a short code or a confirmation link.
+	SendPhoneVerification(ctx context.Context, user *User, phone, token string) error
 }

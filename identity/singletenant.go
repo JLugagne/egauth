@@ -96,3 +96,13 @@ func (s *SingleTenant) ConfirmEmailChange(ctx context.Context, token string) (*U
 func (s *SingleTenant) DeleteAccount(ctx context.Context, userID uuid.UUID) error {
 	return s.svc.DeleteAccount(ctx, "", userID)
 }
+
+// RequestPhoneVerification calls Service.RequestPhoneVerification on the empty tenant.
+func (s *SingleTenant) RequestPhoneVerification(ctx context.Context, userID uuid.UUID, phone string) (token string, err error) {
+	return s.svc.RequestPhoneVerification(ctx, "", userID, phone)
+}
+
+// ConfirmPhoneVerification calls Service.ConfirmPhoneVerification on the empty tenant.
+func (s *SingleTenant) ConfirmPhoneVerification(ctx context.Context, token string) (*User, error) {
+	return s.svc.ConfirmPhoneVerification(ctx, "", token)
+}

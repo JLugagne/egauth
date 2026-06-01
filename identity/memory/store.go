@@ -383,3 +383,45 @@ func (s *Store) ResetFailedAttempts(ctx context.Context, tenantID string, identi
 
 	return nil
 }
+
+// FindUserByPhone finds a live user by their normalized phone number.
+func (s *Store) FindUserByPhone(ctx context.Context, tenantID string, phone string) (*identity.User, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	for _, u := range s.users {
+		if u.TenantID == tenantID && u.DeletedAt == nil && u.Phone != nil && *u.Phone == phone {
+			uCopy := *u
+			return &uCopy, nil
+		}
+	}
+
+	return nil, identity.ErrUserNotFound
+}
+
+// UpdateUserPhone atomically sets a live user's phone and marks it verified, enforcing
+// per-tenant phone uniqueness across other live accounts.
+func (s *Store) UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	for _, u := range s.users {
+		if u.TenantID == tenantID && u.DeletedAt == nil && u.ID != userID && u.Phone != nil && *u.Phone == newPhone {
+			return identity.ErrPhoneAlreadyExists
+		}
+	}
+
+	now := time.Now()
+	p := newPhone
+	user.Phone = &p
+	v := verifiedAt
+	user.PhoneVerifiedAt = &v
+	user.UpdatedAt = now
+
+	return nil
+}

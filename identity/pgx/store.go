@@ -70,10 +70,10 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 	}
 
 	query := `
-		INSERT INTO users (id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (id, tenant_id, email, email_verified_at, phone, phone_verified_at, created_at, updated_at, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 	`
-	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
+	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.Phone, user.PhoneVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -83,14 +83,14 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 
 func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, created_at, updated_at, deleted_at
 		FROM users
 		WHERE id = $1 AND tenant_id = $2
 	`
 	row := s.db.QueryRow(ctx, query, id, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -103,14 +103,14 @@ func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID)
 
 func (s *Store) FindUserByEmail(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, created_at, updated_at, deleted_at
 		FROM users
 		WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, email, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -450,4 +450,48 @@ func (s *Store) ResetFailedAttempts(ctx context.Context, tenantID string, identi
 func (s *Store) Ping(ctx context.Context) error {
 	var ok int
 	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}
+
+func (s *Store) FindUserByPhone(ctx context.Context, tenantID string, phone string) (*identity.User, error) {
+	query := `
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, created_at, updated_at, deleted_at
+		FROM users
+		WHERE phone = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`
+	row := s.db.QueryRow(ctx, query, phone, tenantID)
+
+	var user identity.User
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, identity.ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	return &user, nil
+}
+
+// UpdateUserPhone sets a live user's phone and marks it verified in one statement. The partial
+// unique index (tenant_id, phone) enforces per-tenant uniqueness among live accounts, so a number
+// claimed in the interim aborts the update with ErrPhoneAlreadyExists.
+func (s *Store) UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET phone = $1, phone_verified_at = $2, updated_at = $3
+		WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, newPhone, verifiedAt, now, userID, tenantID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return identity.ErrPhoneAlreadyExists
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
 }

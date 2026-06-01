@@ -21,8 +21,10 @@ type MockStore struct {
 	CreateUserFunc             func(ctx context.Context, tenantID string, email string) (*identity.User, error)
 	FindUserByIDFunc           func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error)
 	FindUserByEmailFunc        func(ctx context.Context, tenantID string, email string) (*identity.User, error)
+	FindUserByPhoneFunc        func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
 	UpdateUserFunc             func(ctx context.Context, tenantID string, user *identity.User) error
 	UpdateUserEmailFunc        func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
+	UpdateUserPhoneFunc        func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
 	DeleteUserFunc             func(ctx context.Context, tenantID string, id uuid.UUID) error
 	AddIdentityFunc            func(ctx context.Context, tenantID string, ident *identity.Identity) error
 	FindIdentitiesByUserIDFunc func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
@@ -459,6 +461,45 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.Equal(t, oauthUser.ID, gotOAuth.UserID)
 	})
 
+	t.Run("Contract: Phone (FindUserByPhone/UpdateUserPhone)", func(t *testing.T) {
+		const phone = "+15557770001"
+		user, err := store.CreateUser(ctx, tenantA, "phone_contract@example.com")
+		require.NoError(t, err)
+		assert.Nil(t, user.Phone, "a freshly created user has no phone")
+
+		// No user owns the number yet.
+		_, err = store.FindUserByPhone(ctx, tenantA, phone)
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+
+		// Set + verify the number atomically.
+		verifiedAt := time.Now()
+		require.NoError(t, store.UpdateUserPhone(ctx, tenantA, user.ID, phone, verifiedAt))
+
+		found, err := store.FindUserByPhone(ctx, tenantA, phone)
+		require.NoError(t, err)
+		assert.Equal(t, user.ID, found.ID)
+		require.NotNil(t, found.Phone)
+		assert.Equal(t, phone, *found.Phone)
+		require.NotNil(t, found.PhoneVerifiedAt, "the confirmed number must be marked verified")
+		assert.Equal(t, verifiedAt.Unix(), found.PhoneVerifiedAt.Unix())
+
+		// The email lookup is unaffected and now carries the phone too (same row).
+		byEmail, err := store.FindUserByEmail(ctx, tenantA, "phone_contract@example.com")
+		require.NoError(t, err)
+		require.NotNil(t, byEmail.Phone)
+		assert.Equal(t, phone, *byEmail.Phone)
+
+		// A second live account cannot take the same number (per-tenant uniqueness).
+		other, err := store.CreateUser(ctx, tenantA, "phone_other@example.com")
+		require.NoError(t, err)
+		err = store.UpdateUserPhone(ctx, tenantA, other.ID, phone, time.Now())
+		assert.ErrorIs(t, err, identity.ErrPhoneAlreadyExists)
+
+		// An unknown user is reported as not found.
+		err = store.UpdateUserPhone(ctx, tenantA, uuid.New(), "+15557770999", time.Now())
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+	})
+
 	t.Run("Contract: Verification Tokens", func(t *testing.T) {
 		user, err := store.CreateUser(ctx, tenantA, "test_verif@example.com")
 		require.NoError(t, err)
@@ -575,4 +616,18 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 			assert.Equal(t, userB.ID, identB.UserID, "Should find the identity specific to Tenant B")
 		})
 	}
+}
+
+func (m *MockStore) FindUserByPhone(ctx context.Context, tenantID string, phone string) (*identity.User, error) {
+	if m.FindUserByPhoneFunc == nil {
+		panic("called not defined FindUserByPhoneFunc")
+	}
+	return m.FindUserByPhoneFunc(ctx, tenantID, phone)
+}
+
+func (m *MockStore) UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error {
+	if m.UpdateUserPhoneFunc == nil {
+		panic("called not defined UpdateUserPhoneFunc")
+	}
+	return m.UpdateUserPhoneFunc(ctx, tenantID, userID, newPhone, verifiedAt)
 }

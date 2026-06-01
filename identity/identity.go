@@ -7,11 +7,20 @@ import (
 )
 
 // User represents an account container.
+// User represents an account container.
 type User struct {
 	ID              uuid.UUID
 	TenantID        string
 	Email           string
 	EmailVerifiedAt *time.Time
+	// Phone is the account's optional phone number in normalized E.164 form (nil when none has
+	// been enrolled). It is a lower-assurance contact channel: per NIST SP 800-63B the mfa module
+	// deliberately does NOT accept SMS as an authentication factor, but a verified phone number is
+	// still useful for transactional notifications and as an independent recovery channel.
+	Phone *string
+	// PhoneVerifiedAt records when control of Phone was last proven (nil when unverified). It is
+	// set by ConfirmPhoneVerification and cleared whenever Phone changes to a new, unverified value.
+	PhoneVerifiedAt *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
 	DeletedAt       *time.Time

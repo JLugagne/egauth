@@ -15,6 +15,14 @@ var (
 	// ErrInvalidEmail is returned when an email fails RFC 5322 address parsing.
 	ErrInvalidEmail = errors.New("identity: invalid email")
 
+	// ErrPhoneAlreadyExists is returned when trying to set a phone number that another
+	// live account in the same tenant already owns.
+	ErrPhoneAlreadyExists = errors.New("identity: phone already exists")
+
+	// ErrInvalidPhone is returned when a phone number fails normalization (it is not a
+	// plausible E.164 number: a leading '+' followed by 8–15 digits).
+	ErrInvalidPhone = errors.New("identity: invalid phone")
+
 	// ErrIdentityNotFound is returned when an identity cannot be found.
 	ErrIdentityNotFound = errors.New("identity: identity not found")
 
