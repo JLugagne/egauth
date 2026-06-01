@@ -24,24 +24,25 @@ type Type string
 
 // The event types egauth emits.
 const (
-	LoginSucceeded        Type = "login.succeeded"
-	LoginFailed           Type = "login.failed"
-	AccountLocked         Type = "account.locked"
-	UserRegistered        Type = "user.registered"
-	PasswordReset         Type = "password.reset"   // completed via a reset token
-	PasswordChanged       Type = "password.changed" // authenticated self-service change
-	EmailVerified         Type = "email.verified"
-	EmailChanged          Type = "email.changed"
-	PhoneVerified         Type = "phone.verified"
-	MagicLinkLogin        Type = "magic_link.login"
-	AccountDeleted        Type = "account.deleted"
-	RefreshReuseDetected  Type = "refresh.reuse_detected"
-	TokenFamilyRevoked    Type = "token.family_revoked"
-	MFAEnrolled           Type = "mfa.enrolled"
-	MFAConfirmed          Type = "mfa.confirmed"
-	MFAVerificationFailed Type = "mfa.verification_failed"
-	MFADisabled           Type = "mfa.disabled"
-	DeliveryFailed        Type = "delivery.failed" // a swallowed mailer/delivery error (outage signal)
+	LoginSucceeded          Type = "login.succeeded"
+	LoginFailed             Type = "login.failed"
+	AccountLocked           Type = "account.locked"
+	UserRegistered          Type = "user.registered"
+	PasswordReset           Type = "password.reset"   // completed via a reset token
+	PasswordChanged         Type = "password.changed" // authenticated self-service change
+	EmailVerified           Type = "email.verified"
+	EmailChanged            Type = "email.changed"
+	PhoneVerified           Type = "phone.verified"
+	RecoveryChannelEnrolled Type = "recovery_channel.enrolled"
+	MagicLinkLogin          Type = "magic_link.login"
+	AccountDeleted          Type = "account.deleted"
+	RefreshReuseDetected    Type = "refresh.reuse_detected"
+	TokenFamilyRevoked      Type = "token.family_revoked"
+	MFAEnrolled             Type = "mfa.enrolled"
+	MFAConfirmed            Type = "mfa.confirmed"
+	MFAVerificationFailed   Type = "mfa.verification_failed"
+	MFADisabled             Type = "mfa.disabled"
+	DeliveryFailed          Type = "delivery.failed" // a swallowed mailer/delivery error (outage signal)
 )
 
 // Event is a single security-relevant occurrence.

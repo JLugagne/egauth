@@ -72,6 +72,18 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
+- **Independent recovery channels (breaking the single-email takeover chain).** An account can
+  enroll a verified phone (`RequestPhoneVerification`) and/or a verified recovery email
+  (`RequestRecoveryEmail`) — both proven by a token delivered to that channel before it is trusted,
+  and a recovery email may not equal the primary address (`ErrRecoveryEmailIsPrimary`). The
+  recovery email is a contact attribute, not a login key (it is not unique, never re-keys an
+  identity, and cannot be authenticated against). `RecoveryChannels(...).Any()` is the gate
+  primitive: pair it with a freshness/step-up check (`tokens.WithMaxAuthAge`) to require an
+  independent verified channel before a sensitive factor-reset. `RequestPasswordResetViaRecovery`
+  directs the reset token to a verified recovery channel **instead of** the primary inbox, so a
+  compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
+  account, an OAuth-only account, and a known account with no recovery channel all produce the
+  same empty, no-error response.
 - **Deactivation revokes pending tokens.** Magic-link, password-reset and email-verification all
   reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
   re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its

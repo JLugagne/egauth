@@ -106,3 +106,23 @@ func (s *SingleTenant) RequestPhoneVerification(ctx context.Context, userID uuid
 func (s *SingleTenant) ConfirmPhoneVerification(ctx context.Context, token string) (*User, error) {
 	return s.svc.ConfirmPhoneVerification(ctx, "", token)
 }
+
+// RequestRecoveryEmail calls Service.RequestRecoveryEmail on the empty tenant.
+func (s *SingleTenant) RequestRecoveryEmail(ctx context.Context, userID uuid.UUID, recoveryEmail string) (token string, err error) {
+	return s.svc.RequestRecoveryEmail(ctx, "", userID, recoveryEmail)
+}
+
+// ConfirmRecoveryEmail calls Service.ConfirmRecoveryEmail on the empty tenant.
+func (s *SingleTenant) ConfirmRecoveryEmail(ctx context.Context, token string) (*User, error) {
+	return s.svc.ConfirmRecoveryEmail(ctx, "", token)
+}
+
+// RecoveryChannels calls Service.RecoveryChannels on the empty tenant.
+func (s *SingleTenant) RecoveryChannels(ctx context.Context, userID uuid.UUID) (RecoveryChannels, error) {
+	return s.svc.RecoveryChannels(ctx, "", userID)
+}
+
+// RequestPasswordResetViaRecovery calls Service.RequestPasswordResetViaRecovery on the empty tenant.
+func (s *SingleTenant) RequestPasswordResetViaRecovery(ctx context.Context, email string) (token string, user *User, channels RecoveryChannels, err error) {
+	return s.svc.RequestPasswordResetViaRecovery(ctx, "", email)
+}

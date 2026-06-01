@@ -21,25 +21,27 @@ import (
 
 type deliveredMail struct {
 	user     *identity.User
-	newEmail string // only set for change-email deliveries (the new target address)
+	newEmail string // set for change-email (new address) and recovery-email (recovery address)
 	token    string
 }
 
 // mockMailer captures deliveries over buffered channels so tests stay race-free even though
 // delivery is dispatched on a background goroutine.
 type mockMailer struct {
-	resetCh  chan deliveredMail
-	verifyCh chan deliveredMail
-	magicCh  chan deliveredMail
-	changeCh chan deliveredMail
+	resetCh    chan deliveredMail
+	verifyCh   chan deliveredMail
+	magicCh    chan deliveredMail
+	changeCh   chan deliveredMail
+	recoveryCh chan deliveredMail
 }
 
 func newMockMailer() *mockMailer {
 	return &mockMailer{
-		resetCh:  make(chan deliveredMail, 1),
-		verifyCh: make(chan deliveredMail, 1),
-		magicCh:  make(chan deliveredMail, 1),
-		changeCh: make(chan deliveredMail, 1),
+		resetCh:    make(chan deliveredMail, 1),
+		verifyCh:   make(chan deliveredMail, 1),
+		magicCh:    make(chan deliveredMail, 1),
+		changeCh:   make(chan deliveredMail, 1),
+		recoveryCh: make(chan deliveredMail, 1),
 	}
 }
 
@@ -60,6 +62,11 @@ func (m *mockMailer) SendMagicLink(_ context.Context, user *identity.User, token
 
 func (m *mockMailer) SendEmailChange(_ context.Context, user *identity.User, newEmail, token string) error {
 	m.changeCh <- deliveredMail{user: user, newEmail: newEmail, token: token}
+	return nil
+}
+
+func (m *mockMailer) SendRecoveryEmailVerification(_ context.Context, user *identity.User, recoveryEmail, token string) error {
+	m.recoveryCh <- deliveredMail{user: user, newEmail: recoveryEmail, token: token}
 	return nil
 }
 

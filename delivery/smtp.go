@@ -75,17 +75,17 @@ type SMTPConfig struct {
 //
 // SMTPMailer also satisfies Sender, so it can deliver OTP codes by email (see OTPDelivery).
 type SMTPMailer struct {
-	host       string
-	port       int
-	from       mail.Address
-	auth       smtp.Auth
-	tlsMode    TLSMode
-	tlsConfig  *tls.Config
-	renderer   Renderer
-	link       LinkBuilder
-	timeout    time.Duration
-	now        func() time.Time
-	dialFunc   func(ctx context.Context, network, addr string) (net.Conn, error)
+	host      string
+	port      int
+	from      mail.Address
+	auth      smtp.Auth
+	tlsMode   TLSMode
+	tlsConfig *tls.Config
+	renderer  Renderer
+	link      LinkBuilder
+	timeout   time.Duration
+	now       func() time.Time
+	dialFunc  func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 // Option configures an SMTPMailer.
@@ -393,3 +393,11 @@ var (
 	_ identity.Mailer = (*SMTPMailer)(nil)
 	_ Sender          = (*SMTPMailer)(nil)
 )
+
+// SendRecoveryEmailVerification implements identity.Mailer. The confirmation is delivered to
+// recoveryEmail (the candidate recovery address), since opening it proves control of that channel.
+// It reuses the address-verification template/link, which is semantically the same action (prove
+// control of an address) applied to the recovery channel.
+func (m *SMTPMailer) SendRecoveryEmailVerification(ctx context.Context, user *identity.User, recoveryEmail, token string) error {
+	return m.deliver(ctx, EventEmailVerification, user, recoveryEmail, "", token)
+}

@@ -23,6 +23,16 @@ var (
 	// plausible E.164 number: a leading '+' followed by 8–15 digits).
 	ErrInvalidPhone = errors.New("identity: invalid phone")
 
+	// ErrRecoveryEmailIsPrimary is returned when enrolling a recovery email equal to the
+	// account's primary login email. A recovery channel must be INDEPENDENT of the primary
+	// email to break the single-channel takeover chain, so the two may not coincide.
+	ErrRecoveryEmailIsPrimary = errors.New("identity: recovery email must differ from the primary email")
+
+	// ErrNoRecoveryChannel is returned by a recovery-channel-gated operation (e.g.
+	// RequestPasswordResetViaRecovery) when the account has no VERIFIED independent recovery
+	// channel enrolled (no verified recovery email and no verified phone).
+	ErrNoRecoveryChannel = errors.New("identity: no verified recovery channel")
+
 	// ErrIdentityNotFound is returned when an identity cannot be found.
 	ErrIdentityNotFound = errors.New("identity: identity not found")
 

@@ -30,6 +30,10 @@ const (
 	// carries the requested phone number as its metadata and is delivered to that number by SMS,
 	// so confirming it proves control of the number before it is set on the account.
 	KindPhoneVerification = "phone_verification"
+	// KindRecoveryEmailVerification identifies tokens minted for the recovery-email enrollment
+	// flow. The token carries the requested recovery address as its metadata and is delivered to
+	// that address, so confirming it proves control of the recovery channel before it is set.
+	KindRecoveryEmailVerification = "recovery_email_verification"
 )
 
 const (
@@ -129,6 +133,11 @@ type Mailer interface {
 	// notification to the current address (user.Email) so the legitimate owner is alerted to a
 	// pending change they did not initiate.
 	SendEmailChange(ctx context.Context, user *User, newEmail, token string) error
+	// SendRecoveryEmailVerification delivers a recovery-email enrollment token to the candidate
+	// recovery address (recoveryEmail), e.g. as a confirmation link. It is delivered to that
+	// address (not the primary) because confirming it is what proves control of the recovery
+	// channel before it is trusted.
+	SendRecoveryEmailVerification(ctx context.Context, user *User, recoveryEmail, token string) error
 }
 
 // SMSSender delivers a phone-verification credential to a phone number over SMS. It is a separate

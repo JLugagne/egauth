@@ -12,19 +12,23 @@ type MockService struct {
 	RegisterFunc     func(ctx context.Context, tenantID string, email, password string) (*identity.User, error)
 	AuthenticateFunc func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error)
 
-	RequestPasswordResetFunc     func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
-	ResetPasswordFunc            func(ctx context.Context, tenantID string, token, newPassword string) error
-	RequestEmailVerificationFunc func(ctx context.Context, tenantID string, userID uuid.UUID) (string, error)
-	VerifyEmailFunc              func(ctx context.Context, tenantID string, token string) (*identity.User, error)
-	LinkOrCreateIdentityFunc     func(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
-	RequestMagicLinkFunc         func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
-	LoginWithMagicLinkFunc       func(ctx context.Context, tenantID string, token string) (*identity.User, error)
-	ChangePasswordFunc           func(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
-	RequestEmailChangeFunc       func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (string, error)
-	ConfirmEmailChangeFunc       func(ctx context.Context, tenantID string, token string) (*identity.User, error)
-	RequestPhoneVerificationFunc func(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (string, error)
-	ConfirmPhoneVerificationFunc func(ctx context.Context, tenantID string, token string) (*identity.User, error)
-	DeleteAccountFunc            func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	RequestPasswordResetFunc            func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
+	ResetPasswordFunc                   func(ctx context.Context, tenantID string, token, newPassword string) error
+	RequestEmailVerificationFunc        func(ctx context.Context, tenantID string, userID uuid.UUID) (string, error)
+	VerifyEmailFunc                     func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	LinkOrCreateIdentityFunc            func(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
+	RequestMagicLinkFunc                func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
+	LoginWithMagicLinkFunc              func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	ChangePasswordFunc                  func(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
+	RequestEmailChangeFunc              func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (string, error)
+	ConfirmEmailChangeFunc              func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	RequestPhoneVerificationFunc        func(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (string, error)
+	ConfirmPhoneVerificationFunc        func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	RequestRecoveryEmailFunc            func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (string, error)
+	ConfirmRecoveryEmailFunc            func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	RecoveryChannelsFunc                func(ctx context.Context, tenantID string, userID uuid.UUID) (identity.RecoveryChannels, error)
+	RequestPasswordResetViaRecoveryFunc func(ctx context.Context, tenantID string, email string) (string, *identity.User, identity.RecoveryChannels, error)
+	DeleteAccountFunc                   func(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -132,4 +136,32 @@ func (m *MockService) ConfirmPhoneVerification(ctx context.Context, tenantID str
 		panic("called not defined ConfirmPhoneVerificationFunc")
 	}
 	return m.ConfirmPhoneVerificationFunc(ctx, tenantID, token)
+}
+
+func (m *MockService) RequestRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (string, error) {
+	if m.RequestRecoveryEmailFunc == nil {
+		panic("called not defined RequestRecoveryEmailFunc")
+	}
+	return m.RequestRecoveryEmailFunc(ctx, tenantID, userID, recoveryEmail)
+}
+
+func (m *MockService) ConfirmRecoveryEmail(ctx context.Context, tenantID string, token string) (*identity.User, error) {
+	if m.ConfirmRecoveryEmailFunc == nil {
+		panic("called not defined ConfirmRecoveryEmailFunc")
+	}
+	return m.ConfirmRecoveryEmailFunc(ctx, tenantID, token)
+}
+
+func (m *MockService) RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (identity.RecoveryChannels, error) {
+	if m.RecoveryChannelsFunc == nil {
+		panic("called not defined RecoveryChannelsFunc")
+	}
+	return m.RecoveryChannelsFunc(ctx, tenantID, userID)
+}
+
+func (m *MockService) RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (string, *identity.User, identity.RecoveryChannels, error) {
+	if m.RequestPasswordResetViaRecoveryFunc == nil {
+		panic("called not defined RequestPasswordResetViaRecoveryFunc")
+	}
+	return m.RequestPasswordResetViaRecoveryFunc(ctx, tenantID, email)
 }

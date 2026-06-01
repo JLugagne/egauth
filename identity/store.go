@@ -48,6 +48,13 @@ type Store interface {
 	// live user matches.
 	UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
 
+	// UpdateUserRecoveryEmail sets a live user's recovery email to recoveryEmail and marks it
+	// verified (recovery_email_verified_at = verifiedAt). The recovery email is a SECONDARY
+	// contact channel, not a login key, so it is intentionally NOT globally unique (several
+	// accounts may share a recovery contact) and re-keys no identity. It returns ErrUserNotFound
+	// when no live user matches.
+	UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
+
 	DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error
 
 	// Identity operations

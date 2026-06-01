@@ -425,3 +425,24 @@ func (s *Store) UpdateUserPhone(ctx context.Context, tenantID string, userID uui
 
 	return nil
 }
+
+// UpdateUserRecoveryEmail sets a live user's recovery email and marks it verified. The recovery
+// email is a secondary contact channel (not a login key), so it is not enforced unique.
+func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	now := time.Now()
+	r := recoveryEmail
+	user.RecoveryEmail = &r
+	v := verifiedAt
+	user.RecoveryEmailVerifiedAt = &v
+	user.UpdatedAt = now
+
+	return nil
+}

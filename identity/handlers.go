@@ -39,6 +39,7 @@ type handlerConfig struct {
 	newPasswordField     string
 	newEmailField        string
 	phoneField           string
+	recoveryEmailField   string
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
 	maxBodyBytes         int64
@@ -60,6 +61,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		newPasswordField:     "new_password",
 		newEmailField:        "new_email",
 		phoneField:           "phone",
+		recoveryEmailField:   "recovery_email",
 		maxBodyBytes:         DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
@@ -192,6 +194,12 @@ func WithEmailChangeField(name string) HandlerOption {
 // RequestPhoneVerificationHandler (default "phone").
 func WithPhoneField(name string) HandlerOption {
 	return func(h *handlerConfig) { h.phoneField = name }
+}
+
+// WithRecoveryEmailField overrides the form field carrying the candidate recovery address in
+// RequestRecoveryEmailHandler (default "recovery_email").
+func WithRecoveryEmailField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.recoveryEmailField = name }
 }
 
 // WithMaxBodyBytes overrides the request-body size cap applied before form parsing
@@ -963,6 +971,147 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// RequestRecoveryEmailHandler builds an authenticated HTTP handler that starts enrollment of an
+// independent recovery email for the signed-in user. The current user is obtained via
+// WithUserResolver; without a resolved user it responds 401. It reads the candidate address from
+// the form (field configurable via WithRecoveryEmailField, default "recovery_email"), mints a token
+// via Service.RequestRecoveryEmail and hands it to the Mailer for delivery to THAT address (off the
+// response path). A malformed address maps to 400; using the primary email as the recovery address
+// maps to 409.
+func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		recoveryEmail := strings.TrimSpace(r.PostForm.Get(cfg.recoveryEmailField))
+		token, err := svc.RequestRecoveryEmail(r.Context(), cfg.tenant(r), user.ID, recoveryEmail)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidEmail):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
+			case errors.Is(err, ErrRecoveryEmailIsPrimary):
+				cfg.fail(w, r, http.StatusConflict, "recovery_email_is_primary")
+			case errors.Is(err, ErrUserNotFound):
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && mailer != nil {
+			deliverTo := recoveryEmail
+			if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
+				deliverTo = n
+			}
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendRecoveryEmailVerification(ctx, user, deliverTo, token)
+			})
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmRecoveryEmailHandler builds an HTTP handler that completes recovery-email enrollment: it
+// reads the token from the form, consumes it (single-use) and sets the account's recovery email,
+// marking it verified. It is authenticated by the single-use token (delivered to the recovery
+// address), so it needs no resolved session. It is POST-only so a link prefetcher cannot trigger it.
+func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmRecoveryEmail(r.Context(), cfg.tenant(r), token); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// RequestPasswordResetViaRecoveryHandler builds an HTTP handler that starts a password reset
+// directed at the account's VERIFIED INDEPENDENT recovery channel (recovery email and/or phone)
+// rather than the primary inbox — so a compromised primary mailbox cannot drive the reset. It is
+// enumeration-uniform: it always responds the same (204 or the success redirect) whether or not the
+// account exists or has a recovery channel, dispatching delivery off the response path. mailer
+// delivers to the recovery email and sms delivers to the phone; either may be nil to disable that
+// channel. It reads the account's primary email from the form (the usual email field).
+func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSSender, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
+		token, user, channels, err := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		// Uniform response regardless of account existence or recovery-channel availability; deliver
+		// off the response path to the verified channels only (token/user are empty otherwise).
+		if token != "" && user != nil {
+			if channels.RecoveryEmail && mailer != nil && user.RecoveryEmail != nil {
+				recoveryEmail := *user.RecoveryEmail
+				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+					return mailer.SendPasswordReset(ctx, &User{
+						ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
+					}, token)
+				})
+			}
+			if channels.Phone && sms != nil && user.Phone != nil {
+				phone := *user.Phone
+				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+					return sms.SendPhoneVerification(ctx, user, phone, token)
+				})
+			}
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}

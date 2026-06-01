@@ -18,17 +18,18 @@ const (
 
 // MockStore is a functional mock of the identity.Store interface.
 type MockStore struct {
-	CreateUserFunc             func(ctx context.Context, tenantID string, email string) (*identity.User, error)
-	FindUserByIDFunc           func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error)
-	FindUserByEmailFunc        func(ctx context.Context, tenantID string, email string) (*identity.User, error)
-	FindUserByPhoneFunc        func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
-	UpdateUserFunc             func(ctx context.Context, tenantID string, user *identity.User) error
-	UpdateUserEmailFunc        func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
-	UpdateUserPhoneFunc        func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
-	DeleteUserFunc             func(ctx context.Context, tenantID string, id uuid.UUID) error
-	AddIdentityFunc            func(ctx context.Context, tenantID string, ident *identity.Identity) error
-	FindIdentitiesByUserIDFunc func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
-	FindIdentityByProviderFunc func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
+	CreateUserFunc              func(ctx context.Context, tenantID string, email string) (*identity.User, error)
+	FindUserByIDFunc            func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error)
+	FindUserByEmailFunc         func(ctx context.Context, tenantID string, email string) (*identity.User, error)
+	FindUserByPhoneFunc         func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
+	UpdateUserFunc              func(ctx context.Context, tenantID string, user *identity.User) error
+	UpdateUserEmailFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
+	UpdateUserPhoneFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
+	UpdateUserRecoveryEmailFunc func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
+	DeleteUserFunc              func(ctx context.Context, tenantID string, id uuid.UUID) error
+	AddIdentityFunc             func(ctx context.Context, tenantID string, ident *identity.Identity) error
+	FindIdentitiesByUserIDFunc  func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
+	FindIdentityByProviderFunc  func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
 
 	IncrementFailedAttemptsFunc func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
 	ResetFailedAttemptsFunc     func(ctx context.Context, tenantID string, identityID uuid.UUID) error
@@ -500,6 +501,33 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.ErrorIs(t, err, identity.ErrUserNotFound)
 	})
 
+	t.Run("Contract: Recovery Email (UpdateUserRecoveryEmail)", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, tenantA, "rec_contract@example.com")
+		require.NoError(t, err)
+		assert.Nil(t, user.RecoveryEmail, "a freshly created user has no recovery email")
+
+		verifiedAt := time.Now()
+		require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenantA, user.ID, "backup@elsewhere.example", verifiedAt))
+
+		found, err := store.FindUserByID(ctx, tenantA, user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, found.RecoveryEmail)
+		assert.Equal(t, "backup@elsewhere.example", *found.RecoveryEmail)
+		require.NotNil(t, found.RecoveryEmailVerifiedAt, "the confirmed recovery email must be marked verified")
+		assert.Equal(t, verifiedAt.Unix(), found.RecoveryEmailVerifiedAt.Unix())
+
+		// The recovery email is NOT a login key and is intentionally not unique: a second account
+		// may carry the same recovery contact.
+		other, err := store.CreateUser(ctx, tenantA, "rec_other@example.com")
+		require.NoError(t, err)
+		require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenantA, other.ID, "backup@elsewhere.example", time.Now()),
+			"a recovery email need not be unique across accounts")
+
+		// An unknown user is reported as not found.
+		err = store.UpdateUserRecoveryEmail(ctx, tenantA, uuid.New(), "x@elsewhere.example", time.Now())
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+	})
+
 	t.Run("Contract: Verification Tokens", func(t *testing.T) {
 		user, err := store.CreateUser(ctx, tenantA, "test_verif@example.com")
 		require.NoError(t, err)
@@ -630,4 +658,11 @@ func (m *MockStore) UpdateUserPhone(ctx context.Context, tenantID string, userID
 		panic("called not defined UpdateUserPhoneFunc")
 	}
 	return m.UpdateUserPhoneFunc(ctx, tenantID, userID, newPhone, verifiedAt)
+}
+
+func (m *MockStore) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error {
+	if m.UpdateUserRecoveryEmailFunc == nil {
+		panic("called not defined UpdateUserRecoveryEmailFunc")
+	}
+	return m.UpdateUserRecoveryEmailFunc(ctx, tenantID, userID, recoveryEmail, verifiedAt)
 }

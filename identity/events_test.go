@@ -160,10 +160,15 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 // failMailer fails every delivery, to exercise the swallowed-delivery-error path.
 type failMailer struct{ err error }
 
-func (m failMailer) SendPasswordReset(context.Context, *identity.User, string) error     { return m.err }
-func (m failMailer) SendEmailVerification(context.Context, *identity.User, string) error { return m.err }
-func (m failMailer) SendMagicLink(context.Context, *identity.User, string) error         { return m.err }
+func (m failMailer) SendPasswordReset(context.Context, *identity.User, string) error { return m.err }
+func (m failMailer) SendEmailVerification(context.Context, *identity.User, string) error {
+	return m.err
+}
+func (m failMailer) SendMagicLink(context.Context, *identity.User, string) error { return m.err }
 func (m failMailer) SendEmailChange(context.Context, *identity.User, string, string) error {
+	return m.err
+}
+func (m failMailer) SendRecoveryEmailVerification(context.Context, *identity.User, string, string) error {
 	return m.err
 }
 

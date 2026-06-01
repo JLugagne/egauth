@@ -45,6 +45,9 @@ const (
 	// because SMS-delivered codes are expected to be entered promptly and a stale code is a
 	// liability.
 	DefaultPhoneVerificationTTL = 15 * time.Minute
+	// DefaultRecoveryEmailTTL is the lifetime of a recovery-email enrollment token. It mirrors
+	// the email-verification window since it is an emailed confirmation link.
+	DefaultRecoveryEmailTTL = 24 * time.Hour
 )
 
 // Service defines the business logic for user identity operations.
@@ -132,6 +135,39 @@ type Service interface {
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
 	ConfirmPhoneVerification(ctx context.Context, tenantID string, token string) (*User, error)
 
+	// RequestRecoveryEmail starts enrollment of an INDEPENDENT recovery email for userID — a
+	// secondary address, distinct from the primary login email, used as an account-recovery
+	// channel. It validates and normalizes recoveryEmail, rejects it when it equals the account's
+	// primary email (ErrRecoveryEmailIsPrimary — a recovery channel must be independent), and
+	// mints a single-use token bound to recoveryEmail (carried as the token's metadata). The token
+	// MUST be delivered to recoveryEmail — confirming it proves control of the recovery channel
+	// before it is trusted. It returns ErrInvalidEmail for a malformed address and ErrUserNotFound
+	// for an unknown/soft-deleted/cross-tenant user.
+	RequestRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (token string, err error)
+
+	// ConfirmRecoveryEmail consumes a recovery-email enrollment token (single-use) and sets the
+	// owning user's recovery email to the address the token was minted for, marking it verified.
+	// It returns the updated user, or ErrUserNotFound when the account was deactivated after the
+	// token was issued.
+	ConfirmRecoveryEmail(ctx context.Context, tenantID string, token string) (*User, error)
+
+	// RecoveryChannels reports which INDEPENDENT verified recovery channels userID has enrolled
+	// (a verified recovery email and/or a verified phone). It is the gate primitive for
+	// sensitive recovery/factor-reset: a consumer requires RecoveryChannels(...).Any() (plus a
+	// freshness/step-up check, see tokens.WithMaxAuthAge) before allowing such an operation. It
+	// returns ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
+	RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (RecoveryChannels, error)
+
+	// RequestPasswordResetViaRecovery mints a password-reset token for the account owning email
+	// but, unlike RequestPasswordReset, directs it to a VERIFIED INDEPENDENT recovery channel
+	// (recovery email or phone) rather than the primary inbox — so a compromised primary mailbox
+	// cannot drive the reset. Like RequestPasswordReset it is enumeration-safe: it returns
+	// ("", nil, RecoveryChannels{}, nil) for an unknown account OR for a known account with no
+	// verified recovery channel, so the caller presents an identical response either way. When a
+	// token is returned, the user and the available channels are returned too so the caller can
+	// deliver the token to the recovery email and/or phone.
+	RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (token string, user *User, channels RecoveryChannels, err error)
+
 	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
 	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
 	// MFA, passkeys — see WithAccountErasers) and then soft-deletes and anonymizes the identity
@@ -167,6 +203,7 @@ type service struct {
 	magicLinkTTL         time.Duration
 	emailChangeTTL       time.Duration
 	phoneVerificationTTL time.Duration
+	recoveryEmailTTL     time.Duration
 	erasers              []AccountEraser
 	events               event.Sink
 	now                  func() time.Time
@@ -206,6 +243,11 @@ func WithEmailChangeTTL(d time.Duration) ServiceOption {
 // WithPhoneVerificationTTL overrides how long a phone-verification token stays valid.
 func WithPhoneVerificationTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.phoneVerificationTTL = d }
+}
+
+// WithRecoveryEmailTTL overrides how long a recovery-email enrollment token stays valid.
+func WithRecoveryEmailTTL(d time.Duration) ServiceOption {
+	return func(s *service) { s.recoveryEmailTTL = d }
 }
 
 // WithAccountErasers registers cross-module revocation hooks run by DeleteAccount, in the order
@@ -258,6 +300,7 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 		magicLinkTTL:         DefaultMagicLinkTTL,
 		emailChangeTTL:       DefaultEmailChangeTTL,
 		phoneVerificationTTL: DefaultPhoneVerificationTTL,
+		recoveryEmailTTL:     DefaultRecoveryEmailTTL,
 		now:                  time.Now,
 	}
 	for _, opt := range opts {
@@ -859,4 +902,132 @@ func (s *service) ConfirmPhoneVerification(ctx context.Context, tenantID string,
 	user.UpdatedAt = now
 	s.emit(ctx, event.Event{Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
+}
+
+// RecoveryChannels reports which INDEPENDENT, verified recovery channels an account has — i.e.
+// channels other than the primary login email that can prove control during account recovery and
+// gate sensitive operations. Use Any to decide whether a recovery/factor-reset is permitted.
+type RecoveryChannels struct {
+	// RecoveryEmail is true when a verified recovery email is enrolled.
+	RecoveryEmail bool
+	// Phone is true when a verified phone number is enrolled.
+	Phone bool
+}
+
+// Any reports whether the account has at least one verified independent recovery channel.
+func (rc RecoveryChannels) Any() bool {
+	return rc.RecoveryEmail || rc.Phone
+}
+
+// RequestRecoveryEmail mints a token that, once confirmed, enrolls userID's recovery email.
+func (s *service) RequestRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (string, error) {
+	recoveryEmail, err := normalizeEmail(recoveryEmail)
+	if err != nil {
+		return "", err
+	}
+
+	// A recovery channel must be INDEPENDENT of the primary email — enrolling the primary address
+	// as the recovery address would defeat the purpose (a single compromised mailbox would own
+	// both). Gate on the live user up front (also yields ErrUserNotFound for unknown accounts).
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
+	if err != nil {
+		return "", err
+	}
+	if user.DeletedAt != nil {
+		return "", ErrUserNotFound
+	}
+	if recoveryEmail == user.Email {
+		return "", ErrRecoveryEmailIsPrimary
+	}
+
+	// Bind the requested address to the token as metadata. CreateVerificationToken also re-checks
+	// userID is a live, same-tenant account.
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, userID, KindRecoveryEmailVerification, s.recoveryEmailTTL, []byte(recoveryEmail))
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConfirmRecoveryEmail consumes a recovery-email enrollment token and sets the recovery email.
+func (s *service) ConfirmRecoveryEmail(ctx context.Context, tenantID string, token string) (*User, error) {
+	user, metadata, err := s.consumeForLiveUser(ctx, tenantID, token, KindRecoveryEmailVerification)
+	if err != nil {
+		return nil, err
+	}
+
+	recoveryEmail, err := normalizeEmail(string(metadata))
+	if err != nil {
+		return nil, err
+	}
+
+	now := s.now()
+	if err := s.store.UpdateUserRecoveryEmail(ctx, tenantID, user.ID, recoveryEmail, now); err != nil {
+		return nil, err
+	}
+	user.RecoveryEmail = &recoveryEmail
+	user.RecoveryEmailVerifiedAt = &now
+	user.UpdatedAt = now
+	s.emit(ctx, event.Event{Type: event.RecoveryChannelEnrolled, UserID: user.ID.String(), TenantID: user.TenantID})
+	return user, nil
+}
+
+// RecoveryChannels reports the verified independent recovery channels enrolled for userID.
+func (s *service) RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (RecoveryChannels, error) {
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
+	if err != nil {
+		return RecoveryChannels{}, err
+	}
+	if user.DeletedAt != nil {
+		return RecoveryChannels{}, ErrUserNotFound
+	}
+	return recoveryChannelsOf(user), nil
+}
+
+// recoveryChannelsOf derives the verified-channel inventory from a loaded user.
+func recoveryChannelsOf(user *User) RecoveryChannels {
+	return RecoveryChannels{
+		RecoveryEmail: user.RecoveryEmail != nil && *user.RecoveryEmail != "" && user.RecoveryEmailVerifiedAt != nil,
+		Phone:         user.Phone != nil && *user.Phone != "" && user.PhoneVerifiedAt != nil,
+	}
+}
+
+// RequestPasswordResetViaRecovery mints a reset token directed at a verified recovery channel.
+func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (string, *User, RecoveryChannels, error) {
+	email, nerr := normalizeEmail(email)
+	if nerr != nil {
+		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		return "", nil, RecoveryChannels{}, nil
+	}
+	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
+	if err != nil {
+		if errors.Is(err, ErrUserNotFound) {
+			return "", nil, RecoveryChannels{}, nil
+		}
+		return "", nil, RecoveryChannels{}, err
+	}
+
+	// Only an account that actually has a password can reset it (mirrors RequestPasswordReset);
+	// stay uniform for OAuth-only accounts.
+	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, user.ID)
+	if err != nil {
+		return "", nil, RecoveryChannels{}, err
+	}
+	if !hasPasswordIdentity(idents) {
+		return "", nil, RecoveryChannels{}, nil
+	}
+
+	// The whole point of this variant is to NOT trust the primary inbox: require a verified
+	// independent recovery channel. Without one, stay enumeration-uniform (no token, no error) —
+	// the caller cannot distinguish "no such account" from "no recovery channel".
+	channels := recoveryChannelsOf(user)
+	if !channels.Any() {
+		return "", nil, RecoveryChannels{}, nil
+	}
+
+	token, err := s.store.CreateVerificationToken(ctx, tenantID, user.ID, KindPasswordReset, s.passwordResetTTL, nil)
+	if err != nil {
+		return "", nil, RecoveryChannels{}, err
+	}
+	return token, user, channels, nil
 }
