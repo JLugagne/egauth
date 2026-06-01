@@ -30,9 +30,13 @@ func newMockSMSSender() *mockSMSSender {
 	return &mockSMSSender{ch: make(chan deliveredSMS, 1)}
 }
 
-func (m *mockSMSSender) SendPhoneVerification(_ context.Context, user *identity.User, phone, token string) error {
-	m.ch <- deliveredSMS{user: user, phone: phone, token: token}
-	return nil
+func (m *mockSMSSender) asSMSSender() identity.SMSSender {
+	return identity.SMSSender{
+		PhoneVerification: func(ctx context.Context, sms identity.PhoneVerificationSMS) error {
+			m.ch <- deliveredSMS{user: sms.User, phone: sms.Phone, token: sms.Token}
+			return nil
+		},
+	}
 }
 
 func requireSMS(t *testing.T, ch chan deliveredSMS) deliveredSMS {
@@ -57,7 +61,7 @@ func requireNoSMS(t *testing.T, ch chan deliveredSMS) {
 
 func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 	t.Run("no resolver -> 401", func(t *testing.T) {
-		h := identity.RequestPhoneVerificationHandler(&servicetest.MockService{}, newMockSMSSender())
+		h := identity.RequestPhoneVerificationHandler(&servicetest.MockService{}, newMockSMSSender().asSMSSender())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"phone": {"+15551234567"}}))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
@@ -73,7 +77,7 @@ func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		sender := newMockSMSSender()
-		h := identity.RequestPhoneVerificationHandler(svc, sender,
+		h := identity.RequestPhoneVerificationHandler(svc, sender.asSMSSender(),
 			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"phone": {"+15551234567"}}))
@@ -92,7 +96,7 @@ func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		sender := newMockSMSSender()
-		h := identity.RequestPhoneVerificationHandler(svc, sender,
+		h := identity.RequestPhoneVerificationHandler(svc, sender.asSMSSender(),
 			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"phone": {" +1 (555) 123-4567 "}}))
@@ -104,7 +108,7 @@ func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 }
 
 func TestRequestPhoneVerificationHandler_RejectsGET(t *testing.T) {
-	h := identity.RequestPhoneVerificationHandler(&servicetest.MockService{}, newMockSMSSender())
+	h := identity.RequestPhoneVerificationHandler(&servicetest.MockService{}, newMockSMSSender().asSMSSender())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
@@ -130,7 +134,7 @@ func TestRequestPhoneVerificationHandler_ErrorMapping(t *testing.T) {
 				},
 			}
 			sender := newMockSMSSender()
-			h := identity.RequestPhoneVerificationHandler(svc, sender,
+			h := identity.RequestPhoneVerificationHandler(svc, sender.asSMSSender(),
 				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{"phone": {"+15550000000"}}))
