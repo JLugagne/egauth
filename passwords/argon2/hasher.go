@@ -44,6 +44,12 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 	if len(password) > passwords.MaxPasswordLength {
 		return "", passwords.ErrPasswordTooLong
 	}
+	// Honor cancellation before running the deliberately expensive KDF, so a cancelled or
+	// timed-out request cannot still cost a full Argon2id pass (memory + CPU). argon2.IDKey is
+	// not itself interruptible, so this pre-call check is the only available cancellation point.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	salt := make([]byte, h.saltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -104,6 +110,12 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 		return passwords.ErrInvalidPassword
 	}
 	keyLen := uint32(len(decodedHash))
+
+	// Honor cancellation before the deliberately expensive KDF (same rationale as Hash): a
+	// cancelled or timed-out verification must not still cost a full Argon2id pass.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	comparisonHash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
 

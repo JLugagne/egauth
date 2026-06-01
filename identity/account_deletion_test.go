@@ -130,3 +130,30 @@ func TestDeleteAccount_AlreadyDeletedIsNotFound(t *testing.T) {
 	err = svc.DeleteAccount(ctx, "", user.ID)
 	assert.ErrorIs(t, err, identity.ErrUserNotFound, "deleting an already-deleted account reports not found")
 }
+
+// TestDeleteAccount_HonorsContextCancellation confirms a cancelled context aborts the
+// multi-step cross-module cascade before any eraser runs: the account stays live (the op is
+// cleanly retriable) and the context error is returned.
+func TestDeleteAccount_HonorsContextCancellation(t *testing.T) {
+	called := false
+	eraser := func(_ context.Context, _ string, _ uuid.UUID) error {
+		called = true
+		return nil
+	}
+	svc, _ := newVerificationService(t, identity.WithAccountErasers(eraser))
+
+	const email = "cancel@example.com"
+	user, err := svc.Register(context.Background(), "", email, "OldPassw0rd!")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err = svc.DeleteAccount(ctx, "", user.ID)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.False(t, called, "erasers must not run once the context is cancelled")
+
+	// The account must remain live so the cancelled operation can be retried.
+	_, err = svc.Authenticate(context.Background(), "", "password", email, "OldPassw0rd!")
+	require.NoError(t, err, "a cancelled deletion must not have deleted the account")
+}

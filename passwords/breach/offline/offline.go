@@ -105,8 +105,14 @@ func LoadPasswords(r io.Reader) (*Checker, error) {
 	return c, nil
 }
 
-// IsBreached reports whether password's SHA-1 is in the loaded set. It never returns an error.
-func (c *Checker) IsBreached(_ context.Context, password string) (bool, error) {
+// IsBreached reports whether password's SHA-1 is in the loaded set. The only error it can
+// return is the context error when ctx is already cancelled.
+func (c *Checker) IsBreached(ctx context.Context, password string) (bool, error) {
+	// Honor cancellation so a cancelled or timed-out password-policy check fails fast rather
+	// than continuing the verification chain.
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	_, ok := c.hashes[hashUpper(password)]
 	return ok, nil
 }

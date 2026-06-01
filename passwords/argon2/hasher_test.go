@@ -77,3 +77,24 @@ func TestArgon2Hasher_RejectsOversizedPassword(t *testing.T) {
 	err = hasher.Compare(ctx, valid, oversized)
 	assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 }
+
+// TestArgon2Hasher_HonorsContextCancellation confirms the (deliberately expensive) KDF is not
+// run once the request's context is already cancelled: Hash/Compare must short-circuit with the
+// context error before reaching argon2.IDKey, so a cancelled pre-auth request cannot still cost
+// 64MB+CPU per attempt.
+func TestArgon2Hasher_HonorsContextCancellation(t *testing.T) {
+	hasher := argon2hasher.NewHasher()
+
+	// A valid stored hash, produced before cancellation, so Compare reaches its guard.
+	valid, err := hasher.Hash(context.Background(), "TestPassword123!")
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = hasher.Hash(ctx, "TestPassword123!")
+	assert.ErrorIs(t, err, context.Canceled)
+
+	err = hasher.Compare(ctx, valid, "TestPassword123!")
+	assert.ErrorIs(t, err, context.Canceled)
+}

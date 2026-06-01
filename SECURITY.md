@@ -89,6 +89,17 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **No internal logging.** egauth performs no logging of its own ("silent by default").
   It never writes passwords, plaintext tokens, or hashes to stdout/stderr or any logger.
   `context.Context` is propagated so consumers can attach their own tracing.
+- **Context cancellation is observed on the expensive paths.** `context.Context` flows through
+  every operation. I/O cancellation propagates through the driver (pgx for the Postgres stores;
+  `net/http` for the HIBP breach client, which uses `http.NewRequestWithContext`). In addition,
+  the deliberately expensive in-process paths check `ctx.Err()` *before* doing the costly work, so
+  a client that has already gone away cannot keep burning resources: the Argon2id KDF
+  (`passwords/argon2` `Hash`/`Compare`) short-circuits before the hash pass, the offline breach
+  lookup fails fast, and `identity.DeleteAccount` aborts its cross-module cascade before running
+  another eraser (leaving the account live and the operation cleanly retriable). Argon2id itself is
+  not interruptible mid-hash, so the guard is a pre-call check, not a kill switch for an in-flight
+  pass; in-memory map lookups in the reference stores are not individually cancellable but complete
+  in microseconds.
 - **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,

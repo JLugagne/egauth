@@ -74,3 +74,16 @@ func TestLoadHashes_RejectsMalformed(t *testing.T) {
 }
 
 var _ passwords.BreachChecker = (*offline.Checker)(nil)
+
+// TestIsBreached_HonorsContextCancellation confirms the lookup observes a cancelled context
+// rather than silently ignoring it, so a cancelled password-policy check fails fast.
+func TestIsBreached_HonorsContextCancellation(t *testing.T) {
+	c, err := offline.LoadPasswords(strings.NewReader("hunter2\n"))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err = c.IsBreached(ctx, "hunter2")
+	assert.ErrorIs(t, err, context.Canceled)
+}

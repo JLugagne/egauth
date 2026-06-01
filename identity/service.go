@@ -593,6 +593,12 @@ func (s *service) DeleteAccount(ctx context.Context, tenantID string, userID uui
 		if erase == nil {
 			continue
 		}
+		// Honor cancellation between erasers (this is a multi-step cross-module cascade): if the
+		// context is done, abort before running another eraser and before the soft-delete, so a
+		// cancelled deletion leaves the account live and cleanly retriable.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if err := erase(ctx, tenantID, userID); err != nil {
 			errs = append(errs, err)
 		}
@@ -601,6 +607,9 @@ func (s *service) DeleteAccount(ctx context.Context, tenantID string, userID uui
 		return errors.Join(errs...)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := s.store.DeleteUser(ctx, tenantID, userID); err != nil {
 		return err
 	}
