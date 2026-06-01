@@ -7,29 +7,43 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/passwords"
+	"github.com/JLugagne/egauth/tokens"
 )
 
 // ClaimsBuilder maps an authenticated user to the claims embedded in their issued tokens.
-// The application supplies it so libauth stays agnostic about the custom claim type C.
+// The application supplies it so egauth stays agnostic about the custom claim type C.
 // Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
 // applies.
 type ClaimsBuilder[C any] func(*User) tokens.Claims[C]
 
+// DefaultMaxBodyBytes is the default cap applied to the request body of the form handlers.
+// It bounds attacker-controlled input (notably the password field, which feeds the expensive
+// argon2 KDF) to prevent a pre-authentication CPU/memory amplification DoS. It is comfortably
+// larger than a legitimate email+password+token form. Override with WithMaxBodyBytes.
+const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
+
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
-	provider       string
-	cookies        tokens.Cookies
-	tenantResolver func(*http.Request) string
-	successURL     string
-	failureURL     string
-	emailField     string
-	passwordField  string
-	rememberField  string
-	tokenField     string
-	userResolver   func(*http.Request) (*User, bool)
-	trustedOrigins map[string]bool
+	provider             string
+	cookies              tokens.Cookies
+	tenantResolver       func(*http.Request) string
+	successURL           string
+	failureURL           string
+	emailField           string
+	passwordField        string
+	rememberField        string
+	tokenField           string
+	currentPasswordField string
+	newPasswordField     string
+	newEmailField        string
+	phoneField           string
+	recoveryEmailField   string
+	userResolver         func(*http.Request) (*User, bool)
+	trustedOrigins       map[string]bool
+	maxBodyBytes         int64
+	events               event.Sink
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -37,12 +51,18 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		provider:      "password",
-		cookies:       tokens.DefaultCookies(),
-		emailField:    "email",
-		passwordField: "password",
-		rememberField: "remember_me",
-		tokenField:    "token",
+		provider:             "password",
+		cookies:              tokens.DefaultCookies(),
+		emailField:           "email",
+		passwordField:        "password",
+		rememberField:        "remember_me",
+		tokenField:           "token",
+		currentPasswordField: "current_password",
+		newPasswordField:     "new_password",
+		newEmailField:        "new_email",
+		phoneField:           "phone",
+		recoveryEmailField:   "recovery_email",
+		maxBodyBytes:         DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -128,6 +148,15 @@ func WithUserResolver(f func(*http.Request) (*User, bool)) HandlerOption {
 	return func(h *handlerConfig) { h.userResolver = f }
 }
 
+// WithHandlerEventSink registers a security-event sink (see the event package) for the handlers.
+// Its main use is making swallowed Mailer delivery failures observable: the Request* handlers
+// reply uniformly for enumeration safety and dispatch delivery off the response path, so a Mailer
+// outage is otherwise invisible — with a sink configured it surfaces as a DeliveryFailed event.
+// (The identity Service has its own WithEventSink for service-level lifecycle events.)
+func WithHandlerEventSink(sink event.Sink) HandlerOption {
+	return func(h *handlerConfig) { h.events = sink }
+}
+
 // WithTrustedOrigins enables CSRF origin checking on the form handlers (login/register).
 //
 // Login and registration are state-changing endpoints driven purely by the request body,
@@ -144,6 +173,61 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 			h.trustedOrigins[o] = true
 		}
 	}
+}
+
+// WithPasswordChangeFields overrides the form field names read by ChangePasswordHandler
+// (defaults "current_password" and "new_password").
+func WithPasswordChangeFields(current, newField string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.currentPasswordField = current
+		h.newPasswordField = newField
+	}
+}
+
+// WithEmailChangeField overrides the form field carrying the requested new address in
+// RequestEmailChangeHandler (default "new_email").
+func WithEmailChangeField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.newEmailField = name }
+}
+
+// WithPhoneField overrides the form field carrying the requested phone number in
+// RequestPhoneVerificationHandler (default "phone").
+func WithPhoneField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.phoneField = name }
+}
+
+// WithRecoveryEmailField overrides the form field carrying the candidate recovery address in
+// RequestRecoveryEmailHandler (default "recovery_email").
+func WithRecoveryEmailField(name string) HandlerOption {
+	return func(h *handlerConfig) { h.recoveryEmailField = name }
+}
+
+// WithMaxBodyBytes overrides the request-body size cap applied before form parsing
+// (default DefaultMaxBodyBytes). A non-positive value disables the cap; do so only if an
+// upstream layer already bounds the body, since an unbounded password feeds the expensive
+// argon2 KDF (a pre-auth DoS vector).
+func WithMaxBodyBytes(n int64) HandlerOption {
+	return func(h *handlerConfig) { h.maxBodyBytes = n }
+}
+
+// parseLimitedForm bounds the request body to cfg.maxBodyBytes before parsing the form. It
+// protects the argon2 hashing path from unbounded attacker-controlled input. On failure it
+// writes the error response (413 when the body is too large, 400 when malformed) and returns
+// false.
+func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
+		} else {
+			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		}
+		return false
+	}
+	return true
 }
 
 // LoginHandler builds an HTTP handler that authenticates form credentials and, on success,
@@ -163,8 +247,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -172,7 +255,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Authenticate(r.Context(), cfg.provider, email, password, cfg.authOpts(r)...)
+		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password)
 		if err != nil {
 			status, code := mapAuthError(err)
 			cfg.fail(w, r, status, code)
@@ -201,8 +284,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -210,7 +292,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Register(r.Context(), email, password, cfg.authOpts(r)...)
+		user, err := svc.Register(r.Context(), cfg.tenant(r), email, password)
 		if err != nil {
 			status, code := mapRegisterError(err)
 			cfg.fail(w, r, status, code)
@@ -238,11 +320,28 @@ func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg h
 	return nil
 }
 
-func (cfg handlerConfig) authOpts(r *http.Request) []Option {
+func (cfg handlerConfig) tenant(r *http.Request) string {
 	if cfg.tenantResolver == nil {
-		return nil
+		return ""
 	}
-	return []Option{WithTenant(cfg.tenantResolver(r))}
+	return cfg.tenantResolver(r)
+}
+
+// dispatchDelivery hands a freshly minted credential to the Mailer off the response path (a
+// detached context, so the request finishing does not cancel delivery, and so the Mailer's
+// latency — which only occurs for existing accounts — is not a timing side channel). A delivery
+// failure is otherwise swallowed to keep the enumeration-safe response uniform; emitting a
+// DeliveryFailed event makes that otherwise-invisible outage observable to a configured sink.
+func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) {
+	ctx := context.WithoutCancel(r.Context())
+	tenant := cfg.tenant(r)
+	go func() {
+		if err := send(ctx); err != nil {
+			event.Emit(ctx, cfg.events, event.Event{
+				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID, Err: err,
+			})
+		}
+	}()
 }
 
 // originAllowed reports whether the request passes the CSRF origin check. When no trusted
@@ -315,8 +414,7 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
@@ -325,12 +423,11 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// not the email maps to an account, so a backend error must NOT be surfaced as a
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
-		token, user, _ := svc.RequestPasswordReset(r.Context(), email, cfg.authOpts(r)...)
+		token, user, _ := svc.RequestPasswordReset(r.Context(), cfg.tenant(r), email)
 		if token != "" && user != nil && mailer != nil {
-			// Dispatch delivery off the response path (detached context) so the Mailer's
-			// latency, which only occurs for existing accounts, is not a timing side channel.
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendPasswordReset(ctx, user, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendPasswordReset(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -351,14 +448,13 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
 		password := r.PostForm.Get(cfg.passwordField)
-		if err := svc.ResetPassword(r.Context(), token, password, cfg.authOpts(r)...); err != nil {
+		if err := svc.ResetPassword(r.Context(), cfg.tenant(r), token, password); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -388,13 +484,17 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			return
 		}
 
-		token, err := svc.RequestEmailVerification(r.Context(), user.ID, cfg.authOpts(r)...)
+		token, err := svc.RequestEmailVerification(r.Context(), cfg.tenant(r), user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "verification_request_failed")
 			return
 		}
-		if mailer != nil {
-			_ = mailer.SendEmailVerification(r.Context(), user, token)
+		// token is empty when the account is not a live, same-tenant user (swallowed at the
+		// service for enumeration safety); only dispatch delivery when a token was minted.
+		if token != "" && mailer != nil {
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendEmailVerification(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -412,13 +512,12 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.VerifyEmail(r.Context(), token, cfg.authOpts(r)...); err != nil {
+		if _, err := svc.VerifyEmail(r.Context(), cfg.tenant(r), token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -444,16 +543,16 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
-		token, user, _ := svc.RequestMagicLink(r.Context(), email, cfg.authOpts(r)...)
+		token, user, _ := svc.RequestMagicLink(r.Context(), cfg.tenant(r), email)
 		if token != "" && user != nil && mailer != nil {
-			ctx := context.WithoutCancel(r.Context())
-			go func() { _ = mailer.SendMagicLink(ctx, user, token) }()
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendMagicLink(ctx, user, token)
+			})
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -476,15 +575,14 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.LoginWithMagicLink(r.Context(), token, cfg.authOpts(r)...)
+		user, err := svc.LoginWithMagicLink(r.Context(), cfg.tenant(r), token)
 		if err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
@@ -499,8 +597,202 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 	}
 }
 
-// mapVerificationError maps password-reset / email-verification errors to an HTTP status and
-// a stable error code.
+// ChangePasswordHandler builds an authenticated HTTP handler that lets a signed-in user
+// change their own password. The current user is obtained via WithUserResolver (typically
+// reading whatever the application's auth middleware stashed on the request); if no resolver
+// is configured or it reports no user, the handler responds 401. It reads the current and new
+// passwords from the form (fields configurable via WithPasswordChangeFields), then calls
+// Service.ChangePassword.
+//
+// On success the consumer SHOULD revoke the user's other sessions / refresh-token families
+// (cross-module, so not done here). A wrong current password maps to 401; a new password that
+// fails the policy maps to 400.
+func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		current := r.PostForm.Get(cfg.currentPasswordField)
+		newPassword := r.PostForm.Get(cfg.newPasswordField)
+
+		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidCredentials):
+				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
+			case isPasswordPolicyError(err):
+				cfg.fail(w, r, http.StatusBadRequest, "password_rejected")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// RequestEmailChangeHandler builds an authenticated HTTP handler that starts the change-email
+// flow for the signed-in user. The current user is obtained via WithUserResolver (typically
+// reading whatever the application's auth middleware stashed on the request); if no resolver
+// is configured or it reports no user, the handler responds 401. It reads the requested new
+// address from the form (field configurable via WithEmailChangeField, default "new_email"),
+// mints a confirmation token via Service.RequestEmailChange and hands it to the Mailer for
+// delivery to the NEW address — delivery is dispatched off the response path. A malformed
+// address maps to 400; an address already taken by another account maps to 409.
+func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		newEmail := strings.TrimSpace(r.PostForm.Get(cfg.newEmailField))
+		token, err := svc.RequestEmailChange(r.Context(), cfg.tenant(r), user.ID, newEmail)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidEmail):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
+			case errors.Is(err, ErrEmailAlreadyExists):
+				cfg.fail(w, r, http.StatusConflict, "email_taken")
+			case errors.Is(err, ErrUserNotFound):
+				// The session resolved to an account that is no longer live; treat as unauthorized.
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && mailer != nil {
+			// Deliver to the canonical form of the new address — the same normalization the
+			// service applied before binding it to the token.
+			deliverTo := newEmail
+			if n, nerr := normalizeEmail(newEmail); nerr == nil {
+				deliverTo = n
+			}
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendEmailChange(ctx, user, deliverTo, token)
+			})
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmEmailChangeHandler builds an HTTP handler that completes the change-email flow: it
+// reads the token from the form, consumes it (single-use) and atomically switches the account's
+// email to the confirmed new address. It is authenticated by the single-use token (delivered to
+// the new address), so it needs no resolved session — like VerifyEmailHandler / ResetPassword
+// Handler. It is POST-only so a link prefetcher cannot trigger the swap.
+func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmEmailChange(r.Context(), cfg.tenant(r), token); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// DeleteAccountHandler builds an authenticated HTTP handler that lets a signed-in user delete
+// their own account. The current user is obtained via WithUserResolver (typically reading
+// whatever the application's auth middleware stashed on the request); if no resolver is
+// configured or it reports no user, the handler responds 401. On success it clears the auth
+// cookies (the account is gone) and responds 204 (or redirects). Deletion is sensitive and
+// irreversible: you SHOULD gate it behind a re-authentication / step-up check (fresh proof of
+// presence) in front of this handler in addition to the session, and configure WithTrustedOrigins
+// so the CSRF origin check is active. A first-class enforceable step-up primitive is planned.
+func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+
+		if err := svc.DeleteAccount(r.Context(), cfg.tenant(r), user.ID); err != nil {
+			switch {
+			case errors.Is(err, ErrUserNotFound):
+				cfg.fail(w, r, http.StatusNotFound, "not_found")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		// The account no longer exists; clear this session's auth cookies client-side. Revoking
+		// the server-side session/refresh artifacts is handled by the Service's AccountErasers.
+		cfg.cookies.Clear(w)
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// mapVerificationError maps password-reset / email-verification / change-email errors to an
+// HTTP status and a stable error code.
 func mapVerificationError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrVerificationTokenExpired):
@@ -513,6 +805,18 @@ func mapVerificationError(err error) (int, string) {
 	case errors.Is(err, ErrUserNotFound):
 		// The token was valid but its account has since been deactivated/deleted.
 		return http.StatusBadRequest, "invalid_token"
+	case errors.Is(err, ErrEmailAlreadyExists):
+		// Change-email: the target address was claimed by another account in the interim.
+		return http.StatusConflict, "email_taken"
+	case errors.Is(err, ErrPhoneAlreadyExists):
+		// Phone-verification: the target number was claimed by another account in the interim.
+		return http.StatusConflict, "phone_taken"
+	case errors.Is(err, ErrInvalidEmail):
+		// Change-email: the token's stored address failed re-validation (defensive).
+		return http.StatusBadRequest, "invalid_email"
+	case errors.Is(err, ErrInvalidPhone):
+		// Phone-verification: the token's stored number failed re-validation (defensive).
+		return http.StatusBadRequest, "invalid_phone"
 	case isPasswordPolicyError(err):
 		return http.StatusBadRequest, "password_rejected"
 	default:
@@ -540,8 +844,6 @@ func mapRegisterError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrEmailAlreadyExists):
 		return http.StatusConflict, "email_taken"
-	case errors.Is(err, ErrTenantRequired):
-		return http.StatusBadRequest, "tenant_required"
 	default:
 		// Password-policy violations and other validation failures.
 		return http.StatusBadRequest, "registration_failed"
@@ -575,4 +877,242 @@ func withErrorParam(rawURL, code string) string {
 	q.Set("error", code)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// RequestPhoneVerificationHandler builds an authenticated HTTP handler that starts the
+// phone-verification flow for the signed-in user. The current user is obtained via
+// WithUserResolver (typically reading whatever the application's auth middleware stashed on the
+// request); if no resolver is configured or it reports no user, the handler responds 401. It reads
+// the requested phone number from the form (field configurable via WithPhoneField, default
+// "phone"), mints a verification token via Service.RequestPhoneVerification and hands it to the
+// SMSSender for delivery to that number — delivery is dispatched off the response path. A malformed
+// number maps to 400; a number already taken by another account maps to 409. Phone is a
+// lower-assurance contact channel and is NOT an MFA factor (NIST SP 800-63B excludes SMS).
+func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		phone := strings.TrimSpace(r.PostForm.Get(cfg.phoneField))
+		token, err := svc.RequestPhoneVerification(r.Context(), cfg.tenant(r), user.ID, phone)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidPhone):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_phone")
+			case errors.Is(err, ErrPhoneAlreadyExists):
+				cfg.fail(w, r, http.StatusConflict, "phone_taken")
+			case errors.Is(err, ErrUserNotFound):
+				// The session resolved to an account that is no longer live; treat as unauthorized.
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && sender != nil {
+			// Deliver to the canonical form of the number — the same normalization the service
+			// applied before binding it to the token.
+			deliverTo := phone
+			if n, nerr := normalizePhone(phone); nerr == nil {
+				deliverTo = n
+			}
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return sender.SendPhoneVerification(ctx, user, deliverTo, token)
+			})
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmPhoneVerificationHandler builds an HTTP handler that completes the phone-verification
+// flow: it reads the token from the form, consumes it (single-use) and atomically sets the
+// account's phone to the confirmed number, marking it verified. It is authenticated by the
+// single-use token (delivered by SMS to the number), so it needs no resolved session — like
+// VerifyEmailHandler / ConfirmEmailChangeHandler. It is POST-only so a link prefetcher cannot
+// trigger the change.
+func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmPhoneVerification(r.Context(), cfg.tenant(r), token); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// RequestRecoveryEmailHandler builds an authenticated HTTP handler that starts enrollment of an
+// independent recovery email for the signed-in user. The current user is obtained via
+// WithUserResolver; without a resolved user it responds 401. It reads the candidate address from
+// the form (field configurable via WithRecoveryEmailField, default "recovery_email"), mints a token
+// via Service.RequestRecoveryEmail and hands it to the Mailer for delivery to THAT address (off the
+// response path). A malformed address maps to 400; using the primary email as the recovery address
+// maps to 409.
+func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		recoveryEmail := strings.TrimSpace(r.PostForm.Get(cfg.recoveryEmailField))
+		token, err := svc.RequestRecoveryEmail(r.Context(), cfg.tenant(r), user.ID, recoveryEmail)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidEmail):
+				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
+			case errors.Is(err, ErrRecoveryEmailIsPrimary):
+				cfg.fail(w, r, http.StatusConflict, "recovery_email_is_primary")
+			case errors.Is(err, ErrUserNotFound):
+				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+		if token != "" && mailer != nil {
+			deliverTo := recoveryEmail
+			if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
+				deliverTo = n
+			}
+			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				return mailer.SendRecoveryEmailVerification(ctx, user, deliverTo, token)
+			})
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ConfirmRecoveryEmailHandler builds an HTTP handler that completes recovery-email enrollment: it
+// reads the token from the form, consumes it (single-use) and sets the account's recovery email,
+// marking it verified. It is authenticated by the single-use token (delivered to the recovery
+// address), so it needs no resolved session. It is POST-only so a link prefetcher cannot trigger it.
+func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		token := r.PostForm.Get(cfg.tokenField)
+		if _, err := svc.ConfirmRecoveryEmail(r.Context(), cfg.tenant(r), token); err != nil {
+			status, code := mapVerificationError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// RequestPasswordResetViaRecoveryHandler builds an HTTP handler that starts a password reset
+// directed at the account's VERIFIED INDEPENDENT recovery channel (recovery email and/or phone)
+// rather than the primary inbox — so a compromised primary mailbox cannot drive the reset. It is
+// enumeration-uniform: it always responds the same (204 or the success redirect) whether or not the
+// account exists or has a recovery channel, dispatching delivery off the response path. mailer
+// delivers to the recovery email and sms delivers to the phone; either may be nil to disable that
+// channel. It reads the account's primary email from the form (the usual email field).
+func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSSender, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
+		token, user, channels, err := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			return
+		}
+		// Uniform response regardless of account existence or recovery-channel availability; deliver
+		// off the response path to the verified channels only (token/user are empty otherwise).
+		if token != "" && user != nil {
+			if channels.RecoveryEmail && mailer != nil && user.RecoveryEmail != nil {
+				recoveryEmail := *user.RecoveryEmail
+				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+					return mailer.SendPasswordReset(ctx, &User{
+						ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
+					}, token)
+				})
+			}
+			if channels.Phone && sms != nil && user.Phone != nil {
+				phone := *user.Phone
+				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+					return sms.SendPhoneVerification(ctx, user, phone, token)
+				})
+			}
+		}
+		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
 }

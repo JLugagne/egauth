@@ -58,8 +58,8 @@ func NewService(store Store, cfg Config) (*Service, error) {
 
 // BeginRegistration starts adding a passkey for the user, returning the creation options to
 // hand to navigator.credentials.create() and the SessionData to carry to FinishRegistration.
-func (s *Service) BeginRegistration(ctx context.Context, userID uuid.UUID, name, displayName string, opts ...Option) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
-	u, err := s.loadUser(ctx, userID, name, displayName, opts...)
+func (s *Service) BeginRegistration(ctx context.Context, tenantID string, userID uuid.UUID, name, displayName string) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+	u, err := s.loadUser(ctx, tenantID, userID, name, displayName)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -72,8 +72,8 @@ func (s *Service) BeginRegistration(ctx context.Context, userID uuid.UUID, name,
 }
 
 // FinishRegistration verifies the attestation response and persists the new credential.
-func (s *Service) FinishRegistration(ctx context.Context, userID uuid.UUID, name, displayName string, session webauthn.SessionData, r *http.Request, opts ...Option) (*Credential, error) {
-	u, err := s.loadUser(ctx, userID, name, displayName, opts...)
+func (s *Service) FinishRegistration(ctx context.Context, tenantID string, userID uuid.UUID, name, displayName string, session webauthn.SessionData, r *http.Request) (*Credential, error) {
+	u, err := s.loadUser(ctx, tenantID, userID, name, displayName)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func (s *Service) FinishRegistration(ctx context.Context, userID uuid.UUID, name
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.SaveCredential(ctx, stored, opts...); err != nil {
+	if err := s.store.SaveCredential(ctx, tenantID, stored); err != nil {
 		return nil, err
 	}
 	return stored, nil
@@ -93,8 +93,8 @@ func (s *Service) FinishRegistration(ctx context.Context, userID uuid.UUID, name
 
 // BeginLogin starts a login ceremony for a user that has at least one passkey, returning the
 // assertion options for navigator.credentials.get() and the SessionData.
-func (s *Service) BeginLogin(ctx context.Context, userID uuid.UUID, opts ...Option) (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
-	u, err := s.loadUser(ctx, userID, "", "", opts...)
+func (s *Service) BeginLogin(ctx context.Context, tenantID string, userID uuid.UUID) (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
+	u, err := s.loadUser(ctx, tenantID, userID, "", "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -106,8 +106,8 @@ func (s *Service) BeginLogin(ctx context.Context, userID uuid.UUID, opts ...Opti
 
 // FinishLogin verifies the assertion response, updates the signature counter (rejecting a
 // regressed counter as a possible clone) and returns the credential that was used.
-func (s *Service) FinishLogin(ctx context.Context, userID uuid.UUID, session webauthn.SessionData, r *http.Request, opts ...Option) (*Credential, error) {
-	u, err := s.loadUser(ctx, userID, "", "", opts...)
+func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.UUID, session webauthn.SessionData, r *http.Request) (*Credential, error) {
+	u, err := s.loadUser(ctx, tenantID, userID, "", "")
 	if err != nil {
 		return nil, err
 	}
@@ -122,25 +122,71 @@ func (s *Service) FinishLogin(ctx context.Context, userID uuid.UUID, session web
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.UpdateCredential(ctx, stored, opts...); err != nil {
+	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
 		return nil, err
 	}
 	return stored, nil
 }
 
+// BeginDiscoverableLogin starts a usernameless ("discoverable credential" / resident-key) login
+// ceremony. Unlike BeginLogin it needs no prior userID: the returned assertion options carry an
+// empty allowCredentials list, so the authenticator offers whichever resident key the user picks
+// and reveals the account via the credential's user handle at FinishDiscoverableLogin. It returns
+// the assertion options for navigator.credentials.get() and the SessionData.
+func (s *Service) BeginDiscoverableLogin() (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
+	return s.wa.BeginDiscoverableLogin()
+}
+
+// FinishDiscoverableLogin verifies a usernameless assertion. It resolves the account from the
+// credential's user handle (the account UUID egauth set as the WebAuthn ID), verifies the
+// assertion against that account's credentials, updates the signature counter (rejecting a
+// regressed counter as a possible clone) and returns the credential used together with the
+// resolved user ID.
+//
+// In a multi-tenant deployment the user handle is globally unique but credential lookup is still
+// tenant-scoped, so pass the tenantID the same way you would for the username-based flow —
+// derive it from the request (host/subdomain) before calling.
+func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, session webauthn.SessionData, r *http.Request) (*Credential, uuid.UUID, error) {
+	var resolvedID uuid.UUID
+	handler := func(_, userHandle []byte) (webauthn.User, error) {
+		uid, err := uuid.FromBytes(userHandle)
+		if err != nil {
+			return nil, err
+		}
+		resolvedID = uid
+		return s.loadUser(ctx, tenantID, uid, "", "")
+	}
+
+	cred, err := s.wa.FinishDiscoverableLogin(handler, session, r)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if cred.Authenticator.CloneWarning {
+		return nil, uuid.Nil, ErrCredentialCloned
+	}
+	stored, err := toStored(resolvedID, cred)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
+		return nil, uuid.Nil, err
+	}
+	return stored, resolvedID, nil
+}
+
 // ListCredentials returns the user's registered credentials.
-func (s *Service) ListCredentials(ctx context.Context, userID uuid.UUID, opts ...Option) ([]*Credential, error) {
-	return s.store.GetCredentials(ctx, userID, opts...)
+func (s *Service) ListCredentials(ctx context.Context, tenantID string, userID uuid.UUID) ([]*Credential, error) {
+	return s.store.GetCredentials(ctx, tenantID, userID)
 }
 
 // DeleteCredential removes one of the user's credentials.
-func (s *Service) DeleteCredential(ctx context.Context, userID uuid.UUID, credentialID []byte, opts ...Option) error {
-	return s.store.DeleteCredential(ctx, userID, credentialID, opts...)
+func (s *Service) DeleteCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) error {
+	return s.store.DeleteCredential(ctx, tenantID, userID, credentialID)
 }
 
 // loadUser builds the go-webauthn User adapter from the user's stored credentials.
-func (s *Service) loadUser(ctx context.Context, userID uuid.UUID, name, displayName string, opts ...Option) (*waUser, error) {
-	stored, err := s.store.GetCredentials(ctx, userID, opts...)
+func (s *Service) loadUser(ctx context.Context, tenantID string, userID uuid.UUID, name, displayName string) (*waUser, error) {
+	stored, err := s.store.GetCredentials(ctx, tenantID, userID)
 	if err != nil {
 		return nil, err
 	}
@@ -170,7 +216,7 @@ func toStored(userID uuid.UUID, cred *webauthn.Credential) (*Credential, error) 
 	}, nil
 }
 
-// waUser adapts a libauth user to the go-webauthn User interface. The WebAuthn user handle is
+// waUser adapts a egauth user to the go-webauthn User interface. The WebAuthn user handle is
 // the account's UUID bytes (opaque, stable, not displayed).
 type waUser struct {
 	id          uuid.UUID

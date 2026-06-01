@@ -5,9 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/mfa"
-	mfapgx "github.com/JLugagne/libauth/mfa/pgx"
-	"github.com/JLugagne/libauth/mfa/storetest"
+	mfapgx "github.com/JLugagne/egauth/mfa/pgx"
+	"github.com/JLugagne/egauth/mfa/storetest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -62,14 +61,14 @@ func TestPgxStore_ReplaceRecoveryCodesAtomic(t *testing.T) {
 	store := newStore(t)
 	uid := uuid.New()
 
-	require.NoError(t, store.ReplaceRecoveryCodes(ctx, uid, []string{"keepA", "keepB"}, mfa.WithTenant("t1")))
+	require.NoError(t, store.ReplaceRecoveryCodes(ctx, "t1", uid, []string{"keepA", "keepB"}))
 
 	// A duplicate hash makes the second INSERT violate the PK, failing the replace mid-loop.
-	err := store.ReplaceRecoveryCodes(ctx, uid, []string{"dup", "dup"}, mfa.WithTenant("t1"))
+	err := store.ReplaceRecoveryCodes(ctx, "t1", uid, []string{"dup", "dup"})
 	require.Error(t, err)
 
 	// Because the replace is transactional, the original codes must still be intact.
-	assert.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "keepA", mfa.WithTenant("t1")),
+	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "keepA"),
 		"a failed replace must roll back, leaving the previous recovery codes usable")
-	assert.NoError(t, store.ConsumeRecoveryCode(ctx, uid, "keepB", mfa.WithTenant("t1")))
+	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "keepB"))
 }

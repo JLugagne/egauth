@@ -12,8 +12,8 @@ import (
 // FamilyRevoker is the minimal store capability LogoutHandler needs to revoke a rotation
 // family. tokens.Store[C] satisfies it for any C (neither method depends on C).
 type FamilyRevoker interface {
-	FindRefreshToken(ctx context.Context, tokenHash string, opts ...Option) (*RefreshToken, error)
-	RevokeFamily(ctx context.Context, familyID uuid.UUID, opts ...Option) error
+	FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*RefreshToken, error)
+	RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
 }
 
 // handlerConfig holds the configurable behavior of the tokens HTTP handlers.
@@ -23,6 +23,7 @@ type handlerConfig struct {
 	successURL     string
 	failureURL     string
 	persistRefresh bool
+	trustedOrigins map[string]bool
 }
 
 // HandlerOption configures the tokens HTTP handlers (RefreshHandler, LogoutHandler).
@@ -93,6 +94,24 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
 
+// WithTrustedOrigins enables a CSRF origin check on the cookie-driven token endpoints
+// (RefreshHandler, LogoutHandler).
+//
+// These are state-changing POSTs authenticated purely by the refresh cookie, so SameSite=Lax
+// alone does not fully prevent a forged cross-site refresh/logout. When trusted origins are
+// configured, a request whose Origin — or, failing that, Referer — host is neither the
+// request's own Host nor one of the supplied hosts is rejected with 403. Supply hosts WITHOUT
+// scheme, e.g. "app.example.com". When left unset the check is disabled and CSRF protection is
+// the consumer's responsibility (see SECURITY.md).
+func WithTrustedOrigins(origins ...string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.trustedOrigins = make(map[string]bool, len(origins))
+		for _, o := range origins {
+			h.trustedOrigins[o] = true
+		}
+	}
+}
+
 // RefreshHandler builds an HTTP handler that rotates the refresh token carried in the
 // refresh cookie: it consumes the old token, issues a fresh access+refresh pair within the
 // same family, and rewrites both cookies. A replayed token causes family revocation and a
@@ -105,6 +124,10 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
 
 		refreshToken, ok := cfg.cookies.Refresh(r)
 		if !ok {
@@ -113,7 +136,7 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			return
 		}
 
-		pair, err := rotator.Rotate(r.Context(), refreshToken, cfg.tenantOpts(r)...)
+		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
 		if err != nil {
 			// Including the reuse case: Rotate already revoked the family; we only need to
 			// clear the client's now-useless cookies.
@@ -140,12 +163,16 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
 
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-			ropts := cfg.tenantOpts(r)
+			tenantID := cfg.tenant(r)
 			hash := HashToken(refreshToken)
-			if rt, err := revoker.FindRefreshToken(r.Context(), hash, ropts...); err == nil {
-				_ = revoker.RevokeFamily(r.Context(), rt.FamilyID, ropts...)
+			if rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash); err == nil {
+				_ = revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID)
 			}
 		}
 
@@ -154,13 +181,44 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 	}
 }
 
-// tenantOpts returns the store options derived from the request's tenant, if a resolver is
-// configured.
-func (cfg handlerConfig) tenantOpts(r *http.Request) []Option {
-	if cfg.tenantResolver == nil {
-		return nil
+// originAllowed reports whether the request passes the CSRF origin check. When no trusted
+// origins are configured the check is disabled (the consumer's responsibility, per
+// SECURITY.md). A configured check rejects any request whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an allowlisted host; a POST carrying neither
+// header is treated as untrusted.
+func (cfg handlerConfig) originAllowed(r *http.Request) bool {
+	if len(cfg.trustedOrigins) == 0 {
+		return true
 	}
-	return []Option{WithTenant(cfg.tenantResolver(r))}
+	host := requestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
+}
+
+func requestOriginHost(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+		if u, err := url.Parse(o); err == nil {
+			return u.Host
+		}
+		return ""
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			return u.Host
+		}
+	}
+	return ""
+}
+
+// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
+// configured (the single-tenant default partition).
+func (cfg handlerConfig) tenant(r *http.Request) string {
+	if cfg.tenantResolver == nil {
+		return ""
+	}
+	return cfg.tenantResolver(r)
 }
 
 // fail emits a failure response: a 303 redirect to the configured failure URL (carrying an

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,7 +29,7 @@ type stubLinker struct {
 	gotVerified   bool
 }
 
-func (s *stubLinker) LinkOrCreateIdentity(_ context.Context, provider, providerID, email string, emailVerified bool, _ ...identity.Option) (*identity.User, error) {
+func (s *stubLinker) LinkOrCreateIdentity(_ context.Context, _ string, provider, providerID, email string, emailVerified bool) (*identity.User, error) {
 	s.gotProvider, s.gotProviderID, s.gotEmail, s.gotVerified = provider, providerID, email, emailVerified
 	if s.err != nil {
 		return nil, s.err

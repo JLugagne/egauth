@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/sessions"
-	"github.com/JLugagne/libauth/sessions/storetest"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/sessions"
+	"github.com/JLugagne/egauth/sessions/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
@@ -20,7 +20,7 @@ func TestMiddleware(t *testing.T) {
 	token := "valid_token"
 
 	mockStore := &storetest.MockStore{
-		FindSessionByHashFunc: func(ctx context.Context, hash string, opts ...sessions.Option) (*sessions.Session, error) {
+		FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 			// In service, hash is hex(sha256(token))
 			return &sessions.Session{
 				UserID:    userID,
@@ -31,7 +31,7 @@ func TestMiddleware(t *testing.T) {
 	}
 	svc := sessions.NewService(mockStore)
 
-	handler := func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {
+	handler := func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {
 		assert.Equal(t, userID, actor.UserID)
 		assert.Equal(t, tenantID, actor.TenantID)
 		w.WriteHeader(http.StatusOK)
@@ -63,7 +63,7 @@ func TestMiddleware(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
@@ -71,7 +71,7 @@ func TestMiddleware(t *testing.T) {
 
 	t.Run("Invalid session", func(t *testing.T) {
 		mockStoreError := &storetest.MockStore{
-			FindSessionByHashFunc: func(ctx context.Context, hash string, opts ...sessions.Option) (*sessions.Session, error) {
+			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 				return nil, sessions.ErrSessionNotFound
 			},
 		}
@@ -81,7 +81,7 @@ func TestMiddleware(t *testing.T) {
 		req.AddCookie(&http.Cookie{Name: "session_token", Value: "invalid"})
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svcError, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svcError, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
@@ -92,7 +92,7 @@ func TestMiddleware(t *testing.T) {
 		req.Header.Set("Authorization", "Basic something")
 		rr := httptest.NewRecorder()
 
-		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, session sessions.Session) {})
+		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {})
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)

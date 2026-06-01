@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// Default cookie names used by libauth handlers and middleware.
+// Default cookie names used by egauth handlers and middleware.
 const (
 	DefaultAccessCookieName  = "access_token"
 	DefaultRefreshCookieName = "refresh_token"
@@ -15,7 +15,7 @@ const (
 // source of truth for cookie behavior, shared by the tokens handlers/middleware and the
 // identity login handler.
 //
-// Per the PRD, every cookie emitted by libauth is HttpOnly, Secure and SameSite=Lax by
+// Per the PRD, every cookie emitted by egauth is HttpOnly, Secure and SameSite=Lax by
 // default and scoped via Path. HttpOnly is always enforced (auth cookies are never read
 // by client-side JavaScript in the server-rendered model), so it is not configurable.
 type Cookies struct {

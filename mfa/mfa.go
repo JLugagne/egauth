@@ -1,6 +1,6 @@
 // Package mfa implements multi-factor authentication: time-based one-time passwords (TOTP,
 // RFC 6238 / RFC 4226) for authenticator apps, and single-use recovery codes. It follows
-// libauth's conventions — a stateful Store interface (memory + pgx implementations, a shared
+// egauth's conventions — a stateful Store interface (memory + pgx implementations, a shared
 // contract suite), a stateless-ish Service for orchestration, and à-la-carte HTTP handlers —
 // and depends only on the standard library plus google/uuid.
 //
@@ -52,26 +52,4 @@ type RecoveryCode struct {
 	CodeHash  string
 	UsedAt    *time.Time
 	CreatedAt time.Time
-}
-
-// StoreOptions holds options for Store operations, such as multi-tenancy.
-type StoreOptions struct {
-	TenantID *string
-}
-
-// Option configures StoreOptions.
-type Option func(*StoreOptions)
-
-// WithTenant scopes a Store operation to a tenant.
-func WithTenant(id string) Option {
-	return func(o *StoreOptions) { o.TenantID = &id }
-}
-
-// ApplyOptions applies opts to a fresh StoreOptions.
-func ApplyOptions(opts []Option) StoreOptions {
-	var o StoreOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
 }

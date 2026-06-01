@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/JLugagne/libauth/mfa"
+	"github.com/JLugagne/egauth/mfa"
 	"github.com/google/uuid"
 )
 
@@ -25,34 +25,28 @@ func NewStore() *Store {
 	}
 }
 
-func tenantOf(opts []mfa.Option) string {
-	o := mfa.ApplyOptions(opts)
-	if o.TenantID == nil {
-		return ""
-	}
-	return *o.TenantID
-}
-
 func key(tenant string, userID uuid.UUID) string {
 	return tenant + "\x00" + userID.String()
 }
 
-func (s *Store) SaveTOTP(ctx context.Context, e *mfa.TOTPEnrollment, opts ...mfa.Option) error {
+func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant := tenantOf(opts)
+	if e.TenantID != "" && e.TenantID != tenantID {
+		return mfa.ErrTenantMismatch
+	}
 	stored := *e
-	stored.TenantID = tenant
-	s.totp[key(tenant, e.UserID)] = &stored
+	stored.TenantID = tenantID
+	s.totp[key(tenantID, e.UserID)] = &stored
 	return nil
 }
 
-func (s *Store) GetTOTP(ctx context.Context, userID uuid.UUID, opts ...mfa.Option) (*mfa.TOTPEnrollment, error) {
+func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*mfa.TOTPEnrollment, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	e, ok := s.totp[key(tenantOf(opts), userID)]
+	e, ok := s.totp[key(tenantID, userID)]
 	if !ok {
 		return nil, mfa.ErrNotEnrolled
 	}
@@ -60,19 +54,19 @@ func (s *Store) GetTOTP(ctx context.Context, userID uuid.UUID, opts ...mfa.Optio
 	return &cpy, nil
 }
 
-func (s *Store) DeleteTOTP(ctx context.Context, userID uuid.UUID, opts ...mfa.Option) error {
+func (s *Store) DeleteTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.totp, key(tenantOf(opts), userID))
+	delete(s.totp, key(tenantID, userID))
 	return nil
 }
 
-func (s *Store) MarkTOTPUsed(ctx context.Context, userID uuid.UUID, step int64, opts ...mfa.Option) (bool, error) {
+func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	e, ok := s.totp[key(tenantOf(opts), userID)]
+	e, ok := s.totp[key(tenantID, userID)]
 	if !ok {
 		// Match the pgx guarded-UPDATE semantics: a missing row simply does not apply.
 		return false, nil
@@ -84,30 +78,29 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, userID uuid.UUID, step int64, 
 	return true, nil
 }
 
-func (s *Store) ReplaceRecoveryCodes(ctx context.Context, userID uuid.UUID, codeHashes []string, opts ...mfa.Option) error {
+func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant := tenantOf(opts)
 	now := time.Now()
 	codes := make([]*mfa.RecoveryCode, 0, len(codeHashes))
 	for _, h := range codeHashes {
 		codes = append(codes, &mfa.RecoveryCode{
 			UserID:    userID,
-			TenantID:  tenant,
+			TenantID:  tenantID,
 			CodeHash:  h,
 			CreatedAt: now,
 		})
 	}
-	s.recovery[key(tenant, userID)] = codes
+	s.recovery[key(tenantID, userID)] = codes
 	return nil
 }
 
-func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID uuid.UUID, codeHash string, opts ...mfa.Option) error {
+func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	codes := s.recovery[key(tenantOf(opts), userID)]
+	codes := s.recovery[key(tenantID, userID)]
 	for _, c := range codes {
 		if c.UsedAt == nil && c.CodeHash == codeHash {
 			now := time.Now()
@@ -118,11 +111,11 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, userID uuid.UUID, codeH
 	return mfa.ErrRecoveryCodeNotFound
 }
 
-func (s *Store) DeleteRecoveryCodes(ctx context.Context, userID uuid.UUID, opts ...mfa.Option) error {
+func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.recovery, key(tenantOf(opts), userID))
+	delete(s.recovery, key(tenantID, userID))
 	return nil
 }
 

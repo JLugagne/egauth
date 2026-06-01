@@ -6,9 +6,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/issuertest"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 )
@@ -34,10 +34,10 @@ func TestRequireAuth(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer valid-token")
 		rec := httptest.NewRecorder()
 
-		var extractedActor libauth.Actor
+		var extractedActor egauth.Actor
 		var called bool
 
-		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom any) {
+		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom any) {
 			extractedActor = actor
 			called = true
 			w.WriteHeader(http.StatusOK)
@@ -55,7 +55,7 @@ func TestRequireAuth(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom any) {
+		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom any) {
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -69,7 +69,7 @@ func TestRequireAuth(t *testing.T) {
 		req.Header.Set("Authorization", "Basic some-token")
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom any) {
+		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom any) {
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -83,7 +83,7 @@ func TestRequireAuth(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer invalid-token")
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom any) {
+		handler := tokens.RequireAuth[any](mockVerifier, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom any) {
 			w.WriteHeader(http.StatusOK)
 		})
 

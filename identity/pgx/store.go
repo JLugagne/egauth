@@ -7,7 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/pgxmigrate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,22 +17,11 @@ import (
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 
-// Migrate executes all the embedded SQL migrations against the provided DBQuerier.
+// Migrate applies the embedded SQL migrations against db, skipping any already recorded in the
+// schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
+// migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	entries, err := MigrationsFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		content, err := MigrationsFS.ReadFile("migrations/" + entry.Name())
-		if err != nil {
-			return err
-		}
-		if _, err := db.Exec(ctx, string(content)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pgxmigrate.Run(ctx, db, MigrationsFS)
 }
 
 // DBQuerier is an interface that matches both *pgxpool.Pool and pgx.Tx.
@@ -49,14 +39,6 @@ type Store struct {
 // NewStore creates a new PostgreSQL store.
 func NewStore(db DBQuerier) *Store {
 	return &Store{db: db}
-}
-
-func (s *Store) getTenantID(opts []identity.Option) string {
-	options := identity.ApplyOptions(opts)
-	if options.TenantID == nil {
-		return ""
-	}
-	return *options.TenantID
 }
 
 func mapError(err error) error {
@@ -78,12 +60,7 @@ func mapError(err error) error {
 	return err
 }
 
-func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return nil, identity.ErrTenantRequired
-	}
-
+func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	user := &identity.User{
 		ID:        uuid.New(),
 		TenantID:  tenantID,
@@ -93,10 +70,10 @@ func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.O
 	}
 
 	query := `
-		INSERT INTO users (id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`
-	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
+	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.Phone, user.PhoneVerifiedAt, user.RecoveryEmail, user.RecoveryEmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -104,17 +81,16 @@ func (s *Store) CreateUser(ctx context.Context, email string, opts ...identity.O
 	return user, nil
 }
 
-func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
+func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
 		FROM users
 		WHERE id = $1 AND tenant_id = $2
 	`
 	row := s.db.QueryRow(ctx, query, id, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -125,17 +101,16 @@ func (s *Store) FindUserByID(ctx context.Context, id uuid.UUID, opts ...identity
 	return &user, nil
 }
 
-func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...identity.Option) (*identity.User, error) {
-	tenantID := s.getTenantID(opts)
+func (s *Store) FindUserByEmail(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
 		FROM users
 		WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, email, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -146,10 +121,9 @@ func (s *Store) FindUserByEmail(ctx context.Context, email string, opts ...ident
 	return &user, nil
 }
 
-func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.User) error {
+	if user.TenantID != "" && user.TenantID != tenantID {
+		return identity.ErrTenantMismatch
 	}
 
 	user.UpdatedAt = time.Now().UTC()
@@ -171,36 +145,84 @@ func (s *Store) UpdateUser(ctx context.Context, user *identity.User, opts ...ide
 	return nil
 }
 
-func (s *Store) DeleteUser(ctx context.Context, id uuid.UUID, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
+// UpdateUserEmail atomically swaps a live user's email and re-keys its password identity in a
+// single statement (data-modifying CTEs share one snapshot and one transaction), so a unique
+// violation on either index aborts the whole change.
+func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		WITH target AS (
+			SELECT id FROM users
+			WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+		),
+		pw AS (
+			UPDATE identities
+			SET provider_id = $3, updated_at = $4
+			WHERE user_id = (SELECT id FROM target) AND tenant_id = $2 AND provider = 'password'
+		)
+		UPDATE users
+		SET email = $3, email_verified_at = $5, updated_at = $4
+		WHERE id = (SELECT id FROM target)
+	`
+	tag, err := s.db.Exec(ctx, query, userID, tenantID, newEmail, now, verifiedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			// A conflict on either the user-email index or the password identity index during an
+			// email change both mean the new address is already taken in this tenant.
+			return identity.ErrEmailAlreadyExists
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
 
-	// Soft delete and anonymize email
+// DeleteUser soft-deletes and anonymizes a live user in one atomic statement: it anonymizes the
+// users row (deleted_at + random email), anonymizes the user's identity provider_ids, and purges
+// any pending verification tokens (which would otherwise outlive the account carrying its user_id
+// and, for change-email tokens, a plaintext target email — residual PII the soft delete is meant
+// to erase). All three run as data-modifying CTEs gated on the user actually being live, so they
+// commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
+func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	now := time.Now().UTC()
 	anonymizedEmail := "deleted_" + uuid.New().String() + "@deleted.local"
 
-	query := `
-		UPDATE users
-		SET deleted_at = $1, email = $2, updated_at = $1
-		WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+	const query = `
+		WITH del AS (
+			UPDATE users
+			SET deleted_at = $1, email = $2, updated_at = $1
+			WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+			RETURNING id
+		),
+		ident AS (
+			UPDATE identities
+			SET provider_id = $2, updated_at = $1
+			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
+		),
+		toks AS (
+			DELETE FROM verification_tokens
+			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
+		)
+		SELECT id FROM del
 	`
-	_, err := s.db.Exec(ctx, query, now, anonymizedEmail, id, tenantID)
+	var deletedID uuid.UUID
+	err := s.db.QueryRow(ctx, query, now, anonymizedEmail, id, tenantID).Scan(&deletedID)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			// No live, same-tenant user matched, so nothing was deleted.
+			return identity.ErrUserNotFound
+		}
 		return err
 	}
-
-	identQuery := `
-		UPDATE identities
-		SET provider_id = $1, updated_at = $2
-		WHERE user_id = $3 AND tenant_id = $4
-	`
-	_, err = s.db.Exec(ctx, identQuery, anonymizedEmail, now, id, tenantID)
-	return err
+	return nil
 }
 
-func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
+func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identity.Identity) error {
+	if ident.TenantID != "" && ident.TenantID != tenantID {
+		return identity.ErrTenantMismatch
 	}
 
 	ident.ID = uuid.New()
@@ -220,9 +242,7 @@ func (s *Store) AddIdentity(ctx context.Context, ident *identity.Identity, opts 
 	return nil
 }
 
-func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, opts ...identity.Option) ([]*identity.Identity, error) {
-	tenantID := s.getTenantID(opts)
-
+func (s *Store) FindIdentitiesByUserID(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error) {
 	query := `
 		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
 		FROM identities
@@ -250,9 +270,7 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, userID uuid.UUID, op
 	return identities, nil
 }
 
-func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID string, opts ...identity.Option) (*identity.Identity, error) {
-	tenantID := s.getTenantID(opts)
-
+func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
 	query := `
 		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
 		FROM identities
@@ -274,12 +292,7 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, provider, providerID
 
 // UpdateIdentityPassword sets a new password hash on the user's "password" identity and
 // atomically clears any lockout.
-func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, passwordHash string, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return identity.ErrTenantRequired
-	}
-
+func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error {
 	query := `
 		UPDATE identities
 		SET password_hash = $1, failed_attempts = 0, locked_until = NULL, updated_at = now()
@@ -299,12 +312,7 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, userID uuid.UUID, pa
 // selector and the verifier hash are stored. The INSERT is gated on the target being a LIVE
 // user in the SAME tenant (the bare user_id foreign key alone would accept a cross-tenant or
 // soft-deleted user), so this matches the memory store's invariant exactly.
-func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte, opts ...identity.Option) (string, error) {
-	tenantID := s.getTenantID(opts)
-	if tenantID == "" {
-		return "", identity.ErrTenantRequired
-	}
-
+func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error) {
 	token, selector, verifierHash, err := identity.GenerateVerificationToken()
 	if err != nil {
 		return "", err
@@ -334,9 +342,7 @@ func (s *Store) CreateVerificationToken(ctx context.Context, userID uuid.UUID, k
 // the row up by selector (an indexed, high-entropy key), compares the verifier in constant
 // time, checks expiry, then deletes the row with a guarded DELETE so concurrent consumers
 // cannot both succeed (single-use).
-func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string, opts ...identity.Option) (uuid.UUID, []byte, error) {
-	tenantID := s.getTenantID(opts)
-
+func (s *Store) ConsumeVerificationToken(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error) {
 	selector, verifier, ok := identity.SplitVerificationToken(token)
 	if !ok {
 		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
@@ -385,12 +391,22 @@ func (s *Store) ConsumeVerificationToken(ctx context.Context, token, kind string
 	return userID, metadata, nil
 }
 
+// DeleteExpiredVerificationTokens purges verification tokens past their expiry within the given
+// tenant, returning the number deleted.
+func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error) {
+	query := `DELETE FROM verification_tokens WHERE expires_at < now() AND tenant_id = $1`
+
+	tag, err := s.db.Exec(ctx, query, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the new count reaches the threshold. It is performed
 // atomically in a single UPDATE statement.
-func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-
+func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error {
 	query := `
 		UPDATE identities
 		SET failed_attempts = failed_attempts + 1,
@@ -412,9 +428,7 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, identityID uuid.UUI
 }
 
 // ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
-func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, opts ...identity.Option) error {
-	tenantID := s.getTenantID(opts)
-
+func (s *Store) ResetFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID) error {
 	query := `
 		UPDATE identities
 		SET failed_attempts = 0, locked_until = NULL, updated_at = now()
@@ -426,6 +440,77 @@ func (s *Store) ResetFailedAttempts(ctx context.Context, identityID uuid.UUID, o
 	}
 	if tag.RowsAffected() == 0 {
 		return identity.ErrIdentityNotFound
+	}
+	return nil
+}
+
+// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
+// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
+// backend is unreachable and honors ctx for cancellation/deadline.
+func (s *Store) Ping(ctx context.Context) error {
+	var ok int
+	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}
+
+func (s *Store) FindUserByPhone(ctx context.Context, tenantID string, phone string) (*identity.User, error) {
+	query := `
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
+		FROM users
+		WHERE phone = $1 AND tenant_id = $2 AND deleted_at IS NULL
+	`
+	row := s.db.QueryRow(ctx, query, phone, tenantID)
+
+	var user identity.User
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, identity.ErrUserNotFound
+		}
+		return nil, err
+	}
+
+	return &user, nil
+}
+
+// UpdateUserPhone sets a live user's phone and marks it verified in one statement. The partial
+// unique index (tenant_id, phone) enforces per-tenant uniqueness among live accounts, so a number
+// claimed in the interim aborts the update with ErrPhoneAlreadyExists.
+func (s *Store) UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET phone = $1, phone_verified_at = $2, updated_at = $3
+		WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, newPhone, verifiedAt, now, userID, tenantID)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return identity.ErrPhoneAlreadyExists
+		}
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// UpdateUserRecoveryEmail sets a live user's recovery email and marks it verified. The recovery
+// email is a secondary contact channel (not a login key) and is intentionally not unique.
+func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET recovery_email = $1, recovery_email_verified_at = $2, updated_at = $3
+		WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, recoveryEmail, verifiedAt, now, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
 	}
 	return nil
 }

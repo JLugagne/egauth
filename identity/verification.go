@@ -22,6 +22,18 @@ const (
 	KindEmailVerification = "email_verification"
 	// KindMagicLink identifies tokens minted for passwordless magic-link login.
 	KindMagicLink = "magic_link"
+	// KindEmailChange identifies tokens minted for the authenticated change-email flow. The
+	// token carries the requested new email address as its metadata and is delivered to that
+	// new address, so confirming it proves control of the new address before the swap.
+	KindEmailChange = "email_change"
+	// KindPhoneVerification identifies tokens minted for the phone-verification flow. The token
+	// carries the requested phone number as its metadata and is delivered to that number by SMS,
+	// so confirming it proves control of the number before it is set on the account.
+	KindPhoneVerification = "phone_verification"
+	// KindRecoveryEmailVerification identifies tokens minted for the recovery-email enrollment
+	// flow. The token carries the requested recovery address as its metadata and is delivered to
+	// that address, so confirming it proves control of the recovery channel before it is set.
+	KindRecoveryEmailVerification = "recovery_email_verification"
 )
 
 const (
@@ -101,7 +113,7 @@ func CompareVerifier(verifierHash, verifier string) bool {
 	return subtle.ConstantTimeCompare([]byte(got), []byte(verifierHash)) == 1
 }
 
-// Mailer delivers verification credentials to a user. libauth never sends email itself (a
+// Mailer delivers verification credentials to a user. egauth never sends email itself (a
 // non-objective in the PRD); it only defines this interface so the HTTP request handlers can
 // hand a freshly minted token to the application's delivery mechanism. Implementations
 // receive the plaintext token and MUST treat it as a credential (embed it in a link/code,
@@ -114,4 +126,31 @@ type Mailer interface {
 	SendEmailVerification(ctx context.Context, user *User, token string) error
 	// SendMagicLink delivers a passwordless magic-link login token to the user.
 	SendMagicLink(ctx context.Context, user *User, token string) error
+	// SendEmailChange delivers a change-email confirmation token to the account's NEW address
+	// (newEmail), e.g. as a confirmation link. The token is delivered to newEmail rather than
+	// the account's current address because confirming it is what proves control of the new
+	// address before the email is switched. Implementations SHOULD additionally send a security
+	// notification to the current address (user.Email) so the legitimate owner is alerted to a
+	// pending change they did not initiate.
+	SendEmailChange(ctx context.Context, user *User, newEmail, token string) error
+	// SendRecoveryEmailVerification delivers a recovery-email enrollment token to the candidate
+	// recovery address (recoveryEmail), e.g. as a confirmation link. It is delivered to that
+	// address (not the primary) because confirming it is what proves control of the recovery
+	// channel before it is trusted.
+	SendRecoveryEmailVerification(ctx context.Context, user *User, recoveryEmail, token string) error
+}
+
+// SMSSender delivers a phone-verification credential to a phone number over SMS. It is a separate
+// seam from Mailer because SMS is a distinct delivery channel that not every deployment uses, and
+// egauth never sends SMS itself (delivery is a non-objective): the handlers hand a freshly minted
+// token to the application's SMS provider via this interface. Implementations receive the plaintext
+// token and MUST treat it as a credential (embed it in the message, never log it). Programmatic
+// callers can bypass this and use the Service methods, which return the token directly. The
+// delivery package's Sender seam (an SMS provider adapter) satisfies the spirit of this contract;
+// wire a thin adapter that formats the verification message.
+type SMSSender interface {
+	// SendPhoneVerification delivers a phone-verification token to the requested phone number
+	// (the number being verified, which may differ from the account's currently-stored Phone),
+	// e.g. as a short code or a confirmation link.
+	SendPhoneVerification(ctx context.Context, user *User, phone, token string) error
 }

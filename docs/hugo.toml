@@ -1,0 +1,8 @@
+baseURL = "https://jlugagne.github.io/egauth/"
+languageCode = "en-us"
+title = "egauth Documentation"
+theme = "hugo-book"
+
+[params]
+  BookTheme = "auto"
+  BookToC = true

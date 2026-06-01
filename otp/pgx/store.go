@@ -7,7 +7,8 @@ import (
 	"errors"
 	"time"
 
-	"github.com/JLugagne/libauth/otp"
+	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/otp"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -16,22 +17,11 @@ import (
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 
-// Migrate executes all embedded SQL migrations against db.
+// Migrate applies the embedded SQL migrations against db, skipping any already recorded in the
+// schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
+// migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	entries, err := MigrationsFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		content, err := MigrationsFS.ReadFile("migrations/" + entry.Name())
-		if err != nil {
-			return err
-		}
-		if _, err := db.Exec(ctx, string(content)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pgxmigrate.Run(ctx, db, MigrationsFS)
 }
 
 // DBQuerier matches both *pgxpool.Pool and pgx.Tx.
@@ -47,22 +37,15 @@ type Store struct {
 }
 
 // NewStore creates a new PostgreSQL OTP store.
-func NewStore(db DBQuerier) *Store { return &Store{db: db} }
-
-func (s *Store) tenantID(opts []otp.Option) string {
-	o := otp.ApplyOptions(opts)
-	if o.TenantID == nil {
-		return ""
-	}
-	return *o.TenantID
+func NewStore(db DBQuerier) *Store {
+	return &Store{db: db}
 }
 
-func (s *Store) SaveOTP(ctx context.Context, o *otp.OTP, opts ...otp.Option) error {
-	tenant := s.tenantID(opts)
-	if tenant == "" {
-		return otp.ErrTenantRequired
+func (s *Store) SaveOTP(ctx context.Context, tenantID string, o *otp.OTP) error {
+	if o.TenantID != "" && o.TenantID != tenantID {
+		return otp.ErrTenantMismatch
 	}
-	o.TenantID = tenant
+	o.TenantID = tenantID
 	if o.CreatedAt.IsZero() {
 		o.CreatedAt = time.Now().UTC()
 	}
@@ -76,19 +59,18 @@ func (s *Store) SaveOTP(ctx context.Context, o *otp.OTP, opts ...otp.Option) err
 		    expires_at = EXCLUDED.expires_at,
 		    created_at = EXCLUDED.created_at
 	`
-	_, err := s.db.Exec(ctx, query, tenant, o.SubjectID, o.Purpose, o.CodeHash, o.Attempts, o.ExpiresAt, o.CreatedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, o.SubjectID, o.Purpose, o.CodeHash, o.Attempts, o.ExpiresAt, o.CreatedAt)
 	return err
 }
 
-func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (*otp.OTP, error) {
-	tenant := s.tenantID(opts)
+func (s *Store) GetOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*otp.OTP, error) {
 	const query = `
 		SELECT code_hash, attempts, expires_at, created_at
 		FROM otp_codes
 		WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3
 	`
-	o := &otp.OTP{SubjectID: subjectID, TenantID: tenant, Purpose: purpose}
-	err := s.db.QueryRow(ctx, query, tenant, subjectID, purpose).Scan(&o.CodeHash, &o.Attempts, &o.ExpiresAt, &o.CreatedAt)
+	o := &otp.OTP{SubjectID: subjectID, TenantID: tenantID, Purpose: purpose}
+	err := s.db.QueryRow(ctx, query, tenantID, subjectID, purpose).Scan(&o.CodeHash, &o.Attempts, &o.ExpiresAt, &o.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, otp.ErrCodeNotFound
@@ -98,14 +80,14 @@ func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string,
 	return o, nil
 }
 
-func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (int, error) {
+func (s *Store) IncrementOTPAttempts(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (int, error) {
 	const query = `
 		UPDATE otp_codes SET attempts = attempts + 1
 		WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3
 		RETURNING attempts
 	`
 	var attempts int
-	err := s.db.QueryRow(ctx, query, s.tenantID(opts), subjectID, purpose).Scan(&attempts)
+	err := s.db.QueryRow(ctx, query, tenantID, subjectID, purpose).Scan(&attempts)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return 0, otp.ErrCodeNotFound
@@ -115,17 +97,34 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, p
 	return attempts, nil
 }
 
-func (s *Store) ConsumeOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (bool, error) {
-	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, s.tenantID(opts), subjectID, purpose)
+func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, tenantID, subjectID, purpose)
 	if err != nil {
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
 }
 
-func (s *Store) DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, s.tenantID(opts), subjectID, purpose)
+func (s *Store) DeleteOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error {
+	_, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, tenantID, subjectID, purpose)
 	return err
 }
 
+// DeleteExpired purges codes past their expiry within the given tenant, returning the number deleted.
+func (s *Store) DeleteExpired(ctx context.Context, tenantID string) (int64, error) {
+	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE expires_at < now() AND tenant_id = $1`, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 var _ otp.Store = (*Store)(nil)
+
+// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
+// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
+// backend is unreachable and honors ctx for cancellation/deadline.
+func (s *Store) Ping(ctx context.Context) error {
+	var ok int
+	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}

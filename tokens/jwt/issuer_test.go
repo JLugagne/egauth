@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/issuertest"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/storetest"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,23 +24,23 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 	apiKeys := make(map[string]*tokens.APIKey[MyCustomClaims])
 
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
 			rtCopy := *rt
 			refreshTokens[rt.Hash] = &rtCopy
 			return nil
 		},
-		FindRefreshTokenFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.RefreshToken, error) {
+		FindRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
 			rt, ok := refreshTokens[tokenHash]
 			if !ok {
 				return nil, tokens.ErrRefreshTokenNotFound
 			}
 			return rt, nil
 		},
-		SaveAPIKeyFunc: func(ctx context.Context, key *tokens.APIKey[MyCustomClaims], opts ...tokens.Option) error {
+		SaveAPIKeyFunc: func(ctx context.Context, tenantID string, key *tokens.APIKey[MyCustomClaims]) error {
 			apiKeys[key.Hash] = key
 			return nil
 		},
-		FindAPIKeyByHashFunc: func(ctx context.Context, tokenHash string, opts ...tokens.Option) (*tokens.APIKey[MyCustomClaims], error) {
+		FindAPIKeyByHashFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[MyCustomClaims], error) {
 			key, ok := apiKeys[tokenHash]
 			if !ok {
 				return nil, tokens.ErrAPIKeyNotFound
@@ -52,7 +52,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 	cfg := jwt.Config[MyCustomClaims]{
 		Store:      mockStore,
 		SecretKey:  "super-secret-key-for-testing",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 	}
@@ -64,7 +64,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &storetest.MockStore[MyCustomClaims]{
-		SaveRefreshTokenFunc: func(ctx context.Context, rt *tokens.RefreshToken, opts ...tokens.Option) error {
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
 			return nil
 		},
 	}

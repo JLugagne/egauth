@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/issuertest"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +23,7 @@ func newRotator(t *testing.T) (*jwt.Service[struct{}], *memory.Store[struct{}]) 
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      store,
 		SecretKey:  "handlers-secret",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
@@ -39,6 +39,58 @@ func postWithRefresh(value string) *http.Request {
 		req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: value})
 	}
 	return req
+}
+
+func TestRefreshHandler_CSRFBlocksCrossOrigin(t *testing.T) {
+	called := false
+	rot := &issuertest.MockRotator[struct{}]{
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
+			called = true
+			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}, nil
+		},
+	}
+	h := tokens.RefreshHandler[struct{}](rot, tokens.WithTrustedOrigins("app.example.com"))
+
+	req := postWithRefresh("some-refresh")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "rotator must not run for a cross-site request")
+}
+
+func TestRefreshHandler_CSRFAllowsSameOrigin(t *testing.T) {
+	svc, _ := newRotator(t)
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	require.NoError(t, err)
+
+	h := tokens.RefreshHandler[struct{}](svc, tokens.WithTrustedOrigins("app.example.com"))
+	req := postWithRefresh(pair.RefreshToken)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestLogoutHandler_CSRFBlocksCrossOrigin(t *testing.T) {
+	store := memory.NewStore[struct{}]()
+	h := tokens.LogoutHandler(store, tokens.WithTrustedOrigins("app.example.com"))
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: "x"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
 }
 
 func TestRefreshHandler_Success(t *testing.T) {
@@ -99,7 +151,7 @@ func TestRefreshHandler_MissingCookie(t *testing.T) {
 
 func TestRefreshHandler_ReuseClearsCookies(t *testing.T) {
 	rot := &issuertest.MockRotator[struct{}]{
-		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
 			return nil, tokens.ErrRefreshTokenReused
 		},
 	}
@@ -119,7 +171,7 @@ func TestRefreshHandler_ReuseClearsCookies(t *testing.T) {
 
 func TestRefreshHandler_FailureRedirect(t *testing.T) {
 	rot := &issuertest.MockRotator[struct{}]{
-		RotateFunc: func(ctx context.Context, refreshToken string, opts ...tokens.Option) (*tokens.TokenPair[struct{}], error) {
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
 			return nil, tokens.ErrRefreshTokenReused
 		},
 	}
@@ -159,7 +211,7 @@ func TestLogoutHandler_RevokesFamilyAndClears(t *testing.T) {
 	assert.Less(t, refresh.MaxAge, 0)
 
 	// The family must have been revoked: the token is gone.
-	_, err = store.FindRefreshToken(ctx, tokens.HashToken(pair.RefreshToken))
+	_, err = store.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
 	require.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
 }
 

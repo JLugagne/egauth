@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -30,7 +30,7 @@ func newAutoRefreshFixture(t *testing.T) autoRefreshFixture {
 	cfg := jwt.Config[struct{}]{
 		Store:      store,
 		SecretKey:  "mw-secret",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
@@ -63,9 +63,9 @@ func TestRequireAuth_ValidAccessCookie(t *testing.T) {
 	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid})
 	require.NoError(t, err)
 
-	var gotActor libauth.Actor
+	var gotActor egauth.Actor
 	called := false
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		gotActor = actor
 		called = true
 		w.WriteHeader(http.StatusOK)
@@ -87,8 +87,8 @@ func TestRequireAuth_ExpiredAccessAutoRefreshes(t *testing.T) {
 	require.NoError(t, err)
 
 	called := false
-	var gotActor libauth.Actor
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	var gotActor egauth.Actor
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		called = true
 		gotActor = actor
 		w.WriteHeader(http.StatusOK)
@@ -117,7 +117,7 @@ func TestRequireAuth_MissingAccessAutoRefreshes(t *testing.T) {
 	require.NoError(t, err)
 
 	called := false
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
@@ -135,7 +135,7 @@ func TestRequireAuth_InvalidAccessNotEligibleForRefresh(t *testing.T) {
 	require.NoError(t, err)
 
 	called := false
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
@@ -155,11 +155,11 @@ func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 	require.NoError(t, err)
 
 	// Consume the refresh token once so presenting it again is a replay.
-	_, err = f.svc.Rotate(ctx, pair.RefreshToken)
+	_, err = f.svc.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 
 	called := false
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
@@ -182,7 +182,7 @@ func TestRequireAuth_AutoRefreshDefaultsToSessionCookie(t *testing.T) {
 	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
 	require.NoError(t, err)
 
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ struct{}) {
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
 
@@ -200,7 +200,7 @@ func TestRequireAuth_PersistentAutoRefreshOption(t *testing.T) {
 	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
 	require.NoError(t, err)
 
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ struct{}) {
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies), tokens.WithPersistentAutoRefresh[struct{}]())
 
@@ -220,7 +220,7 @@ func TestRequireAuth_ExpiredWithoutAutoRefreshRejected(t *testing.T) {
 
 	called := false
 	// Cookie auth but NO auto-refresh: an expired access token is simply rejected.
-	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, _ struct{}) {
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
 		called = true
 		w.WriteHeader(http.StatusOK)
 	}, tokens.WithCookieAuth[struct{}](f.cookies))

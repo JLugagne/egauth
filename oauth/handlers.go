@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/JLugagne/libauth/identity"
-	"github.com/JLugagne/libauth/tokens"
+	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/tokens"
 )
 
 // Default state-cookie configuration.
@@ -21,7 +21,7 @@ const (
 // satisfies it; the callback handler depends only on this narrow method so it stays
 // decoupled from the rest of the identity service.
 type IdentityLinker interface {
-	LinkOrCreateIdentity(ctx context.Context, provider, providerID, email string, emailVerified bool, opts ...identity.Option) (*identity.User, error)
+	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
 }
 
 // handlerConfig holds the configurable behavior of the OAuth handlers.
@@ -149,8 +149,19 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 				return
 			}
 		}
-		cfg.setStateCookie(w, packState(state, verifier))
-		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge), http.StatusFound)
+		// For an OIDC-enabled provider, mint a nonce, bind it through the state cookie and send
+		// it on the authorization request so the returned id_token can be tied to this attempt.
+		var nonce string
+		var authOpts []AuthCodeOption
+		if p.oidcEnabled() {
+			if nonce, err = newNonce(); err != nil {
+				http.Error(w, "internal error", http.StatusInternalServerError)
+				return
+			}
+			authOpts = append(authOpts, WithAuthNonce(nonce))
+		}
+		cfg.setStateCookie(w, packState(state, verifier, nonce))
+		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge, authOpts...), http.StatusFound)
 	}
 }
 
@@ -167,7 +178,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, ok := unpackState(raw)
+		cookieState, verifier, nonce, ok := unpackState(raw)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
@@ -189,7 +200,11 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		info, err := p.Exchange(r.Context(), code, cfg.resolveRedirectURL(r), verifier)
+		var exchOpts []ExchangeOption
+		if p.oidcEnabled() {
+			exchOpts = append(exchOpts, WithExpectedNonce(nonce))
+		}
+		info, err := p.Exchange(r.Context(), code, cfg.resolveRedirectURL(r), verifier, exchOpts...)
 		if err != nil {
 			cfg.fail(w, r, http.StatusBadGateway, "exchange_failed")
 			return
@@ -206,7 +221,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		user, err := linker.LinkOrCreateIdentity(r.Context(), p.Name(), info.ProviderID, info.Email, info.EmailVerified, cfg.linkOpts(r)...)
+		user, err := linker.LinkOrCreateIdentity(r.Context(), cfg.tenant(r), p.Name(), info.ProviderID, info.Email, info.EmailVerified)
 		if err != nil {
 			status, code := mapLinkError(err)
 			cfg.fail(w, r, status, code)
@@ -281,11 +296,13 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-func (cfg handlerConfig) linkOpts(r *http.Request) []identity.Option {
+// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
+// configured (the single-tenant default partition).
+func (cfg handlerConfig) tenant(r *http.Request) string {
 	if cfg.tenantResolver == nil {
-		return nil
+		return ""
 	}
-	return []identity.Option{identity.WithTenant(cfg.tenantResolver(r))}
+	return cfg.tenantResolver(r)
 }
 
 func mapLinkError(err error) (int, string) {

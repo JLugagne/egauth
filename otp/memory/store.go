@@ -4,8 +4,9 @@ package memory
 import (
 	"context"
 	"sync"
+	"time"
 
-	"github.com/JLugagne/libauth/otp"
+	"github.com/JLugagne/egauth/otp"
 	"github.com/google/uuid"
 )
 
@@ -20,34 +21,28 @@ func NewStore() *Store {
 	return &Store{codes: make(map[string]*otp.OTP)}
 }
 
-func tenantOf(opts []otp.Option) string {
-	o := otp.ApplyOptions(opts)
-	if o.TenantID == nil {
-		return ""
-	}
-	return *o.TenantID
+func key(tenantID string, subjectID uuid.UUID, purpose string) string {
+	return tenantID + "\x00" + subjectID.String() + "\x00" + purpose
 }
 
-func key(tenant string, subjectID uuid.UUID, purpose string) string {
-	return tenant + "\x00" + subjectID.String() + "\x00" + purpose
-}
-
-func (s *Store) SaveOTP(ctx context.Context, o *otp.OTP, opts ...otp.Option) error {
+func (s *Store) SaveOTP(ctx context.Context, tenantID string, o *otp.OTP) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tenant := tenantOf(opts)
+	if o.TenantID != "" && o.TenantID != tenantID {
+		return otp.ErrTenantMismatch
+	}
 	stored := *o
-	stored.TenantID = tenant
-	s.codes[key(tenant, o.SubjectID, o.Purpose)] = &stored
+	stored.TenantID = tenantID
+	s.codes[key(tenantID, o.SubjectID, o.Purpose)] = &stored
 	return nil
 }
 
-func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (*otp.OTP, error) {
+func (s *Store) GetOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*otp.OTP, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	o, ok := s.codes[key(tenantOf(opts), subjectID, purpose)]
+	o, ok := s.codes[key(tenantID, subjectID, purpose)]
 	if !ok {
 		return nil, otp.ErrCodeNotFound
 	}
@@ -55,11 +50,11 @@ func (s *Store) GetOTP(ctx context.Context, subjectID uuid.UUID, purpose string,
 	return &cpy, nil
 }
 
-func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (int, error) {
+func (s *Store) IncrementOTPAttempts(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	o, ok := s.codes[key(tenantOf(opts), subjectID, purpose)]
+	o, ok := s.codes[key(tenantID, subjectID, purpose)]
 	if !ok {
 		return 0, otp.ErrCodeNotFound
 	}
@@ -67,11 +62,11 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, subjectID uuid.UUID, p
 	return o.Attempts, nil
 }
 
-func (s *Store) ConsumeOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) (bool, error) {
+func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	k := key(tenantOf(opts), subjectID, purpose)
+	k := key(tenantID, subjectID, purpose)
 	if _, ok := s.codes[k]; !ok {
 		return false, nil
 	}
@@ -79,12 +74,31 @@ func (s *Store) ConsumeOTP(ctx context.Context, subjectID uuid.UUID, purpose str
 	return true, nil
 }
 
-func (s *Store) DeleteOTP(ctx context.Context, subjectID uuid.UUID, purpose string, opts ...otp.Option) error {
+func (s *Store) DeleteOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.codes, key(tenantOf(opts), subjectID, purpose))
+	delete(s.codes, key(tenantID, subjectID, purpose))
 	return nil
+}
+
+// DeleteExpired purges codes past their expiry within the given tenant, returning the number deleted.
+func (s *Store) DeleteExpired(ctx context.Context, tenantID string) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	var deleted int64
+	for k, code := range s.codes {
+		if code.TenantID != tenantID {
+			continue
+		}
+		if code.ExpiresAt.Before(now) {
+			delete(s.codes, k)
+			deleted++
+		}
+	}
+	return deleted, nil
 }
 
 var _ otp.Store = (*Store)(nil)

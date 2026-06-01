@@ -2,10 +2,12 @@ package policy_test
 
 import (
 	"context"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
-	"github.com/JLugagne/libauth/passwords"
-	"github.com/JLugagne/libauth/passwords/policy"
+	"github.com/JLugagne/egauth/passwords"
+	"github.com/JLugagne/egauth/passwords/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,4 +88,29 @@ func TestDefaultPolicy_Verify(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestDefaultPolicy_LengthCountsRunesNotBytes pins that MinLength/MaxLength measure characters
+// (runes), not bytes — matching the passphrase policy. Byte counting both under-counts (lets a
+// short multibyte password through MinLength) and over-restricts (rejects a within-limit
+// multibyte password as too long).
+func TestDefaultPolicy_LengthCountsRunesNotBytes(t *testing.T) {
+	ctx := context.Background()
+	p := policy.NewDefaultPolicy()
+
+	// "Aa1!ééé" is 7 characters but 10 bytes and satisfies every complexity rule. Byte counting
+	// would wrongly accept it against MinLength=8; it must be rejected as too short.
+	short := "Aa1!ééé"
+	require.Equal(t, 7, utf8.RuneCountInString(short))
+	require.Greater(t, len(short), p.MinLength, "test fixture must have byte length >= MinLength to expose the bug")
+	assert.ErrorIs(t, p.Verify(ctx, short), passwords.ErrPasswordTooShort,
+		"a 7-character password must be too short regardless of its byte length")
+
+	// "Aa1!" + 46×'é' is 50 characters but 96 bytes. It is comfortably within the 72-character
+	// limit; byte counting would wrongly reject it as too long.
+	long := "Aa1!" + strings.Repeat("é", 46)
+	require.Equal(t, 50, utf8.RuneCountInString(long))
+	require.Greater(t, len(long), p.MaxLength, "test fixture must have byte length > MaxLength to expose the bug")
+	assert.NoError(t, p.Verify(ctx, long),
+		"a 50-character password must be within the 72-character limit regardless of byte length")
 }

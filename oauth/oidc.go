@@ -1,0 +1,427 @@
+package oauth
+
+import (
+	"context"
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rsa"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math/big"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/golang-jwt/jwt/v5"
+)
+
+var (
+	// ErrIDTokenInvalid is returned when an OIDC id_token fails validation (bad signature,
+	// issuer, audience, expiry, missing claim, or an unresolvable signing key).
+	ErrIDTokenInvalid = errors.New("oauth: id_token validation failed")
+	// ErrNonceMismatch is returned when the id_token's nonce claim does not match the nonce
+	// minted for this login attempt — the signal of a replayed or cross-bound id_token.
+	ErrNonceMismatch = errors.New("oauth: id_token nonce mismatch")
+)
+
+// defaultAllowedAlgs are the asymmetric signing algorithms accepted for id_tokens by default.
+// "none" and the HMAC family are deliberately excluded: accepting a symmetric alg while
+// verifying against a JWKS public key is the classic RS256→HS256 algorithm-confusion attack.
+var defaultAllowedAlgs = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
+
+const (
+	defaultOIDCLeeway   = time.Minute
+	defaultJWKSCacheTTL = time.Hour
+	// maxJWKSBytes bounds the JWKS response read.
+	maxJWKSBytes = 1 << 20
+)
+
+// OIDCConfig enables OpenID Connect id_token validation for a Provider (see WithOIDC). When set,
+// Exchange validates the id_token returned by the token endpoint — its signature against the
+// issuer's JWKS plus the iss / aud / exp / iat and nonce claims — and derives the UserInfo from
+// the verified claims instead of trusting an access-token userinfo GET. This is what makes the
+// flow true OIDC (cryptographically attested claims + nonce replay protection) rather than plain
+// OAuth2.
+type OIDCConfig struct {
+	// Issuer is the expected "iss" claim. OIDC mandates an exact string comparison. Required.
+	Issuer string
+	// JWKSURL is the issuer's JSON Web Key Set endpoint, used to fetch the public keys that
+	// verify the id_token signature. Required.
+	JWKSURL string
+	// Audience is the expected "aud" claim. Defaults to the Provider's clientID when empty.
+	Audience string
+	// AllowedAlgs restricts the accepted id_token signing algorithms. Defaults to RS256/384/512
+	// and ES256/384/512. "none" and HMAC algorithms are always rejected regardless of this list.
+	AllowedAlgs []string
+	// Leeway tolerates small clock skew when validating exp / iat (default 1 minute).
+	Leeway time.Duration
+	// ClaimsMapper maps the validated id_token claims to a UserInfo. Defaults to the standard
+	// OIDC claims (sub → ProviderID, email, email_verified, name).
+	ClaimsMapper func(claims map[string]any) (*UserInfo, error)
+	// HTTPClient fetches the JWKS. Defaults to a client with a 10s timeout.
+	HTTPClient *http.Client
+}
+
+// oidcVerifier validates id_tokens for a configured issuer.
+type oidcVerifier struct {
+	issuer      string
+	audience    string
+	allowedAlgs []string
+	leeway      time.Duration
+	claimsMap   func(claims map[string]any) (*UserInfo, error)
+	jwks        *jwksCache
+}
+
+// newOIDCVerifier builds a verifier from cfg, falling back to defaultAudience (the Provider's
+// clientID) when no audience is configured. It validates the configuration eagerly so a
+// misconfigured provider fails at construction rather than at the first callback.
+func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, error) {
+	if strings.TrimSpace(cfg.Issuer) == "" {
+		return nil, errors.New("OIDCConfig.Issuer is required")
+	}
+	if strings.TrimSpace(cfg.JWKSURL) == "" {
+		return nil, errors.New("OIDCConfig.JWKSURL is required")
+	}
+	audience := cfg.Audience
+	if audience == "" {
+		audience = defaultAudience
+	}
+	if audience == "" {
+		return nil, errors.New("OIDCConfig.Audience is required when the provider has no clientID")
+	}
+	algs := cfg.AllowedAlgs
+	if len(algs) == 0 {
+		algs = defaultAllowedAlgs
+	}
+	leeway := cfg.Leeway
+	if leeway <= 0 {
+		leeway = defaultOIDCLeeway
+	}
+	mapper := cfg.ClaimsMapper
+	if mapper == nil {
+		mapper = defaultOIDCClaimsMapper
+	}
+	client := cfg.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
+	return &oidcVerifier{
+		issuer:      cfg.Issuer,
+		audience:    audience,
+		allowedAlgs: algs,
+		leeway:      leeway,
+		claimsMap:   mapper,
+		jwks:        &jwksCache{url: cfg.JWKSURL, client: client, ttl: defaultJWKSCacheTTL, now: time.Now},
+	}, nil
+}
+
+// verify validates rawIDToken and returns the mapped UserInfo. expectedNonce is the nonce minted
+// for this login attempt; it is mandatory (an empty expected nonce is itself a failure) so a
+// replayed id_token bound to a different attempt is rejected.
+func (v *oidcVerifier) verify(ctx context.Context, rawIDToken, expectedNonce string) (*UserInfo, error) {
+	keyFunc := func(t *jwt.Token) (any, error) {
+		kid, _ := t.Header["kid"].(string)
+		return v.jwks.publicKey(ctx, kid)
+	}
+	token, err := jwt.Parse(rawIDToken, keyFunc,
+		jwt.WithValidMethods(v.allowedAlgs),
+		jwt.WithIssuer(v.issuer),
+		jwt.WithAudience(v.audience),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+		jwt.WithLeeway(v.leeway),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrIDTokenInvalid, err)
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, fmt.Errorf("%w: unexpected claims type", ErrIDTokenInvalid)
+	}
+
+	// Authorized-party (azp) checks per OIDC Core 3.1.3.7. jwt.WithAudience above only proves our
+	// audience is CONTAINED in "aud"; for a token minted by the same issuer for another relying
+	// party that also lists us, that is not enough (confused deputy). So: if azp is present it
+	// MUST equal our audience, and a multi-audience token MUST carry such an azp.
+	azp, _ := claims["azp"].(string)
+	if azp != "" && subtle.ConstantTimeCompare([]byte(azp), []byte(v.audience)) != 1 {
+		return nil, fmt.Errorf("%w: azp does not match audience", ErrIDTokenInvalid)
+	}
+	if len(audienceValues(claims["aud"])) > 1 && azp == "" {
+		return nil, fmt.Errorf("%w: multiple audiences without an azp claim", ErrIDTokenInvalid)
+	}
+
+	// The nonce binds this id_token to the exact login attempt that minted it. Compare in
+	// constant time; a missing or empty expected/actual nonce is a failure, never a pass.
+	nonceClaim, _ := claims["nonce"].(string)
+	if expectedNonce == "" || nonceClaim == "" ||
+		subtle.ConstantTimeCompare([]byte(nonceClaim), []byte(expectedNonce)) != 1 {
+		return nil, ErrNonceMismatch
+	}
+
+	info, err := v.claimsMap(map[string]any(claims))
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+// audienceValues normalizes the "aud" claim (a string or an array of strings) into a slice,
+// dropping empty entries.
+func audienceValues(raw any) []string {
+	switch v := raw.(type) {
+	case string:
+		if v == "" {
+			return nil
+		}
+		return []string{v}
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok && s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+// defaultOIDCClaimsMapper maps the standard OIDC claims to a UserInfo.
+func defaultOIDCClaimsMapper(claims map[string]any) (*UserInfo, error) {
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		return nil, fmt.Errorf("%w: missing sub claim", ErrIDTokenInvalid)
+	}
+	email, _ := claims["email"].(string)
+	name, _ := claims["name"].(string)
+
+	// email_verified may arrive as a bool or, from some providers, as the string "true".
+	verified := false
+	switch ev := claims["email_verified"].(type) {
+	case bool:
+		verified = ev
+	case string:
+		verified = ev == "true"
+	}
+
+	return &UserInfo{ProviderID: sub, Email: email, EmailVerified: verified, Name: name}, nil
+}
+
+// jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
+// cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
+type jwksCache struct {
+	url    string
+	client *http.Client
+	ttl    time.Duration
+	now    func() time.Time
+
+	mu   sync.RWMutex
+	keys map[string]crypto.PublicKey
+	exp  time.Time
+}
+
+// publicKey returns the verification key for kid, fetching/refreshing the key set as needed.
+func (c *jwksCache) publicKey(ctx context.Context, kid string) (crypto.PublicKey, error) {
+	if k, ok := c.cached(kid); ok {
+		return k, nil
+	}
+	if err := c.refresh(ctx); err != nil {
+		return nil, err
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return lookupKey(c.keys, kid)
+}
+
+func (c *jwksCache) cached(kid string) (crypto.PublicKey, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.keys == nil || c.now().After(c.exp) {
+		return nil, false
+	}
+	k, err := lookupKey(c.keys, kid)
+	if err != nil {
+		return nil, false
+	}
+	return k, true
+}
+
+func (c *jwksCache) refresh(ctx context.Context) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	if err != nil {
+		return fmt.Errorf("%w: building JWKS request: %v", ErrIDTokenInvalid, err)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: fetching JWKS: %v", ErrIDTokenInvalid, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: JWKS endpoint status %d", ErrIDTokenInvalid, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBytes))
+	if err != nil {
+		return fmt.Errorf("%w: reading JWKS: %v", ErrIDTokenInvalid, err)
+	}
+	keys, err := parseJWKS(body)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	c.keys = keys
+	c.exp = c.now().Add(c.ttl)
+	c.mu.Unlock()
+	return nil
+}
+
+// lookupKey resolves kid in keys. An empty kid is accepted only when the set holds exactly one
+// key (an id_token without a kid is unambiguous then).
+func lookupKey(keys map[string]crypto.PublicKey, kid string) (crypto.PublicKey, error) {
+	if kid == "" {
+		if len(keys) == 1 {
+			for _, k := range keys {
+				return k, nil
+			}
+		}
+		return nil, fmt.Errorf("%w: id_token has no kid and the key set is ambiguous", ErrIDTokenInvalid)
+	}
+	k, ok := keys[kid]
+	if !ok {
+		return nil, fmt.Errorf("%w: no JWKS key for kid %q", ErrIDTokenInvalid, kid)
+	}
+	return k, nil
+}
+
+// jwk is a single JSON Web Key (the subset egauth understands: RSA and EC signing keys).
+type jwk struct {
+	Kty string `json:"kty"`
+	Kid string `json:"kid"`
+	Use string `json:"use"`
+	N   string `json:"n"`
+	E   string `json:"e"`
+	Crv string `json:"crv"`
+	X   string `json:"x"`
+	Y   string `json:"y"`
+}
+
+// parseJWKS parses a JWKS document into a kid→public-key map, skipping encryption keys and any
+// key it cannot construct. It errors only if no usable signing key remains.
+func parseJWKS(data []byte) (map[string]crypto.PublicKey, error) {
+	var set struct {
+		Keys []jwk `json:"keys"`
+	}
+	if err := json.Unmarshal(data, &set); err != nil {
+		return nil, fmt.Errorf("%w: decoding JWKS: %v", ErrIDTokenInvalid, err)
+	}
+	out := make(map[string]crypto.PublicKey, len(set.Keys))
+	for _, k := range set.Keys {
+		if k.Use == "enc" {
+			continue
+		}
+		pub, err := k.publicKey()
+		if err != nil {
+			continue
+		}
+		out[k.Kid] = pub
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%w: no usable signing keys in JWKS", ErrIDTokenInvalid)
+	}
+	return out, nil
+}
+
+// publicKey constructs the crypto public key represented by the JWK.
+func (k jwk) publicKey() (crypto.PublicKey, error) {
+	switch k.Kty {
+	case "RSA":
+		n, err := decodeBigInt(k.N)
+		if err != nil {
+			return nil, err
+		}
+		eb, err := decodeBase64URL(k.E)
+		if err != nil {
+			return nil, err
+		}
+		e := new(big.Int).SetBytes(eb).Int64()
+		if e <= 0 {
+			return nil, fmt.Errorf("%w: invalid RSA exponent", ErrIDTokenInvalid)
+		}
+		return &rsa.PublicKey{N: n, E: int(e)}, nil
+	case "EC":
+		curve, err := curveForJWK(k.Crv)
+		if err != nil {
+			return nil, err
+		}
+		xb, err := decodeBase64URL(k.X)
+		if err != nil {
+			return nil, err
+		}
+		yb, err := decodeBase64URL(k.Y)
+		if err != nil {
+			return nil, err
+		}
+		// Reassemble the SEC1 uncompressed point (0x04 || X || Y, each coordinate left-padded to
+		// the curve's field size) and parse it with the modern API, which also verifies the point
+		// is actually on the curve (rejecting invalid-curve keys) — unlike assigning the raw
+		// X/Y fields directly (deprecated since Go 1.25).
+		size := (curve.Params().BitSize + 7) / 8
+		if len(xb) > size || len(yb) > size {
+			return nil, fmt.Errorf("%w: EC coordinate exceeds curve size", ErrIDTokenInvalid)
+		}
+		point := make([]byte, 1+2*size)
+		point[0] = 4
+		copy(point[1+size-len(xb):1+size], xb)
+		copy(point[1+2*size-len(yb):], yb)
+		pub, err := ecdsa.ParseUncompressedPublicKey(curve, point)
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid EC public key: %v", ErrIDTokenInvalid, err)
+		}
+		return pub, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported key type %q", ErrIDTokenInvalid, k.Kty)
+	}
+}
+
+func curveForJWK(crv string) (elliptic.Curve, error) {
+	switch crv {
+	case "P-256":
+		return elliptic.P256(), nil
+	case "P-384":
+		return elliptic.P384(), nil
+	case "P-521":
+		return elliptic.P521(), nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported EC curve %q", ErrIDTokenInvalid, crv)
+	}
+}
+
+func decodeBase64URL(s string) ([]byte, error) {
+	// JWK members are base64url without padding, but tolerate padded input defensively.
+	b, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(s, "="))
+	if err != nil {
+		return nil, fmt.Errorf("%w: decoding key material: %v", ErrIDTokenInvalid, err)
+	}
+	return b, nil
+}
+
+func decodeBigInt(s string) (*big.Int, error) {
+	b, err := decodeBase64URL(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(b) == 0 {
+		return nil, fmt.Errorf("%w: empty key parameter", ErrIDTokenInvalid)
+	}
+	return new(big.Int).SetBytes(b), nil
+}

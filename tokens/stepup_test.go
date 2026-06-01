@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +20,7 @@ func stepUpService() *jwt.Service[struct{}] {
 	return jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      memory.NewStore[struct{}](),
 		SecretKey:  "step-up-secret",
-		Issuer:     "libauth-test",
+		Issuer:     "egauth-test",
 		AccessTTL:  time.Hour,
 		RefreshTTL: time.Hour,
 	})
@@ -36,7 +36,7 @@ func TestRequireAuth_StepUpAMRGate(t *testing.T) {
 		return pair.AccessToken
 	}
 	protected := func(opts ...tokens.AuthOption[struct{}]) http.HandlerFunc {
-		return tokens.RequireAuth[struct{}](svc, func(w http.ResponseWriter, _ *http.Request, _ libauth.Actor, _ struct{}) {
+		return tokens.RequireAuth[struct{}](svc, func(w http.ResponseWriter, _ *http.Request, _ egauth.Actor, _ struct{}) {
 			w.WriteHeader(http.StatusOK)
 		}, opts...)
 	}

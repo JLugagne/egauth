@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/JLugagne/libauth/otp"
-	"github.com/JLugagne/libauth/otp/memory"
+	"github.com/JLugagne/egauth/otp"
+	"github.com/JLugagne/egauth/otp/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +20,7 @@ func TestService_ConcurrentVerify_SingleUse(t *testing.T) {
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(100))
 	sub := uuid.New()
 
-	ch, err := svc.Issue(ctx, sub, "login", otp.WithTenant("t1"))
+	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
 
 	const n = 64
@@ -32,7 +32,7 @@ func TestService_ConcurrentVerify_SingleUse(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if svc.Verify(ctx, sub, "login", ch.Code, otp.WithTenant("t1")) == nil {
+			if svc.Verify(ctx, "t1", sub, "login", ch.Code) == nil {
 				atomic.AddInt64(&successes, 1)
 			}
 		}()
@@ -51,7 +51,7 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(maxAttempts))
 	sub := uuid.New()
 
-	ch, err := svc.Issue(ctx, sub, "login", otp.WithTenant("t1"))
+	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
 	bad := wrongCode(ch.Code)
 
@@ -64,7 +64,7 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if err := svc.Verify(ctx, sub, "login", bad, otp.WithTenant("t1")); err == otp.ErrInvalidCode {
+			if err := svc.Verify(ctx, "t1", sub, "login", bad); err == otp.ErrInvalidCode {
 				atomic.AddInt64(&invalid, 1)
 			}
 		}()
@@ -77,5 +77,5 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 	assert.LessOrEqual(t, invalid, int64(maxAttempts), "concurrent wrong guesses must not exceed the attempt ceiling")
 
 	// And the code is burned afterwards.
-	assert.ErrorIs(t, svc.Verify(ctx, sub, "login", ch.Code, otp.WithTenant("t1")), otp.ErrCodeNotFound)
+	assert.ErrorIs(t, svc.Verify(ctx, "t1", sub, "login", ch.Code), otp.ErrCodeNotFound)
 }

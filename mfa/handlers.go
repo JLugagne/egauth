@@ -65,12 +65,12 @@ func WithFailureRedirect(rawURL string) HandlerOption {
 // for the client to render (e.g. as a QR code). The factor is not active until confirmed.
 func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
 		account := r.PostForm.Get(cfg.accountField)
 		if account == "" {
 			account = uid.String()
 		}
-		enrollment, err := svc.EnrollTOTP(r.Context(), uid, account, o...)
+		enrollment, err := svc.EnrollTOTP(r.Context(), tenant, uid, account)
 		if err != nil {
 			cfg.failErr(w, r, err)
 			return
@@ -83,8 +83,8 @@ func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 // minted single-use recovery codes as JSON (shown once).
 func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
-		codes, err := svc.ConfirmTOTP(r.Context(), uid, r.PostForm.Get(cfg.codeField), o...)
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		codes, err := svc.ConfirmTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField))
 		if err != nil {
 			cfg.failErr(w, r, err)
 			return
@@ -96,8 +96,8 @@ func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 // VerifyHandler checks a login second-factor TOTP code and replies 204 (or a 303 redirect).
 func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
-		if err := svc.VerifyTOTP(r.Context(), uid, r.PostForm.Get(cfg.codeField), o...); err != nil {
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.VerifyTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
 			cfg.failErr(w, r, err)
 			return
 		}
@@ -108,8 +108,8 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 // VerifyRecoveryHandler consumes a single-use recovery code and replies 204 (or a 303 redirect).
 func VerifyRecoveryHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
-		if err := svc.VerifyRecoveryCode(r.Context(), uid, r.PostForm.Get(cfg.codeField), o...); err != nil {
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.VerifyRecoveryCode(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
 			cfg.failErr(w, r, err)
 			return
 		}
@@ -121,8 +121,8 @@ func VerifyRecoveryHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 // and returns them as JSON.
 func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
-		codes, err := svc.RegenerateRecoveryCodes(r.Context(), uid, o...)
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		codes, err := svc.RegenerateRecoveryCodes(r.Context(), tenant, uid)
 		if err != nil {
 			cfg.failErr(w, r, err)
 			return
@@ -134,8 +134,8 @@ func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.Han
 // DisableHandler removes the user's TOTP factor and recovery codes, replying 204 (or 303).
 func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, o []Option) {
-		if err := svc.DisableTOTP(r.Context(), uid, o...); err != nil {
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.DisableTOTP(r.Context(), tenant, uid); err != nil {
 			cfg.failErr(w, r, err)
 			return
 		}
@@ -143,9 +143,9 @@ func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	})
 }
 
-// guarded wraps the common preamble: POST-only, form parse, user resolution and tenant-option
-// derivation, then invokes fn with the resolved user and store options.
-func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, []Option)) http.HandlerFunc {
+// guarded wraps the common preamble: POST-only, form parse, user resolution and tenant
+// derivation, then invokes fn with the resolved user ID and tenant string.
+func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -165,11 +165,7 @@ func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uui
 			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
 			return
 		}
-		var o []Option
-		if tenant != "" {
-			o = []Option{WithTenant(tenant)}
-		}
-		fn(w, r, uid, o)
+		fn(w, r, uid, tenant)
 	}
 }
 

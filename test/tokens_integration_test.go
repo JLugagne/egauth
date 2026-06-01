@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/libauth"
-	"github.com/JLugagne/libauth/tokens"
-	"github.com/JLugagne/libauth/tokens/jwt"
-	"github.com/JLugagne/libauth/tokens/memory"
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,7 +28,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	cfg := jwt.Config[IntegrationCustomClaims]{
 		Store:      store,
 		SecretKey:  "integration-secret-key",
-		Issuer:     "libauth-integration",
+		Issuer:     "egauth-integration",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
 	}
@@ -55,11 +55,11 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		var extractedActor libauth.Actor
+		var extractedActor egauth.Actor
 		var extractedCustom IntegrationCustomClaims
 		var called bool
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom IntegrationCustomClaims) {
 			extractedActor = actor
 			extractedCustom = custom
 			called = true
@@ -91,7 +91,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom IntegrationCustomClaims) {
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -116,7 +116,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
 		rec := httptest.NewRecorder()
 
-		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, custom IntegrationCustomClaims) {
+		handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom IntegrationCustomClaims) {
 			w.WriteHeader(http.StatusOK)
 		})
 

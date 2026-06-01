@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/JLugagne/libauth/passwords"
+	"github.com/JLugagne/egauth/passwords"
 	"golang.org/x/crypto/argon2"
 )
 
@@ -39,6 +39,17 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 	if password == "" {
 		return "", passwords.ErrHashFailed
 	}
+	// Bound attacker-controlled input before running the (deliberately expensive) KDF, to
+	// prevent a pre-auth CPU/memory amplification DoS. See passwords.MaxPasswordLength.
+	if len(password) > passwords.MaxPasswordLength {
+		return "", passwords.ErrPasswordTooLong
+	}
+	// Honor cancellation before running the deliberately expensive KDF, so a cancelled or
+	// timed-out request cannot still cost a full Argon2id pass (memory + CPU). argon2.IDKey is
+	// not itself interruptible, so this pre-call check is the only available cancellation point.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 
 	salt := make([]byte, h.saltLen)
 	if _, err := rand.Read(salt); err != nil {
@@ -59,6 +70,13 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 
 // Compare checks a plaintext password against a PHC formatted Argon2id hash.
 func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
+	// Refuse to run the KDF on oversized candidate input (pre-auth DoS guard). A stored hash
+	// can only have come from an in-bounds password, so an oversized candidate cannot match;
+	// report it as an ordinary mismatch to avoid leaking a distinct signal.
+	if len(password) > passwords.MaxPasswordLength {
+		return passwords.ErrInvalidPassword
+	}
+
 	parts := strings.Split(hash, "$")
 	if len(parts) != 6 {
 		return passwords.ErrInvalidPassword
@@ -92,6 +110,12 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 		return passwords.ErrInvalidPassword
 	}
 	keyLen := uint32(len(decodedHash))
+
+	// Honor cancellation before the deliberately expensive KDF (same rationale as Hash): a
+	// cancelled or timed-out verification must not still cost a full Argon2id pass.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	comparisonHash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
 

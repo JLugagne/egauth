@@ -4,13 +4,14 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
-	"github.com/JLugagne/libauth"
+	"github.com/JLugagne/egauth"
 )
 
 // AuthenticatedHandlerFunc is an HTTP handler that explicitly requires an authenticated
 // actor and custom claims as parameters, ensuring business data is never hidden in the context.
-type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor libauth.Actor, customClaims C)
+type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, customClaims C)
 
 // authConfig holds the optional behavior of RequireAuth, configured via AuthOption.
 type authConfig[C any] struct {
@@ -20,6 +21,7 @@ type authConfig[C any] struct {
 	readHeader     bool
 	persistRefresh bool
 	requiredAMR    []string
+	maxAuthAge     time.Duration
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -77,11 +79,25 @@ func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
 }
 
+// WithMaxAuthAge gates the route on step-up ("sudo mode") freshness: the subject must have
+// authenticated within d, measured from the token's auth_time (OIDC) claim — NOT its issue time,
+// so a silent auto-refresh does not reset the clock. A subject whose authentication is older than
+// d (or whose token carries no auth_time) is rejected with 403 "step_up_required" and should
+// re-authenticate to mint a fresh token.
+//
+// This is the enforceable primitive for sensitive actions such as disabling MFA, deleting the
+// account, or changing security settings: wrap their routes with it (it works for any factor, so
+// it covers OAuth-only accounts that cannot re-verify a password). A non-positive d disables the
+// check. See also Claims.FreshAuth for gating outside an HTTP handler.
+func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
+	return func(a *authConfig[C]) { a.maxAuthAge = d }
+}
+
 // RequireAuth wraps an AuthenticatedHandlerFunc to enforce access-token verification.
 //
 // By default it reads a Bearer token from the Authorization header (backward-compatible).
 // Options enable reading from a cookie (WithCookieAuth) and opt-in transparent rotation
-// (WithAutoRefresh). On success it explicitly passes the extracted libauth.Actor and custom
+// (WithAutoRefresh). On success it explicitly passes the extracted egauth.Actor and custom
 // claims to the next handler.
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc {
 	cfg := authConfig[C]{readHeader: true}
@@ -95,7 +111,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 		if token != "" {
 			claims, err := verifier.VerifyAccessToken(r.Context(), token)
 			if err == nil {
-				if !cfg.amrSatisfied(claims) {
+				if !cfg.stepUpSatisfied(claims) {
 					stepUpRequired(w)
 					return
 				}
@@ -113,11 +129,11 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 		// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
 		if cfg.rotator != nil && cfg.cookies != nil {
 			if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-				var ropts []Option
+				var tenantID string
 				if cfg.tenantResolver != nil {
-					ropts = append(ropts, WithTenant(cfg.tenantResolver(r)))
+					tenantID = cfg.tenantResolver(r)
 				}
-				pair, err := cfg.rotator.Rotate(r.Context(), refreshToken, ropts...)
+				pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
 				if err != nil {
 					// Rotation failed (reuse/expired/not found): clear cookies so a
 					// poisoned family cannot keep retrying, then reject.
@@ -127,7 +143,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 				}
 				cfg.cookies.SetAccess(w, pair.AccessToken)
 				cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-				if !cfg.amrSatisfied(&pair.Claims) {
+				if !cfg.stepUpSatisfied(&pair.Claims) {
 					stepUpRequired(w)
 					return
 				}
@@ -158,11 +174,18 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 	return "", false
 }
 
-func actorFromClaims[C any](claims *Claims[C]) libauth.Actor {
-	return libauth.Actor{
+func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
+	return egauth.Actor{
 		UserID:   claims.Subject,
 		TenantID: claims.TenantID,
 	}
+}
+
+// stepUpSatisfied reports whether the claims clear BOTH step-up gates: the required AMR factors
+// (WithRequiredAMR) and the authentication-freshness window (WithMaxAuthAge). Either gate is a
+// no-op when not configured.
+func (cfg *authConfig[C]) stepUpSatisfied(claims *Claims[C]) bool {
+	return cfg.amrSatisfied(claims) && claims.FreshAuth(cfg.maxAuthAge)
 }
 
 // amrSatisfied reports whether the claims carry every required authentication-method

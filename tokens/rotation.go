@@ -35,9 +35,9 @@ func (f ClaimsProviderFunc[C]) ClaimsForUser(ctx context.Context, userID uuid.UU
 // presented (replay), the implementation MUST revoke the entire family and return
 // ErrRefreshTokenReused.
 type Rotator[C any] interface {
-	// Rotate consumes refreshToken and returns a fresh token pair in the same family.
-	// opts carry store scoping such as WithTenant for multi-tenant deployments.
-	Rotate(ctx context.Context, refreshToken string, opts ...Option) (*TokenPair[C], error)
+	// Rotate consumes refreshToken within the given tenant and returns a fresh token pair in
+	// the same family.
+	Rotate(ctx context.Context, tenantID string, refreshToken string) (*TokenPair[C], error)
 }
 
 var _ ClaimsProvider[any] = (ClaimsProviderFunc[any])(nil)

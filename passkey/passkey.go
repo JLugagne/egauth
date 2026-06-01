@@ -1,5 +1,5 @@
 // Package passkey implements WebAuthn / FIDO2 passkeys (registration and login ceremonies) on
-// top of the go-webauthn library, following libauth's conventions: a credential Store
+// top of the go-webauthn library, following egauth's conventions: a credential Store
 // (memory + pgx implementations with a shared contract), a Service that runs the ceremonies,
 // and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the
 // Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is
@@ -25,26 +25,4 @@ type Credential struct {
 	SignCount uint32
 	Data      []byte // JSON of webauthn.Credential
 	CreatedAt time.Time
-}
-
-// StoreOptions holds options for Store operations, such as multi-tenancy.
-type StoreOptions struct {
-	TenantID *string
-}
-
-// Option configures StoreOptions.
-type Option func(*StoreOptions)
-
-// WithTenant scopes a Store operation to a tenant.
-func WithTenant(id string) Option {
-	return func(o *StoreOptions) { o.TenantID = &id }
-}
-
-// ApplyOptions applies opts to a fresh StoreOptions.
-func ApplyOptions(opts []Option) StoreOptions {
-	var o StoreOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
 }

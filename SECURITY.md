@@ -19,8 +19,12 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
   and mints a new one in the same family; the access-token lifetime is always
   issuer-controlled on rotation, and the family's tenant is immutable across rotations.
-  Replaying a consumed token revokes the **entire family** (forcing re-authentication),
-  and a revocation that fails is surfaced rather than silently swallowed. To avoid logging
+  Replaying a consumed token **that is still within its validity** revokes the **entire
+  family** (forcing re-authentication), and a revocation that fails is surfaced rather than
+  silently swallowed. (Once a token has expired it can no longer be rotated and may have been
+  reaped by the `DeleteExpired` GC, so a *post-expiry* replay reports not-found instead of
+  revoking the family — the theft tripwire spans a token's validity, by which point an expired
+  token grants no access regardless.) To avoid logging
   users out on ordinary request concurrency (parallel tabs, prefetch, concurrent
   sub-resource loads racing the same cookie), a replay within `ReuseGracePeriod`
   (default 10s) of consumption is treated as benign and rejected *without* revoking the
@@ -68,6 +72,18 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
+- **Independent recovery channels (breaking the single-email takeover chain).** An account can
+  enroll a verified phone (`RequestPhoneVerification`) and/or a verified recovery email
+  (`RequestRecoveryEmail`) — both proven by a token delivered to that channel before it is trusted,
+  and a recovery email may not equal the primary address (`ErrRecoveryEmailIsPrimary`). The
+  recovery email is a contact attribute, not a login key (it is not unique, never re-keys an
+  identity, and cannot be authenticated against). `RecoveryChannels(...).Any()` is the gate
+  primitive: pair it with a freshness/step-up check (`tokens.WithMaxAuthAge`) to require an
+  independent verified channel before a sensitive factor-reset. `RequestPasswordResetViaRecovery`
+  directs the reset token to a verified recovery channel **instead of** the primary inbox, so a
+  compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
+  account, an OAuth-only account, and a known account with no recovery channel all produce the
+  same empty, no-error response.
 - **Deactivation revokes pending tokens.** Magic-link, password-reset and email-verification all
   reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
   re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its
@@ -82,9 +98,30 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   against an attacker who already has the database; the real defenses are the short TTL,
   single-use consumption and the attempt limit — and, as always, the consumer's own rate limiting
   on the verify endpoint.
-- **No internal logging.** libauth performs no logging of its own ("silent by default").
+- **No internal logging.** egauth performs no logging of its own ("silent by default").
   It never writes passwords, plaintext tokens, or hashes to stdout/stderr or any logger.
   `context.Context` is propagated so consumers can attach their own tracing.
+- **Context cancellation is observed on the expensive paths.** `context.Context` flows through
+  every operation. I/O cancellation propagates through the driver (pgx for the Postgres stores;
+  `net/http` for the HIBP breach client, which uses `http.NewRequestWithContext`). In addition,
+  the deliberately expensive in-process paths check `ctx.Err()` *before* doing the costly work, so
+  a client that has already gone away cannot keep burning resources: the Argon2id KDF
+  (`passwords/argon2` `Hash`/`Compare`) short-circuits before the hash pass, the offline breach
+  lookup fails fast, and `identity.DeleteAccount` aborts its cross-module cascade before running
+  another eraser (leaving the account live and the operation cleanly retriable). Argon2id itself is
+  not interruptible mid-hash, so the guard is a pre-call check, not a kill switch for an in-flight
+  pass; in-memory map lookups in the reference stores are not individually cancellable but complete
+  in microseconds.
+- **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
+  logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
+  secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
+  `slog`): `tokens.TokenPair` (access + refresh token), `tokens.APIKey` (the clear-text `Token`),
+  and — because the HS256 signing key is the most catastrophic secret to leak — `tokens/jwt.Config`,
+  `tokens/jwt.SigningKey` and the running `tokens/jwt.Service` (its `SecretKey` / `SigningKeys[].Secret`
+  and the resolved key bytes). Non-secret identifiers (key IDs, issuer, expiry) stay visible to aid
+  debugging. This is a safety net, **not** a licence to log these values (see below). JSON
+  marshalling is intentionally **not** redacted, since returning a freshly issued token to its
+  owner in a response body is a legitimate use.
 - **Errors do not echo secrets.** Wrapped errors carry the underlying cause
   (`%w`) or non-sensitive metadata (e.g. a JWT `alg` header), never the plaintext
   password or token bytes.
@@ -96,15 +133,22 @@ as credentials:
 
 - `tokens.APIKey.Token` — the raw API key (only `APIKey.Hash` is stored).
 - `tokens.TokenPair.AccessToken` and `tokens.TokenPair.RefreshToken`.
-- Session tokens returned by the `sessions` service.
+- Session tokens returned by the `sessions` service (bare `string` return values, **not** a
+  struct field — `sessions.Session` persists only `TokenHash`).
 - Any password passed into `Register` / `Authenticate`.
 
-These are plain `string` fields with **no redaction**. Therefore the consumer must:
+The `tokens.*` structs above redact their secret fields on `fmt`/`slog` (see the redaction note
+above), but a session token / password is a bare string with **no** such safety net, and the
+redaction is in any case only a backstop. Therefore the consumer must:
 
-- **Never log them** (no `log`, `slog`, `fmt.Printf`, request/response dumps, etc.).
-- **Never serialize them by accident.** The structs above carry no `json` tags and are
-  not marshaled by libauth, but a consumer that JSON-encodes them will emit the
+- **Never log them** (no `log`, `slog`, `fmt.Printf`, request/response dumps, etc.). The
+  redaction stops an accidental struct dump; it does not make logging a token's *value* safe.
+- **Never serialize them by accident.** The `tokens.*` structs carry no `json` tags and JSON
+  marshalling is deliberately *not* redacted, so a consumer that JSON-encodes them will emit the
   plaintext. Send a token to the client deliberately (cookie/body) and nowhere else.
+- **Never log the JWT signing key.** Load `tokens/jwt.Config.SecretKey` / `SigningKeys` from a
+  secret store; `Config`, `SigningKey` and `Service` redact it on `fmt`/`slog`, but do not
+  serialize the config or persist the key in plaintext.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
 
@@ -127,7 +171,7 @@ and general CSRF are left to the application layer):
 
 ## Account-existence disclosure (by design)
 
-Two responses intentionally reveal that an account exists; this is an accepted trade-off,
+Three responses intentionally reveal that an account exists; this is an accepted trade-off,
 not a bug:
 
 - **`ErrAccountLocked` → 429** on login: lockout is meant to be observable (PRD §105–106).
@@ -135,9 +179,17 @@ not a bug:
   requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
   `400` (note that `Register` already hashes before the uniqueness check, so the timing
   channel is already closed).
+- **`email_taken` → 409** on the authenticated change-email request
+  (`RequestEmailChangeHandler`): the caller is told up front when the requested new address
+  already belongs to another account, mirroring the registration disclosure. This is gated
+  behind authentication (a higher bar than sign-up) and gives the user a clear "pick another
+  address" response. If your threat model forbids it, drop the pre-flight `FindUserByEmail`
+  conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
+  time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
+  the interim).
 
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
-decoy hashing); the two disclosures above are the only intentional exceptions.
+decoy hashing); the three disclosures above are the only intentional exceptions.
 
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an

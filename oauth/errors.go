@@ -9,15 +9,10 @@ var (
 
 	// ErrUserInfoFailed is returned when fetching the user profile from the provider fails.
 	ErrUserInfoFailed = errors.New("oauth: fetching user info failed")
-
-	// ErrStateMismatch is returned when the state echoed back by the provider does not match
-	// the value stored in the state cookie (possible CSRF) or the cookie is absent.
-	ErrStateMismatch = errors.New("oauth: state mismatch")
-
-	// ErrMissingCode is returned when the provider redirect carries no authorization code.
-	ErrMissingCode = errors.New("oauth: missing authorization code")
-
-	// ErrEmailMissing is returned when the provider returns no email, which is required to
-	// provision or resolve an account.
-	ErrEmailMissing = errors.New("oauth: provider returned no email")
 )
+
+// Note: the callback handler signals state-mismatch, missing-code and missing-email failures
+// directly as HTTP responses (or a ?error=<code> redirect), not as returned Go errors, so it
+// exposes no sentinel for callers to errors.Is against. Previously declared ErrStateMismatch,
+// ErrMissingCode and ErrEmailMissing sentinels were never returned anywhere and were removed
+// rather than left as misleading dead exports (audit N6).

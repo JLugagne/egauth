@@ -5,7 +5,8 @@ import (
 	"embed"
 	"errors"
 
-	"github.com/JLugagne/libauth/sessions"
+	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/sessions"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -14,22 +15,11 @@ import (
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 
-// Migrate executes all the embedded SQL migrations against the provided DBQuerier.
+// Migrate applies the embedded SQL migrations against db, skipping any already recorded in the
+// schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
+// migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	entries, err := MigrationsFS.ReadDir("migrations")
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		content, err := MigrationsFS.ReadFile("migrations/" + entry.Name())
-		if err != nil {
-			return err
-		}
-		if _, err := db.Exec(ctx, string(content)); err != nil {
-			return err
-		}
-	}
-	return nil
+	return pgxmigrate.Run(ctx, db, MigrationsFS)
 }
 
 // DBQuerier is an interface that matches both *pgxpool.Pool and pgx.Tx.
@@ -49,20 +39,13 @@ func NewStore(db DBQuerier) *Store {
 	return &Store{db: db}
 }
 
-func (s *Store) getTenantID(opts []sessions.Option) string {
-	options := sessions.ApplyOptions(opts)
-	if options.TenantID == nil {
-		return ""
+// CreateSession persists a new session. If the record carries a non-empty TenantID that
+// differs from tenantID, it returns ErrTenantMismatch.
+func (s *Store) CreateSession(ctx context.Context, tenantID string, session *sessions.Session) error {
+	if session.TenantID != "" && session.TenantID != tenantID {
+		return sessions.ErrTenantMismatch
 	}
-	return *options.TenantID
-}
-
-// CreateSession persists a new session.
-func (s *Store) CreateSession(ctx context.Context, session *sessions.Session, opts ...sessions.Option) error {
-	tenantID := s.getTenantID(opts)
-	if tenantID != "" {
-		session.TenantID = tenantID
-	}
+	session.TenantID = tenantID
 
 	query := `
 		INSERT INTO sessions (id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at)
@@ -74,22 +57,15 @@ func (s *Store) CreateSession(ctx context.Context, session *sessions.Session, op
 	return err
 }
 
-// FindSessionByHash retrieves a session by its token hash.
-func (s *Store) FindSessionByHash(ctx context.Context, tokenHash string, opts ...sessions.Option) (*sessions.Session, error) {
-	options := sessions.ApplyOptions(opts)
-
+// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
+func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error) {
 	query := `
 		SELECT id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at
 		FROM sessions
-		WHERE token_hash = $1
+		WHERE token_hash = $1 AND tenant_id = $2
 	`
-	args := []any{tokenHash}
-	if options.TenantID != nil {
-		query += " AND tenant_id = $2"
-		args = append(args, *options.TenantID)
-	}
 
-	row := s.db.QueryRow(ctx, query, args...)
+	row := s.db.QueryRow(ctx, query, tokenHash, tenantID)
 
 	var sess sessions.Session
 	err := row.Scan(&sess.ID, &sess.TenantID, &sess.UserID, &sess.TokenHash, &sess.UserAgent, &sess.IP, &sess.ExpiresAt, &sess.CreatedAt)
@@ -103,10 +79,28 @@ func (s *Store) FindSessionByHash(ctx context.Context, tokenHash string, opts ..
 	return &sess, nil
 }
 
-// DeleteSession removes a session by its ID.
-func (s *Store) DeleteSession(ctx context.Context, id uuid.UUID, opts ...sessions.Option) error {
-	tenantID := s.getTenantID(opts)
+// UpdateSession updates the mutable fields of an existing session (token hash, expiry,
+// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID
+// and tenant are immutable.
+func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
+	query := `
+		UPDATE sessions
+		SET token_hash = $1, user_agent = $2, ip = $3, expires_at = $4
+		WHERE id = $5 AND tenant_id = $6 AND token_hash = $7
+	`
+	tag, err := s.db.Exec(ctx, query, session.TokenHash, session.UserAgent, session.IP, session.ExpiresAt, session.ID, tenantID, expectedTokenHash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Unknown id/tenant, or the token was already rotated away by a concurrent request.
+		return sessions.ErrSessionNotFound
+	}
+	return nil
+}
 
+// DeleteSession removes a session by its ID within the given tenant.
+func (s *Store) DeleteSession(ctx context.Context, tenantID string, id uuid.UUID) error {
 	query := `DELETE FROM sessions WHERE id = $1 AND tenant_id = $2`
 	tag, err := s.db.Exec(ctx, query, id, tenantID)
 	if err != nil {
@@ -120,11 +114,27 @@ func (s *Store) DeleteSession(ctx context.Context, id uuid.UUID, opts ...session
 	return nil
 }
 
-// DeleteSessionsByUserID removes all sessions for a user.
-func (s *Store) DeleteSessionsByUserID(ctx context.Context, userID uuid.UUID, opts ...sessions.Option) error {
-	tenantID := s.getTenantID(opts)
+// DeleteExpired purges sessions past their expiry within the given tenant, returning the number deleted.
+func (s *Store) DeleteExpired(ctx context.Context, tenantID string) (int64, error) {
+	query := `DELETE FROM sessions WHERE expires_at < now() AND tenant_id = $1`
+	tag, err := s.db.Exec(ctx, query, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
 
+// DeleteSessionsByUserID removes all sessions for a user within the given tenant.
+func (s *Store) DeleteSessionsByUserID(ctx context.Context, tenantID string, userID uuid.UUID) error {
 	query := `DELETE FROM sessions WHERE user_id = $1 AND tenant_id = $2`
 	_, err := s.db.Exec(ctx, query, userID, tenantID)
 	return err
+}
+
+// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
+// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
+// backend is unreachable and honors ctx for cancellation/deadline.
+func (s *Store) Ping(ctx context.Context) error {
+	var ok int
+	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
 }
