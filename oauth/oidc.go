@@ -40,6 +40,18 @@ const (
 	defaultJWKSCacheTTL = time.Hour
 	// maxJWKSBytes bounds the JWKS response read.
 	maxJWKSBytes = 1 << 20
+	// maxJWKSKeys caps how many keys a JWKS document may declare. A document over this cap is
+	// rejected outright (SEC-11): a hostile issuer could otherwise serve thousands of keys and
+	// amplify CPU/memory during parsing and signature verification.
+	maxJWKSKeys = 16
+	// minRSABits and maxRSABits bound an RSA modulus to a sane range (SEC-11). Smaller moduli are
+	// not securely usable; larger ones serve only to amplify verification cost.
+	minRSABits = 2048
+	maxRSABits = 8192
+	// minRSAExponent and maxRSAExponent bound the RSA public exponent (SEC-11). It must be an odd
+	// integer in [3, 2^24+1]; the conventional value is 65537.
+	minRSAExponent = 3
+	maxRSAExponent = (1 << 24) + 1
 )
 
 // OIDCConfig enables OpenID Connect id_token validation for a Provider (see WithOIDC). When set,
@@ -400,6 +412,11 @@ func parseJWKS(data []byte) (map[string]crypto.PublicKey, error) {
 	if err := json.Unmarshal(data, &set); err != nil {
 		return nil, fmt.Errorf("%w: decoding JWKS: %v", ErrIDTokenInvalid, err)
 	}
+	// Reject documents declaring more keys than maxJWKSKeys before constructing any of them, so a
+	// hostile issuer cannot force us to attempt building thousands of keys (SEC-11).
+	if len(set.Keys) > maxJWKSKeys {
+		return nil, fmt.Errorf("%w: JWKS declares %d keys, over the %d-key cap", ErrIDTokenInvalid, len(set.Keys), maxJWKSKeys)
+	}
 	out := make(map[string]crypto.PublicKey, len(set.Keys))
 	for _, k := range set.Keys {
 		if k.Use == "enc" {
@@ -425,13 +442,24 @@ func (k jwk) publicKey() (crypto.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Bound the modulus to a sane size (SEC-11): below minRSABits it is not securely usable,
+		// above maxRSABits it only serves to amplify verification cost.
+		if bits := n.BitLen(); bits < minRSABits || bits > maxRSABits {
+			return nil, fmt.Errorf("%w: RSA modulus %d bits out of range [%d, %d]", ErrIDTokenInvalid, bits, minRSABits, maxRSABits)
+		}
 		eb, err := decodeBase64URL(k.E)
 		if err != nil {
 			return nil, err
 		}
-		e := new(big.Int).SetBytes(eb).Int64()
-		if e <= 0 {
-			return nil, fmt.Errorf("%w: invalid RSA exponent", ErrIDTokenInvalid)
+		// Reject an oversized exponent before narrowing to int64 (avoiding truncation), then enforce
+		// the conventional odd-exponent range [3, 2^24+1] (SEC-11); the common value is 65537.
+		ebig := new(big.Int).SetBytes(eb)
+		if ebig.BitLen() > 25 {
+			return nil, fmt.Errorf("%w: RSA exponent too large", ErrIDTokenInvalid)
+		}
+		e := ebig.Int64()
+		if e < minRSAExponent || e > maxRSAExponent || e%2 == 0 {
+			return nil, fmt.Errorf("%w: invalid RSA exponent %d", ErrIDTokenInvalid, e)
 		}
 		return &rsa.PublicKey{N: n, E: int(e)}, nil
 	case "EC":

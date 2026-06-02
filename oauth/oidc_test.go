@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -508,4 +509,110 @@ func TestCallbackHandler_OIDCMissingIDTokenRejected(t *testing.T) {
 		WithRedirectURL(testRedirect))
 
 	assert.Equal(t, http.StatusBadGateway, rec.Code)
+}
+
+// rsaJWKEntry renders a single RSA JWK object string from an explicit modulus and exponent
+// big.Int, used to build hostile JWKS documents in the SEC-11 bound tests.
+func rsaJWKEntry(kid string, n, e *big.Int) string {
+	rn := base64.RawURLEncoding.EncodeToString(n.Bytes())
+	re := base64.RawURLEncoding.EncodeToString(e.Bytes())
+	return fmt.Sprintf(`{"kty":"RSA","kid":%q,"use":"sig","n":%q,"e":%q}`, kid, rn, re)
+}
+
+// TestParseJWKS_TooManyKeysRejected covers SEC-11 #1: a JWKS declaring more than maxJWKSKeys
+// keys is rejected outright before any per-key construction is attempted.
+func TestParseJWKS_TooManyKeysRejected(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	n := rsaKey.N
+	e := big.NewInt(int64(rsaKey.E))
+
+	entries := make([]string, 0, maxJWKSKeys+1)
+	for i := 0; i < maxJWKSKeys+1; i++ {
+		entries = append(entries, rsaJWKEntry(fmt.Sprintf("k%d", i), n, e))
+	}
+	doc := fmt.Sprintf(`{"keys":[%s]}`, strings.Join(entries, ","))
+
+	_, err = parseJWKS([]byte(doc))
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+}
+
+// TestParseJWKS_KeyCountAtCapAccepted is a positive control: exactly maxJWKSKeys valid keys parse.
+func TestParseJWKS_KeyCountAtCapAccepted(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	n := rsaKey.N
+	e := big.NewInt(int64(rsaKey.E))
+
+	entries := make([]string, 0, maxJWKSKeys)
+	for i := 0; i < maxJWKSKeys; i++ {
+		entries = append(entries, rsaJWKEntry(fmt.Sprintf("k%d", i), n, e))
+	}
+	doc := fmt.Sprintf(`{"keys":[%s]}`, strings.Join(entries, ","))
+
+	keys, err := parseJWKS([]byte(doc))
+	require.NoError(t, err)
+	assert.Len(t, keys, maxJWKSKeys)
+}
+
+// TestParseJWKS_RSAModulusTooSmallRejected covers SEC-11 #2: a sub-2048-bit RSA modulus is the
+// only key, so the whole document yields no usable signing keys.
+func TestParseJWKS_RSAModulusTooSmallRejected(t *testing.T) {
+	small, err := rsa.GenerateKey(rand.Reader, 1024)
+	require.NoError(t, err)
+	doc := fmt.Sprintf(`{"keys":[%s]}`, rsaJWKEntry("small", small.N, big.NewInt(int64(small.E))))
+
+	_, err = parseJWKS([]byte(doc))
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+}
+
+// TestParseJWKS_RSAModulusTooLargeRejected covers SEC-11 #2: an absurd >8192-bit modulus is skipped.
+func TestParseJWKS_RSAModulusTooLargeRejected(t *testing.T) {
+	// Synthesise a 9000-bit modulus without paying for key generation.
+	n := new(big.Int).Lsh(big.NewInt(1), 8999)
+	n.SetBit(n, 0, 1) // make it odd, harmless cosmetic
+	doc := fmt.Sprintf(`{"keys":[%s]}`, rsaJWKEntry("huge", n, big.NewInt(65537)))
+
+	_, err := parseJWKS([]byte(doc))
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+}
+
+// TestParseJWKS_BadExponentRejected covers SEC-11 #2: e=1, an even e, and an absurdly large e are
+// each rejected, so a document carrying only such a key has no usable signing keys.
+func TestParseJWKS_BadExponentRejected(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	n := rsaKey.N
+
+	cases := map[string]*big.Int{
+		"e=1":      big.NewInt(1),
+		"e=even":   big.NewInt(4),
+		"e=toobig": new(big.Int).Lsh(big.NewInt(1), 40),
+	}
+	for name, e := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := fmt.Sprintf(`{"keys":[%s]}`, rsaJWKEntry("bad", n, e))
+			_, err := parseJWKS([]byte(doc))
+			require.ErrorIs(t, err, ErrIDTokenInvalid)
+		})
+	}
+}
+
+// TestParseJWKS_BadKeySkippedAmongGood confirms reject-vs-skip semantics: an oversized key alongside
+// a valid one is silently dropped while the good key survives.
+func TestParseJWKS_BadKeySkippedAmongGood(t *testing.T) {
+	good, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	huge := new(big.Int).Lsh(big.NewInt(1), 8999)
+	doc := fmt.Sprintf(`{"keys":[%s,%s]}`,
+		rsaJWKEntry("good", good.N, big.NewInt(int64(good.E))),
+		rsaJWKEntry("huge", huge, big.NewInt(65537)),
+	)
+
+	keys, err := parseJWKS([]byte(doc))
+	require.NoError(t, err)
+	assert.Len(t, keys, 1)
+	assert.IsType(t, &rsa.PublicKey{}, keys["good"])
+	_, ok := keys["huge"]
+	assert.False(t, ok, "oversized key must be skipped")
 }
