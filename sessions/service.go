@@ -15,12 +15,10 @@ import (
 type Service interface {
 	CreateSession(ctx context.Context, tenantID string, userID uuid.UUID, userAgent string, ip string, duration time.Duration) (*Session, string, error)
 	ValidateSession(ctx context.Context, tenantID string, token string) (*Session, error)
-
 	// Touch slides a session's expiry to now+duration without changing its token, returning the
 	// updated session. It is the idle-timeout primitive: call it on activity to keep an active
 	// session alive. An unknown or already-expired session yields ErrSessionNotFound.
 	Touch(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, error)
-
 	// Rotate issues a fresh token for the SAME logical session (same session ID and metadata),
 	// invalidating the old token, and resets the lifetime to now+duration. It returns the updated
 	// session and the new plaintext token. Call it after any privilege change — login over an
@@ -28,13 +26,18 @@ type Service interface {
 	// an attacker may have fixed stops working the moment the victim authenticates. An unknown or
 	// already-expired session yields ErrSessionNotFound.
 	Rotate(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, string, error)
-
 	RevokeSession(ctx context.Context, tenantID string, token string) error
+	// RevokeAllForUser deletes every session belonging to userID within tenantID — the
+	// "log out everywhere" primitive. Call it after a password reset or account compromise to
+	// kill an attacker's other live sessions, not just the current token. It is idempotent: a
+	// user with no sessions yields no error.
+	RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 type service struct {
-	store Store
-	now   func() time.Time
+	store       Store
+	now         func() time.Time
+	maxLifetime time.Duration
 }
 
 // NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
@@ -106,7 +109,15 @@ func (s *service) ValidateSession(ctx context.Context, tenantID string, token st
 		return nil, err
 	}
 
-	if s.now().After(session.ExpiresAt) {
+	now := s.now()
+	if now.After(session.ExpiresAt) {
+		return nil, ErrSessionNotFound
+	}
+
+	// Absolute lifetime cap: once a session is older than maxLifetime it is rejected even if it
+	// has been kept warm within the idle window. Returns the same opaque ErrSessionNotFound as an
+	// ordinary expiry so a caller cannot distinguish idle expiry from absolute-cap expiry.
+	if deadline, ok := s.absoluteDeadline(session); ok && now.After(deadline) {
 		return nil, ErrSessionNotFound
 	}
 
@@ -120,7 +131,8 @@ func (s *service) Touch(ctx context.Context, tenantID string, token string, dura
 		return nil, err
 	}
 	currentHash := session.TokenHash // unchanged by Touch; the compare-and-set key
-	session.ExpiresAt = s.now().Add(duration)
+	// Clamp the slide so it can never push ExpiresAt past the absolute deadline (SEC-08).
+	session.ExpiresAt = s.clampExpiry(session, s.now().Add(duration))
 	if err := s.store.UpdateSession(ctx, tenantID, session, currentHash); err != nil {
 		return nil, err
 	}
@@ -144,7 +156,8 @@ func (s *service) Rotate(ctx context.Context, tenantID string, token string, dur
 	// rather than receive a token that would never validate.
 	oldHash := session.TokenHash
 	session.TokenHash = s.hashToken(newToken)
-	session.ExpiresAt = s.now().Add(duration)
+	// Clamp the reset lifetime so it can never push ExpiresAt past the absolute deadline (SEC-08).
+	session.ExpiresAt = s.clampExpiry(session, s.now().Add(duration))
 	if err := s.store.UpdateSession(ctx, tenantID, session, oldHash); err != nil {
 		return nil, "", err
 	}
@@ -166,4 +179,40 @@ func (s *service) hashToken(token string) string {
 	h := sha256.New()
 	h.Write([]byte(token))
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// WithMaxLifetime sets an absolute cap on a session's lifetime, measured from its CreatedAt.
+// Once now is past CreatedAt+d the session stops validating and can no longer be touched or
+// rotated, regardless of how recently it was active — an idle-timeout slide can never keep a
+// stolen-but-kept-warm token alive indefinitely. Touch and Rotate additionally clamp the new
+// ExpiresAt so it never slides past the absolute deadline. The zero value disables the cap
+// (idle timeout only), preserving the previous behaviour.
+func WithMaxLifetime(d time.Duration) ServiceOption {
+	return func(s *service) { s.maxLifetime = d }
+}
+
+// absoluteDeadline returns the absolute expiry deadline (CreatedAt+maxLifetime) for a session
+// and whether an absolute cap is configured. When maxLifetime is zero the cap is disabled and
+// ok is false.
+func (s *service) absoluteDeadline(session *Session) (time.Time, bool) {
+	if s.maxLifetime <= 0 {
+		return time.Time{}, false
+	}
+	return session.CreatedAt.Add(s.maxLifetime), true
+}
+
+// clampExpiry returns the effective expiry for a session whose lifetime is being extended to
+// candidate. When an absolute cap is configured it is min(candidate, CreatedAt+maxLifetime), so
+// a slide can never push ExpiresAt past the absolute deadline. With no cap it returns candidate.
+func (s *service) clampExpiry(session *Session, candidate time.Time) time.Time {
+	if deadline, ok := s.absoluteDeadline(session); ok && candidate.After(deadline) {
+		return deadline
+	}
+	return candidate
+}
+
+// RevokeAllForUser deletes every session belonging to userID within tenantID by forwarding to
+// the store's DeleteSessionsByUserID. It is the "log out everywhere" primitive.
+func (s *service) RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	return s.store.DeleteSessionsByUserID(ctx, tenantID, userID)
 }

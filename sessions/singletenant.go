@@ -55,3 +55,8 @@ func (s *SingleTenant) Rotate(ctx context.Context, token string, duration time.D
 func (s *SingleTenant) RevokeSession(ctx context.Context, token string) error {
 	return s.svc.RevokeSession(ctx, "", token)
 }
+
+// RevokeAllForUser calls Service.RevokeAllForUser on the empty tenant.
+func (s *SingleTenant) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
+	return s.svc.RevokeAllForUser(ctx, "", userID)
+}
