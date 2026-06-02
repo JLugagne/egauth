@@ -26,6 +26,15 @@ type Config struct {
 	// RPOrigins is the list of allowed origins (scheme + host[/+port]) the ceremony responses
 	// must come from, e.g. ["https://example.com"].
 	RPOrigins []string
+	// UserVerification controls whether the authenticator must verify the user (PIN, biometric,
+	// etc.) during registration and login — i.e. whether the User Verified (UV) flag is enforced.
+	// The zero value behaves like protocol.VerificationPreferred (UV is requested but not
+	// mandatory), preserving backward compatibility. Set it to protocol.VerificationRequired to
+	// reject any assertion where the UV flag is unset — required for passwordless and step-up use
+	// cases. This requirement is propagated into the ceremony options and the SessionData, so
+	// go-webauthn enforces the UV bit at FinishRegistration, FinishLogin and
+	// FinishDiscoverableLogin.
+	UserVerification protocol.UserVerificationRequirement
 }
 
 // Service runs the WebAuthn registration and login ceremonies over a credential Store.
@@ -45,6 +54,13 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.RPOrigins,
+		// AuthenticatorSelection.UserVerification drives the UV requirement that go-webauthn
+		// copies into the registration/login ceremony options and the SessionData. At Finish,
+		// shouldVerifyUser is derived from SessionData.UserVerification == VerificationRequired,
+		// so wiring it here enforces the UV flag across register, login and discoverable login.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{
+			UserVerification: cfg.UserVerification,
+		},
 		Timeouts: webauthn.TimeoutsConfig{
 			Login:        webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
 			Registration: webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},

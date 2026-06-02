@@ -6,8 +6,8 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -148,8 +148,15 @@ func (a *softAuthenticator) assertionAtCount(t *testing.T, challenge string, use
 
 func (a *softAuthenticator) assertion(t *testing.T, challenge string, userHandle []byte, count uint32) *http.Request {
 	t.Helper()
+	return a.assertionWithFlags(t, challenge, userHandle, count, flagUP|flagUV)
+}
+
+// assertionWithFlags is like assertion but lets the caller control the authenticator-data flag
+// bits (e.g. omit flagUV to forge an assertion where the user was not verified).
+func (a *softAuthenticator) assertionWithFlags(t *testing.T, challenge string, userHandle []byte, count uint32, flags byte) *http.Request {
+	t.Helper()
 	a.signCount = count
-	authData := a.authData(t, flagUP|flagUV, false)
+	authData := a.authData(t, flags, false)
 	cd := clientDataJSON(t, "webauthn.get", challenge, a.origin)
 	cdHash := sha256.Sum256(cd)
 	signed := append(append([]byte{}, authData...), cdHash[:]...)
