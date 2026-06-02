@@ -17,3 +17,4 @@ Welcome to the `egauth` Developer Manual. `egauth` is a completely modular, comp
 - **MFA & Passkeys**: Implementing Multi-Factor Authentication via TOTP and WebAuthn (biometrics/hardware keys).
 - **Tenancy**: Data isolation across all operations.
 - **Delivery & Events**: Webhooks and callbacks for sending OTPs, emails, and auditing security events.
+- **Security Hardening**: The checklist of opt-in controls — cost ceilings, absolute timeouts, UV enforcement, SSRF defence, and rate limiting — to set before production.

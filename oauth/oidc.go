@@ -40,6 +40,18 @@ const (
 	defaultJWKSCacheTTL = time.Hour
 	// maxJWKSBytes bounds the JWKS response read.
 	maxJWKSBytes = 1 << 20
+	// maxJWKSKeys caps how many keys a JWKS document may declare. A document over this cap is
+	// rejected outright (SEC-11): a hostile issuer could otherwise serve thousands of keys and
+	// amplify CPU/memory during parsing and signature verification.
+	maxJWKSKeys = 16
+	// minRSABits and maxRSABits bound an RSA modulus to a sane range (SEC-11). Smaller moduli are
+	// not securely usable; larger ones serve only to amplify verification cost.
+	minRSABits = 2048
+	maxRSABits = 8192
+	// minRSAExponent and maxRSAExponent bound the RSA public exponent (SEC-11). It must be an odd
+	// integer in [3, 2^24+1]; the conventional value is 65537.
+	minRSAExponent = 3
+	maxRSAExponent = (1 << 24) + 1
 )
 
 // OIDCConfig enables OpenID Connect id_token validation for a Provider (see WithOIDC). When set,
@@ -51,8 +63,12 @@ const (
 type OIDCConfig struct {
 	// Issuer is the expected "iss" claim. OIDC mandates an exact string comparison. Required.
 	Issuer string
-	// JWKSURL is the issuer's JSON Web Key Set endpoint, used to fetch the public keys that
-	// verify the id_token signature. Required.
+	// JWKSURL is an OPTIONAL override of the issuer's JSON Web Key Set endpoint. Leave it empty
+	// to let the verifier discover the authoritative jwks_uri from the issuer's OIDC discovery
+	// document (<issuer>/.well-known/openid-configuration) — this binds the verification keys to
+	// the issuer and prevents a trusted issuer from being paired with an attacker-controlled key
+	// set. When set, it is only accepted if its host equals the issuer host (defence in depth);
+	// any other host is rejected.
 	JWKSURL string
 	// Audience is the expected "aud" claim. Defaults to the Provider's clientID when empty.
 	Audience string
@@ -64,8 +80,15 @@ type OIDCConfig struct {
 	// ClaimsMapper maps the validated id_token claims to a UserInfo. Defaults to the standard
 	// OIDC claims (sub → ProviderID, email, email_verified, name).
 	ClaimsMapper func(claims map[string]any) (*UserInfo, error)
-	// HTTPClient fetches the JWKS. Defaults to a client with a 10s timeout.
+	// HTTPClient fetches the discovery document and the JWKS. Defaults to a client with a 10s
+	// timeout. On the untrusted/dynamic path callers must inject oauth.SafeHTTPClient().
 	HTTPClient *http.Client
+	// AllowInsecureURLs opts INTO accepting non-https Issuer / JWKS / discovery URLs. It exists
+	// only for local development against an http loopback IdP; it is secure-by-default (false) and
+	// must never be set in production. When true the https requirement is skipped and, if no
+	// HTTPClient is supplied, a plain http.Client is used (the SSRF-safe client blocks loopback at
+	// dial time, so it cannot reach a dev IdP).
+	AllowInsecureURLs bool
 }
 
 // oidcVerifier validates id_tokens for a configured issuer.
@@ -85,8 +108,23 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 	if strings.TrimSpace(cfg.Issuer) == "" {
 		return nil, errors.New("OIDCConfig.Issuer is required")
 	}
-	if strings.TrimSpace(cfg.JWKSURL) == "" {
-		return nil, errors.New("OIDCConfig.JWKSURL is required")
+	// SEC-06: the issuer must be https by default. The dev-only AllowInsecureURLs opt-in relaxes
+	// this for a local http loopback IdP.
+	if err := validateOIDCEndpointURL(cfg.Issuer, cfg.AllowInsecureURLs); err != nil {
+		return nil, fmt.Errorf("invalid issuer: %w", err)
+	}
+	// SEC-07: JWKSURL is now an optional override of the discovered jwks_uri. When supplied it is
+	// accepted only if it is a valid endpoint URL AND its host matches the issuer host, so a
+	// trusted issuer can never be bound to attacker-controlled keys; otherwise the jwks_uri is
+	// discovered from the issuer's openid-configuration.
+	jwksOverride := strings.TrimSpace(cfg.JWKSURL)
+	if jwksOverride != "" {
+		if err := validateOIDCEndpointURL(jwksOverride, cfg.AllowInsecureURLs); err != nil {
+			return nil, fmt.Errorf("invalid JWKSURL: %w", err)
+		}
+		if !sameHost(jwksOverride, cfg.Issuer) {
+			return nil, fmt.Errorf("%w: JWKSURL host does not match issuer host", ErrJWKSHostMismatch)
+		}
 	}
 	audience := cfg.Audience
 	if audience == "" {
@@ -109,6 +147,9 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 	}
 	client := cfg.HTTPClient
 	if client == nil {
+		// In the dev/insecure path the SSRF-safe client (used on the untrusted dynamic path)
+		// would block the loopback IdP at dial time, so fall back to a plain client. Production
+		// callers on the dynamic path inject oauth.SafeHTTPClient() explicitly.
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
 	return &oidcVerifier{
@@ -117,7 +158,14 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 		allowedAlgs: algs,
 		leeway:      leeway,
 		claimsMap:   mapper,
-		jwks:        &jwksCache{url: cfg.JWKSURL, client: client, ttl: defaultJWKSCacheTTL, now: time.Now},
+		jwks: &jwksCache{
+			url:           jwksOverride,
+			issuer:        cfg.Issuer,
+			allowInsecure: cfg.AllowInsecureURLs,
+			client:        client,
+			ttl:           defaultJWKSCacheTTL,
+			now:           time.Now,
+		},
 	}, nil
 }
 
@@ -125,6 +173,12 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 // for this login attempt; it is mandatory (an empty expected nonce is itself a failure) so a
 // replayed id_token bound to a different attempt is rejected.
 func (v *oidcVerifier) verify(ctx context.Context, rawIDToken, expectedNonce string) (*UserInfo, error) {
+	// Resolve the JWKS endpoint up front (running OIDC discovery on first use) so a host-binding
+	// or discovery failure surfaces with its own sentinel rather than being swallowed by jwt's
+	// non-unwrappable keyfunc error wrapper.
+	if _, err := v.jwks.resolveURL(ctx); err != nil {
+		return nil, err
+	}
 	keyFunc := func(t *jwt.Token) (any, error) {
 		kid, _ := t.Header["kid"].(string)
 		return v.jwks.publicKey(ctx, kid)
@@ -219,11 +273,19 @@ func defaultOIDCClaimsMapper(claims map[string]any) (*UserInfo, error) {
 
 // jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
 // cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
+// jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
+// cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
+//
+// The JWKS endpoint is bound to the issuer: when url is empty it is resolved once, lazily, via
+// OIDC discovery (<issuer>/.well-known/openid-configuration) and the resolved jwks_uri must
+// belong to the issuer host. An explicitly-provided url is treated as a pre-validated override.
 type jwksCache struct {
-	url    string
-	client *http.Client
-	ttl    time.Duration
-	now    func() time.Time
+	url           string // resolved (or override) jwks_uri; empty until discovery runs
+	issuer        string // configured issuer, used to derive and bind the discovery document
+	allowInsecure bool   // dev-only: permit non-https discovery/JWKS URLs
+	client        *http.Client
+	ttl           time.Duration
+	now           func() time.Time
 
 	mu   sync.RWMutex
 	keys map[string]crypto.PublicKey
@@ -257,7 +319,11 @@ func (c *jwksCache) cached(kid string) (crypto.PublicKey, bool) {
 }
 
 func (c *jwksCache) refresh(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.url, nil)
+	jwksURL, err := c.resolveURL(ctx)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, jwksURL, nil)
 	if err != nil {
 		return fmt.Errorf("%w: building JWKS request: %v", ErrIDTokenInvalid, err)
 	}
@@ -283,6 +349,28 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	c.exp = c.now().Add(c.ttl)
 	c.mu.Unlock()
 	return nil
+}
+
+// resolveURL returns the JWKS endpoint, performing OIDC discovery once and caching the result
+// when no explicit url override was supplied. Discovery fetches the issuer's
+// .well-known/openid-configuration over the configured client, verifies the document's own
+// "issuer" matches the configured issuer exactly (per OIDC discovery), and binds the resolved
+// jwks_uri to the issuer host so a trusted issuer can never be paired with foreign keys.
+func (c *jwksCache) resolveURL(ctx context.Context) (string, error) {
+	c.mu.RLock()
+	cached := c.url
+	c.mu.RUnlock()
+	if cached != "" {
+		return cached, nil
+	}
+	jwksURL, err := discoverJWKSURL(ctx, c.client, c.issuer, c.allowInsecure)
+	if err != nil {
+		return "", err
+	}
+	c.mu.Lock()
+	c.url = jwksURL
+	c.mu.Unlock()
+	return jwksURL, nil
 }
 
 // lookupKey resolves kid in keys. An empty kid is accepted only when the set holds exactly one
@@ -324,6 +412,11 @@ func parseJWKS(data []byte) (map[string]crypto.PublicKey, error) {
 	if err := json.Unmarshal(data, &set); err != nil {
 		return nil, fmt.Errorf("%w: decoding JWKS: %v", ErrIDTokenInvalid, err)
 	}
+	// Reject documents declaring more keys than maxJWKSKeys before constructing any of them, so a
+	// hostile issuer cannot force us to attempt building thousands of keys (SEC-11).
+	if len(set.Keys) > maxJWKSKeys {
+		return nil, fmt.Errorf("%w: JWKS declares %d keys, over the %d-key cap", ErrIDTokenInvalid, len(set.Keys), maxJWKSKeys)
+	}
 	out := make(map[string]crypto.PublicKey, len(set.Keys))
 	for _, k := range set.Keys {
 		if k.Use == "enc" {
@@ -349,13 +442,24 @@ func (k jwk) publicKey() (crypto.PublicKey, error) {
 		if err != nil {
 			return nil, err
 		}
+		// Bound the modulus to a sane size (SEC-11): below minRSABits it is not securely usable,
+		// above maxRSABits it only serves to amplify verification cost.
+		if bits := n.BitLen(); bits < minRSABits || bits > maxRSABits {
+			return nil, fmt.Errorf("%w: RSA modulus %d bits out of range [%d, %d]", ErrIDTokenInvalid, bits, minRSABits, maxRSABits)
+		}
 		eb, err := decodeBase64URL(k.E)
 		if err != nil {
 			return nil, err
 		}
-		e := new(big.Int).SetBytes(eb).Int64()
-		if e <= 0 {
-			return nil, fmt.Errorf("%w: invalid RSA exponent", ErrIDTokenInvalid)
+		// Reject an oversized exponent before narrowing to int64 (avoiding truncation), then enforce
+		// the conventional odd-exponent range [3, 2^24+1] (SEC-11); the common value is 65537.
+		ebig := new(big.Int).SetBytes(eb)
+		if ebig.BitLen() > 25 {
+			return nil, fmt.Errorf("%w: RSA exponent too large", ErrIDTokenInvalid)
+		}
+		e := ebig.Int64()
+		if e < minRSAExponent || e > maxRSAExponent || e%2 == 0 {
+			return nil, fmt.Errorf("%w: invalid RSA exponent %d", ErrIDTokenInvalid, e)
 		}
 		return &rsa.PublicKey{N: n, E: int(e)}, nil
 	case "EC":
@@ -425,3 +529,10 @@ func decodeBigInt(s string) (*big.Int, error) {
 	}
 	return new(big.Int).SetBytes(b), nil
 }
+
+// ErrJWKSHostMismatch is returned when an OIDC JWKS source does not belong to the issuer:
+// either an explicitly-supplied JWKSURL whose host differs from the issuer host, or a
+// discovery document whose jwks_uri host (or its own "issuer" field) does not match the
+// configured issuer. Binding the keys to the issuer closes the trusted-issuer / attacker-keys
+// confused-deputy class of attack.
+var ErrJWKSHostMismatch = errors.New("oauth: JWKS source does not match issuer")

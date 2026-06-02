@@ -98,3 +98,66 @@ func TestArgon2Hasher_HonorsContextCancellation(t *testing.T) {
 	err = hasher.Compare(ctx, valid, "TestPassword123!")
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+// TestArgon2Hasher_MalformedParamsDoNotPanic verifies that a stored PHC hash carrying
+// out-of-range Argon2id parameters is rejected as an ordinary mismatch
+// (passwords.ErrInvalidPassword) instead of crashing the process.
+//
+// golang.org/x/crypto v0.52.0 argon2.deriveKey panics on time<1
+// ("argon2: number of rounds too small") and threads<1 ("argon2: parallelism degree
+// too low"), and a keyLen==0 (empty final hash segment) triggers a nil-pointer panic
+// inside extractKey/blake2bHash (blake2b.New(0,nil) returns a nil hash whose Write is
+// then called). A memory below the per-thread minimum (8*threads KiB) is silently bumped
+// by deriveKey, so the stored value cannot match what produced the hash — a corrupt row.
+// All of these are reachable via a consumer-populated Identity.PasswordHash.
+//
+// Each valid-looking case below uses well-formed base64 salt/hash segments so the ONLY
+// defect is the parameter under test (proving it is the bound check firing, not an
+// earlier parse error). The empty-hash case legitimately has an empty segment.
+func TestArgon2Hasher_MalformedParamsDoNotPanic(t *testing.T) {
+	ctx := context.Background()
+	hasher := argon2hasher.NewHasher()
+
+	const (
+		validSalt = "AAECAwQFBgcICQoLDA0ODw"                      // 16 bytes, RawStdEncoding
+		validHash = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8" // 32 bytes, RawStdEncoding
+	)
+
+	cases := []struct {
+		name string
+		hash string
+	}{
+		{
+			name: "zero time would panic in deriveKey",
+			hash: "$argon2id$v=19$m=65536,t=0,p=4$" + validSalt + "$" + validHash,
+		},
+		{
+			name: "zero threads would panic in deriveKey",
+			hash: "$argon2id$v=19$m=65536,t=1,p=0$" + validSalt + "$" + validHash,
+		},
+		{
+			name: "empty final hash segment (keyLen==0) would panic in extractKey",
+			hash: "$argon2id$v=19$m=65536,t=1,p=4$" + validSalt + "$",
+		},
+		{
+			name: "memory below per-thread minimum is a corrupt hash",
+			hash: "$argon2id$v=19$m=16,t=1,p=4$" + validSalt + "$" + validHash,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NotPanics(t, func() {
+				err := hasher.Compare(ctx, tc.hash, "password")
+				assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
+			})
+		})
+	}
+
+	t.Run("well-formed hash from Hash still verifies", func(t *testing.T) {
+		password := "TestPassword123!"
+		good, err := hasher.Hash(ctx, password)
+		require.NoError(t, err)
+		require.NoError(t, hasher.Compare(ctx, good, password))
+	})
+}

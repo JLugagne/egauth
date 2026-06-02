@@ -84,7 +84,7 @@ func stubProviderServer(t *testing.T, body *string) (*Provider, *httptest.Server
 		return &UserInfo{ProviderID: u.Sub, Email: u.Email, EmailVerified: u.EmailVerified, Name: u.Name}, nil
 	}
 	p := New("test", "cid", "csecret", srv.URL+"/auth", srv.URL+"/token",
-		[]string{"email"}, fetch, WithHTTPClient(srv.Client()))
+		[]string{"email"}, fetch, WithHTTPClient(srv.Client()), WithInsecureURLs())
 	return p, srv
 }
 

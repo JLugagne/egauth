@@ -39,16 +39,19 @@ type UserInfo struct {
 type FetchUserFunc func(ctx context.Context, client *http.Client, accessToken string) (*UserInfo, error)
 
 // Provider is a configured OAuth2 authorization-code provider.
+// Provider is a configured OAuth2 authorization-code provider.
 type Provider struct {
-	name         string
-	clientID     string
-	clientSecret string
-	authURL      string
-	tokenURL     string
-	scopes       []string
-	httpClient   *http.Client
-	fetchUser    FetchUserFunc
-	oidc         *oidcVerifier // non-nil when OIDC id_token validation is enabled (WithOIDC)
+	name              string
+	clientID          string
+	clientSecret      string
+	authURL           string
+	tokenURL          string
+	scopes            []string
+	httpClient        *http.Client
+	fetchUser         FetchUserFunc
+	oidc              *oidcVerifier // non-nil when OIDC id_token validation is enabled (WithOIDC)
+	allowInsecureURLs bool          // dev-only: permit non-https auth/token URLs (WithInsecureURLs)
+	configErr         error         // deferred construction error (e.g. a non-https endpoint URL)
 }
 
 // ProviderOption customizes a Provider at construction.
@@ -100,6 +103,16 @@ func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string
 	}
 	for _, o := range opts {
 		o(p)
+	}
+	// SEC-06: the authorization and token endpoints must be https by default. The dev-only
+	// WithInsecureURLs opt-in relaxes this. The check runs after options so the flag is honoured.
+	// New cannot return an error (it is the package's fundamental constructor), so an invalid
+	// endpoint is recorded as a deferred configErr surfaced eagerly by AuthCodeURL/Exchange.
+	for _, f := range []string{p.authURL, p.tokenURL} {
+		if err := validateOIDCEndpointURL(f, p.allowInsecureURLs); err != nil {
+			p.configErr = fmt.Errorf("oauth: invalid provider endpoint URL: %w", err)
+			break
+		}
 	}
 	return p
 }
@@ -181,6 +194,9 @@ func WithExpectedNonce(nonce string) ExchangeOption {
 // expected nonce is supplied with WithExpectedNonce.
 func (p *Provider) Exchange(ctx context.Context, code, redirectURI, codeVerifier string, opts ...ExchangeOption) (*UserInfo, error) {
 	var params exchangeParams
+	if p.configErr != nil {
+		return nil, p.configErr
+	}
 	for _, opt := range opts {
 		opt(&params)
 	}
@@ -256,4 +272,14 @@ func getJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, ds
 		return fmt.Errorf("%w: %v", ErrUserInfoFailed, err)
 	}
 	return nil
+}
+
+// WithInsecureURLs opts INTO accepting non-https provider URLs (auth, token, and — for an
+// OIDC-enabled provider — the issuer / JWKS / discovery URLs). It exists ONLY for local
+// development against an http loopback IdP and must never be set in production: by default the
+// provider rejects non-https endpoints (SEC-06). It is the URL counterpart of the loud,
+// secure-by-default WithInsecureCookies. When set, an OIDC-enabled provider also needs the same
+// opt-in on its OIDCConfig (AllowInsecureURLs).
+func WithInsecureURLs() ProviderOption {
+	return func(p *Provider) { p.allowInsecureURLs = true }
 }
