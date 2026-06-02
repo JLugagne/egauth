@@ -59,13 +59,13 @@ err := identityService.DeleteAccount(ctx, "tenant-123", authUser.ID)
 
 ## Password Resets
 
-The Identity module handles generating secure password reset tokens. You must implement the `identity.Mailer` interface to actually deliver the email.
+The Identity module handles generating secure password reset tokens. `identity.Mailer` is a struct of delivery callbacks (one per flow, e.g. `PasswordReset`) that you supply to actually deliver the email — egauth never sends mail itself. Programmatic callers can skip the Mailer entirely and use the token returned directly by `RequestPasswordReset`.
 
 ```go
 // 1. Generate the token (Decoy enabled: returns no error if user doesn't exist)
 token, _, err := identityService.RequestPasswordReset(ctx, "tenant-123", "bob@example.com")
 
-// 2. In your Mailer implementation, send the reset link:
+// 2. In your Mailer.PasswordReset callback, send the reset link:
 // https://yourapp.com/reset?token=<token>
 
 // 3. Complete the reset

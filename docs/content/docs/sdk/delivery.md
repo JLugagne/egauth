@@ -5,42 +5,65 @@ weight: 8
 
 # Delivery & External Services
 
-Because `egauth` is designed to run without taking over your infrastructure, it does not hardcode connections to AWS SES, SendGrid, Twilio, or Redis. Instead, it exposes interfaces for you to implement.
+Because `egauth` is designed to run without taking over your infrastructure, it does not hardcode connections to AWS SES, SendGrid, Twilio, or Redis. Instead, it exposes seams for you to implement.
 
-## Mailer Interface
+## The Mailer
 
-When a user requests a magic link or a password reset, `egauth` delegates the actual delivery to you.
+When a user requests a magic link or a password reset, `egauth` mints the token but delegates the actual delivery to you. `egauth` never sends email and ships no templating.
+
+The `identity.Mailer` is not an interface — it is a struct of callbacks. You wire up only the flows you use; a `nil` callback means the corresponding flow simply skips delivery. Each callback receives a details struct (e.g. `identity.PasswordResetMail`) carrying the `User` and the plaintext `Token`.
 
 ```go
-type MyMailer struct {}
+import (
+	"context"
+	"fmt"
 
-func (m *MyMailer) SendPasswordReset(ctx context.Context, email, token string) error {
-	// Construct the URL
-	url := fmt.Sprintf("https://myapp.com/reset?token=%s", token)
-	
-	// Example: Call SendGrid API
-	// return sendgridClient.Send(email, "Reset your password", url)
-	return nil
+	"github.com/JLugagne/egauth/identity"
+)
+
+mailer := identity.Mailer{
+	PasswordReset: func(ctx context.Context, mail identity.PasswordResetMail) error {
+		// Construct the URL from the plaintext token (treat it as a secret — never log it).
+		url := fmt.Sprintf("https://myapp.com/reset?token=%s", mail.Token)
+
+		// Example: Call SendGrid API, delivering to mail.User.Email
+		// return sendgridClient.Send(mail.User.Email, "Reset your password", url)
+		return nil
+	},
+	MagicLink: func(ctx context.Context, mail identity.MagicLinkMail) error {
+		url := fmt.Sprintf("https://myapp.com/login?token=%s", mail.Token)
+		// return sendgridClient.Send(mail.User.Email, "Your login link", url)
+		return nil
+	},
 }
 ```
 
-You then inject this mailer into the handlers or services.
+The other available callbacks are `EmailVerification`, `EmailChange`, and `RecoveryEmailVerification`, each receiving its own `*Mail` details struct.
+
+### Wiring the Mailer
+
+The `Mailer` is not injected into `identity.NewService`. Instead, you pass it to the request-handler factories in the `identity` package, which mint the token and hand it to the matching callback:
+
+```go
+resetHandler := identity.RequestPasswordResetHandler(svc, mailer)
+mux.Handle("/auth/password-reset/request", resetHandler)
+```
 
 ## Rate Limiting
 
-To prevent brute force attacks, you should rate limit identity endpoints. `egauth` exposes a `ratelimit.Limiter` interface.
-
-You can implement this interface using Redis, or use a lightweight in-memory Token Bucket for smaller deployments.
+To slow brute-force and abuse, rate limit your identity endpoints. `egauth` exposes a `ratelimit.Limiter` interface (`Allow(ctx, key) (allowed bool, retryAfter time.Duration)`) and a lightweight in-memory `TokenBucket` implementation. Rate limiting is applied as HTTP middleware wrapping your handlers — it is not injected into the identity service.
 
 ```go
 import "github.com/JLugagne/egauth/ratelimit"
 
-// A simple in-memory limiter allowing 5 requests per minute
-limiter := ratelimit.NewMemoryLimiter(5, time.Minute)
+// A token bucket: burst of 5, refilling one token per minute.
+limiter := ratelimit.NewTokenBucket(5, time.Minute)
 
-// Pass it to the Identity Service to automatically throttle authentication attempts
-identitySvc := identity.NewService(
-	store, hasher, policy,
-	identity.WithRateLimiter(limiter),
-)
+// Wrap a handler, keying the budget per client IP.
+limited := ratelimit.Wrap(limiter, ratelimit.ClientIP, resetHandler)
+mux.Handle("/auth/password-reset/request", limited)
 ```
+
+`ratelimit.ClientIP` keys per source address; supply your own `ratelimit.KeyFunc` to key per account or per destination instead. Use `ratelimit.Middleware(limiter, key)` when you want the `func(http.Handler) http.Handler` form.
+
+See [Security Hardening]({{< ref "security-hardening" >}}) for the full per-IP / per-account / per-destination recipe and the SMS toll-fraud warning.

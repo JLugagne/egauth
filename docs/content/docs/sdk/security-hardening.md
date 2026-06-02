@@ -13,12 +13,11 @@ middleware to wire, and why each one matters.
 Everything here reflects the current code. Where a control is OFF by default, that is called out
 explicitly so you can decide deliberately rather than inherit a silent default.
 
-{{< hint warning >}}
-**Read this before going to production.** Skipping the opt-in controls below leaves real gaps:
-sessions that never absolutely expire, passkeys that don't enforce user verification, OIDC
-fetches that can be pointed at internal services, and unauthenticated endpoints that can be used
-for mail/SMS bombing.
-{{< /hint >}}
+> [!WARNING]
+> **Read this before going to production.** Skipping the opt-in controls below leaves real gaps:
+> sessions that never absolutely expire, passkeys that don't enforce user verification, OIDC
+> fetches that can be pointed at internal services, and unauthenticated endpoints that can be used
+> for mail/SMS bombing.
 
 ## Quick checklist
 
@@ -199,11 +198,10 @@ finishLogin := passkey.FinishLoginHandler(svc,
 )
 ```
 
-{{< hint info >}}
-Pass the **same** `ChallengeStore` to the matching Begin and Finish handlers (registration and
-login). The in-memory store is per-process; for a load-balanced deployment, back the
-`passkey.ChallengeStore` interface with a shared store (e.g. Redis).
-{{< /hint >}}
+> [!NOTE]
+> Pass the **same** `ChallengeStore` to the matching Begin and Finish handlers (registration and
+> login). The in-memory store is per-process; for a load-balanced deployment, back the
+> `passkey.ChallengeStore` interface with a shared store (e.g. Redis).
 
 `WithCookieKey` is mandatory for the handlers regardless — without it the ceremony cookie is
 forgeable and the handlers fail closed (`500 server_misconfigured`).
@@ -276,13 +274,12 @@ documented here so you know the limits.
 
 ## Rate limiting the `Request*` endpoints
 
-{{< hint danger >}}
-**This is off by default and you must wire it.** The unauthenticated `RequestPasswordReset` and
-`RequestMagicLink` handlers take a *victim's* email; `RequestPhoneVerification` takes an
-attacker-chosen number into a **paid SMS sender**. Left unthrottled they enable mail-bombing,
-link spam, and — most costly — **SMS toll-fraud** (pumping verification texts to premium-rate or
-attacker-controlled numbers to burn your SMS budget).
-{{< /hint >}}
+> [!CAUTION]
+> **This is off by default and you must wire it.** The unauthenticated `RequestPasswordReset` and
+> `RequestMagicLink` handlers take a *victim's* email; `RequestPhoneVerification` takes an
+> attacker-chosen number into a **paid SMS sender**. Left unthrottled they enable mail-bombing,
+> link spam, and — most costly — **SMS toll-fraud** (pumping verification texts to premium-rate or
+> attacker-controlled numbers to burn your SMS budget).
 
 `egauth` does not throttle these for you (rate, key, and backing store are deployment policy), but
 the `ratelimit` package is the ready seam. Apply defence in depth:

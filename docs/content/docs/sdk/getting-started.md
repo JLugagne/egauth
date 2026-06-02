@@ -59,8 +59,8 @@ func main() {
 	identityStore := identitypg.NewStore(pool)
 
 	// 4. Initialize Core Logic (e.g. Hasher and Password Policy)
-	hasher := argon2.NewHasher(argon2.WithMemory(64*1024), argon2.WithIterations(1))
-	passwordPolicy := policy.NewDefaultPolicy() // 12 char minimum
+	hasher := argon2.NewHasher(argon2.WithMemory(64*1024), argon2.WithTime(1))
+	passwordPolicy := policy.NewDefaultPolicy() // 8 char minimum
 
 	// 5. Wire the Service
 	identityService := identity.NewService(identityStore, hasher, passwordPolicy)
@@ -74,7 +74,11 @@ func main() {
 `egauth` operates silently by default, but it can emit critical security events (failed logins, lockouts) without logging sensitive data. Implement an `event.Sink` to capture these:
 
 ```go
-import "github.com/JLugagne/egauth/event"
+import (
+	"log/slog"
+
+	"github.com/JLugagne/egauth/event"
+)
 
 // ... inside main ...
 loggerSink := event.NewSlogSink(slog.Default())
