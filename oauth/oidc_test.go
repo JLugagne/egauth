@@ -38,12 +38,16 @@ func newOIDCIssuer(t *testing.T) *oidcIssuer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
-	ti := &oidcIssuer{key: key, kid: "test-key-1", iss: "https://issuer.test"}
+	ti := &oidcIssuer{key: key, kid: "test-key-1"}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/jwks", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, ti.jwksJSON())
+	})
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, ti.discoveryJSON())
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -52,7 +56,16 @@ func newOIDCIssuer(t *testing.T) *oidcIssuer {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	ti.srv = srv
+	// The issuer is the server's own (http loopback) origin so the issuer host, discovery host and
+	// jwks_uri host all match — exercising the SEC-07 host-binding path. Loopback http means tests
+	// run on the dev-only AllowInsecureURLs path (the SSRF-safe client would block loopback).
+	ti.iss = srv.URL
 	return ti
+}
+
+// discoveryJSON serves the issuer's OIDC discovery document, binding jwks_uri to the issuer host.
+func (ti *oidcIssuer) discoveryJSON() string {
+	return fmt.Sprintf(`{"issuer":%q,"jwks_uri":%q}`, ti.iss, ti.jwksURL())
 }
 
 func (ti *oidcIssuer) jwksURL() string { return ti.srv.URL + "/jwks" }
@@ -98,11 +111,13 @@ func baseIDClaims(iss, aud, nonce string) jwt.MapClaims {
 
 func (ti *oidcIssuer) verifier(t *testing.T) *oidcVerifier {
 	t.Helper()
+	// JWKSURL is intentionally omitted so the verifier resolves it via OIDC discovery (SEC-07).
+	// AllowInsecureURLs lets the http loopback test IdP through the otherwise-https-only gate.
 	v, err := newOIDCVerifier(OIDCConfig{
-		Issuer:     ti.iss,
-		JWKSURL:    ti.jwksURL(),
-		Audience:   "cid",
-		HTTPClient: ti.srv.Client(),
+		Issuer:            ti.iss,
+		Audience:          "cid",
+		HTTPClient:        ti.srv.Client(),
+		AllowInsecureURLs: true,
 	}, "cid")
 	require.NoError(t, err)
 	return v
@@ -326,8 +341,14 @@ func TestOIDCVerify_ES256(t *testing.T) {
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
+	// Bind the discovery document's issuer and jwks_uri to the server's loopback origin so the
+	// SEC-07 host-binding check passes; the http loopback runs on the dev/insecure path.
+	iss := srv.URL
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, fmt.Sprintf(`{"issuer":%q,"jwks_uri":%q}`, iss, srv.URL+"/jwks"))
+	})
 
-	claims := baseIDClaims("https://ec.issuer", "cid", "ec-nonce")
+	claims := baseIDClaims(iss, "cid", "ec-nonce")
 	claims["exp"] = float64(time.Now().Add(time.Hour).Unix())
 	claims["iat"] = float64(time.Now().Add(-time.Minute).Unix())
 	tok := jwt.NewWithClaims(jwt.SigningMethodES256, claims)
@@ -335,7 +356,7 @@ func TestOIDCVerify_ES256(t *testing.T) {
 	idToken, err := tok.SignedString(ecKey)
 	require.NoError(t, err)
 
-	v, err := newOIDCVerifier(OIDCConfig{Issuer: "https://ec.issuer", JWKSURL: srv.URL + "/jwks", Audience: "cid", HTTPClient: srv.Client()}, "cid")
+	v, err := newOIDCVerifier(OIDCConfig{Issuer: iss, Audience: "cid", HTTPClient: srv.Client(), AllowInsecureURLs: true}, "cid")
 	require.NoError(t, err)
 	info, err := v.verify(context.Background(), idToken, "ec-nonce")
 	require.NoError(t, err)
@@ -349,9 +370,25 @@ func TestNewOIDCVerifier_Validation(t *testing.T) {
 		_, err := newOIDCVerifier(OIDCConfig{JWKSURL: "https://x/jwks"}, "cid")
 		require.Error(t, err)
 	})
-	t.Run("jwks required", func(t *testing.T) {
-		_, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x"}, "cid")
+	t.Run("non-https issuer rejected by default", func(t *testing.T) {
+		_, err := newOIDCVerifier(OIDCConfig{Issuer: "http://x"}, "cid")
 		require.Error(t, err)
+	})
+	t.Run("jwks optional - discovery used when absent", func(t *testing.T) {
+		// SEC-07: JWKSURL is no longer required; an absent one is resolved lazily via discovery,
+		// so construction succeeds (the network call happens at first verify, not here).
+		v, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x"}, "cid")
+		require.NoError(t, err)
+		assert.Empty(t, v.jwks.url, "jwks url is resolved lazily via discovery")
+	})
+	t.Run("jwks override with matching host accepted", func(t *testing.T) {
+		v, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x.example.com", JWKSURL: "https://x.example.com/jwks"}, "cid")
+		require.NoError(t, err)
+		assert.Equal(t, "https://x.example.com/jwks", v.jwks.url)
+	})
+	t.Run("jwks override with mismatched host rejected", func(t *testing.T) {
+		_, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x.example.com", JWKSURL: "https://evil.example.net/jwks"}, "cid")
+		require.ErrorIs(t, err, ErrJWKSHostMismatch)
 	})
 	t.Run("audience required when no clientID", func(t *testing.T) {
 		_, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x", JWKSURL: "https://x/jwks"}, "")
@@ -398,10 +435,13 @@ func (ti *oidcIssuer) provider(t *testing.T) *Provider {
 		t.Fatal("fetchUser must not be called for an OIDC-enabled provider")
 		return nil, nil
 	}
+	// WithInsecureURLs + AllowInsecureURLs put this on the dev path so the http loopback test IdP
+	// (auth/token/issuer/discovery/jwks) is accepted; JWKSURL is omitted to exercise discovery.
 	return New("oidc-test", "cid", "secret", ti.srv.URL+"/auth", ti.srv.URL+"/token",
 		[]string{"openid", "email"}, fetch,
 		WithHTTPClient(ti.srv.Client()),
-		WithOIDC(OIDCConfig{Issuer: ti.iss, JWKSURL: ti.jwksURL(), Audience: "cid", HTTPClient: ti.srv.Client()}))
+		WithInsecureURLs(),
+		WithOIDC(OIDCConfig{Issuer: ti.iss, Audience: "cid", HTTPClient: ti.srv.Client(), AllowInsecureURLs: true}))
 }
 
 func TestBeginHandler_OIDCMintsNonce(t *testing.T) {
