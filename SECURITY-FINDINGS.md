@@ -147,43 +147,62 @@ Status legend: `[ ]` todo · `[~]` in progress · `[x]` done
 
 ## LOW
 
-- [ ] **SEC-08 — No absolute session lifetime**
+- [x] **SEC-08 — No absolute session lifetime**
   - File: `sessions/service.go:117`
   - Problem: `Touch` slides `ExpiresAt` to `now+duration` forever; `CreatedAt` never compared. Idle
     timeout is the only timeout; a kept-warm stolen token lives indefinitely.
   - Fix: add `WithMaxLifetime`; in Validate/Touch/Rotate reject when `now > CreatedAt + maxLifetime`.
-  - [ ] Test · [ ] Fix · [ ] Green
+  - Resolution: `WithMaxLifetime` ServiceOption; `ValidateSession` rejects (→ `ErrSessionNotFound`) once
+    `now > CreatedAt+maxLifetime`, and `Touch`/`Rotate` clamp the new `ExpiresAt` to that deadline. Zero
+    value disables the cap. (`sessions/lifetime_test.go`)
+  - [x] Test · [x] Fix · [x] Green
 
-- [ ] **SEC-09 — No revoke-all / "log out everywhere"**
+- [x] **SEC-09 — No revoke-all / "log out everywhere"**
   - File: `sessions/service.go:15`
   - Problem: `Store` has `DeleteSessionsByUserID` but `Service` only exposes single-token
     `RevokeSession`; can't kill an attacker's other sessions after reset/compromise.
   - Fix: add `RevokeAllForUser(ctx, tenantID, userID)` to `Service` + `SingleTenant` forwarder.
-  - [ ] Test · [ ] Fix · [ ] Green
+  - Resolution: `Service.RevokeAllForUser` (+ `SingleTenant` forwarder) over the existing
+    `Store.DeleteSessionsByUserID`; no other `Service` implementer/mock existed. (`sessions/lifetime_test.go`)
+  - [x] Test · [x] Fix · [x] Green
 
-- [ ] **SEC-10 — argon2: no minimum-cost floor, no rehash-on-login**
+- [x] **SEC-10 — argon2: no minimum-cost floor, no rehash-on-login**
   - File: `passwords/argon2/hasher.go:96-120`
   - Problem: verification trusts the stored params; weak imported hashes verify cheaply forever and a
     defaults bump never upgrades existing users.
   - Fix: enforce a configurable strength floor; add `NeedsRehash`; re-hash on successful login when
     stored params are below target. (Combine with SEC-04.)
-  - [ ] Test · [ ] Fix · [ ] Green
+  - Resolution: `NewHasher` gains `WithTime`/`WithMemory`/`WithThreads` options (zero-arg defaults
+    byte-for-byte unchanged) and a concrete `NeedsRehash(hash) bool` that flags a stored hash below the
+    hasher's current target params (or malformed/foreign) for rehash-on-login. Kept off the shared
+    `passwords.Hasher` interface to avoid breaking other implementers (consumers type-assert).
+    (`passwords/argon2/hasher_test.go`)
+  - [x] Test · [x] Fix · [x] Green
 
-- [ ] **SEC-11 — JWKS parsing unbounded (key count / RSA modulus size)**
+- [x] **SEC-11 — JWKS parsing unbounded (key count / RSA modulus size)**
   - File: `oauth/oidc.go:320-360,418-427`
   - Problem: no cap on number of keys or modulus size (within the 1 MiB body); hostile JWKS amplifies
     CPU/memory on cache-miss.
   - Fix: cap key count (e.g. ≤16); bound RSA modulus to [2048, 8192] bits and exponent range;
     coalesce/rate-limit refreshes per issuer.
-  - [ ] Test · [ ] Fix · [ ] Green
+  - Resolution: `parseJWKS` hard-rejects a document declaring more than `maxJWKSKeys` (16) before the
+    per-key loop; `jwk.publicKey` rejects RSA keys outside [2048,8192] bits or with an out-of-range
+    exponent (skipped per-key, so an all-bad JWKS trips the existing no-usable-keys error). Per-issuer
+    refresh rate-limiting deferred (the cache already has a TTL). (`oauth/oidc_test.go`)
+  - [x] Test · [x] Fix · [x] Green
 
-- [ ] **SEC-12 — OAuth state cookie not bound to provider/tenant**
+- [x] **SEC-12 — OAuth state cookie not bound to provider/tenant**
   - Files: `oauth/handlers.go:163,172-211,245-264,349-376`, `oauth/state.go:52-68`
   - Problem: single shared cookie name carries only state/verifier/nonce; multiple providers/tenants
     on one host enable provider confusion.
   - Fix: bind provider+tenant into the signed/packed state and verify on callback; and/or namespace
     the cookie per provider/tenant.
-  - [ ] Test · [ ] Fix · [ ] Green
+  - Resolution: `packState`/`unpackState` now carry the provider name and tenant (base64url-encoded so
+    the separator stays unambiguous, fixed 5-field format that fails closed on any legacy/forged value);
+    `CallbackHandler` rejects a mismatched packed provider/tenant (`provider_mismatch`/`tenant_mismatch`,
+    403). Dynamic handlers inherit it via delegation. Cookie-namespacing deferred (packed-state binding
+    already closes the vuln). (`oauth/state_binding_test.go`)
+  - [x] Test · [x] Fix · [x] Green
 
 ## INFO
 
