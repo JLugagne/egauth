@@ -8,6 +8,33 @@
 //
 // The reference TokenBucket is process-local. For a multi-instance deployment back the
 // Limiter with a shared store (e.g. Redis) implementing the same interface.
+//
+// # Throttling the unauthenticated Request* endpoints
+//
+// The identity Request* handlers (RequestPasswordResetHandler, RequestMagicLinkHandler) are
+// unauthenticated and take an attacker-chosen email, and RequestPhoneVerificationHandler takes
+// an attacker-chosen phone number into a paid SMS sender. Left unthrottled they enable
+// mail-bombing a victim's inbox, magic-link/reset spam, and — most costly — SMS toll-fraud
+// (an attacker pumping verification texts to premium-rate or attacker-controlled numbers to
+// burn your SMS budget). egauth does NOT throttle them for you: the handlers are returned as
+// plain http.HandlerFunc so you compose the policy that fits your deployment. Wire it
+// explicitly with Wrap/Middleware. See the package examples for runnable recipes.
+//
+// Defence in depth — apply more than one layer:
+//
+//   - Per client IP, on every Request* endpoint, with ClientIP (or your own proxy-aware
+//     KeyFunc). This is the cheap blanket cap; see Example (PasswordReset).
+//   - Per account / per destination, so a single victim email or one phone number cannot be
+//     targeted from many IPs (and one user cannot fan out to many numbers). This needs a
+//     KeyFunc that reads the request form, so it is application-specific; see
+//     Example (PerDestinationNumber).
+//   - Cap outstanding tokens per (user, kind) at the Service layer and enforce a provider-side
+//     spend cap / number allowlist on your SMS sender — rate limiting alone does not bound a
+//     determined toll-fraud spend.
+//
+// SMS toll-fraud warning: phone verification spends real money per message. Always rate-limit
+// RequestPhoneVerificationHandler per destination number (not only per IP/account), cap your
+// SMS provider's spend, and prefer an allowlist of dialing regions you actually serve.
 package ratelimit
 
 import (
