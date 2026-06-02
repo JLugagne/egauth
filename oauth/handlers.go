@@ -160,7 +160,7 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce))
+		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r)))
 		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -178,7 +178,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, nonce, ok := unpackState(raw)
+		cookieState, verifier, nonce, cookieProvider, cookieTenant, ok := unpackState(raw)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
@@ -192,6 +192,17 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		}
 		if !stateMatches(q.Get("state"), cookieState) {
 			cfg.fail(w, r, http.StatusForbidden, "state_mismatch")
+			return
+		}
+		// Bind the in-flight attempt to the provider and tenant that started it, so a state
+		// cookie minted for provider/tenant A cannot be replayed against the callback of
+		// provider/tenant B (SEC-12: provider confusion / cross-tenant state reuse).
+		if !stateMatches(cookieProvider, p.Name()) {
+			cfg.fail(w, r, http.StatusForbidden, "provider_mismatch")
+			return
+		}
+		if !stateMatches(cookieTenant, cfg.tenant(r)) {
+			cfg.fail(w, r, http.StatusForbidden, "tenant_mismatch")
 			return
 		}
 		code := q.Get("code")
