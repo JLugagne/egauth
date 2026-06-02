@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -39,6 +40,7 @@ type handlerConfig struct {
 	cookieSameSite  http.SameSite
 	insecureCookies bool
 	cookieKey       []byte
+	challenges      ChallengeStore
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -114,6 +116,10 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 			cfg.fail(w, err)
 			return
 		}
+		if err := cfg.recordChallenge(r.Context(), tenant, session); err != nil {
+			cfg.fail(w, err)
+			return
+		}
 		if !cfg.storeSession(w, session) {
 			return
 		}
@@ -132,6 +138,10 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 		}
 		session, ok := cfg.loadSession(w, r)
 		if !ok {
+			return
+		}
+		// Consume the challenge before verifying so a replayed registration Finish is rejected.
+		if !cfg.consumeChallenge(w, r.Context(), tenant, session) {
 			return
 		}
 		if _, err := svc.FinishRegistration(r.Context(), tenant, uid, name, displayName, session, r); err != nil {
@@ -156,6 +166,10 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, err)
 			return
 		}
+		if err := cfg.recordChallenge(r.Context(), tenant, session); err != nil {
+			cfg.fail(w, err)
+			return
+		}
 		if !cfg.storeSession(w, session) {
 			return
 		}
@@ -174,6 +188,12 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		}
 		session, ok := cfg.loadSession(w, r)
 		if !ok {
+			return
+		}
+		// Consume the challenge before verifying: a replayed Finish (identical cookie + body)
+		// fails here on the second attempt, even for a sign-count-0 authenticator whose clone
+		// counter never advances.
+		if !cfg.consumeChallenge(w, r.Context(), tenant, session) {
 			return
 		}
 		if _, err := svc.FinishLogin(r.Context(), tenant, uid, session, r); err != nil {
@@ -316,4 +336,53 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// WithChallengeStore enables server-side, single-use replay protection for the ceremony
+// challenge (SEC-05). On Begin the issued challenge is recorded; on Finish it is atomically
+// consumed before the assertion is verified, so a captured Finish request replayed within the
+// cookie TTL is rejected (the second consume fails). It is optional and OFF by default: when
+// nil, the handlers behave exactly as before. Pass the same store to the matching Begin and
+// Finish handlers.
+func WithChallengeStore(cs ChallengeStore) HandlerOption {
+	return func(h *handlerConfig) { h.challenges = cs }
+}
+
+// recordChallenge stores the ceremony challenge for single-use replay protection, if a
+// ChallengeStore is configured. It is called on Begin, after the ceremony succeeds and before
+// the session cookie is written. The TTL follows session.Expires; when that is zero it falls
+// back to sessionTTL from now (matching the cookie MaxAge). A store error is propagated so the
+// caller can fail closed rather than issue a challenge that can never be consumed.
+func (cfg handlerConfig) recordChallenge(ctx context.Context, tenant string, session *webauthn.SessionData) error {
+	if cfg.challenges == nil {
+		return nil
+	}
+	expires := session.Expires
+	if expires.IsZero() {
+		expires = time.Now().Add(cfg.sessionTTL)
+	}
+	return cfg.challenges.Put(ctx, tenant, session.Challenge, expires)
+}
+
+// consumeChallenge atomically consumes the ceremony challenge for single-use replay
+// protection, if a ChallengeStore is configured. It is called on Finish, right after
+// loadSession succeeds and BEFORE the assertion is verified, so a replayed Finish (identical
+// cookie + body) is reliably blocked: the second consume of the same challenge returns false.
+// It returns true when the ceremony may proceed; on a missing/already-consumed challenge or a
+// store error it writes the failure response and returns false.
+func (cfg handlerConfig) consumeChallenge(w http.ResponseWriter, ctx context.Context, tenant string, session webauthn.SessionData) bool {
+	if cfg.challenges == nil {
+		return true
+	}
+	ok, err := cfg.challenges.Consume(ctx, tenant, session.Challenge)
+	if err != nil {
+		cfg.fail(w, err)
+		return false
+	}
+	if !ok {
+		// Unknown or already-used challenge: treat as an invalid ceremony session (a replay).
+		cfg.fail(w, ErrSessionInvalid)
+		return false
+	}
+	return true
 }
