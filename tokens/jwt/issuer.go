@@ -43,13 +43,15 @@ type Service[C any] struct {
 	verifyKeys     map[string][]byte // kid -> key, for verifying kid-tagged tokens
 	legacyKey      []byte            // key tried for a token carrying no kid (the configured SecretKey)
 	issuer         string
-	accessTTL      time.Duration
-	refreshTTL     time.Duration
-	refreshLength  int
-	apiKeyLength   int
-	reuseGrace     time.Duration
-	events         event.Sink
-	now            func() time.Time
+	// expected audiences for the verify path; empty disables the aud check
+	expectedAudiences []string
+	accessTTL         time.Duration
+	refreshTTL        time.Duration
+	refreshLength     int
+	apiKeyLength      int
+	reuseGrace        time.Duration
+	events            event.Sink
+	now               func() time.Time
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -63,6 +65,12 @@ type SigningKey struct {
 type Config[C any] struct {
 	Store  tokens.Store[C]
 	Issuer string
+	// ExpectedAudience gates the `aud` claim on the verify path. A token is accepted only if it
+	// carries at least one of these audiences (any-of semantics). It guards against the
+	// confused-deputy risk when a single symmetric (HS256) key is shared across services: a token
+	// minted for audience A is then rejected by a service configured for audience B. Leaving it
+	// empty disables audience checking entirely, preserving backward compatibility.
+	ExpectedAudience []string
 	// SecretKey is the HS256 signing key in single-key mode. When SigningKeys is also set it is
 	// kept only as a "legacy" verification key for tokens minted (without a kid) before rotation
 	// was enabled — it never signs new tokens.
@@ -226,20 +234,21 @@ func New[C any](cfg Config[C]) *Service[C] {
 	}
 
 	return &Service[C]{
-		store:          cfg.Store,
-		claimsProvider: cfg.ClaimsProvider,
-		signingKey:     signKey,
-		signingKeyID:   signKeyID,
-		verifyKeys:     verifyKeys,
-		legacyKey:      legacyKey,
-		issuer:         cfg.Issuer,
-		accessTTL:      cfg.AccessTTL,
-		refreshTTL:     cfg.RefreshTTL,
-		refreshLength:  cfg.RefreshLength,
-		apiKeyLength:   cfg.APIKeyLength,
-		reuseGrace:     cfg.ReuseGracePeriod,
-		events:         cfg.EventSink,
-		now:            cfg.Clock,
+		store:             cfg.Store,
+		claimsProvider:    cfg.ClaimsProvider,
+		signingKey:        signKey,
+		signingKeyID:      signKeyID,
+		verifyKeys:        verifyKeys,
+		legacyKey:         legacyKey,
+		issuer:            cfg.Issuer,
+		expectedAudiences: cfg.ExpectedAudience,
+		accessTTL:         cfg.AccessTTL,
+		refreshTTL:        cfg.RefreshTTL,
+		refreshLength:     cfg.RefreshLength,
+		apiKeyLength:      cfg.APIKeyLength,
+		reuseGrace:        cfg.ReuseGracePeriod,
+		events:            cfg.EventSink,
+		now:               cfg.Clock,
 	}
 }
 
@@ -410,9 +419,29 @@ func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*t
 	// WithTimeFunc routes the library's exp/nbf validation through the same injected clock the
 	// issuer stamps with, so the verify path is deterministic under a test clock (and honors a
 	// custom clock in production). Without it golang-jwt would validate exp against time.Now().
-	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey, jwt.WithTimeFunc(s.now))
+	opts := []jwt.ParserOption{jwt.WithTimeFunc(s.now)}
+
+	// Gate the "iss" claim only when an issuer is configured. WithIssuer makes the claim
+	// mandatory and rejects a mismatch, so for issuer-less setups (legacy tokens carry no iss)
+	// we must NOT add it — that would suddenly require an iss that was never stamped.
+	if s.issuer != "" {
+		opts = append(opts, jwt.WithIssuer(s.issuer))
+	}
+
+	// Gate the "aud" claim only when expected audiences are configured. golang-jwt v5's
+	// WithAudience is variadic and, by default (expectAllAud=false), accepts a token whose aud
+	// contains ANY of the listed values — exactly the any-of semantics we want, so a single
+	// WithAudience(all...) call expresses "token is valid if it carries at least one of these".
+	if len(s.expectedAudiences) > 0 {
+		opts = append(opts, jwt.WithAudience(s.expectedAudiences...))
+	}
+
+	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey, opts...)
 
 	if err != nil {
+		// An expired token keeps the dedicated sentinel. An iss/aud mismatch is an
+		// invalid-token condition (a confused-deputy attempt), NOT an expiry, so it maps to
+		// ErrInvalidToken via the generic branch below.
 		if errors.Is(err, jwt.ErrTokenExpired) {
 			return nil, tokens.ErrTokenExpired
 		}
