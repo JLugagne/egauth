@@ -9,17 +9,62 @@ import (
 	"github.com/google/uuid"
 )
 
+// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
+//
+// Lookup is O(1) via the secondary byHash index. If the matched session is past its
+// expiry it is opportunistically evicted from both maps and reported as not found, so
+// the store does not retain stale rows on the hot path. Callers that still want a bulk
+// purge can use DeleteExpired.
+func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id, ok := s.byHash[hashKey(tenantID, tokenHash)]
+	if !ok {
+		return nil, sessions.ErrSessionNotFound
+	}
+
+	sess, ok := s.sessions[id]
+	if !ok || sess.TokenHash != tokenHash || sess.TenantID != tenantID {
+		// Defensive: index points at a missing or mismatched row. Drop the stale key.
+		delete(s.byHash, hashKey(tenantID, tokenHash))
+		return nil, sessions.ErrSessionNotFound
+	}
+
+	// Opportunistic eviction of the looked-up key only (bounded, O(1)).
+	if sess.ExpiresAt.Before(time.Now()) {
+		delete(s.sessions, id)
+		delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
+		return nil, sessions.ErrSessionNotFound
+	}
+
+	sCopy := *sess
+	return &sCopy, nil
+}
+
 // Store is an in-memory implementation of sessions.Store.
 type Store struct {
 	mu       sync.RWMutex
 	sessions map[uuid.UUID]*sessions.Session
+	// byHash is a secondary index mapping a tenant-scoped token-hash key to the owning
+	// session ID, so FindSessionByHash is O(1) instead of scanning the whole map. It is
+	// maintained in lockstep with sessions under the write lock by every mutator.
+	byHash map[string]uuid.UUID
 }
 
 // NewStore creates a new in-memory sessions Store.
 func NewStore() *Store {
 	return &Store{
 		sessions: make(map[uuid.UUID]*sessions.Session),
+		byHash:   make(map[string]uuid.UUID),
 	}
+}
+
+// hashKey builds the secondary-index key. The token hash alone is not unique across
+// tenants, so the key is scoped by tenant to preserve tenant isolation. The NUL
+// separator cannot appear in a hex SHA-256 hash, so the key is unambiguous.
+func hashKey(tenantID, tokenHash string) string {
+	return tenantID + "\x00" + tokenHash
 }
 
 // CreateSession persists a new session. If the record carries a non-empty TenantID that
@@ -36,23 +81,9 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	sCopy.TenantID = tenantID
 
 	s.sessions[sCopy.ID] = &sCopy
+	s.byHash[hashKey(sCopy.TenantID, sCopy.TokenHash)] = sCopy.ID
 
 	return nil
-}
-
-// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
-func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	for _, sess := range s.sessions {
-		if sess.TokenHash == tokenHash && sess.TenantID == tenantID {
-			sCopy := *sess
-			return &sCopy, nil
-		}
-	}
-
-	return nil, sessions.ErrSessionNotFound
 }
 
 // UpdateSession updates the mutable fields of an existing session (token hash, expiry,
@@ -72,6 +103,14 @@ func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *ses
 	sCopy := *session
 	sCopy.TenantID = existing.TenantID // tenant is immutable
 	s.sessions[session.ID] = &sCopy
+
+	// Keep the hash index in lockstep with the rotation: the old hash key (equal to
+	// expectedTokenHash, since the compare-and-set above succeeded) is removed and the
+	// new hash is added. Both keys are tenant-scoped on the immutable tenant.
+	if sCopy.TokenHash != existing.TokenHash {
+		delete(s.byHash, hashKey(existing.TenantID, existing.TokenHash))
+	}
+	s.byHash[hashKey(sCopy.TenantID, sCopy.TokenHash)] = sCopy.ID
 	return nil
 }
 
@@ -86,6 +125,7 @@ func (s *Store) DeleteSession(ctx context.Context, tenantID string, id uuid.UUID
 	}
 
 	delete(s.sessions, id)
+	delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
 
 	return nil
 }
@@ -103,6 +143,7 @@ func (s *Store) DeleteExpired(ctx context.Context, tenantID string) (int64, erro
 		}
 		if sess.ExpiresAt.Before(now) {
 			delete(s.sessions, id)
+			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
 			deleted++
 		}
 	}
@@ -117,11 +158,12 @@ func (s *Store) DeleteSessionsByUserID(ctx context.Context, tenantID string, use
 	for id, sess := range s.sessions {
 		if sess.UserID == userID && sess.TenantID == tenantID {
 			delete(s.sessions, id)
+			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
 		}
 	}
 
 	return nil
 }
 
-// Verify interface compliance
+// Verify interface compliance.
 var _ sessions.Store = (*Store)(nil)
