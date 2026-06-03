@@ -21,6 +21,12 @@ const (
 	DefaultSessionTTL        = 5 * time.Minute
 )
 
+// DefaultMaxBodyBytes is the default cap applied to the request body of the Finish ceremony
+// handlers. A WebAuthn attestation/assertion response is small; this bound prevents an
+// authenticated caller from forcing unbounded buffering and base64 decoding (a low-severity
+// memory-pressure DoS). Override with WithMaxBodyBytes.
+const DefaultMaxBodyBytes int64 = 64 << 10
+
 // UserResolver extracts the subject of a passkey ceremony from the request — typically the
 // authenticated user (for registration) or the user identified by a prior username step (for
 // login). name/displayName are only used during registration. ok=false yields a 401.
@@ -41,6 +47,7 @@ type handlerConfig struct {
 	insecureCookies bool
 	cookieKey       []byte
 	challenges      ChallengeStore
+	maxBodyBytes    int64
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -51,6 +58,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		sessionCookie:  DefaultSessionCookieName,
 		sessionTTL:     DefaultSessionTTL,
 		cookieSameSite: http.SameSiteLaxMode,
+		maxBodyBytes:   DefaultMaxBodyBytes,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -144,6 +152,11 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 		if !cfg.consumeChallenge(w, r.Context(), tenant, session) {
 			return
 		}
+		// Cap the ceremony body before the go-webauthn decoder reads it (DOS-01): the attestation
+		// response is small, so an oversized body is an abuse attempt, not a legitimate request.
+		if cfg.maxBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+		}
 		if _, err := svc.FinishRegistration(r.Context(), tenant, uid, name, displayName, session, r); err != nil {
 			cfg.fail(w, err)
 			return
@@ -195,6 +208,11 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		// counter never advances.
 		if !cfg.consumeChallenge(w, r.Context(), tenant, session) {
 			return
+		}
+		// Cap the ceremony body before the go-webauthn decoder reads it (DOS-01): the assertion
+		// response is small, so an oversized body is an abuse attempt, not a legitimate request.
+		if cfg.maxBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
 		}
 		if _, err := svc.FinishLogin(r.Context(), tenant, uid, session, r); err != nil {
 			cfg.fail(w, err)
@@ -385,4 +403,12 @@ func (cfg handlerConfig) consumeChallenge(w http.ResponseWriter, ctx context.Con
 		return false
 	}
 	return true
+}
+
+// WithMaxBodyBytes overrides the request-body size cap applied to the Finish ceremony
+// handlers before the WebAuthn response is decoded (default DefaultMaxBodyBytes). A
+// non-positive value disables the cap; do so only if an upstream layer already bounds the
+// body, since the go-webauthn decoder buffers and base64-decodes the body unbounded otherwise.
+func WithMaxBodyBytes(n int64) HandlerOption {
+	return func(h *handlerConfig) { h.maxBodyBytes = n }
 }
