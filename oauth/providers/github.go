@@ -1,9 +1,11 @@
-package oauth
+package providers
 
 import (
 	"context"
 	"net/http"
 	"strconv"
+
+	"github.com/JLugagne/egauth/oauth"
 )
 
 // GitHub endpoints.
@@ -16,23 +18,23 @@ const (
 
 // GitHub builds a Provider for GitHub sign-in. Default scopes request the user profile and
 // email addresses (GitHub does not expose a private primary email without "user:email").
-func GitHub(clientID, clientSecret string, opts ...ProviderOption) *Provider {
-	return New("github", clientID, clientSecret, githubAuthURL, githubTokenURL,
+func GitHub(clientID, clientSecret string, opts ...oauth.ProviderOption) *oauth.Provider {
+	return oauth.New("github", clientID, clientSecret, githubAuthURL, githubTokenURL,
 		[]string{"read:user", "user:email"}, fetchGitHubUser, opts...)
 }
 
-func fetchGitHubUser(ctx context.Context, c *http.Client, accessToken string) (*UserInfo, error) {
+func fetchGitHubUser(ctx context.Context, c *http.Client, accessToken string) (*oauth.UserInfo, error) {
 	var profile struct {
 		ID    int64  `json:"id"`
 		Login string `json:"login"`
 		Name  string `json:"name"`
 		Email string `json:"email"`
 	}
-	if err := getJSON(ctx, c, githubUserURL, accessToken, &profile); err != nil {
+	if err := oauth.GetJSON(ctx, c, githubUserURL, accessToken, &profile); err != nil {
 		return nil, err
 	}
 
-	info := &UserInfo{
+	info := &oauth.UserInfo{
 		ProviderID: strconv.FormatInt(profile.ID, 10),
 		Email:      profile.Email,
 		Name:       profile.Name,
@@ -46,7 +48,7 @@ func fetchGitHubUser(ctx context.Context, c *http.Client, accessToken string) (*
 		Primary  bool   `json:"primary"`
 		Verified bool   `json:"verified"`
 	}
-	if err := getJSON(ctx, c, githubUserEmailURL, accessToken, &emails); err == nil {
+	if err := oauth.GetJSON(ctx, c, githubUserEmailURL, accessToken, &emails); err == nil {
 		for _, e := range emails {
 			if e.Primary {
 				info.Email = e.Email

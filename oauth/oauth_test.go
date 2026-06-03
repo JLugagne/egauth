@@ -78,7 +78,7 @@ func stubProviderServer(t *testing.T, body *string) (*Provider, *httptest.Server
 			EmailVerified bool   `json:"email_verified"`
 			Name          string `json:"name"`
 		}
-		if err := getJSON(ctx, c, srv.URL+"/userinfo", accessToken, &u); err != nil {
+		if err := GetJSON(ctx, c, srv.URL+"/userinfo", accessToken, &u); err != nil {
 			return nil, err
 		}
 		return &UserInfo{ProviderID: u.Sub, Email: u.Email, EmailVerified: u.EmailVerified, Name: u.Name}, nil
@@ -101,7 +101,8 @@ func TestNewPKCE_ChallengeIsS256(t *testing.T) {
 }
 
 func TestAuthCodeURL(t *testing.T) {
-	p := Google("client-id", "secret")
+	p := New("google", "client-id", "secret", "https://accounts.google.com/o/oauth2/v2/auth",
+		"https://oauth2.googleapis.com/token", []string{"openid", "email", "profile"}, nil)
 	raw := p.AuthCodeURL("the-state", "https://app.example.com/cb", "the-challenge")
 
 	u, err := url.Parse(raw)
