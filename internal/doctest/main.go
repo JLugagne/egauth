@@ -42,6 +42,7 @@ var pkgAlias = map[string]string{
 	"jwtissuer":  "github.com/JLugagne/egauth/tokens/jwt",
 	"oauth":      "github.com/JLugagne/egauth/oauth",
 	"oauthpgx":   "github.com/JLugagne/egauth/oauth/pgx",
+	"providers":  "github.com/JLugagne/egauth/oauth/providers",
 	"passkey":    "github.com/JLugagne/egauth/passkey",
 	"passkeymem": "github.com/JLugagne/egauth/passkey/memory",
 	"mfa":        "github.com/JLugagne/egauth/mfa",
@@ -158,8 +159,8 @@ func scan(path string) ([]ref, error) {
 			code = code[:idx]
 		}
 		for _, loc := range qualifiedRef.FindAllStringSubmatchIndex(code, -1) {
-			alias := code[loc[2]:loc[3]]   // loc[2:4] = alias
-			symbol := code[loc[4]:loc[5]]  // loc[4:6] = symbol
+			alias := code[loc[2]:loc[3]]  // loc[2:4] = alias
+			symbol := code[loc[4]:loc[5]] // loc[4:6] = symbol
 			// Disqualify when the alias is preceded by an identifier char or a dot
 			// (a field/selector chain like x.Foo.Bar, not a package selector).
 			if loc[2] > 0 {
