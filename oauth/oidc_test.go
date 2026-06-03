@@ -619,7 +619,9 @@ func TestParseJWKS_BadKeySkippedAmongGood(t *testing.T) {
 func TestWithOIDC_DefersErrorOnInvalidConfig(t *testing.T) {
 	var p *Provider
 	assert.NotPanics(t, func() {
-		p = Google("cid", "secret", WithOIDC(OIDCConfig{Issuer: "", JWKSURL: ""}))
+		p = New("google", "cid", "secret", "https://accounts.google.com/o/oauth2/v2/auth",
+			"https://oauth2.googleapis.com/token", []string{"openid", "email", "profile"}, nil,
+			WithOIDC(OIDCConfig{Issuer: "", JWKSURL: ""}))
 	})
 	require.NotNil(t, p)
 	// OIDC verifier construction failed, so the provider fails closed: oidcEnabled is false (no

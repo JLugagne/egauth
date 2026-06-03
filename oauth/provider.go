@@ -1,6 +1,7 @@
 // Package oauth implements the OAuth2 authorization-code flow (with PKCE) as stateless,
-// composable HTTP handlers. It ships ready-made Google, GitHub and Discord providers and a
-// generic New constructor for any other compliant provider. Following egauth's philosophy
+// composable HTTP handlers. Ready-made Google, GitHub and Discord providers live
+// in the oauth/providers subpackage; the generic New constructor here covers any other
+// compliant provider. Following egauth's philosophy
 // the package is HTTP-decentralized (it exposes handler builders, not a router) and depends
 // only on the standard library plus the egauth identity/tokens packages — no third-party
 // OAuth SDK.
@@ -100,8 +101,9 @@ func WithOIDC(cfg OIDCConfig) ProviderOption {
 	}
 }
 
-// New builds a Provider for any RFC 6749 authorization-code provider. The built-in
-// Google/GitHub/Discord constructors are thin wrappers over it.
+// New builds a Provider for any RFC 6749 authorization-code provider. The ready-made
+// Google/GitHub/Discord constructors in the oauth/providers subpackage are thin wrappers over
+// it.
 func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string, fetch FetchUserFunc, opts ...ProviderOption) *Provider {
 	p := &Provider{
 		name:         name,
@@ -265,9 +267,11 @@ func (p *Provider) Exchange(ctx context.Context, code, redirectURI, codeVerifier
 	return p.fetchUser(ctx, p.httpClient, tok.AccessToken)
 }
 
-// getJSON performs a bearer-authenticated GET and decodes a JSON response into dst. It sets a
-// User-Agent (required by some providers, notably GitHub) and bounds the response size.
-func getJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, dst any) error {
+// GetJSON performs a bearer-authenticated GET and decodes a JSON response into dst. It sets a
+// User-Agent (required by some providers, notably GitHub) and bounds the response size. It is
+// exported so provider implementations outside this package (see oauth/providers) can reuse the
+// same hardened fetch behaviour.
+func GetJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, dst any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
