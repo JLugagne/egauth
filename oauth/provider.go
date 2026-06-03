@@ -76,13 +76,25 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 // an access-token userinfo GET. The nonce is mandatory, so a direct Exchange caller on an
 // OIDC-enabled provider must pass WithExpectedNonce.
 //
-// It panics on an invalid OIDCConfig (empty Issuer or JWKSURL, or no resolvable audience): that
-// is a startup-time programmer error, surfaced eagerly like jwt.New's empty-key check.
+// An invalid OIDCConfig (empty Issuer, a JWKSURL whose host differs from the issuer, or no
+// resolvable audience) does NOT panic: WithOIDC runs synchronously inside New, and on the
+// per-request dynamic ProviderStore a panic would break the login route. Instead the error is
+// recorded as a deferred configErr (the same mechanism New uses for a non-https endpoint URL)
+// and surfaced when the provider is first used (Exchange); oidcEnabled stays false so the
+// provider fails closed rather than nil-derefing the verifier.
 func WithOIDC(cfg OIDCConfig) ProviderOption {
 	return func(p *Provider) {
 		v, err := newOIDCVerifier(cfg, p.clientID)
 		if err != nil {
-			panic("oauth: WithOIDC: " + err.Error())
+			// PANIC-01: WithOIDC runs synchronously inside New, and on the dynamic
+			// ProviderStore that is per request over tenant-controlled data. A panic there
+			// breaks the login route, so an invalid OIDCConfig is instead recorded as a
+			// deferred construction error (surfaced by Exchange) — mirroring the non-https
+			// endpoint configErr set in New. Don't clobber an already-recorded configErr.
+			if p.configErr == nil {
+				p.configErr = fmt.Errorf("oauth: WithOIDC: %w", err)
+			}
+			return
 		}
 		p.oidc = v
 	}
@@ -108,7 +120,12 @@ func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string
 	// WithInsecureURLs opt-in relaxes this. The check runs after options so the flag is honoured.
 	// New cannot return an error (it is the package's fundamental constructor), so an invalid
 	// endpoint is recorded as a deferred configErr surfaced eagerly by AuthCodeURL/Exchange.
+	// A WithOIDC option may already have recorded a deferred configErr; preserve the first one
+	// (the existing convention) rather than overwriting it with an endpoint-URL error.
 	for _, f := range []string{p.authURL, p.tokenURL} {
+		if p.configErr != nil {
+			break
+		}
 		if err := validateOIDCEndpointURL(f, p.allowInsecureURLs); err != nil {
 			p.configErr = fmt.Errorf("oauth: invalid provider endpoint URL: %w", err)
 			break

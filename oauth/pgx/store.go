@@ -66,6 +66,13 @@ func WithIssuerAllowlist(issuers []string) StoreOption {
 // ErrIssuerNotAllowed is returned when an OIDC issuer is not on a configured issuer allowlist.
 var ErrIssuerNotAllowed = errors.New("oauth/pgx: issuer not on allowlist")
 
+// ErrInvalidProviderConfig is returned when a stored or submitted provider configuration is
+// structurally unusable for building an OIDC provider — currently an empty client_id or empty
+// issuer. These are caught at registration (UpsertProvider) and again at resolution
+// (GetProvider) so a tenant-controlled row can never reach oauth.WithOIDC with values that would
+// make it fail at request time (PANIC-01).
+var ErrInvalidProviderConfig = errors.New("oauth/pgx: invalid provider configuration")
+
 // NewStore creates a new PostgreSQL store for OAuth providers. Pass StoreOptions such as
 // WithIssuerAllowlist to harden the multi-tenant configuration surface.
 func NewStore(pool *pgxpool.Pool, opts ...StoreOption) *Store {
@@ -113,6 +120,14 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		return nil, err
 	}
 
+	// PANIC-01: validate the tenant-controlled row before building the provider. oauth.WithOIDC
+	// runs synchronously and would otherwise record a deferred error (empty issuer / no resolvable
+	// audience from an empty client_id) only surfaced at Exchange; reject it eagerly here with a
+	// clear error so the dynamic handler returns provider_not_found instead of a broken login.
+	if err := validateProviderConfig(OIDCProviderConfig{ClientID: clientID, Issuer: issuer}); err != nil {
+		return nil, err
+	}
+
 	scopes := strings.Fields(scopesStr)
 
 	// Since this store enforces OIDC, the fetchUser is never called (OIDC id_token verification bypasses it).
@@ -141,6 +156,9 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 // UpsertProvider configures an OIDC connection for a given tenant.
 func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName string, config OIDCProviderConfig) error {
 	if err := s.checkIssuerAllowed(config.Issuer); err != nil {
+		return err
+	}
+	if err := validateProviderConfig(config); err != nil {
 		return err
 	}
 	if err := validateProviderURLs(config); err != nil {
@@ -202,6 +220,23 @@ func validateProviderURLs(config OIDCProviderConfig) error {
 		if err := oauth.ValidateExternalURL(config.JWKSURL); err != nil {
 			return fmt.Errorf("invalid jwks_url: %w", err)
 		}
+	}
+	return nil
+}
+
+// validateProviderConfig rejects a provider configuration whose client_id or issuer is empty.
+// Both are required to build a usable OIDC provider: an empty client_id leaves OIDCConfig with no
+// resolvable audience and an empty issuer fails the issuer check, either of which would make
+// oauth.WithOIDC record a deferred error at request time on the dynamic store (PANIC-01). It is a
+// pure function so it can be unit-tested without a database and reused by both UpsertProvider
+// (registration) and GetProvider (resolution). It does NOT re-validate URL shape — that is
+// validateProviderURLs' job; callers run both.
+func validateProviderConfig(config OIDCProviderConfig) error {
+	if strings.TrimSpace(config.ClientID) == "" {
+		return fmt.Errorf("%w: client_id is required", ErrInvalidProviderConfig)
+	}
+	if strings.TrimSpace(config.Issuer) == "" {
+		return fmt.Errorf("%w: issuer is required", ErrInvalidProviderConfig)
 	}
 	return nil
 }
