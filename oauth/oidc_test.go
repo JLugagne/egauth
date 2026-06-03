@@ -402,12 +402,6 @@ func TestNewOIDCVerifier_Validation(t *testing.T) {
 	})
 }
 
-func TestWithOIDC_PanicsOnInvalidConfig(t *testing.T) {
-	assert.Panics(t, func() {
-		Google("cid", "secret", WithOIDC(OIDCConfig{Issuer: "", JWKSURL: ""}))
-	})
-}
-
 // --- handler integration -------------------------------------------------------------------
 
 func runBeginCapture(t *testing.T, p *Provider, opts ...HandlerOption) (*http.Cookie, string, string) {
@@ -615,4 +609,23 @@ func TestParseJWKS_BadKeySkippedAmongGood(t *testing.T) {
 	assert.IsType(t, &rsa.PublicKey{}, keys["good"])
 	_, ok := keys["huge"]
 	assert.False(t, ok, "oversized key must be skipped")
+}
+
+// TestWithOIDC_DefersErrorOnInvalidConfig covers PANIC-01: an invalid OIDCConfig must NOT
+// panic during construction. WithOIDC runs synchronously inside New, and on the dynamic
+// ProviderStore that runs per request over tenant-controlled data, so a panic there breaks the
+// login route. The error is instead deferred onto the Provider (configErr) and surfaced at
+// Exchange, mirroring the existing non-https endpoint configErr pattern.
+func TestWithOIDC_DefersErrorOnInvalidConfig(t *testing.T) {
+	var p *Provider
+	assert.NotPanics(t, func() {
+		p = Google("cid", "secret", WithOIDC(OIDCConfig{Issuer: "", JWKSURL: ""}))
+	})
+	require.NotNil(t, p)
+	// OIDC verifier construction failed, so the provider fails closed: oidcEnabled is false (no
+	// nil-deref of p.oidc anywhere) and Exchange returns the deferred configErr.
+	assert.False(t, p.oidcEnabled())
+	_, err := p.Exchange(context.Background(), "code", "https://app/cb", "verifier")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "WithOIDC")
 }

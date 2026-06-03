@@ -250,3 +250,38 @@ Captured so they aren't re-triaged. Revisit only if you disagree with the verifi
   doesn't invalidate other tokens; refresh rotation not transactional; sign-count blind overwrite;
   MinSecretKeyLength = length-not-entropy; ceremony-cookie MaxAge knob; non-constant-time hash
   lookups in memory stores — all reviewed, judged low/non-exploitable or by-design.
+
+---
+
+## Panic / DoS sweep (2026-06-03)
+
+Second-pass multi-agent audit targeting reachable panics and unbounded-resource DoS under an
+unauthenticated/low-priv remote attacker model. 7 candidates → **3 confirmed**, 4 refuted after
+adversarial verification. All three fixed (test-backed).
+
+- [x] **PANIC-01 — per-request panic in the dynamic OIDC ProviderStore** (medium)
+  - `oauth/provider.go` `WithOIDC` panicked on an invalid `OIDCConfig` (a startup contract), but
+    `oauth/pgx` `GetProvider` ran it per-request on tenant/DB-controlled config — an empty `client_id`
+    or bad issuer panicked the Begin/Callback handler (500 + broken login route for that tenant).
+  - Fix: `WithOIDC` now records the error into the existing deferred `configErr` (surfaced at
+    `Exchange`) instead of panicking; the pgx store validates `client_id`/`issuer` at both
+    `GetProvider` and `UpsertProvider`. (`oauth/oidc_test.go`, `oauth/pgx/validate_internal_test.go`)
+
+- [x] **DOS-01 — passkey Finish handlers decode the ceremony body with no size cap** (low)
+  - `FinishLogin`/`FinishRegistration` fed the raw body to the go-webauthn JSON decoder unbounded; a
+    cookie-bearing (low-priv) caller could force unbounded buffering.
+  - Fix: wrap `r.Body` in `http.MaxBytesReader` (default 64 KiB, `WithMaxBodyBytes` to tune), mirroring
+    the identity/otp handlers. (`passkey/maxbody_test.go`)
+
+- [x] **DOS-02 — `sessions/memory` O(n) lookup + no expired-session eviction** (low)
+  - `FindSessionByHash` linear-scanned the whole map per validate/revoke; the set only grew
+    (`DeleteExpired` had no callers). CPU/latency DoS under login load. (pgx store unaffected.)
+  - Fix: tenant-scoped `tokenHash→ID` secondary index (O(1) lookup) maintained by every mutator, plus
+    opportunistic evict-on-read of an expired session. (`sessions/memory/store_test.go`)
+
+**Refuted (not actioned):** MFA handler "unbounded body" — `net/http.ParseForm` already caps urlencoded
+bodies at ~10 MB and 401s unauthenticated callers first; `ratelimit.TokenBucket` unbounded-key growth —
+not instantiated anywhere in egauth and the default `ClientIP` key is bounded by real peer IPs (opt-in
+component, caller's responsibility); identity in-memory linear scans — reference store, prod uses
+indexed SQL, growth needs rate-limitable registration; `TokenBucket.Allow` ignores ctx — guarded op is
+O(1), nothing to cancel.
