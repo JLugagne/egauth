@@ -46,7 +46,7 @@ google := providers.Google("client-id", "client-secret",
 
 ### Built-in providers
 
-All constructors live in `oauth/providers`, take `(clientID, clientSecret, ...oauth.ProviderOption)`, and return a `*oauth.Provider`. OIDC providers also export `…Issuer` / `…JWKSURL` constants for `oauth.WithOIDC`.
+All constructors live in `oauth/providers` and return a `*oauth.Provider`. The social providers take `(clientID, clientSecret, ...oauth.ProviderOption)`; the per-tenant providers take one or more leading domain/tenant arguments (see the table). OIDC providers also expose `…Issuer` / `…JWKSURL` values for `oauth.WithOIDC` — a constant for fixed-endpoint providers, or a helper function for the per-tenant ones.
 
 | Constructor | Type | Issuer / JWKS constants | Notes |
 | --- | --- | --- | --- |
