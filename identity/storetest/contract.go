@@ -18,26 +18,25 @@ const (
 
 // MockStore is a functional mock of the identity.Store interface.
 type MockStore struct {
-	CreateUserFunc              func(ctx context.Context, tenantID string, email string) (*identity.User, error)
-	FindUserByIDFunc            func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error)
-	FindUserByEmailFunc         func(ctx context.Context, tenantID string, email string) (*identity.User, error)
-	FindUserByPhoneFunc         func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
-	UpdateUserFunc              func(ctx context.Context, tenantID string, user *identity.User) error
-	UpdateUserEmailFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
-	UpdateUserPhoneFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
-	UpdateUserRecoveryEmailFunc func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
-	DeleteUserFunc              func(ctx context.Context, tenantID string, id uuid.UUID) error
-	AddIdentityFunc             func(ctx context.Context, tenantID string, ident *identity.Identity) error
-	FindIdentitiesByUserIDFunc  func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
-	FindIdentityByProviderFunc  func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
-
-	IncrementFailedAttemptsFunc func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
-	ResetFailedAttemptsFunc     func(ctx context.Context, tenantID string, identityID uuid.UUID) error
-
-	UpdateIdentityPasswordFunc   func(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
-	CreateVerificationTokenFunc  func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
-	ConsumeVerificationTokenFunc func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
-
+	CreateUserFunc                      func(ctx context.Context, tenantID string, email string) (*identity.User, error)
+	FindUserByIDFunc                    func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error)
+	FindUserByEmailFunc                 func(ctx context.Context, tenantID string, email string) (*identity.User, error)
+	FindUserByPhoneFunc                 func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
+	UpdateUserFunc                      func(ctx context.Context, tenantID string, user *identity.User) error
+	UpdateUserEmailFunc                 func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
+	UpdateUserPhoneFunc                 func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
+	UpdateUserRecoveryEmailFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
+	DeleteUserFunc                      func(ctx context.Context, tenantID string, id uuid.UUID) error
+	DisableUserFunc                     func(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error
+	EnableUserFunc                      func(ctx context.Context, tenantID string, id uuid.UUID) error
+	AddIdentityFunc                     func(ctx context.Context, tenantID string, ident *identity.Identity) error
+	FindIdentitiesByUserIDFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
+	FindIdentityByProviderFunc          func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
+	IncrementFailedAttemptsFunc         func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
+	ResetFailedAttemptsFunc             func(ctx context.Context, tenantID string, identityID uuid.UUID) error
+	UpdateIdentityPasswordFunc          func(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
+	CreateVerificationTokenFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
+	ConsumeVerificationTokenFunc        func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
 	DeleteExpiredVerificationTokensFunc func(ctx context.Context, tenantID string) (int64, error)
 }
 
@@ -665,4 +664,71 @@ func (m *MockStore) UpdateUserRecoveryEmail(ctx context.Context, tenantID string
 		panic("called not defined UpdateUserRecoveryEmailFunc")
 	}
 	return m.UpdateUserRecoveryEmailFunc(ctx, tenantID, userID, recoveryEmail, verifiedAt)
+}
+
+func (m *MockStore) DisableUser(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error {
+	if m.DisableUserFunc == nil {
+		panic("called not defined DisableUserFunc")
+	}
+	return m.DisableUserFunc(ctx, tenantID, id, disabledAt)
+}
+
+func (m *MockStore) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) error {
+	if m.EnableUserFunc == nil {
+		panic("called not defined EnableUserFunc")
+	}
+	return m.EnableUserFunc(ctx, tenantID, id)
+}
+
+// StoreDisableEnableContract verifies the administrative disable/enable lifecycle: DisableUser
+// stamps DisabledAt while retaining the (findable) row and email slot, EnableUser clears it, both
+// are idempotent, and both reject unknown or soft-deleted accounts. It is part of the Store
+// contract; each backend's test runs it alongside StoreContractTesting.
+func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, tenant, "disable_contract@example.com")
+	require.NoError(t, err)
+	assert.Nil(t, user.DisabledAt, "a freshly created user is not disabled")
+
+	// Disable stamps DisabledAt; the row stays findable (unlike soft delete) and the email is
+	// retained.
+	disabledAt := time.Now()
+	require.NoError(t, store.DisableUser(ctx, tenant, user.ID, disabledAt))
+
+	found, err := store.FindUserByID(ctx, tenant, user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found.DisabledAt, "DisableUser must set DisabledAt")
+	assert.Equal(t, disabledAt.Unix(), found.DisabledAt.Unix())
+	assert.Equal(t, "disable_contract@example.com", found.Email, "disable retains the email slot")
+
+	// A disabled account is still reachable by email so admin tooling can inspect it.
+	byEmail, err := store.FindUserByEmail(ctx, tenant, "disable_contract@example.com")
+	require.NoError(t, err)
+	assert.Equal(t, user.ID, byEmail.ID)
+	require.NotNil(t, byEmail.DisabledAt)
+
+	// Disabling an already-disabled user is an idempotent success.
+	require.NoError(t, store.DisableUser(ctx, tenant, user.ID, time.Now()))
+
+	// Enable clears DisabledAt.
+	require.NoError(t, store.EnableUser(ctx, tenant, user.ID))
+	found, err = store.FindUserByID(ctx, tenant, user.ID)
+	require.NoError(t, err)
+	assert.Nil(t, found.DisabledAt, "EnableUser must clear DisabledAt")
+
+	// Enabling an account that is not disabled is an idempotent success.
+	require.NoError(t, store.EnableUser(ctx, tenant, user.ID))
+
+	// Unknown users are reported as not found on both operations.
+	assert.ErrorIs(t, store.DisableUser(ctx, tenant, uuid.New(), time.Now()), identity.ErrUserNotFound)
+	assert.ErrorIs(t, store.EnableUser(ctx, tenant, uuid.New()), identity.ErrUserNotFound)
+
+	// A soft-deleted user cannot be disabled or enabled: it is not a live account.
+	gone, err := store.CreateUser(ctx, tenant, "disable_gone@example.com")
+	require.NoError(t, err)
+	require.NoError(t, store.DeleteUser(ctx, tenant, gone.ID))
+	assert.ErrorIs(t, store.DisableUser(ctx, tenant, gone.ID, time.Now()), identity.ErrUserNotFound)
+	assert.ErrorIs(t, store.EnableUser(ctx, tenant, gone.ID), identity.ErrUserNotFound)
 }

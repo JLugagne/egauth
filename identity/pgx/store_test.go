@@ -54,6 +54,7 @@ func TestPgxStore_Contract(t *testing.T) {
 	// 4. Create Store
 	store := pgxstore.NewStore(pool)
 
-	// 5. Run Contract Test
+	// 5. Run Contract Tests
 	storetest.StoreContractTesting(t, store, true)
+	storetest.StoreDisableEnableContract(t, store, "tenant-A")
 }

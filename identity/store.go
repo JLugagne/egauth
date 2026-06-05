@@ -7,11 +7,6 @@ import (
 	"github.com/google/uuid"
 )
 
-// Store defines the persistence interface for User and Identity models.
-//
-// Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
-// string is a legal tenant key (the single-tenant default partition); it must still be
-// passed explicitly.
 type Store interface {
 	// User operations
 
@@ -56,6 +51,18 @@ type Store interface {
 	UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
 
 	DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error
+
+	// DisableUser marks a live user as administratively disabled by setting disabled_at to
+	// disabledAt. It is a REVERSIBLE suspension: the row, email slot and all associated data are
+	// retained (unlike DeleteUser, which anonymizes). Disabling an already-disabled user is a
+	// no-op that succeeds (idempotent). It returns ErrUserNotFound when no live (non-soft-deleted),
+	// same-tenant user matches.
+	DisableUser(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error
+
+	// EnableUser clears a user's disabled_at, re-activating an administratively disabled account.
+	// Enabling an account that is not disabled is a no-op that succeeds (idempotent). It returns
+	// ErrUserNotFound when no live (non-soft-deleted), same-tenant user matches.
+	EnableUser(ctx context.Context, tenantID string, id uuid.UUID) error
 
 	// Identity operations
 
