@@ -28,7 +28,7 @@ const MinCookieKeyLength = 32
 // user-verification requirement, which the server treats as trusted state; without an
 // authenticated cookie a client could forge them (e.g. downgrade user verification), so the key
 // is required at construction.
-var ErrCookieKeyMissing = errors.New("passkey: Config.CookieKey is required and must be at least 32 bytes (set it, or shorten it is too short)")
+var ErrCookieKeyMissing = errors.New("passkey: Config.CookieKey is required and must be at least 32 bytes")
 
 // ErrChallengeStoreMissing is returned by NewService when no Config.ChallengeStore is provided
 // and the insecure opt-out (Config.InsecureNoChallengeStore) was not set. The challenge store
