@@ -14,12 +14,15 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// MigrationsFS embeds the SQL migration files for the oauth module's Postgres schema,
+// applied via Migrate (which runs them through pgxmigrate).
+//
 //go:embed migrations/*.sql
-var migrationsFS embed.FS
+var MigrationsFS embed.FS
 
 // Migrate applies the SQL schema migrations for the OAuth pgx store.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	return pgxmigrate.Run(ctx, pool, migrationsFS)
+	return pgxmigrate.Run(ctx, pool, MigrationsFS)
 }
 
 // OIDCProviderConfig holds the database-storable attributes of an OIDC connection.
