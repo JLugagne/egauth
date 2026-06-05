@@ -21,6 +21,25 @@ func newUVRequiredService(t *testing.T) *passkey.Service {
 		RPDisplayName:    testRPName,
 		RPOrigins:        []string{testOrigin},
 		UserVerification: protocol.VerificationRequired,
+		CookieKey:        testCookieKey,
+		ChallengeStore:   passkeymemory.NewChallengeStore(),
+	})
+	require.NoError(t, err)
+	return svc
+}
+
+// newUVPreferredService builds a Service that explicitly relaxes user verification to
+// VerificationPreferred — the opt-out from the secure default — so a UV-cleared assertion is
+// accepted.
+func newUVPreferredService(t *testing.T) *passkey.Service {
+	t.Helper()
+	svc, err := passkey.NewService(passkeymemory.NewStore(), passkey.Config{
+		RPID:             testRPID,
+		RPDisplayName:    testRPName,
+		RPOrigins:        []string{testOrigin},
+		UserVerification: protocol.VerificationPreferred,
+		CookieKey:        testCookieKey,
+		ChallengeStore:   passkeymemory.NewChallengeStore(),
 	})
 	require.NoError(t, err)
 	return svc
@@ -97,22 +116,41 @@ func TestUserVerificationRequired_RejectsUVUnsetDiscoverableLogin(t *testing.T) 
 	require.Error(t, err, "UV-required discoverable login must reject an assertion without the User Verified flag")
 }
 
-// TestUserVerificationDefault_PreservesBackwardCompatibility documents that the default
-// (zero-value) config does NOT require UV, so existing callers are unaffected: a UV-cleared
-// assertion is still accepted.
-func TestUserVerificationDefault_PreservesBackwardCompatibility(t *testing.T) {
+// TestUserVerificationDefault_RequiresUV is the secure-by-default assertion: a zero-value
+// Config.UserVerification now means VerificationRequired, so the ceremony carries the UV
+// requirement and a UV-cleared assertion is REJECTED — without the caller opting into it.
+func TestUserVerificationDefault_RequiresUV(t *testing.T) {
 	ctx := context.Background()
-	svc := newPasskeyService(t)
+	svc := newPasskeyService(t) // zero-value UserVerification
 	userID := uuid.New()
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)
 	require.NoError(t, err)
-	assert.Empty(t, session.UserVerification,
-		"default config leaves UV unset (preferred), preserving prior behavior")
+	assert.Equal(t, protocol.VerificationRequired, session.UserVerification,
+		"the default config must require user verification")
+
+	_, err = svc.FinishLogin(ctx, "", userID, *session,
+		auth.assertionWithFlags(t, session.Challenge, nil, 1, flagUP))
+	require.Error(t, err, "by default a UV-cleared assertion must be rejected")
+}
+
+// TestUserVerificationPreferred_AcceptsUVUnset documents the explicit opt-out: setting
+// VerificationPreferred relaxes the default so a UV-cleared assertion is accepted again (e.g. a
+// second-factor flow where another factor already authenticated the user).
+func TestUserVerificationPreferred_AcceptsUVUnset(t *testing.T) {
+	ctx := context.Background()
+	svc := newUVPreferredService(t)
+	userID := uuid.New()
+	auth := register(t, svc, userID)
+
+	_, session, err := svc.BeginLogin(ctx, "", userID)
+	require.NoError(t, err)
+	assert.Equal(t, protocol.VerificationPreferred, session.UserVerification,
+		"an explicit Preferred requirement must be carried into the ceremony")
 
 	cred, err := svc.FinishLogin(ctx, "", userID, *session,
 		auth.assertionWithFlags(t, session.Challenge, nil, 1, flagUP))
-	require.NoError(t, err, "without UV configured, a UV-cleared assertion must still be accepted")
+	require.NoError(t, err, "with UV preferred, a UV-cleared assertion must be accepted")
 	assert.Equal(t, auth.credID, cred.ID)
 }

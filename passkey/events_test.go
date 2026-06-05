@@ -38,10 +38,12 @@ func (c *captureSink) find(t event.Type) (event.Event, bool) {
 func newPasskeyServiceWithSink(t *testing.T, sink event.Sink) *passkey.Service {
 	t.Helper()
 	svc, err := passkey.NewService(passkeymemory.NewStore(), passkey.Config{
-		RPID:          testRPID,
-		RPDisplayName: testRPName,
-		RPOrigins:     []string{testOrigin},
-		Events:        sink,
+		RPID:           testRPID,
+		RPDisplayName:  testRPName,
+		RPOrigins:      []string{testOrigin},
+		CookieKey:      testCookieKey,
+		ChallengeStore: passkeymemory.NewChallengeStore(),
+		Events:         sink,
 	})
 	require.NoError(t, err)
 	return svc

@@ -53,12 +53,19 @@ type handlerConfig struct {
 // HandlerOption configures the passkey HTTP handlers.
 type HandlerOption func(*handlerConfig)
 
-func newHandlerConfig(opts []HandlerOption) handlerConfig {
+// newHandlerConfig seeds the handler config from the Service's secure defaults (the
+// construction-validated cookie key and the configured ChallengeStore) and then applies the
+// per-handler options, which may override them. Seeding from the Service means a Service built
+// via NewService — which fails fast without a cookie key — yields handlers that are secure by
+// default without repeating WithCookieKey/WithChallengeStore at every call site.
+func newHandlerConfig(svc *Service, opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
 		sessionCookie:  DefaultSessionCookieName,
 		sessionTTL:     DefaultSessionTTL,
 		cookieSameSite: http.SameSiteLaxMode,
 		maxBodyBytes:   DefaultMaxBodyBytes,
+		cookieKey:      svc.cookieKey,
+		challenges:     svc.challenges,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -101,11 +108,13 @@ func WithInsecureCookies() HandlerOption {
 	return func(h *handlerConfig) { h.insecureCookies = true }
 }
 
-// WithCookieKey sets the secret key used to HMAC-authenticate the ceremony cookie. It is
-// REQUIRED: the cookie carries the WebAuthn challenge and user-verification requirement, which
-// the server treats as trusted state, so an unauthenticated cookie would let a client forge
-// them (e.g. downgrade user verification). Without a key the handlers fail closed. Use a
-// stable, random secret (>= 32 bytes) and pass the SAME key to every passkey handler.
+// WithCookieKey overrides, for a single handler, the secret key used to HMAC-authenticate the
+// ceremony cookie. The key is normally supplied once via Config.CookieKey (validated at
+// NewService) and inherited by every handler, so this option is only needed to use a different
+// key for a specific handler. The cookie carries the WebAuthn challenge and user-verification
+// requirement, which the server treats as trusted state, so an unauthenticated cookie would let
+// a client forge them (e.g. downgrade user verification). Use a stable, random secret
+// (>= MinCookieKeyLength bytes) and pass the SAME key to the matching Begin and Finish handlers.
 func WithCookieKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) { h.cookieKey = key }
 }
@@ -113,7 +122,7 @@ func WithCookieKey(key []byte) HandlerOption {
 // BeginRegistrationHandler returns the credential-creation options (for
 // navigator.credentials.create) as JSON and stores the ceremony SessionData in a secure cookie.
 func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
-	cfg := newHandlerConfig(opts)
+	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, name, displayName, tenant, ok := cfg.subject(w, r)
 		if !ok {
@@ -138,7 +147,7 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 // FinishRegistrationHandler verifies the attestation response (POST body) against the cookie's
 // SessionData and persists the new credential.
 func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
-	cfg := newHandlerConfig(opts)
+	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, name, displayName, tenant, ok := cfg.subject(w, r)
 		if !ok {
@@ -168,7 +177,7 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 // BeginLoginHandler returns the credential-request options (for navigator.credentials.get) as
 // JSON and stores the ceremony SessionData in a secure cookie.
 func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
-	cfg := newHandlerConfig(opts)
+	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, _, _, tenant, ok := cfg.subject(w, r)
 		if !ok {
@@ -193,7 +202,7 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 // FinishLoginHandler verifies the assertion response (POST body) against the cookie's
 // SessionData. On success it calls the configured LoginSuccess callback (or replies 204).
 func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
-	cfg := newHandlerConfig(opts)
+	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
 		uid, _, _, tenant, ok := cfg.subject(w, r)
 		if !ok {
@@ -356,12 +365,14 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
-// WithChallengeStore enables server-side, single-use replay protection for the ceremony
-// challenge (SEC-05). On Begin the issued challenge is recorded; on Finish it is atomically
-// consumed before the assertion is verified, so a captured Finish request replayed within the
-// cookie TTL is rejected (the second consume fails). It is optional and OFF by default: when
-// nil, the handlers behave exactly as before. Pass the same store to the matching Begin and
-// Finish handlers.
+// WithChallengeStore overrides, for a single handler, the ChallengeStore that provides
+// server-side, single-use replay protection for the ceremony challenge (SEC-05). On Begin the
+// issued challenge is recorded; on Finish it is atomically consumed before the assertion is
+// verified, so a captured Finish request replayed within the cookie TTL is rejected (the second
+// consume fails). The store is normally supplied once via Config.ChallengeStore (required at
+// NewService unless Config.InsecureNoChallengeStore is set) and inherited by every handler, so
+// this option is only needed to use a different store for a specific handler. Pass the same
+// store to the matching Begin and Finish handlers.
 func WithChallengeStore(cs ChallengeStore) HandlerOption {
 	return func(h *handlerConfig) { h.challenges = cs }
 }

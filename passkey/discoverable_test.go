@@ -17,12 +17,17 @@ const (
 	testRPName  = "Example Inc"
 )
 
+// newPasskeyService builds a Service with the secure-by-default requirements satisfied (a cookie
+// key and a challenge store), so it can be used by tests that only exercise the Service-level
+// ceremonies. UserVerification is left at the zero value, which is now VerificationRequired.
 func newPasskeyService(t *testing.T) *passkey.Service {
 	t.Helper()
 	svc, err := passkey.NewService(passkeymemory.NewStore(), passkey.Config{
-		RPID:          testRPID,
-		RPDisplayName: testRPName,
-		RPOrigins:     []string{testOrigin},
+		RPID:           testRPID,
+		RPDisplayName:  testRPName,
+		RPOrigins:      []string{testOrigin},
+		CookieKey:      testCookieKey,
+		ChallengeStore: passkeymemory.NewChallengeStore(),
 	})
 	require.NoError(t, err)
 	return svc
