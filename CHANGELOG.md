@@ -92,7 +92,7 @@ Initial public release.
 - SSRF-hardened server-side OIDC fetches (SEC-02).
 - Verified `iss` and `aud` on the access-token path (SEC-03).
 - Reject malformed Argon2 PHC parameters instead of panicking (SEC-04).
-- Single-use passkey challenge consumption to block login replay (SEC-06).
+- Single-use passkey challenge consumption to block login replay (SEC-05).
 - Required HTTPS and bound JWKS to the issuer via OIDC discovery.
 - Bounded the JWKS key count and RSA modulus/exponent size (SEC-11).
 - Bound the OAuth state cookie to the provider and tenant (SEC-12).
