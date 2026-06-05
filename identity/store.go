@@ -7,6 +7,20 @@ import (
 	"github.com/google/uuid"
 )
 
+// Store is the persistence boundary for the identity package. It defines the operations
+// needed to manage users and their authentication identities within a tenant, along with
+// the verification-token, lockout and account-state primitives the higher-level flows
+// build on. All methods are tenant-scoped and return the package's sentinel errors
+// (e.g. ErrUserNotFound, ErrTenantMismatch) so callers can branch on them. Implementations
+// are responsible for enforcing per-tenant isolation; a Postgres-backed implementation is
+// provided in the identity/pgx subpackage.
+//
+// STABILITY: Store is a single, cohesive persistence contract for the package and is
+// expected to GROW during the pre-1.0 series — new methods may be added in minor releases.
+// It is intentionally NOT split into a required core plus optional capability interfaces:
+// every method here is required for correct auth behavior, and a partial Store would
+// silently break an auth flow. Implementers should follow the reference memory and pgx
+// stores and run the package's storetest conformance suite to stay in sync as it evolves.
 type Store interface {
 	// User operations
 
