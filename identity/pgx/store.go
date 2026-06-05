@@ -70,10 +70,10 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 	}
 
 	query := `
-		INSERT INTO users (id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO users (id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at, disabled_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
-	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.Phone, user.PhoneVerifiedAt, user.RecoveryEmail, user.RecoveryEmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt)
+	_, err := s.db.Exec(ctx, query, user.ID, user.TenantID, user.Email, user.EmailVerifiedAt, user.Phone, user.PhoneVerifiedAt, user.RecoveryEmail, user.RecoveryEmailVerifiedAt, user.CreatedAt, user.UpdatedAt, user.DeletedAt, user.DisabledAt)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -83,14 +83,14 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 
 func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at, disabled_at
 		FROM users
 		WHERE id = $1 AND tenant_id = $2
 	`
 	row := s.db.QueryRow(ctx, query, id, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt, &user.DisabledAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -103,14 +103,14 @@ func (s *Store) FindUserByID(ctx context.Context, tenantID string, id uuid.UUID)
 
 func (s *Store) FindUserByEmail(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at, disabled_at
 		FROM users
 		WHERE email = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, email, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt, &user.DisabledAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -454,14 +454,14 @@ func (s *Store) Ping(ctx context.Context) error {
 
 func (s *Store) FindUserByPhone(ctx context.Context, tenantID string, phone string) (*identity.User, error) {
 	query := `
-		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at
+		SELECT id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at, deleted_at, disabled_at
 		FROM users
 		WHERE phone = $1 AND tenant_id = $2 AND deleted_at IS NULL
 	`
 	row := s.db.QueryRow(ctx, query, phone, tenantID)
 
 	var user identity.User
-	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt)
+	err := row.Scan(&user.ID, &user.TenantID, &user.Email, &user.EmailVerifiedAt, &user.Phone, &user.PhoneVerifiedAt, &user.RecoveryEmail, &user.RecoveryEmailVerifiedAt, &user.CreatedAt, &user.UpdatedAt, &user.DeletedAt, &user.DisabledAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrUserNotFound
@@ -506,6 +506,48 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, us
 		WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
 	`
 	tag, err := s.db.Exec(ctx, query, recoveryEmail, verifiedAt, now, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// DisableUser marks a live user as administratively disabled by setting disabled_at. It is a
+// reversible suspension (the row and email slot are retained, unlike DeleteUser). It is gated on
+// the user being live (deleted_at IS NULL); re-disabling an already-disabled live user simply
+// overwrites disabled_at and still succeeds. Returns ErrUserNotFound when no live, same-tenant
+// user matches.
+func (s *Store) DisableUser(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET disabled_at = $1, updated_at = $2
+		WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, disabledAt, now, id, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
+// EnableUser clears a user's disabled_at, re-activating the account. It is gated on the user
+// being live; enabling an account that is not disabled is a no-op-success. Returns
+// ErrUserNotFound when no live, same-tenant user matches.
+func (s *Store) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET disabled_at = NULL, updated_at = $1
+		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, now, id, tenantID)
 	if err != nil {
 		return err
 	}

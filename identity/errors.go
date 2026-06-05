@@ -1,8 +1,6 @@
 package identity
 
-import (
-	"errors"
-)
+import "errors"
 
 var (
 	// ErrUserNotFound is returned when a user cannot be found in the store.
@@ -50,6 +48,11 @@ var (
 	// ErrAccountLocked is returned when authentication is attempted on an account that is
 	// currently locked due to too many failed attempts.
 	ErrAccountLocked = errors.New("identity: account locked")
+
+	// ErrAccountDisabled is returned when authentication is attempted on an account that an
+	// administrator has disabled (suspended). Unlike ErrAccountLocked it does not clear on its
+	// own after a duration: the account stays disabled until EnableUser is called.
+	ErrAccountDisabled = errors.New("identity: account disabled")
 
 	// ErrVerificationTokenNotFound is returned when a verification token cannot be found,
 	// is malformed, or its verifier does not match. The three cases are deliberately

@@ -35,6 +35,12 @@ type User struct {
 	CreatedAt               time.Time
 	UpdatedAt               time.Time
 	DeletedAt               *time.Time
+	// DisabledAt records when an administrator suspended the account (nil when the account is
+	// active). Unlike DeletedAt this is a REVERSIBLE state: the user row, its email slot and all
+	// associated data are retained, and EnableUser clears it. A disabled account is rejected at
+	// authentication (Authenticate returns ErrAccountDisabled; passwordless logins are refused)
+	// but remains findable so admin tooling can still inspect and re-enable it.
+	DisabledAt *time.Time
 }
 
 // Identity represents an authentication method linked to a User.

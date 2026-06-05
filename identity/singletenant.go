@@ -126,3 +126,13 @@ func (s *SingleTenant) RecoveryChannels(ctx context.Context, userID uuid.UUID) (
 func (s *SingleTenant) RequestPasswordResetViaRecovery(ctx context.Context, email string) (token string, user *User, channels RecoveryChannels, err error) {
 	return s.svc.RequestPasswordResetViaRecovery(ctx, "", email)
 }
+
+// DisableUser calls Service.DisableUser on the empty tenant.
+func (s *SingleTenant) DisableUser(ctx context.Context, userID uuid.UUID) error {
+	return s.svc.DisableUser(ctx, "", userID)
+}
+
+// EnableUser calls Service.EnableUser on the empty tenant.
+func (s *SingleTenant) EnableUser(ctx context.Context, userID uuid.UUID) error {
+	return s.svc.EnableUser(ctx, "", userID)
+}

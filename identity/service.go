@@ -57,42 +57,34 @@ const (
 type Service interface {
 	Register(ctx context.Context, tenantID string, email, password string) (*User, error)
 	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error)
-
 	// RequestPasswordReset mints a password-reset token for the account owning email. To
 	// avoid account enumeration it returns ("", nil, nil) when no such account exists, so the
 	// caller can present an identical response either way. When a token is returned the user
 	// is returned too, so the caller can deliver the token (e.g. via a Mailer).
 	RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
-
 	// ResetPassword validates newPassword against the policy, then consumes the reset token
 	// (single-use) and sets the new password, clearing any lockout.
 	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
-
 	// RequestEmailVerification mints an email-verification token for the given user.
 	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
-
 	// VerifyEmail consumes an email-verification token and marks the user's email verified,
 	// returning the updated user.
 	VerifyEmail(ctx context.Context, tenantID string, token string) (*User, error)
-
 	// LinkOrCreateIdentity resolves the user behind an external (e.g. OAuth) identity: it
 	// returns the existing user when (provider, providerID) is already linked, otherwise it
 	// just-in-time provisions a new user+identity. It refuses to silently attach the identity
 	// to a pre-existing account that merely shares the email (returns ErrEmailAlreadyExists),
 	// since auto-linking by email is an account-takeover vector.
 	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
-
 	// RequestMagicLink mints a passwordless login token for the account owning email and
 	// returns it together with the user (for delivery, e.g. via a Mailer). Like
 	// RequestPasswordReset it returns ("", nil, nil) for an unknown account to avoid
 	// enumeration. It works for any account (including OAuth-only) since it grants a session
 	// rather than touching a password.
 	RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
-
 	// LoginWithMagicLink consumes a magic-link token (single-use) and returns the user it
 	// authenticates, so the caller can issue a session/token pair.
 	LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
-
 	// ChangePassword re-verifies the user's current password and, on success, validates the
 	// new password against the policy and replaces the stored hash. It is the authenticated
 	// self-service counterpart to ResetPassword (which is token-gated). It returns
@@ -101,7 +93,6 @@ type Service interface {
 	// rejected. After a successful change the caller SHOULD revoke the user's other sessions
 	// and refresh-token families (that is cross-module and left to the consumer).
 	ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
-
 	// RequestEmailChange starts the authenticated change-email flow for userID. It validates
 	// and normalizes newEmail, rejects an address already owned by another live account in the
 	// tenant (ErrEmailAlreadyExists), and mints a single-use token bound to newEmail (carried
@@ -110,14 +101,12 @@ type Service interface {
 	// the account to an attacker-controlled address. It returns ErrInvalidEmail for a malformed
 	// address and ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
 	RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
-
 	// ConfirmEmailChange consumes a change-email token (single-use) and atomically switches the
 	// owning user's email to the address the token was minted for, marking it verified (the
 	// confirmation, delivered to the new address, proves control). It returns the updated user.
 	// It returns ErrEmailAlreadyExists when the target was claimed by another account in the
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
 	ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
-
 	// RequestPhoneVerification starts the phone-verification flow for userID. It validates and
 	// normalizes phone to E.164, rejects a number already owned by another live account in the
 	// tenant (ErrPhoneAlreadyExists), and mints a single-use token bound to phone (carried as the
@@ -127,14 +116,12 @@ type Service interface {
 	// a lower-assurance contact channel (NIST SP 800-63B excludes SMS as an authentication
 	// factor); the mfa module still does not accept SMS.
 	RequestPhoneVerification(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (token string, err error)
-
 	// ConfirmPhoneVerification consumes a phone-verification token (single-use) and atomically
 	// sets the owning user's phone to the number the token was minted for, marking it verified
 	// (the confirmation, delivered to that number, proves control). It returns the updated user.
 	// It returns ErrPhoneAlreadyExists when the number was claimed by another account in the
 	// interim and ErrUserNotFound when the account was deactivated after the token was issued.
 	ConfirmPhoneVerification(ctx context.Context, tenantID string, token string) (*User, error)
-
 	// RequestRecoveryEmail starts enrollment of an INDEPENDENT recovery email for userID — a
 	// secondary address, distinct from the primary login email, used as an account-recovery
 	// channel. It validates and normalizes recoveryEmail, rejects it when it equals the account's
@@ -144,20 +131,17 @@ type Service interface {
 	// before it is trusted. It returns ErrInvalidEmail for a malformed address and ErrUserNotFound
 	// for an unknown/soft-deleted/cross-tenant user.
 	RequestRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (token string, err error)
-
 	// ConfirmRecoveryEmail consumes a recovery-email enrollment token (single-use) and sets the
 	// owning user's recovery email to the address the token was minted for, marking it verified.
 	// It returns the updated user, or ErrUserNotFound when the account was deactivated after the
 	// token was issued.
 	ConfirmRecoveryEmail(ctx context.Context, tenantID string, token string) (*User, error)
-
 	// RecoveryChannels reports which INDEPENDENT verified recovery channels userID has enrolled
 	// (a verified recovery email and/or a verified phone). It is the gate primitive for
 	// sensitive recovery/factor-reset: a consumer requires RecoveryChannels(...).Any() (plus a
 	// freshness/step-up check, see tokens.WithMaxAuthAge) before allowing such an operation. It
 	// returns ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
 	RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (RecoveryChannels, error)
-
 	// RequestPasswordResetViaRecovery mints a password-reset token for the account owning email
 	// but, unlike RequestPasswordReset, directs it to a VERIFIED INDEPENDENT recovery channel
 	// (recovery email or phone) rather than the primary inbox — so a compromised primary mailbox
@@ -167,7 +151,6 @@ type Service interface {
 	// token is returned, the user and the available channels are returned too so the caller can
 	// deliver the token to the recovery email and/or phone.
 	RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (token string, user *User, channels RecoveryChannels, err error)
-
 	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
 	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
 	// MFA, passkeys — see WithAccountErasers) and then soft-deletes and anonymizes the identity
@@ -182,6 +165,21 @@ type Service interface {
 	// tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)): the auth_time freshness gate works for
 	// any factor, so it also covers OAuth-only accounts that cannot re-verify a password.
 	DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// DisableUser administratively suspends an account: it sets the user's DisabledAt so subsequent
+	// authentication is refused (Authenticate returns ErrAccountDisabled) and pending token-gated
+	// actions, including magic-link logins, are revoked. It is REVERSIBLE — the row, email slot and
+	// all data are retained — and is the counterpart to EnableUser. Disabling an already-disabled
+	// account succeeds (idempotent). Unlike DeleteAccount it does NOT run the AccountErasers, so
+	// existing sessions/refresh tokens are not revoked by this call; a caller that wants active
+	// sessions terminated on suspension SHOULD revoke them separately. Returns ErrUserNotFound for
+	// an unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it
+	// behind appropriate authorization (it is not a self-service action).
+	DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// EnableUser re-activates an administratively disabled account by clearing its DisabledAt.
+	// Enabling an account that is not disabled succeeds (idempotent). Returns ErrUserNotFound for an
+	// unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it behind
+	// appropriate authorization.
+	EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
@@ -402,6 +400,13 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			return nil, ErrAccountLocked
 		}
 
+		// An administratively disabled account is rejected without comparing the password, like a
+		// lockout. Unlike a lockout it does not clear on its own; only EnableUser re-activates it.
+		if user.DisabledAt != nil {
+			loginFailed(user.ID.String(), "account_disabled")
+			return nil, ErrAccountDisabled
+		}
+
 		if ident.PasswordHash == nil {
 			s.decoyHash(ctx, password)
 			loginFailed(user.ID.String(), "invalid_credentials")
@@ -444,6 +449,12 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 	if err != nil {
 		loginFailed("", "invalid_credentials")
 		return nil, ErrInvalidCredentials
+	}
+
+	// A disabled account cannot authenticate via any provider.
+	if user.DisabledAt != nil {
+		loginFailed(user.ID.String(), "account_disabled")
+		return nil, ErrAccountDisabled
 	}
 
 	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
@@ -512,6 +523,13 @@ func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token
 		return nil, nil, err
 	}
 	if user.DeletedAt != nil {
+		return nil, nil, ErrUserNotFound
+	}
+	// A disabled (administratively suspended) account cannot consume verification tokens: this
+	// reliably revokes a pending magic-link login, email-change or other token-gated action while
+	// the suspension is in force. ErrUserNotFound keeps the response indistinguishable from an
+	// account that no longer exists.
+	if user.DisabledAt != nil {
 		return nil, nil, ErrUserNotFound
 	}
 	return user, metadata, nil
@@ -1030,4 +1048,24 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 		return "", nil, RecoveryChannels{}, err
 	}
 	return token, user, channels, nil
+}
+
+// DisableUser administratively suspends a live account: it stamps DisabledAt (so Authenticate
+// returns ErrAccountDisabled and pending token-gated actions are revoked). It does not run the
+// AccountErasers — active sessions/refresh tokens are not revoked by this call.
+func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if err := s.store.DisableUser(ctx, tenantID, userID, s.now()); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.AccountDisabled, UserID: userID.String(), TenantID: tenantID})
+	return nil
+}
+
+// EnableUser re-activates an administratively disabled account by clearing DisabledAt.
+func (s *service) EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if err := s.store.EnableUser(ctx, tenantID, userID); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.AccountEnabled, UserID: userID.String(), TenantID: tenantID})
+	return nil
 }

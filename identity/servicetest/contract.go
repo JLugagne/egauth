@@ -9,9 +9,8 @@ import (
 
 // MockService is a mock implementation of the identity.Service interface.
 type MockService struct {
-	RegisterFunc     func(ctx context.Context, tenantID string, email, password string) (*identity.User, error)
-	AuthenticateFunc func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error)
-
+	RegisterFunc                        func(ctx context.Context, tenantID string, email, password string) (*identity.User, error)
+	AuthenticateFunc                    func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error)
 	RequestPasswordResetFunc            func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
 	ResetPasswordFunc                   func(ctx context.Context, tenantID string, token, newPassword string) error
 	RequestEmailVerificationFunc        func(ctx context.Context, tenantID string, userID uuid.UUID) (string, error)
@@ -29,6 +28,8 @@ type MockService struct {
 	RecoveryChannelsFunc                func(ctx context.Context, tenantID string, userID uuid.UUID) (identity.RecoveryChannels, error)
 	RequestPasswordResetViaRecoveryFunc func(ctx context.Context, tenantID string, email string) (string, *identity.User, identity.RecoveryChannels, error)
 	DeleteAccountFunc                   func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	DisableUserFunc                     func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	EnableUserFunc                      func(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -164,4 +165,18 @@ func (m *MockService) RequestPasswordResetViaRecovery(ctx context.Context, tenan
 		panic("called not defined RequestPasswordResetViaRecoveryFunc")
 	}
 	return m.RequestPasswordResetViaRecoveryFunc(ctx, tenantID, email)
+}
+
+func (m *MockService) DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if m.DisableUserFunc == nil {
+		panic("called not defined DisableUserFunc")
+	}
+	return m.DisableUserFunc(ctx, tenantID, userID)
+}
+
+func (m *MockService) EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if m.EnableUserFunc == nil {
+		panic("called not defined EnableUserFunc")
+	}
+	return m.EnableUserFunc(ctx, tenantID, userID)
 }

@@ -36,6 +36,8 @@ const (
 	RecoveryChannelEnrolled Type = "recovery_channel.enrolled"
 	MagicLinkLogin          Type = "magic_link.login"
 	AccountDeleted          Type = "account.deleted"
+	AccountDisabled         Type = "account.disabled" // reversible administrative suspension
+	AccountEnabled          Type = "account.enabled"  // administrative re-activation
 	RefreshReuseDetected    Type = "refresh.reuse_detected"
 	TokenFamilyRevoked      Type = "token.family_revoked"
 	MFAEnrolled             Type = "mfa.enrolled"

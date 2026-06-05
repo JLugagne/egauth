@@ -446,3 +446,38 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, us
 
 	return nil
 }
+
+// DisableUser marks a live user as administratively disabled (reversible suspension). It is a
+// no-op-success when the user is already disabled.
+func (s *Store) DisableUser(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[id]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	d := disabledAt
+	user.DisabledAt = &d
+	user.UpdatedAt = time.Now()
+
+	return nil
+}
+
+// EnableUser clears a user's disabled state, re-activating an administratively disabled account.
+// It is a no-op-success when the user is not currently disabled.
+func (s *Store) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[id]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	user.DisabledAt = nil
+	user.UpdatedAt = time.Now()
+
+	return nil
+}
