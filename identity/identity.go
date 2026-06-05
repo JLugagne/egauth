@@ -7,8 +7,6 @@ import (
 )
 
 // User represents an account container.
-// User represents an account container.
-// User represents an account container.
 type User struct {
 	ID              uuid.UUID
 	TenantID        string

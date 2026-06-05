@@ -40,7 +40,6 @@ type UserInfo struct {
 type FetchUserFunc func(ctx context.Context, client *http.Client, accessToken string) (*UserInfo, error)
 
 // Provider is a configured OAuth2 authorization-code provider.
-// Provider is a configured OAuth2 authorization-code provider.
 type Provider struct {
 	name              string
 	clientID          string
