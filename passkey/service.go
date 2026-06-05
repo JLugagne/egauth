@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
@@ -35,12 +36,18 @@ type Config struct {
 	// go-webauthn enforces the UV bit at FinishRegistration, FinishLogin and
 	// FinishDiscoverableLogin.
 	UserVerification protocol.UserVerificationRequirement
+	// Events is an optional security-event sink (see the event package). When set it receives a
+	// LoginSucceeded event on each completed passkey login and an AccountBlocked event when a
+	// regressed signature counter flags a possible cloned authenticator. A nil sink disables
+	// emission.
+	Events event.Sink
 }
 
 // Service runs the WebAuthn registration and login ceremonies over a credential Store.
 type Service struct {
-	wa    *webauthn.WebAuthn
-	store Store
+	wa     *webauthn.WebAuthn
+	store  Store
+	events event.Sink
 }
 
 // ceremonyTimeout bounds how long an in-flight registration/login ceremony stays valid.
@@ -69,7 +76,7 @@ func NewService(store Store, cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{wa: wa, store: store}, nil
+	return &Service{wa: wa, store: store, events: cfg.Events}, nil
 }
 
 // BeginRegistration starts adding a passkey for the user, returning the creation options to
@@ -132,6 +139,7 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 		return nil, err
 	}
 	if cred.Authenticator.CloneWarning {
+		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: userID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, ErrCredentialCloned
 	}
 	stored, err := toStored(userID, cred)
@@ -141,6 +149,7 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
 		return nil, err
 	}
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: userID.String(), TenantID: tenantID, Reason: "passkey"})
 	return stored, nil
 }
 
@@ -178,6 +187,7 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 		return nil, uuid.Nil, err
 	}
 	if cred.Authenticator.CloneWarning {
+		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, uuid.Nil, ErrCredentialCloned
 	}
 	stored, err := toStored(resolvedID, cred)
@@ -187,6 +197,7 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
 		return nil, uuid.Nil, err
 	}
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_discoverable"})
 	return stored, resolvedID, nil
 }
 
@@ -247,3 +258,6 @@ func (u *waUser) WebAuthnDisplayName() string                { return u.displayN
 func (u *waUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 var _ webauthn.User = (*waUser)(nil)
+
+// emit sends a security event to the configured sink (a no-op when none is set).
+func (s *Service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }

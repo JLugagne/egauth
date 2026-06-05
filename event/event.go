@@ -36,6 +36,8 @@ const (
 	RecoveryChannelEnrolled Type = "recovery_channel.enrolled"
 	MagicLinkLogin          Type = "magic_link.login"
 	AccountDeleted          Type = "account.deleted"
+	Logout                  Type = "logout"           // a session was revoked (sign-out, "log out everywhere")
+	AccountBlocked          Type = "account.blocked"  // access denied by policy (rate limit, IP/geo, risk), distinct from account.locked
 	AccountDisabled         Type = "account.disabled" // reversible administrative suspension
 	AccountEnabled          Type = "account.enabled"  // administrative re-activation
 	RefreshReuseDetected    Type = "refresh.reuse_detected"
@@ -137,7 +139,7 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelError
 	}
 	switch e.Type {
-	case LoginFailed, AccountLocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed:
+	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed:
 		return slog.LevelWarn
 	default:
 		return slog.LevelInfo

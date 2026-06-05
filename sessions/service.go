@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
@@ -38,6 +39,7 @@ type service struct {
 	store       Store
 	now         func() time.Time
 	maxLifetime time.Duration
+	events      event.Sink
 }
 
 // NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
@@ -172,7 +174,11 @@ func (s *service) RevokeSession(ctx context.Context, tenantID string, token stri
 		return err
 	}
 
-	return s.store.DeleteSession(ctx, tenantID, session.ID)
+	if err := s.store.DeleteSession(ctx, tenantID, session.ID); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.Logout, UserID: session.UserID.String(), TenantID: tenantID})
+	return nil
 }
 
 func (s *service) hashToken(token string) string {
@@ -214,5 +220,17 @@ func (s *service) clampExpiry(session *Session, candidate time.Time) time.Time {
 // RevokeAllForUser deletes every session belonging to userID within tenantID by forwarding to
 // the store's DeleteSessionsByUserID. It is the "log out everywhere" primitive.
 func (s *service) RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
-	return s.store.DeleteSessionsByUserID(ctx, tenantID, userID)
+	if err := s.store.DeleteSessionsByUserID(ctx, tenantID, userID); err != nil {
+		return err
+	}
+	s.emit(ctx, event.Event{Type: event.Logout, UserID: userID.String(), TenantID: tenantID, Reason: "all_sessions"})
+	return nil
 }
+
+// WithEventSink registers a security-event sink (see the event package) that receives a Logout
+// event whenever a session is revoked — RevokeSession (single sign-out) and RevokeAllForUser
+// ("log out everywhere"). Optional; without it no events are emitted.
+func WithEventSink(sink event.Sink) ServiceOption { return func(s *service) { s.events = sink } }
+
+// emit sends a security event to the configured sink (a no-op when none is set).
+func (s *service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }

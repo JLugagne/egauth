@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
@@ -26,6 +27,7 @@ type service struct {
 	ttl         time.Duration
 	maxAttempts int
 	now         func() time.Time
+	events      event.Sink
 }
 
 // ServiceOption configures the OTP Service.
@@ -119,6 +121,7 @@ func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UU
 	}
 	if n > s.maxAttempts {
 		_ = s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
+		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: subjectID.String(), TenantID: tenantID, Reason: "otp_too_many_attempts", Attrs: map[string]any{"purpose": purpose}})
 		return ErrTooManyAttempts
 	}
 
@@ -126,6 +129,7 @@ func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UU
 		if n >= s.maxAttempts {
 			// Last allowed guess was wrong: burn the code.
 			_ = s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
+			s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: subjectID.String(), TenantID: tenantID, Reason: "otp_too_many_attempts", Attrs: map[string]any{"purpose": purpose}})
 			return ErrTooManyAttempts
 		}
 		return ErrInvalidCode
@@ -147,3 +151,11 @@ func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UU
 func (s *service) Invalidate(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error {
 	return s.store.DeleteOTP(ctx, tenantID, subjectID, purpose)
 }
+
+// WithEventSink registers a security-event sink (see the event package) that receives an
+// AccountBlocked event when a subject exhausts its verification attempts for a purpose (the
+// code is burned). Optional; without it no events are emitted.
+func WithEventSink(sink event.Sink) ServiceOption { return func(s *service) { s.events = sink } }
+
+// emit sends a security event to the configured sink (a no-op when none is set).
+func (s *service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }
