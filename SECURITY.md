@@ -1,9 +1,9 @@
 # Security model — handling secrets and passwords
 
-This document describes how `libauth` handles sensitive values (passwords, opaque
+This document describes how `egauth` handles sensitive values (passwords, opaque
 tokens, hashes) and what the **consumer** of the library is responsible for.
 
-## What libauth guarantees
+## What egauth guarantees
 
 - **Hashing at rest.** Opaque tokens (refresh tokens, API keys, session tokens) are
   never persisted in clear text. Only their SHA-256 hash is stored (`tokens.HashToken`),
@@ -45,7 +45,7 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   client secret; the provider access token never leaves the exchange.
 - **NIST-aligned passphrases.** `passwords/policy.PassphrasePolicy` enforces length (counted in
   Unicode code points) with NO composition rules and screens secrets against a denylist plus an
-  optional pluggable `passwords.BreachChecker` (e.g. a HIBP k-anonymity client — libauth ships
+  optional pluggable `passwords.BreachChecker` (e.g. a HIBP k-anonymity client — egauth ships
   the interface only, never the network call).
 - **TOTP & recovery codes.** The `mfa` module implements RFC 6238 TOTP (authenticator apps only,
   no SMS) with a ±skew window and **replay protection** via a monotonic last-used time-step (a
@@ -58,12 +58,38 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Passkeys (WebAuthn).** The `passkey` module wraps go-webauthn. Credentials are scoped to the
   configured Relying Party ID; the ceremony challenge and user-verification requirement
   (`SessionData`) are carried between Begin and Finish in a short-lived, **HMAC-signed**
-  `HttpOnly`/`Secure` cookie (the key is **required** via `passkey.WithCookieKey`; the handlers
-  fail closed without it) so the client cannot tamper with the challenge or downgrade user
+  `HttpOnly`/`Secure` cookie so the client cannot tamper with the challenge or downgrade user
   verification; the cookie is single-use and the ceremony has a server-enforced expiry. A
   regressed signature counter (possible cloned authenticator) is rejected (`ErrCredentialCloned`).
-- **MFA verification is not rate-limited by libauth.** Per the non-objectives, throttling TOTP /
-  recovery-code / passkey attempts is the consumer's responsibility; libauth exposes the errors
+  The module is **secure by default**: `passkey.NewService` fails fast on a misconfigured
+  passwordless/step-up setup rather than degrading silently (mirroring `jwt.New`). See the
+  hardening checklist below.
+
+  **Passwordless / step-up hardening checklist** — required configuration for a secure
+  deployment (each item is enforced at construction unless noted):
+  - **`Config.CookieKey` (required).** A stable, random secret of at least
+    `passkey.MinCookieKeyLength` (32) bytes used to HMAC-authenticate the ceremony cookie.
+    `NewService` returns `ErrCookieKeyMissing` if it is unset or too short — the key is validated
+    at construction, not on the first ceremony, so a misconfiguration fails at startup. (A
+    per-handler `passkey.WithCookieKey` override still exists for the rare case of a distinct key,
+    and the handlers also fail closed defensively if that override clears the key.)
+  - **`Config.ChallengeStore` (required).** Provides single-use, server-side replay protection
+    (SEC-05): the challenge is recorded on Begin and atomically consumed on Finish, so a captured
+    raw Finish request cannot be replayed within the cookie TTL. `NewService` returns
+    `ErrChallengeStoreMissing` unless a store is supplied or the explicit opt-out
+    `Config.InsecureNoChallengeStore` is set (cookie-only protection — **do not** use for
+    passwordless). The `passkey/memory` and `passkey/pgx` subpackages provide implementations.
+  - **`Config.UserVerification` (defaults to required).** The zero value is now
+    `protocol.VerificationRequired`: an assertion whose User Verified (UV) flag is unset is
+    rejected at Finish across register, login and discoverable login. Leave it at the default for
+    passwordless/step-up; set it explicitly to `VerificationPreferred`/`VerificationDiscouraged`
+    **only** for a flow where another factor already authenticated the user.
+  - **Serve over HTTPS** so the `Secure` ceremony cookie is sent; `passkey.WithInsecureCookies`
+    is for local HTTP development only.
+  - **Rate-limit ceremony attempts** in front of the handlers (egauth does not throttle them —
+    see the next bullet).
+- **MFA verification is not rate-limited by egauth.** Per the non-objectives, throttling TOTP /
+  recovery-code / passkey attempts is the consumer's responsibility; egauth exposes the errors
   and propagates `context.Context` so an external limiter can be attached in front of the handlers.
 - **Step-up / AAL enforcement.** Tokens carry an `AMR` claim (RFC 8176) recording the factors used
   to obtain them; `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
@@ -88,7 +114,7 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
   re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its
   outstanding passwordless logins and reset links (a token minted while live cannot resurrect it).
-- **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — libauth never
+- **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — egauth never
   sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
   is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).
   Both guarantees hold under concurrency: success consumes the code through an atomic guarded
@@ -155,7 +181,7 @@ redaction is in any case only a backstop. Therefore the consumer must:
 ## CSRF on the form handlers (consumer responsibility)
 
 `LoginHandler`, `RegisterHandler`, `RefreshHandler` and `LogoutHandler` are
-state-changing endpoints driven by the request (form body / cookies). libauth applies two
+state-changing endpoints driven by the request (form body / cookies). egauth applies two
 partial defences but does **not** ship a full CSRF-token system (per the PRD, rate limiting
 and general CSRF are left to the application layer):
 
