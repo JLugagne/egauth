@@ -147,9 +147,15 @@ func TestSafeHTTPClientRefusesLoopbackServer(t *testing.T) {
 
 // TestSafeHTTPClientIgnoresEnvProxy proves the dial-time IP guard inspects the RESOLVED TARGET
 // even when HTTP(S)_PROXY is set in the environment. If the safe client honored the env proxy, the
-// dial would target the (bogus) proxy host instead of the loopback test server, so the request
-// would fail with a proxy dial error rather than the internal-IP SSRF block. Asserting that the
-// error wraps ErrBlockedAddress confirms env proxies are not trusted (Proxy: nil).
+// dial would target the (bogus) proxy host instead of the internal target, so the request would
+// fail with a proxy dial error rather than the internal-IP SSRF block. Asserting that the error
+// wraps ErrBlockedAddress confirms env proxies are not trusted (Proxy: nil).
+//
+// The RFC1918 literal-IP target is the load-bearing revert-detector: Go's
+// http.ProxyFromEnvironment silently bypasses the proxy for loopback addresses, so a loopback
+// target alone would still hit the dial-time guard (and pass) even if Proxy were reverted to
+// http.ProxyFromEnvironment. A non-loopback internal IP (10.0.0.5) IS proxied when the env proxy
+// is honored, so it fails with ErrBlockedAddress only while Proxy stays nil.
 func TestSafeHTTPClientIgnoresEnvProxy(t *testing.T) {
 	// A proxy that, if honored, would intercept the dial before the target IP is ever evaluated.
 	t.Setenv("HTTP_PROXY", "http://some-proxy.invalid:3128")
@@ -157,24 +163,45 @@ func TestSafeHTTPClientIgnoresEnvProxy(t *testing.T) {
 	t.Setenv("http_proxy", "http://some-proxy.invalid:3128")
 	t.Setenv("https_proxy", "http://some-proxy.invalid:3128")
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
 	client := SafeHTTPClient()
-	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
-	if err != nil {
-		t.Fatalf("building request: %v", err)
-	}
-	resp, err := client.Do(req)
-	if err == nil {
-		_ = resp.Body.Close()
-		t.Fatalf("SafeHTTPClient reached loopback target %s with env proxy set, want SSRF block", srv.URL)
-	}
-	// The error must be the dial-time internal-IP block (inspecting the resolved 127.0.0.1
-	// target), NOT a failed dial to the bogus proxy host.
-	if !errors.Is(err, ErrBlockedAddress) {
-		t.Fatalf("error = %v, want wrapped ErrBlockedAddress (dial-time IP guard, env proxy ignored)", err)
-	}
+
+	// Subcase 1: a non-loopback RFC1918 target. ProxyFromEnvironment would route this through the
+	// proxy (loopback bypass does NOT apply), so honoring the env proxy would yield a proxy-dial
+	// error, not ErrBlockedAddress. Only Proxy: nil keeps the dial-time guard authoritative here.
+	t.Run("rfc1918 literal target is not proxied", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodGet, "http://10.0.0.5/", nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("SafeHTTPClient reached internal target 10.0.0.5 with env proxy set, want SSRF block")
+		}
+		if !errors.Is(err, ErrBlockedAddress) {
+			t.Fatalf("error = %v, want wrapped ErrBlockedAddress (dial-time IP guard, env proxy ignored)", err)
+		}
+	})
+
+	// Subcase 2: a loopback test server. The dial-time guard must still block it (defence in depth;
+	// note Go bypasses the env proxy for loopback regardless, so this alone cannot detect a revert).
+	t.Run("loopback target is blocked at dial time", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+
+		req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatalf("building request: %v", err)
+		}
+		resp, err := client.Do(req)
+		if err == nil {
+			_ = resp.Body.Close()
+			t.Fatalf("SafeHTTPClient reached loopback target %s with env proxy set, want SSRF block", srv.URL)
+		}
+		if !errors.Is(err, ErrBlockedAddress) {
+			t.Fatalf("error = %v, want wrapped ErrBlockedAddress (dial-time IP guard, env proxy ignored)", err)
+		}
+	})
 }
