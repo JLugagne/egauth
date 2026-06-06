@@ -1,5 +1,9 @@
 # egauth
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/JLugagne/egauth.svg)](https://pkg.go.dev/github.com/JLugagne/egauth)
+[![CI](https://github.com/JLugagne/egauth/actions/workflows/ci.yml/badge.svg)](https://github.com/JLugagne/egauth/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 A complete, composable, non-opinionated authentication toolkit for Go.
 
 > **About this project — please read.** egauth was built mostly through "vibe coding"
@@ -162,6 +166,8 @@ trade-offs (e.g. TOTP secrets stored recoverably, accepted account-existence dis
 boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mail/SMS transport).
 
 ## Documentation
+
+Full API reference: [pkg.go.dev/github.com/JLugagne/egauth](https://pkg.go.dev/github.com/JLugagne/egauth)
 
 Each module has a package overview (`go doc github.com/JLugagne/egauth/identity`) and the
 login-critical packages carry runnable examples.
