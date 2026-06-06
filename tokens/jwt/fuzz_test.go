@@ -23,8 +23,8 @@ func FuzzVerifyAccessToken(f *testing.F) {
 
 	f.Add("")
 	f.Add("a.b.c")
-	f.Add("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.")             // alg=none attempt
-	f.Add("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.AAAA")        // HS256 header, bogus sig
+	f.Add("eyJhbGciOiJub25lIn0.eyJzdWIiOiJ4In0.")      // alg=none attempt
+	f.Add("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ4In0.AAAA") // HS256 header, bogus sig
 	f.Add("....")
 	f.Add("not-base64.@@@.$$$")
 

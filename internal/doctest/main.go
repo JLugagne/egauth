@@ -6,8 +6,8 @@
 // it checks — via `go doc` — that the symbol actually resolves to a real exported
 // identifier in the current source. A renamed function, a removed option, or a
 // fabricated/dangling constructor therefore fails CI instead of silently shipping
-// a misleading example (this is exactly how the old `egauth/delivery` dangling
-// references slipped into three tags).
+// a misleading example (this is exactly how the old, now-deleted empty delivery
+// package's dangling references slipped into three tags).
 //
 // It deliberately checks ONLY qualified identifiers of the egauth packages mapped
 // below. Local variables (ctx, pool, userID, w, r, …), stdlib calls, business
