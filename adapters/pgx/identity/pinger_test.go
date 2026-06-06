@@ -1,8 +1,8 @@
 package pgx_test
 
 import (
+	"github.com/JLugagne/egauth/adapters/pgx/identity"
 	"github.com/JLugagne/egauth/health"
-	"github.com/JLugagne/egauth/identity/pgx"
 )
 
 // Compile-time assertion that the pgx Store satisfies the optional health.Pinger seam (N11).

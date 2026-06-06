@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	mfapgx "github.com/JLugagne/egauth/mfa/pgx"
+	mfapgx "github.com/JLugagne/egauth/adapters/pgx/mfa"
 	"github.com/JLugagne/egauth/mfa/storetest"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"

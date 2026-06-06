@@ -7,7 +7,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/passkey"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

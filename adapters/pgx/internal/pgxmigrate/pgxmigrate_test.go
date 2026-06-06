@@ -6,7 +6,7 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

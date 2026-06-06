@@ -5,20 +5,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/egauth/health"
-	"github.com/JLugagne/egauth/sessions/pgx"
+	"github.com/JLugagne/egauth/adapters/pgx/tokens"
+	"github.com/JLugagne/egauth/tokens/storetest"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// Verifies the N11 health seam: the pgx Store implements health.Pinger and Ping surfaces
-// backend connectivity (nil while the pool is up, error once it is closed).
+type customClaims struct {
+	Foo string `json:"foo"`
+}
 
-func TestStore_Ping(t *testing.T) {
+func TestStoreContract(t *testing.T) {
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,
@@ -39,17 +39,11 @@ func TestStore_Ping(t *testing.T) {
 
 	pool, err := pgxpool.New(ctx, connStr)
 	require.NoError(t, err)
+	defer pool.Close()
 
-	store := pgx.NewStore(pool)
+	err = pgx.Migrate(ctx, pool)
+	require.NoError(t, err)
 
-	// The store must expose the optional Pinger seam.
-	pinger, ok := interface{}(store).(health.Pinger)
-	require.True(t, ok, "pgx Store must implement health.Pinger")
-
-	// Healthy while the pool is up.
-	require.NoError(t, pinger.Ping(ctx))
-
-	// Closing the pool makes Ping surface the connectivity failure.
-	pool.Close()
-	assert.Error(t, pinger.Ping(ctx), "Ping must error once the pool is closed")
+	store := pgx.NewStore[customClaims](pool)
+	storetest.StoreContractTesting(t, store, true, customClaims{Foo: "bar"})
 }

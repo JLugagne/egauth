@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	pgxstore "github.com/JLugagne/egauth/adapters/pgx/identity"
 	"github.com/JLugagne/egauth/identity"
-	pgxstore "github.com/JLugagne/egauth/identity/pgx"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
 	"github.com/jackc/pgx/v5/pgxpool"

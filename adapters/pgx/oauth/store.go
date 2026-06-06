@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/oauth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"

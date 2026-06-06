@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	otppgx "github.com/JLugagne/egauth/otp/pgx"
-	"github.com/JLugagne/egauth/otp/storetest"
+	passkeypgx "github.com/JLugagne/egauth/adapters/pgx/passkey"
+	"github.com/JLugagne/egauth/passkey/storetest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -42,7 +42,7 @@ func TestPgxStore_Contract(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	require.NoError(t, otppgx.Migrate(ctx, pool))
+	require.NoError(t, passkeypgx.Migrate(ctx, pool))
 
-	storetest.StoreContractTesting(t, otppgx.NewStore(pool), true)
+	storetest.StoreContractTesting(t, passkeypgx.NewStore(pool), true)
 }

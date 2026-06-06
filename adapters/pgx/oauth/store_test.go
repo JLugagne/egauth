@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
+	oauthpgx "github.com/JLugagne/egauth/adapters/pgx/oauth"
 	"github.com/JLugagne/egauth/oauth"
-	oauthpgx "github.com/JLugagne/egauth/oauth/pgx"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"

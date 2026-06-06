@@ -5,7 +5,7 @@ import (
 	"embed"
 	"errors"
 
-	"github.com/JLugagne/egauth/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/sessions"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"

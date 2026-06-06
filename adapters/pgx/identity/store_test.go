@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	passkeypgx "github.com/JLugagne/egauth/passkey/pgx"
-	"github.com/JLugagne/egauth/passkey/storetest"
+	pgxstore "github.com/JLugagne/egauth/adapters/pgx/identity"
+	"github.com/JLugagne/egauth/identity/storetest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -17,6 +17,7 @@ import (
 func TestPgxStore_Contract(t *testing.T) {
 	ctx := context.Background()
 
+	// 1. Setup Postgres Testcontainer
 	pgContainer, err := postgres.Run(ctx,
 		"postgres:16-alpine",
 		postgres.WithDatabase("testdb"),
@@ -29,6 +30,7 @@ func TestPgxStore_Contract(t *testing.T) {
 		),
 	)
 	require.NoError(t, err)
+
 	t.Cleanup(func() {
 		if err := pgContainer.Terminate(ctx); err != nil {
 			t.Fatalf("failed to terminate pgContainer: %s", err)
@@ -38,11 +40,21 @@ func TestPgxStore_Contract(t *testing.T) {
 	connString, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
 	require.NoError(t, err)
 
+	// 2. Connect with pgxpool
 	pool, err := pgxpool.New(ctx, connString)
 	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	t.Cleanup(func() {
+		pool.Close()
+	})
 
-	require.NoError(t, passkeypgx.Migrate(ctx, pool))
+	// 3. Run Migrations
+	err = pgxstore.Migrate(ctx, pool)
+	require.NoError(t, err)
 
-	storetest.StoreContractTesting(t, passkeypgx.NewStore(pool), true)
+	// 4. Create Store
+	store := pgxstore.NewStore(pool)
+
+	// 5. Run Contract Tests
+	storetest.StoreContractTesting(t, store, true)
+	storetest.StoreDisableEnableContract(t, store, "tenant-A")
 }

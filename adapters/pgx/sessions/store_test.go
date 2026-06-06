@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/egauth/sessions/pgx"
+	"github.com/JLugagne/egauth/adapters/pgx/sessions"
 	"github.com/JLugagne/egauth/sessions/storetest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"

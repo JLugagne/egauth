@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/identity"
-	"github.com/JLugagne/egauth/internal/pgxmigrate"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
