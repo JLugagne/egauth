@@ -488,6 +488,12 @@ func mapAuthError(err error) (int, string) {
 // for delivery. To prevent account enumeration it ALWAYS responds the same way — success —
 // whether or not the email maps to an account, and it ignores Mailer delivery errors so the
 // response is uniform (the Mailer should handle its own logging/retries).
+//
+// This and the other unauthenticated Request* handlers (RequestMagicLinkHandler,
+// RequestPhoneVerificationHandler, RequestPasswordResetViaRecoveryHandler) are NOT throttled
+// by egauth — per-IP / per-destination rate limiting remains YOUR responsibility. Wrap them
+// with [github.com/JLugagne/egauth/ratelimit.Middleware] (the recommended way to throttle
+// these endpoints); see the ratelimit package examples for a turnkey rate-limited router.
 func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
