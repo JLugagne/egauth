@@ -12,6 +12,16 @@ pre-1.0 API-stability changes, in preparation for an open public release.
 
 ### Added
 
+- **BREAKING (mfa, secure-by-default):** the second factor is now attempt-limited.
+  `VerifyTOTP` and the recovery-code path reserve a slot via the new
+  `mfa.Store.IncrementTOTPAttempts` atomically *before* the constant-time compare and
+  lock the factor after `DefaultMaxAttempts` (5) failures (`ErrTooManyAttempts`,
+  HTTP 429); a successful verification resets the counter. Limiting is ON by default —
+  tune it with `mfa.WithMaxAttempts` or disable it explicitly with
+  `mfa.WithNoAttemptLimit`. Adds `failed_attempts` to `mfa_totp` (pgx migration
+  `002_add_totp_failed_attempts.sql`). External `mfa.Store` implementers must add
+  `IncrementTOTPAttempts` and reset `failed_attempts` on a successful `MarkTOTPUsed` /
+  `ConsumeRecoveryCode`.
 - `tokens/basic`: a non-generic convenience layer over the generic token API,
   specialized to no-custom-claims, so the common login/refresh/protect path can
   be wired without writing `[struct{}]`. The generic `tokens` / `tokens/jwt`

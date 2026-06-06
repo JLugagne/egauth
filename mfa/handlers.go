@@ -192,6 +192,8 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 
 func mapMFAError(err error) (int, string) {
 	switch {
+	case errors.Is(err, ErrTooManyAttempts):
+		return http.StatusTooManyRequests, "too_many_attempts"
 	case errors.Is(err, ErrInvalidCode), errors.Is(err, ErrRecoveryCodeNotFound):
 		return http.StatusUnauthorized, "invalid_code"
 	case errors.Is(err, ErrAlreadyEnrolled):

@@ -23,6 +23,11 @@ const (
 	DefaultSkew = 1
 	// DefaultRecoveryCodeCount is how many single-use recovery codes are minted per set.
 	DefaultRecoveryCodeCount = 10
+	// DefaultMaxAttempts is how many failed second-factor verifications (TOTP or recovery
+	// code, combined) are tolerated before the factor is locked. The second factor is
+	// online-brute-forceable without it (≈3 of 1,000,000 codes are valid per window), so
+	// limiting is ON by default; disable it explicitly with WithNoAttemptLimit.
+	DefaultMaxAttempts = 5
 )
 
 // TOTPEnrollment is a user's TOTP factor. The shared Secret must be stored in a recoverable
@@ -39,7 +44,11 @@ type TOTPEnrollment struct {
 	// LastUsedStep is the most recent accepted time-step counter, used to reject replay of a
 	// code within its validity window.
 	LastUsedStep int64
-	CreatedAt    time.Time
+	// FailedAttempts counts consecutive failed second-factor verifications (TOTP or recovery
+	// code) since the last success or (re-)enrollment. Once it exceeds the service's
+	// MaxAttempts the factor is locked; a successful verification resets it to zero.
+	FailedAttempts int
+	CreatedAt      time.Time
 }
 
 // Confirmed reports whether the enrollment has been confirmed.

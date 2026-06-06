@@ -51,8 +51,11 @@ type service struct {
 	period            time.Duration
 	skew              int
 	recoveryCodeCount int
-	now               func() time.Time
-	events            event.Sink
+	// maxAttempts is the failed-verification ceiling for the second factor. 0 disables
+	// limiting entirely (set via WithNoAttemptLimit); any positive value is the active limit.
+	maxAttempts int
+	now         func() time.Time
+	events      event.Sink
 }
 
 // ServiceOption configures the MFA Service.
@@ -72,6 +75,17 @@ func WithSkew(n int) ServiceOption { return func(s *service) { s.skew = n } }
 
 // WithRecoveryCodeCount sets how many recovery codes are minted per set (default 10).
 func WithRecoveryCodeCount(n int) ServiceOption { return func(s *service) { s.recoveryCodeCount = n } }
+
+// WithMaxAttempts sets how many failed second-factor verifications (TOTP or recovery code,
+// combined) are tolerated before the factor is locked (default DefaultMaxAttempts). A
+// non-positive value is treated as "use the default" — to turn limiting OFF use
+// WithNoAttemptLimit, which makes the intent explicit and auditable.
+func WithMaxAttempts(n int) ServiceOption { return func(s *service) { s.maxAttempts = n } }
+
+// WithNoAttemptLimit DISABLES second-factor attempt limiting. This is insecure unless an
+// external rate limiter fronts verification — the second factor becomes online-brute-forceable.
+// Limiting is ON by default; only use this if you knowingly enforce the budget elsewhere.
+func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.maxAttempts = -1 } }
 
 // WithClock overrides the time source (primarily for tests).
 func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
@@ -115,6 +129,15 @@ func NewService(store Store, opts ...ServiceOption) Service {
 		panic("mfa: recovery-code count must be positive")
 	case s.now == nil:
 		panic("mfa: clock must not be nil")
+	}
+	// Attempt limiting is secure-by-default: an untouched (zero) value means "use the default
+	// ceiling". WithNoAttemptLimit sets a negative sentinel to disable it; normalize that to 0
+	// (the internal "off" value) so the verify paths only have to test maxAttempts <= 0.
+	switch {
+	case s.maxAttempts == 0:
+		s.maxAttempts = DefaultMaxAttempts
+	case s.maxAttempts < 0:
+		s.maxAttempts = 0 // explicitly disabled via WithNoAttemptLimit
 	}
 	return s
 }
@@ -184,18 +207,39 @@ func (s *service) VerifyTOTP(ctx context.Context, tenantID string, userID uuid.U
 		return ErrNotConfirmed
 	}
 
+	// Reserve an attempt slot atomically BEFORE the constant-time compare. Like otp, the
+	// increment hands each concurrent caller a unique, monotonically increasing count, so at
+	// most maxAttempts callers ever reach validateTOTP — concurrent guesses cannot run more
+	// comparisons than the limit (the gate is the atomic counter, not the stale read above).
+	n, err := s.reserveAttempt(ctx, tenantID, userID)
+	if err != nil {
+		return err
+	}
+	if s.overLimit(n) {
+		s.emitBlocked(ctx, tenantID, userID, "totp")
+		return ErrTooManyAttempts
+	}
+
 	step, ok := validateTOTP(enrollment.Secret, code, s.now(), s.digits, s.period, s.skew)
 	if !ok {
+		if s.atLimit(n) {
+			// The last allowed guess was wrong: the factor is now locked.
+			s.emitBlocked(ctx, tenantID, userID, "totp")
+			return ErrTooManyAttempts
+		}
 		s.emit(ctx, event.Event{Type: event.MFAVerificationFailed, UserID: userID.String(), TenantID: tenantID, Reason: "invalid_code"})
 		return ErrInvalidCode
 	}
 
-	// Replay protection: only accept a step strictly newer than the last one used.
+	// Replay protection: only accept a step strictly newer than the last one used. A successful
+	// MarkTOTPUsed also resets the failed-attempt counter (see Store), clearing the budget.
 	applied, err := s.store.MarkTOTPUsed(ctx, tenantID, userID, step)
 	if err != nil {
 		return err
 	}
 	if !applied {
+		// A correct-but-replayed code is still a failed verification: it consumed the slot
+		// reserved above (the counter was NOT reset since MarkTOTPUsed did not apply).
 		s.emit(ctx, event.Event{Type: event.MFAVerificationFailed, UserID: userID.String(), TenantID: tenantID, Reason: "replay"})
 		return ErrInvalidCode
 	}
@@ -203,7 +247,74 @@ func (s *service) VerifyTOTP(ctx context.Context, tenantID string, userID uuid.U
 }
 
 func (s *service) VerifyRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, code string) error {
-	return s.store.ConsumeRecoveryCode(ctx, tenantID, userID, HashRecoveryCode(code))
+	// Recovery codes are an alternate proof of the SAME second factor, so they share the TOTP
+	// attempt budget when an enrollment exists. Reserve a slot before the lookup/compare so a
+	// locked factor cannot be brute-forced through the recovery path either.
+	_, err := s.store.GetTOTP(ctx, tenantID, userID)
+	gated := err == nil // a TOTP enrollment exists → gate the recovery attempt against its budget
+	var reserved int
+	switch {
+	case gated:
+		// Reserve a slot before the lookup/compare so a locked factor cannot be brute-forced
+		// through the recovery path either.
+		n, rerr := s.reserveAttempt(ctx, tenantID, userID)
+		if rerr != nil {
+			return rerr
+		}
+		reserved = n
+		if s.overLimit(n) {
+			s.emitBlocked(ctx, tenantID, userID, "recovery")
+			return ErrTooManyAttempts
+		}
+	case errors.Is(err, ErrNotEnrolled):
+		// No TOTP factor to gate against (recovery codes can exist on their own); fall through
+		// to the single-use consume, which is itself the only guard.
+	default:
+		return err
+	}
+
+	// A successful consume resets the TOTP failed-attempt counter (see Store).
+	if err := s.store.ConsumeRecoveryCode(ctx, tenantID, userID, HashRecoveryCode(code)); err != nil {
+		if errors.Is(err, ErrRecoveryCodeNotFound) {
+			// When this wrong code was the last allowed attempt the factor is now locked; report
+			// the lock-out so callers stop accepting further guesses.
+			if gated && s.atLimit(reserved) {
+				s.emitBlocked(ctx, tenantID, userID, "recovery")
+				return ErrTooManyAttempts
+			}
+			s.emit(ctx, event.Event{Type: event.MFAVerificationFailed, UserID: userID.String(), TenantID: tenantID, Reason: "invalid_recovery_code"})
+		}
+		return err
+	}
+	return nil
+}
+
+// overLimit reports whether the reserved count n is beyond the configured ceiling (the slot was
+// handed out only to reject it). When limiting is disabled (maxAttempts <= 0) it is always false.
+func (s *service) overLimit(n int) bool { return s.maxAttempts > 0 && n > s.maxAttempts }
+
+// atLimit reports whether n is exactly the last allowed attempt. When limiting is disabled it is
+// always false.
+func (s *service) atLimit(n int) bool { return s.maxAttempts > 0 && n >= s.maxAttempts }
+
+// reserveAttempt atomically claims one slot of the attempt budget and returns the new count.
+// When limiting is disabled it is a no-op that reports 0 (never locked).
+func (s *service) reserveAttempt(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
+	if s.maxAttempts <= 0 {
+		return 0, nil
+	}
+	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID)
+}
+
+// emitBlocked reports that a second factor was locked after exhausting its attempt budget.
+func (s *service) emitBlocked(ctx context.Context, tenantID string, userID uuid.UUID, factor string) {
+	s.emit(ctx, event.Event{
+		Type:     event.AccountBlocked,
+		UserID:   userID.String(),
+		TenantID: tenantID,
+		Reason:   "mfa_too_many_attempts",
+		Attrs:    map[string]any{"factor": factor},
+	})
 }
 
 func (s *service) RegenerateRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) ([]string, error) {

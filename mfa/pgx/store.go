@@ -54,25 +54,26 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 	}
 
 	const query = `
-		INSERT INTO mfa_totp (tenant_id, user_id, secret, confirmed_at, last_used_step, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO mfa_totp (tenant_id, user_id, secret, confirmed_at, last_used_step, failed_attempts, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, user_id) DO UPDATE
 		SET secret = EXCLUDED.secret,
 		    confirmed_at = EXCLUDED.confirmed_at,
-		    last_used_step = EXCLUDED.last_used_step
+		    last_used_step = EXCLUDED.last_used_step,
+		    failed_attempts = EXCLUDED.failed_attempts
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, e.UserID, e.Secret, e.ConfirmedAt, e.LastUsedStep, e.CreatedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, e.UserID, e.Secret, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, e.CreatedAt)
 	return err
 }
 
 func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*mfa.TOTPEnrollment, error) {
 	const query = `
-		SELECT secret, confirmed_at, last_used_step, created_at
+		SELECT secret, confirmed_at, last_used_step, failed_attempts, created_at
 		FROM mfa_totp
 		WHERE tenant_id = $1 AND user_id = $2
 	`
 	e := &mfa.TOTPEnrollment{UserID: userID, TenantID: tenantID}
-	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(&e.Secret, &e.ConfirmedAt, &e.LastUsedStep, &e.CreatedAt)
+	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(&e.Secret, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &e.CreatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, mfa.ErrNotEnrolled
@@ -88,8 +89,9 @@ func (s *Store) DeleteTOTP(ctx context.Context, tenantID string, userID uuid.UUI
 }
 
 func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error) {
+	// A fresh accepted step also clears the failed-attempt budget (reset on success).
 	const query = `
-		UPDATE mfa_totp SET last_used_step = $3
+		UPDATE mfa_totp SET last_used_step = $3, failed_attempts = 0
 		WHERE tenant_id = $1 AND user_id = $2 AND last_used_step < $3
 	`
 	tag, err := s.db.Exec(ctx, query, tenantID, userID, step)
@@ -97,6 +99,23 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.U
 		return false, err
 	}
 	return tag.RowsAffected() > 0, nil
+}
+
+func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
+	const query = `
+		UPDATE mfa_totp SET failed_attempts = failed_attempts + 1
+		WHERE tenant_id = $1 AND user_id = $2
+		RETURNING failed_attempts
+	`
+	var attempts int
+	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(&attempts)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, mfa.ErrNotEnrolled
+		}
+		return 0, err
+	}
+	return attempts, nil
 }
 
 func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error {
@@ -140,18 +159,45 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userI
 }
 
 func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error {
-	const query = `
+	const consume = `
 		UPDATE mfa_recovery_codes SET used_at = now()
 		WHERE tenant_id = $1 AND user_id = $2 AND code_hash = $3 AND used_at IS NULL
 	`
-	tag, err := s.db.Exec(ctx, query, tenantID, userID, codeHash)
+	// Resetting the TOTP lock-out budget on a successful consume must commit together with the
+	// consume itself; the recovery code (already marked used) is a successful second-factor
+	// verification. Run both in one transaction so the budget cannot leak a half-applied state.
+	const resetBudget = `
+		UPDATE mfa_totp SET failed_attempts = 0
+		WHERE tenant_id = $1 AND user_id = $2
+	`
+	consumeAndReset := func(q DBQuerier) error {
+		tag, err := q.Exec(ctx, consume, tenantID, userID, codeHash)
+		if err != nil {
+			return err
+		}
+		if tag.RowsAffected() == 0 {
+			return mfa.ErrRecoveryCodeNotFound
+		}
+		// Best-effort reset; no-op when the user has recovery codes but no TOTP enrollment.
+		_, err = q.Exec(ctx, resetBudget, tenantID, userID)
+		return err
+	}
+
+	beginner, ok := s.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return consumeAndReset(s.db)
+	}
+	tx, err := beginner.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
-		return mfa.ErrRecoveryCodeNotFound
+	if err := consumeAndReset(tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return err
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error {
