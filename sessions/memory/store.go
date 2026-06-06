@@ -1,3 +1,24 @@
+// Package memory provides an in-memory sessions.Store, primarily for tests and
+// single-process use.
+//
+// # Production requirement: periodic eviction is MANDATORY
+//
+// The Store grows without bound unless DeleteExpired is called periodically.
+// Every expired session row remains in the in-memory map until explicitly
+// purged; under load a production deployment that skips periodic eviction will
+// exhaust available memory, creating a trivial denial-of-service vector.
+//
+// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
+//
+//	store := memory.NewStore()
+//	j := janitor.Start(ctx, 5*time.Minute, func() {
+//	    store.DeleteExpired(context.Background(), tenantID)
+//	})
+//	defer j.Stop()
+//
+// This in-memory backend is suitable for tests and single-binary deployments
+// where controlled restart bounds the total session count. For persistent or
+// horizontally-scaled deployments, use the sessions/pgx backend instead.
 package memory
 
 import (

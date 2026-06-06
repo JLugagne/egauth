@@ -21,7 +21,6 @@
 //	passkey    WebAuthn / passkeys, including discoverable (usernameless) login.
 //	oauth      OAuth2 / OIDC with PKCE-S256 and id_token/nonce/JWKS; ready-made providers
 //	           (Google, GitHub, Microsoft, Apple, Okta, Auth0, ...) live in oauth/providers.
-//	delivery   Optional reference SMTP mailer, template renderer, OTP sender and SMS phone-verifier.
 //	ratelimit  Pluggable rate-limiting Limiter + token-bucket reference + middleware.
 //	event      Dependency-free security-event Sink seam (audit logging, slog adapter).
 //	health     Optional Store Ping/readiness seam.
@@ -35,17 +34,17 @@
 // credentials and manages the account lifecycle) with tokens (issues the access/refresh pair) —
 // identity never issues tokens or sessions itself, so you pick the token backend that fits.
 //
-//	idStore := identitymem.NewStore()                          // or identity/pgx.NewStore(pool)
+//	idStore := identitymem.NewStore()                          // or adapters/pgx/identity.NewStore(pool)
 //	idSvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 //
-//	tkStore := tokensmem.NewStore[struct{}]()                  // or tokens/pgx.NewStore(pool)
-//	issuer := jwt.New[struct{}](jwt.Config[struct{}]{          // tokens/jwt reference issuer
+//	tkStore := basic.NewMemoryStore()                          // tokens/basic: the no-custom-claims path
+//	issuer := basic.NewIssuer(basic.Config{                    // thin tokens/jwt facade, zero [struct{}]
 //		Store: tkStore, Issuer: "example-app", SecretKey: secret,
 //		AccessTTL: 15 * time.Minute, RefreshTTL: 720 * time.Hour,
 //	})
 //
 //	user, _ := idSvc.Register(ctx, tenantID, email, password)
-//	pair, _ := issuer.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: user.ID, TenantID: tenantID})
+//	pair, _ := issuer.IssueTokenPair(ctx, basic.Claims{Subject: user.ID, TenantID: tenantID})
 //
 // The complete, runnable login + refresh wiring (including the HTTP handlers) lives in the
 // identity package's example tests — see Example, ExampleNewSingleTenant and ExampleLoginHandler.

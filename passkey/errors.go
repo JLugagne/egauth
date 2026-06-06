@@ -3,6 +3,11 @@ package passkey
 import "errors"
 
 var (
+	// ErrNilStore is returned by NewService when the store argument is nil. The store is
+	// always required; NewService fails fast at startup rather than nil-panicking on the first
+	// request.
+	ErrNilStore = errors.New("passkey: NewService requires a non-nil Store")
+
 	// ErrNoCredentials is returned when a login ceremony is started for a user that has no
 	// registered passkeys.
 	ErrNoCredentials = errors.New("passkey: no credentials registered")

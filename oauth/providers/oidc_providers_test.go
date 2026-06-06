@@ -116,6 +116,7 @@ func TestOIDC_DiscoversEndpoints(t *testing.T) {
 	p := providers.OIDC(context.Background(), issuer, "id", "secret", nil,
 		providers.WithDiscoveryHTTPClient(srv.Client()),
 		providers.WithProviderName("fake-idp"),
+		providers.WithInsecureDiscoveryURLs(), // test server is http; opt-in required
 	)
 	if p.Name() != "fake-idp" {
 		t.Errorf("Name() = %q, want \"fake-idp\"", p.Name())
@@ -136,7 +137,10 @@ func TestOIDC_DiscoveryFailureDefersError(t *testing.T) {
 
 	var p *oauth.Provider
 	done := func() {
-		p = providers.OIDC(context.Background(), srv.URL, "id", "secret", nil, providers.WithDiscoveryHTTPClient(srv.Client()))
+		p = providers.OIDC(context.Background(), srv.URL, "id", "secret", nil,
+			providers.WithDiscoveryHTTPClient(srv.Client()),
+			providers.WithInsecureDiscoveryURLs(), // test server is http; opt-in required
+		)
 	}
 	done() // must not panic
 	if p == nil {
@@ -147,3 +151,80 @@ func TestOIDC_DiscoveryFailureDefersError(t *testing.T) {
 		t.Error("expected a deferred error from a failed discovery, got nil")
 	}
 }
+
+// TestOIDC_RejectsInternalIssuerBeforeGET verifies that fetchOIDCDiscovery returns an error for
+// internal/non-https issuers WITHOUT issuing any HTTP request. This is the primary regression
+// test for the TASK-028 hardening: the trusted-path constructor must gate on
+// oauth.ValidateOIDCEndpointURL before touching the network.
+func TestOIDC_RejectsInternalIssuerBeforeGET(t *testing.T) {
+	cases := []struct {
+		name   string
+		issuer string
+	}{
+		{"link-local IMDS", "http://169.254.169.254/latest/meta-data"},
+		{"loopback without opt-in", "http://127.0.0.1:8080"},
+		{"plain http external without opt-in", "http://example.com"},
+		{"empty issuer", ""},
+		{"no scheme", "example.com/oidc"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// A RoundTripper that fails the test if it is ever called — the issuer validation
+			// must reject the URL before any network I/O occurs.
+			blockRT := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+				t.Errorf("HTTP request was issued to %q — expected rejection before network I/O", r.URL)
+				return nil, nil
+			})
+			client := &http.Client{Transport: blockRT}
+
+			p := providers.OIDC(context.Background(), tc.issuer, "id", "secret", nil,
+				providers.WithDiscoveryHTTPClient(client),
+				// No WithInsecureDiscoveryURLs — secure-by-default behaviour under test.
+			)
+			if p == nil {
+				t.Fatal("OIDC returned nil provider")
+			}
+			// The validation error must be deferred; Exchange surfaces it.
+			_, err := p.Exchange(context.Background(), "code", "https://app/cb", "verifier")
+			if err == nil {
+				t.Errorf("issuer %q: expected an error (rejected before GET), got nil", tc.issuer)
+			}
+		})
+	}
+}
+
+// TestOIDC_InsecureOptInAllowsLoopback verifies that WithInsecureDiscoveryURLs permits a
+// loopback http issuer (local-dev scenario) and that discovery succeeds for a valid document.
+func TestOIDC_InsecureOptInAllowsLoopback(t *testing.T) {
+	mux := http.NewServeMux()
+	var issuer string
+	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"issuer": "`+issuer+`",
+			"authorization_endpoint": "`+issuer+`/auth",
+			"token_endpoint": "`+issuer+`/token",
+			"userinfo_endpoint": "`+issuer+`/userinfo",
+			"jwks_uri": "`+issuer+`/jwks"
+		}`)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	issuer = srv.URL // http://127.0.0.1:<port>
+
+	p := providers.OIDC(context.Background(), issuer, "id", "secret", nil,
+		providers.WithDiscoveryHTTPClient(srv.Client()),
+		providers.WithInsecureDiscoveryURLs(), // loopback http opt-in
+	)
+	u := authorizeURL(t, p)
+	if !strings.HasPrefix(u.String(), issuer+"/auth") {
+		t.Errorf("authorize URL = %q, want prefix %q", u.String(), issuer+"/auth")
+	}
+}
+
+// roundTripperFunc adapts a function to the http.RoundTripper interface.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

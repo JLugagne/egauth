@@ -130,3 +130,10 @@ func TestListAndDeleteCredentials(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, creds)
 }
+
+func TestPasskeyNewServiceNilStoreErrors(t *testing.T) {
+	cfg := secureCfg()
+	_, err := passkey.NewService(nil, cfg)
+	assert.ErrorIs(t, err, passkey.ErrNilStore,
+		"NewService with a nil store must return ErrNilStore at construction, not nil-panic on first request")
+}

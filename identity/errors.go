@@ -45,6 +45,19 @@ var (
 	// ErrInvalidCredentials is returned when authentication fails due to invalid credentials.
 	ErrInvalidCredentials = errors.New("identity: invalid credentials")
 
+	// ErrPasswordPolicyRequired is returned by a password operation
+	// (Register/ResetPassword/ChangePassword) invoked on a Service constructed without a
+	// passwords.Policy. A nil policy is legal for an OAuth-only deployment that uses no password
+	// flows, so the operation fails fast with this clear error rather than panicking with a
+	// nil-pointer dereference deep in the request.
+	ErrPasswordPolicyRequired = errors.New("identity: password policy required for password operations")
+
+	// ErrPasswordHasherRequired is returned by a password operation
+	// (Register/ResetPassword/ChangePassword) invoked on a Service constructed without a
+	// passwords.Hasher. Like ErrPasswordPolicyRequired, a nil hasher is legal for an OAuth-only
+	// deployment, so the operation fails fast with this clear error instead of panicking.
+	ErrPasswordHasherRequired = errors.New("identity: password hasher required for password operations")
+
 	// ErrAccountLocked is returned when authentication is attempted on an account that is
 	// currently locked due to too many failed attempts.
 	ErrAccountLocked = errors.New("identity: account locked")
@@ -63,4 +76,11 @@ var (
 	// verifier matches, but it is past its expiry. It is only surfaced to a caller that
 	// presented the genuine token.
 	ErrVerificationTokenExpired = errors.New("identity: verification token expired")
+
+	// ErrDeliveryDropped is the Err carried by the DeliveryFailed event emitted when an
+	// off-response-path delivery is dropped because the handler's delivery-concurrency cap
+	// (WithDeliveryConcurrency) was already saturated. It is never returned to a caller — it
+	// only surfaces through the event sink so an over-cap drop is observable like a Mailer
+	// outage. See dispatchDelivery / WithDeliveryConcurrency.
+	ErrDeliveryDropped = errors.New("identity: delivery dropped, concurrency cap exceeded")
 )

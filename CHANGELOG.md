@@ -7,39 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Public-release hardening (M1): documentation, naming, and packaging cleanup plus
-pre-1.0 API-stability changes, in preparation for an open public release.
+## [0.3.0] - 2026-06-06
+
+Public-release hardening: secure-by-default behavior changes, a PostgreSQL storage-adapter
+module split, plus documentation/naming/packaging cleanup and pre-1.0 API-stability changes,
+in preparation for an open public release. Under v0.x SemVer the breaking changes below are a
+minor bump. The pre-hardening tags `v0.1.0`–`v0.2.1` are retracted in `go.mod`.
+
+### BREAKING
+
+- **passkey (secure-by-default):** `passkey.NewService` now fails fast on insecure
+  configuration. WebAuthn user verification is **required by default** (set
+  `Config.UserVerification` explicitly to opt out); a `ChallengeStore` is **required**
+  (`Config.ChallengeStore`) unless `Config.InsecureNoChallengeStore` is set; and the HMAC
+  cookie key is supplied and validated at construction (`Config.CookieKey`, min length
+  `MinCookieKeyLength`). New sentinels `ErrCookieKeyMissing` and `ErrChallengeStoreMissing`.
+  Existing callers must add `CookieKey` + `ChallengeStore` (or the explicit opt-outs).
+- **mfa (secure-by-default):** the second factor is now attempt-limited. `VerifyTOTP` and the
+  recovery-code path reserve a slot via the new `mfa.Store.IncrementTOTPAttempts` atomically
+  *before* the constant-time compare and lock the factor after `DefaultMaxAttempts` (5) failures
+  (`ErrTooManyAttempts`, HTTP 429); a successful verification resets the counter. Limiting is ON
+  by default — tune it with `mfa.WithMaxAttempts` or disable it explicitly with
+  `mfa.WithNoAttemptLimit`. Adds `failed_attempts` to `mfa_totp` (pgx migration
+  `002_add_totp_failed_attempts.sql`). External `mfa.Store` implementers must add
+  `IncrementTOTPAttempts` and reset `failed_attempts` on a successful `MarkTOTPUsed` /
+  `ConsumeRecoveryCode`.
+- **tokens/jwt:** `jwt.VerifyRefreshToken` and `jwt.VerifyAPIKey` now take a `tenantID string`
+  parameter (after `ctx`) so multi-tenant callers can verify tokens saved under a real tenant —
+  the lookup was previously hard-wired to the empty tenant and reported not-found for any token
+  saved under a real one. Single-tenant callers pass `""` (or use the `SingleTenant` facade,
+  whose signature is unchanged).
+- **pgx storage moved to a nested module:** the PostgreSQL stores + migration runner now live in
+  the separate module `github.com/JLugagne/egauth/adapters/pgx` (packages `adapters/pgx/identity`,
+  `adapters/pgx/tokens`, …) instead of `egauth/<domain>/pgx`. Core consumers no longer pull the
+  `pgx` driver or the testcontainers/Docker dependency chain. Update imports to
+  `github.com/JLugagne/egauth/adapters/pgx/<domain>` and add
+  `go get github.com/JLugagne/egauth/adapters/pgx`. The `Store` interfaces and the exported
+  `*storetest` conformance suites stay in core as the documented backend-extension seam.
 
 ### Added
 
-- `tokens/basic`: a non-generic convenience layer over the generic token API,
-  specialized to no-custom-claims, so the common login/refresh/protect path can
-  be wired without writing `[struct{}]`. The generic `tokens` / `tokens/jwt`
-  API is unchanged and remains the path for custom claims.
+- `tokens/basic`: a non-generic convenience layer over the generic token API, specialized to
+  no-custom-claims, so the common login/refresh/protect path can be wired without writing
+  `[struct{}]`. The generic `tokens` / `tokens/jwt` API is unchanged and remains the path for
+  custom claims.
+- Four OAuth providers since v0.2.0 — **Amazon Cognito, Discord, GitLab, and Keycloak** —
+  bringing `oauth/providers` to **12** (Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab,
+  Google, Keycloak, LinkedIn, Microsoft, Okta).
 - This `CHANGELOG.md`, backfilled from git history.
 
 ### Changed
 
-- **BREAKING (passkey, secure-by-default):** `passkey.NewService` now fails fast
-  on insecure configuration. WebAuthn user verification is **required by default**
-  (set `Config.UserVerification` explicitly to opt out); a `ChallengeStore` is
-  **required** (`Config.ChallengeStore`) unless `Config.InsecureNoChallengeStore`
-  is set; and the HMAC cookie key is supplied and validated at construction
-  (`Config.CookieKey`, min length `MinCookieKeyLength`). New sentinels
-  `ErrCookieKeyMissing` and `ErrChallengeStoreMissing`. Existing callers must add
-  `CookieKey` + `ChallengeStore` (or the explicit opt-outs).
-- Documentation, naming, and packaging consistency improvements across the
-  repository (module/name consistency, README, package docs, pinned CI linter,
-  relaxed `go` directive).
-- Documented that `identity.Store` / `tokens.Store` are cohesive, pre-1.0-evolving
-  persistence contracts (new methods may be added in minor releases); they are
-  intentionally not split into optional capability interfaces.
+- Documentation, naming, and packaging consistency improvements across the repository
+  (module/name consistency, README, package docs, pinned CI linter, relaxed `go` directive).
+- Documented that `identity.Store` / `tokens.Store` are cohesive, pre-1.0-evolving persistence
+  contracts (new methods may be added in minor releases); they are intentionally not split into
+  optional capability interfaces.
 
 ### Fixed
 
-- Documentation drift and packaging rough edges surfaced during the
-  public-release audit (non-compiling package example, duplicated doc comments,
-  dangling references, stale provider list, tracked coverage artifact).
+- Documentation drift and packaging rough edges surfaced during the public-release audit
+  (non-compiling package example, duplicated doc comments, dangling references, stale provider
+  list, tracked coverage artifact).
 
 ## [0.2.1] - 2026-06-04
 

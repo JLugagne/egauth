@@ -3,6 +3,8 @@ package storetest
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -83,6 +85,88 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		applied, err = store.MarkTOTPUsed(ctx, tenantA, uid, 101)
 		require.NoError(t, err)
 		assert.True(t, applied, "a newer step must be accepted")
+	})
+
+	t.Run("failed-attempt counter increments, persists and resets on success", func(t *testing.T) {
+		uid := uuid.New()
+
+		// Incrementing a missing factor reports not-enrolled.
+		_, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		assert.ErrorIs(t, err, mfa.ErrNotEnrolled)
+
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}))
+
+		got, err := store.GetTOTP(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, 0, got.FailedAttempts, "a fresh enrollment starts at zero")
+
+		// Increments return the new count and persist.
+		n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+		n, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, 2, n)
+		got, _ = store.GetTOTP(ctx, tenantA, uid)
+		assert.Equal(t, 2, got.FailedAttempts)
+
+		// A successful TOTP step (MarkTOTPUsed) resets the counter to zero.
+		applied, err := store.MarkTOTPUsed(ctx, tenantA, uid, 1)
+		require.NoError(t, err)
+		require.True(t, applied)
+		got, _ = store.GetTOTP(ctx, tenantA, uid)
+		assert.Equal(t, 0, got.FailedAttempts, "an accepted code clears the lock-out budget")
+
+		// A consumed recovery code also resets the counter to zero.
+		require.NoError(t, store.ReplaceRecoveryCodes(ctx, tenantA, uid, []string{"rc1"}))
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		require.NoError(t, err)
+		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "rc1"))
+		got, _ = store.GetTOTP(ctx, tenantA, uid)
+		assert.Equal(t, 0, got.FailedAttempts, "a valid recovery code clears the lock-out budget")
+
+		// Re-saving (re-enroll) resets the counter via the upsert.
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		require.NoError(t, err)
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S2", CreatedAt: time.Now()}))
+		got, _ = store.GetTOTP(ctx, tenantA, uid)
+		assert.Equal(t, 0, got.FailedAttempts, "re-enrolling must reset the counter")
+
+		require.NoError(t, store.DeleteTOTP(ctx, tenantA, uid))
+	})
+
+	t.Run("IncrementTOTPAttempts is atomic under concurrency", func(t *testing.T) {
+		uid := uuid.New()
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}))
+
+		const goroutines = 64
+		seen := make([]int64, goroutines+1) // count occurrences of each returned value
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		for i := 0; i < goroutines; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+				if err == nil && n >= 1 && n <= goroutines {
+					atomic.AddInt64(&seen[n], 1)
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		// Each concurrent increment must hand out a UNIQUE count (no two callers see the same
+		// value), proving the reserve-before-compare gate cannot be raced past the limit.
+		for v := 1; v <= goroutines; v++ {
+			assert.LessOrEqualf(t, seen[v], int64(1), "value %d handed out more than once (not atomic)", v)
+		}
+		got, err := store.GetTOTP(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, goroutines, got.FailedAttempts, "every increment must be counted exactly once")
+
+		require.NoError(t, store.DeleteTOTP(ctx, tenantA, uid))
 	})
 
 	t.Run("recovery codes are single-use and replaceable", func(t *testing.T) {

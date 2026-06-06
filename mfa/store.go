@@ -21,14 +21,23 @@ type Store interface {
 	DeleteTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// MarkTOTPUsed records step as the last accepted time-step, but only if it is strictly
 	// greater than the current value. It reports whether the update applied — false means the
-	// step was already consumed (a replay), which the service rejects.
+	// step was already consumed (a replay), which the service rejects. On a successful update
+	// it MUST also reset the failed-attempt counter to zero (a fresh accepted code clears the
+	// lock-out budget).
 	MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error)
+	// IncrementTOTPAttempts atomically increments and returns the new failed-attempt count for
+	// the user's factor. It is the lock-out gate: the service reserves a slot here BEFORE the
+	// constant-time compare, so concurrent wrong guesses cannot run more comparisons than the
+	// configured limit. Returns ErrNotEnrolled if there is no enrollment.
+	IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) (int, error)
 
 	// ReplaceRecoveryCodes atomically discards any existing recovery codes for the user and
 	// stores the given hashes (in any order).
 	ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error
 	// ConsumeRecoveryCode marks the matching unused code as used (single-use). It returns
-	// ErrRecoveryCodeNotFound when no unused code matches the hash.
+	// ErrRecoveryCodeNotFound when no unused code matches the hash. On a successful consume it
+	// MUST also reset the user's TOTP failed-attempt counter to zero (a valid recovery code is
+	// a successful second-factor verification, so it clears the lock-out budget).
 	ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error
 	// DeleteRecoveryCodes removes all of the user's recovery codes. Idempotent.
 	DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error

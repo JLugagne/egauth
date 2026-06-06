@@ -94,6 +94,12 @@ func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 }
 
 // VerifyHandler checks a login second-factor TOTP code and replies 204 (or a 303 redirect).
+//
+// The Service caps per-user code attempts (ErrTooManyAttempts), but egauth does NOT apply a
+// per-IP / per-destination request rate limit to this or VerifyRecoveryHandler — that remains
+// YOUR responsibility. Wrap these verify endpoints with
+// [github.com/JLugagne/egauth/ratelimit.Middleware] (the recommended way to throttle them);
+// see the ratelimit package examples for a turnkey rate-limited router.
 func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
@@ -192,6 +198,8 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 
 func mapMFAError(err error) (int, string) {
 	switch {
+	case errors.Is(err, ErrTooManyAttempts):
+		return http.StatusTooManyRequests, "too_many_attempts"
 	case errors.Is(err, ErrInvalidCode), errors.Is(err, ErrRecoveryCodeNotFound):
 		return http.StatusUnauthorized, "invalid_code"
 	case errors.Is(err, ErrAlreadyEnrolled):

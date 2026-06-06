@@ -21,9 +21,10 @@ const discoveryMaxBytes = 1 << 20 // 1 MiB
 type OIDCOption func(*oidcSettings)
 
 type oidcSettings struct {
-	httpClient *http.Client
-	scopes     []string
-	name       string
+	httpClient        *http.Client
+	scopes            []string
+	name              string
+	allowInsecureURLs bool
 }
 
 // WithDiscoveryHTTPClient overrides the HTTP client used to fetch the discovery document. On an
@@ -44,6 +45,14 @@ func WithOIDCScopes(scopes ...string) OIDCOption {
 // descriptive value (for example "zitadel" or "onelogin") when wiring a specific IdP.
 func WithProviderName(name string) OIDCOption {
 	return func(s *oidcSettings) { s.name = name }
+}
+
+// WithInsecureDiscoveryURLs opts INTO accepting a non-https issuer URL during discovery. It
+// mirrors oauth.WithInsecureURLs and exists ONLY for local development against an http loopback
+// IdP — never set this in production. When set, fetchOIDCDiscovery skips the https requirement
+// on the issuer but still requires a parseable http/https URL with a non-empty host.
+func WithInsecureDiscoveryURLs() OIDCOption {
+	return func(s *oidcSettings) { s.allowInsecureURLs = true }
 }
 
 // OIDC builds a Provider for any standards-compliant OpenID Connect issuer by resolving its
@@ -75,7 +84,7 @@ func OIDC(ctx context.Context, issuer, clientID, clientSecret string, providerOp
 		o(&settings)
 	}
 
-	meta, err := fetchOIDCDiscovery(ctx, settings.httpClient, issuer)
+	meta, err := fetchOIDCDiscovery(ctx, settings.httpClient, issuer, settings.allowInsecureURLs)
 	if err != nil {
 		// Defer the error: oauth.New records a configErr for empty/invalid endpoints, which
 		// AuthCodeURL and Exchange surface. We stash the discovery error on the name so it is not
@@ -99,8 +108,15 @@ type oidcDiscoveryDocument struct {
 
 // fetchOIDCDiscovery retrieves and validates the issuer's discovery document. It enforces the
 // OIDC requirement that the document's "issuer" exactly equals the requested issuer (preventing
-// a discovery document from redirecting trust to a different issuer).
-func fetchOIDCDiscovery(ctx context.Context, c *http.Client, issuer string) (*oidcDiscoveryDocument, error) {
+// a discovery document from redirecting trust to a different issuer). It pre-validates the
+// issuer URL via oauth.ValidateOIDCEndpointURL before issuing any network request, matching the
+// https/SSRF gate on the dynamic/untrusted path. When allowInsecure is true (the dev-only
+// WithInsecureDiscoveryURLs opt-in) the https requirement is relaxed to permit a loopback http
+// IdP for local development.
+func fetchOIDCDiscovery(ctx context.Context, c *http.Client, issuer string, allowInsecure bool) (*oidcDiscoveryDocument, error) {
+	if err := oauth.ValidateOIDCEndpointURL(issuer, allowInsecure); err != nil {
+		return nil, fmt.Errorf("oidc discovery: invalid issuer: %w", err)
+	}
 	configURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, configURL, nil)
 	if err != nil {
@@ -111,7 +127,7 @@ func fetchOIDCDiscovery(ctx context.Context, c *http.Client, issuer string) (*oi
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, discoveryMaxBytes))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("oidc discovery: status %d", resp.StatusCode)

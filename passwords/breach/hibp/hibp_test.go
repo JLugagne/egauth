@@ -82,7 +82,7 @@ func TestClient_IsBreached_PaddingZeroCountNeverMatches(t *testing.T) {
 	wantPrefix, wantSuffix := sha1Hex(pw)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/range/"+wantPrefix, r.URL.Path)
-		fmt.Fprintf(w, "%s:0\r\n", wantSuffix) // suffix present but count 0 (padding)
+		_, _ = fmt.Fprintf(w, "%s:0\r\n", wantSuffix) // suffix present but count 0 (padding)
 	}))
 	t.Cleanup(srv.Close)
 

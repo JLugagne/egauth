@@ -72,6 +72,18 @@ func ValidateExternalURL(rawURL string) error {
 // transport dials through a net.Dialer whose Control hook rejects connections to internal IP
 // ranges, evaluated against the resolved address at dial time (DNS-rebinding safe). It carries a
 // 10s timeout to match the package default.
+//
+// The transport deliberately sets Proxy: nil and does NOT honor HTTP(S)_PROXY from the
+// environment. If a proxy were used, the dial-time Control hook would inspect the PROXY's IP
+// rather than the resolved target, letting a tenant route around the internal-IP SSRF guard
+// (e.g. point a registered OIDC URL through a proxy that reaches 169.254.169.254 or an RFC1918
+// host). Ignoring env proxies keeps the dial-time guard authoritative for every fetch.
+//
+// Operator note: integrators using the dynamic ProviderStore (bring-your-own-SSO) must not run
+// these tenant-supplied fetches through a proxy that can reach internal ranges. Because the safe
+// client now ignores env proxies, no HTTP(S)_PROXY needs to be unset for it; but any explicit
+// proxy added to this transport in the future must apply the same dial-time IP guard to the
+// proxy's own resolved address.
 func SafeHTTPClient() *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   10 * time.Second,
@@ -79,7 +91,9 @@ func SafeHTTPClient() *http.Client {
 		Control:   safeDialControl,
 	}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
+		// Proxy is intentionally nil: env proxies (HTTP(S)_PROXY) are not trusted, so the
+		// dial-time Control hook always sees the resolved target IP, not a proxy's IP.
+		Proxy:                 nil,
 		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,

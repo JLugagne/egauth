@@ -17,9 +17,9 @@ const (
 
 // Claims represents standard JWT claims plus custom generic claims.
 type Claims[C any] struct {
-	Subject   uuid.UUID
-	TenantID  string
-	IssuedAt  time.Time
+	Subject  uuid.UUID
+	TenantID string
+	IssuedAt time.Time
 	// AuthTime is when the subject last actually authenticated (OIDC "auth_time"). Unlike
 	// IssuedAt it is NOT advanced by a silent refresh — it is preserved across rotation within a
 	// family — so it anchors step-up / "sudo mode" freshness checks (see middleware

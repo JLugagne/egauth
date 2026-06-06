@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	testRPID    = "example.com"
-	testOrigin  = "https://example.com"
-	testRPName  = "Example Inc"
+	testRPID   = "example.com"
+	testOrigin = "https://example.com"
+	testRPName = "Example Inc"
 )
 
 // newPasskeyService builds a Service with the secure-by-default requirements satisfied (a cookie

@@ -21,6 +21,11 @@ var (
 	// ErrRecoveryCodeNotFound is returned when a recovery code does not match an unused code.
 	ErrRecoveryCodeNotFound = errors.New("mfa: recovery code not found")
 
+	// ErrTooManyAttempts is returned when the second factor has been guessed wrong too many
+	// times; the factor is locked and the user must re-authenticate / re-enroll (or an
+	// operator must reset it) before further attempts are accepted.
+	ErrTooManyAttempts = errors.New("mfa: too many attempts")
+
 	// ErrTenantMismatch is returned when a Save* call is given a tenantID that conflicts with
 	// a non-empty TenantID already set on the record being saved.
 	ErrTenantMismatch = errors.New("mfa: tenant ID mismatch")

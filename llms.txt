@@ -1,0 +1,52 @@
+# egauth
+
+> Composable, non-opinionated authentication toolkit for Go. Independent modules in the
+> `database/sql` style: import what you need, wire with dependency injection. No framework —
+> egauth never owns your router, DB, or mail/SMS transport. Secure-by-default.
+
+module: `github.com/JLugagne/egauth` · Go 1.26+ · License MIT · status: pre-1.0 (API settling; AI-audited, no third-party human audit yet)
+install (core): `go get github.com/JLugagne/egauth`
+install (PostgreSQL stores, separate module): `go get github.com/JLugagne/egauth/adapters/pgx`
+
+Detailed machine-readable docs live in `.llms/` (token-optimized; exact Go signatures from `go doc`).
+Each module = a `Service` interface + a `Store` contract + à-la-carte `http.HandlerFunc` factories +
+a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID string`; `""` = single-tenant default.
+
+## Start here
+
+- [Architecture & conventions](.llms/architecture.md): the Service/Store/SingleTenant pattern, multi-tenancy, seams, conformance suites, security posture, composition graph. READ FIRST.
+- [Recipes](.llms/recipes.md): copy-pasteable wiring for each stack (password+JWT, sessions, OAuth/OIDC, MFA, passkeys, OTP, password reset, production hardening, API keys).
+
+## Module reference
+
+- [identity](.llms/identity.md): accounts & credential verification — register, login, password reset, email/phone verification, magic link, change email/password, recovery channels, account deletion, OAuth JIT linking. Does NOT issue tokens/sessions. Source: `identity/`
+- [tokens](.llms/tokens.md): stateless JWT access + single-use refresh with rotation & family theft detection; API keys. Generic over custom claims `C`; `tokens/basic` = zero-type-arg facade. Reference impl `tokens/jwt`. Source: `tokens/`
+- [sessions](.llms/sessions.md): server-side revocable sessions — idle timeout (`Touch`), fixation defense (`Rotate`), middleware. Source: `sessions/`
+- [passwords](.llms/passwords.md): hashing/policy/breach-check seams + references — `argon2` (Argon2id), `policy` (password + passphrase), `breach/hibp`, `breach/offline`. Source: `passwords/`
+- [mfa](.llms/mfa.md): TOTP (RFC 6238) + recovery codes. SMS intentionally excluded as a factor. Source: `mfa/`
+- [otp](.llms/otp.md): one-time email/SMS codes; enumeration-safe handlers (Issue always 204, Verify collapses to 401). Source: `otp/`
+- [passkey](.llms/passkey.md): WebAuthn / passkeys incl. discoverable (usernameless) login. Source: `passkey/`
+- [oauth](.llms/oauth.md): OAuth2/OIDC — PKCE-S256, id_token/nonce/JWKS, state CSRF binding, SSRF guard. 12 built-in providers in `oauth/providers` (Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab, Google, Keycloak, LinkedIn, Microsoft, Okta) + generic OIDC. Source: `oauth/`
+- [infra](.llms/infra.md): root `Actor` + cross-cutting seams — `ratelimit` (Limiter + TokenBucket), `event` (audit Sink + slog adapter), `health` (Pinger), `janitor` (eviction loop). Source: `actor.go`, `ratelimit/`, `event/`, `health/`, `janitor/`
+- [storage-pgx](.llms/storage-pgx.md): PostgreSQL `Store` backends for all modules. Separate go.mod (keeps pgx/Docker out of core). `Migrate(ctx, pool)` once at startup. Source: `adapters/pgx/`
+
+## Repo docs
+
+- [README.md](README.md): human overview + quickstart
+- [SECURITY.md](SECURITY.md): full threat model, explicit trade-offs, consumer responsibilities
+- [doc.go](doc.go): root package godoc
+- [SECURITY-FINDINGS.md](SECURITY-FINDINGS.md), [AUDIT.md](AUDIT.md): audit logs
+- [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [RELEASING.md](RELEASING.md)
+
+## Conventions for LLMs using egauth
+
+- Pass `tenantID` explicitly on every Service/Store call; `""` is the valid single-tenant partition. Use a `SingleTenant` facade to drop the arg.
+- `identity` verifies credentials only — pair it with `tokens` (stateless) OR `sessions` (revocable) to establish auth state.
+- Most apps: use `tokens/basic` (no custom claims). Custom claims → generic `tokens`/`tokens/jwt` with your type `C`.
+- `ClaimsProvider` is REQUIRED for refresh (`Rotate`); JWT `SecretKey` must be >= 32 bytes.
+- Tokens/codes passed to delivery callbacks are plaintext secrets — NEVER log them.
+- In-memory stores (`sessions/memory`, `otp/memory`, `ratelimit.TokenBucket`) grow unbounded — schedule eviction with `janitor`, or use the pgx stores.
+- Handlers are POST-only with a pre-auth body cap; `Request*`/OTP-issue handlers are enumeration-safe (always 204).
+- egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. CSRF origin check is opt-in via `WithTrustedOrigins`.
+- Implementing a custom Store/Service? Run the matching conformance suite (`<module>/storetest`, `servicetest`, `issuertest`, `hashertest`) — Store interfaces may gain methods in minor releases.
+- Authoritative API: `go doc -all github.com/JLugagne/egauth/<module>`. The `.llms/*.md` files mirror it but verify against `go doc` if in doubt.

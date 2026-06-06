@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/sessions"
-	sessionspg "github.com/JLugagne/egauth/sessions/pgx"
+	sessionspg "github.com/JLugagne/egauth/adapters/pgx/sessions"
 )
 
 sessionStore := sessionspg.NewStore(pool)

@@ -31,7 +31,7 @@ import (
 	"log"
 
 	"github.com/JLugagne/egauth/identity"
-	identitypg "github.com/JLugagne/egauth/identity/pgx"
+	identitypg "github.com/JLugagne/egauth/adapters/pgx/identity"
 	
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
@@ -50,7 +50,7 @@ func main() {
 	defer pool.Close()
 
 	// 2. Run Automatic Migrations
-	// Each module (identity, tokens, sessions) has its own pgx subpackage with Migrations.
+	// Each backend lives under the adapters/pgx module (adapters/pgx/identity, .../tokens, ...) with Migrations.
 	if err := identitypg.Migrate(ctx, pool); err != nil {
 		log.Fatalf("identity migration failed: %v", err)
 	}

@@ -195,6 +195,50 @@ and general CSRF are left to the application layer):
   account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
   in front of these endpoints.
 
+## Observability and idempotency (consumer responsibility)
+
+egauth ships no first-party metrics, tracing, or request-level idempotency layer.
+
+**Observability** — wire `event.Sink` to your metrics pipeline or audit log. The ready-made
+`event.NewSlogSink` covers the "log it with slog" case; for richer consumers (Prometheus
+counters, OpenTelemetry spans, SIEM ingestion) implement `event.Sink` directly or use
+`event.MultiSink` to fan out. Every operation propagates a `context.Context`, so span
+propagation and deadline enforcement are fully under the consumer's control. egauth ships no
+first-party OpenTelemetry or Prometheus adapter (a later milestone, if wanted).
+
+**Idempotency** — request-level deduplication (idempotency keys, retry-safe mutations) is the
+application layer's responsibility. egauth provides no idempotency-key layer; consuming
+applications that need it must implement or proxy one in front of the egauth handlers, mirroring
+how rate limiting and CSRF tokens are positioned.
+
+## Evicting in-memory stores in production (consumer responsibility)
+
+The in-memory store backends (`sessions/memory`, `otp/memory`) and the `ratelimit.TokenBucket`
+accumulate entries until a caller explicitly invokes `DeleteExpired` / `Cleanup`. This is an
+intentional design choice (the in-memory stores are primarily for tests and single-process apps),
+but it is an **operational footgun** if overlooked:
+
+- A flood of short-lived sessions, OTP codes, or unique rate-limit keys will grow the internal
+  maps indefinitely, exhausting heap memory and creating a denial-of-service vector.
+- The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
+  it is O(1) on the hot path and is **not** a substitute for a full sweep.
+
+**Mitigation (consumer responsibility):** schedule periodic eviction using the optional
+`janitor` helper shipped with egauth:
+
+```go
+import "github.com/JLugagne/egauth/janitor"
+
+j := janitor.Start(ctx, 5*time.Minute, func() {
+    sessStore.DeleteExpired(context.Background(), tenantID)
+})
+defer j.Stop()
+```
+
+The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.TokenBucket.Cleanup`.
+See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
+persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
+
 ## Account-existence disclosure (by design)
 
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,
@@ -226,4 +270,33 @@ read for an existing account — is left to the consumer's rate limiting, per th
 
 ## Reporting a vulnerability
 
-Report security issues privately to the maintainer rather than opening a public issue.
+Please use **GitHub Private Vulnerability Reporting** — do **not** open a public issue for
+security matters.
+
+1. Go to the repository's **Security** tab.
+2. Click **"Report a vulnerability"**.
+3. Fill in the advisory form and submit.
+
+Direct link: <https://github.com/JLugagne/egauth/security/advisories/new>
+
+> **Note:** GitHub Private Vulnerability Reporting must be enabled in the repository's
+> Security settings for the button to appear; this is verified separately.
+
+## Supported versions
+
+Only the latest `0.x` minor release receives security fixes. Older minor series are
+unsupported and may be retracted.
+
+| Version | Supported          |
+| ------- | ------------------ |
+| >= 0.3  | yes                |
+| 0.2.x   | no (unsupported)   |
+| 0.1.x   | no (retracted)     |
+
+## Acknowledgement window
+
+Security reports are acknowledged on a **good-faith, best-effort** basis:
+
+- **72 hours** — initial acknowledgement (confirm receipt and assign a tracking ID).
+- **7 days** — preliminary assessment (severity, reproduction status, and an estimated
+  fix timeline).

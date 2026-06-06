@@ -6,16 +6,37 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Least privilege: CI only reads the repo (checkout). Jobs that need more must opt in explicitly.
+permissions:
+  contents: read
+
+# Multi-module monorepo: the core flagship module (.) and the nested pgx adapter module
+# (./adapters/pgx). The committed go.work resolves the core module from local disk for the adapter
+# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to prove the
+# core module is self-contained — it builds and tests as the standalone module external consumers
+# get, with no Docker and no dependency on the workspace or the adapter.
+
 jobs:
-  test:
-    name: Test & Vet
-    runs-on: ubuntu-latest
+  test-core:
+    name: Core — Test & Vet (${{ matrix.os }}, no Docker)
+    runs-on: ${{ matrix.os }}
+    # OS matrix: crypto/timing-sensitive code (Argon2, HMAC, constant-time compares) can behave
+    # differently across platforms, so the core suite runs on Linux, macOS and Windows. The Go
+    # version is intentionally NOT a matrix dimension: the module's `go 1.26` directive is the
+    # deliberate minimum (see TASK-035 / the keep-go-1.26 decision), and an older toolchain refuses
+    # to build a `go 1.26` module — so there is no meaningful "prior stable Go" leg to test.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    env:
+      GOWORK: "off"
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: 'go.mod'
           cache: true
@@ -27,40 +48,168 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # Using the test command specified in your global rules.
-        # GitHub Actions 'ubuntu-latest' includes the Docker engine by default, 
-        # so testcontainers-go will work out of the box for the pgx tests.
+        # The core module carries no pgx/testcontainers dependency, so it tests with NO Docker
+        # daemon. GOWORK=off (job env) confirms it resolves entirely from its own go.mod.
         run: go test -race -failfast ./...
 
-  govulncheck:
-    name: Vulnerability Check
+  test-adapters-pgx:
+    name: adapters/pgx — Test & Vet (Docker/testcontainers)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adapters/pgx
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
-        with:
-          go-version-file: 'go.mod'
-          go-package: ./...
-
-  lint:
-    name: Linting
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'adapters/pgx/go.mod'
+          cache: true
+
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        # The adapter module owns the Docker-dependent pgx conformance/integration tests.
+        # ubuntu-latest ships the Docker engine, so testcontainers-go works out of the box.
+        # The committed go.work (at the repo root) resolves the core module from local disk.
+        run: go test -race -failfast ./...
+
+  test-short:
+    name: Docker-less unit tests (go test -short)
+    runs-on: ubuntu-latest
+    # Proves the documented Docker-less contributor path: `go test -short ./...` passes in BOTH
+    # modules with no Docker daemon — every testcontainers test skips under -short. We do NOT start
+    # any Docker service in this job, so a regression that makes a unit test depend on Docker fails
+    # here. (The full pgx conformance suites still run in test-adapters-pgx with Docker.)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Run golangci-lint
-        # Use go run to ensure golangci-lint is compiled with the same Go version
-        # as the project, bypassing the "lower than targeted Go version" error.
+      - name: Core — go test -short (no Docker)
+        env:
+          GOWORK: "off"
+        run: go test -short ./...
+
+      - name: adapters/pgx — go test -short (no Docker; testcontainers tests skip)
+        working-directory: adapters/pgx
+        run: go test -short ./...
+
+  fuzz:
+    name: Fuzz (short pass on untrusted-input parsers)
+    runs-on: ubuntu-latest
+    # The fuzz targets cover the highest-value attack surface of an auth SDK: the parsers fed
+    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, WebAuthn CBOR/base64).
+    # All live in the core module, so GOWORK=off. A short pass per target catches panics (DoS) and
+    # mis-parses on every push without a long-running fuzz budget.
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Short fuzz pass
+        run: |
+          set -euo pipefail
+          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=30s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=30s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=30s ./oauth
+          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=30s ./tokens/jwt
+          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=30s ./passkey
+          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=30s ./passkey
+
+  coverage:
+    name: Coverage (core security packages)
+    runs-on: ubuntu-latest
+    # Non-gating: produces a coverage profile for the security-critical core packages
+    # (passwords, tokens, oauth, passkey), prints the total to the log, and uploads the profile.
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Generate coverage profile
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out \
+            ./passwords/... ./tokens/... ./oauth/... ./passkey/...
+          echo "Total coverage:"
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
+
+  govulncheck:
+    name: Vulnerability Check (both modules)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: govulncheck — core
+        env:
+          GOWORK: "off"
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: govulncheck — adapters/pgx
+        working-directory: adapters/pgx
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  lint:
+    name: Linting (both modules)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run golangci-lint — core
+        # Use go run so golangci-lint is compiled with the same Go version as the project,
+        # bypassing the "lower than targeted Go version" error.
+        env:
+          GOWORK: "off"
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
+
+      - name: Run golangci-lint — adapters/pgx
+        working-directory: adapters/pgx
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
 
   docs:
@@ -68,16 +217,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: 'go.mod'
           cache: true
 
       - name: Check doc code samples against the current API
-        # Every egauth-qualified symbol in a ```go fence under docs/ must resolve
-        # to a real exported identifier (via `go doc`), so an example cannot drift
-        # from the API without failing CI. See internal/doctest.
+        # Every egauth-qualified symbol in a ```go fence under docs/, in README.md, and in every
+        # Go package doc comment (incl. the root doc.go) must resolve to a real exported identifier
+        # (via `go doc`), so prose cannot drift from the API without failing CI. doctest resolves
+        # adapters/pgx/* symbols too, which needs the workspace to see the adapter module — the
+        # committed go.work provides it (no GOWORK=off here). See internal/doctest.
         run: go run ./internal/doctest

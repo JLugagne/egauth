@@ -16,7 +16,7 @@ Before writing any code, it is critical to understand what `egauth` is (and what
 
 ### What we love to see:
 - **Bug Fixes:** Especially around edge cases in OAuth flows, Passkeys, or database constraint handling.
-- **New Store Adapters:** If you want to add support for MySQL, SQLite, or Redis, please create a new subpackage (e.g., `identity/mysql`) that implements the `Store` interface. Do not modify the core domain logic to accommodate a specific database.
+- **New Store Adapters:** Storage backends live in **their own module per backend technology**, under `adapters/` — e.g. the bundled `adapters/pgx` (`github.com/JLugagne/egauth/adapters/pgx`) holds every PostgreSQL store. This keeps each driver's dependencies out of a consumer who doesn't use that backend. To add MySQL/SQLite/Redis support, create a new module `adapters/<backend>` whose packages implement the core `Store` interfaces (`identity.Store`, `tokens.Store`, …) and certify against the exported conformance suites (the per-domain `*storetest` packages, e.g. `storetest.StoreContractTesting(t, myStore)`). Do **not** modify the core domain logic to accommodate a specific database, and do **not** add a per-domain module — all stores of one backend share the same driver, so per-domain modules add tagging overhead for no dependency win. A third-party backend (e.g. an out-of-tree `egauth-mongo`) certifies against the **same** exported contract, with no change to core required.
 - **Documentation Improvements:** Typo fixes, better examples, and clearer explanations are always welcome.
 
 ### What requires discussion first:
@@ -25,8 +25,19 @@ Before writing any code, it is critical to understand what `egauth` is (and what
 
 ## Development Setup
 
+This is a **multi-module monorepo**: the core flagship module (`github.com/JLugagne/egauth`) and a
+nested pgx adapter module (`github.com/JLugagne/egauth/adapters/pgx`). The adapter's `go.mod` carries
+a relative `replace github.com/JLugagne/egauth => ../..` (alongside a committed `go.work`) so it
+resolves the local core module without a published tag — clone and everything builds offline. The
+maintainer drops the replace at release (see RELEASING.md). `go.work.sum` is a derived lock file and
+is not tracked.
+
 1. **Go Version:** We target the latest stable Go releases.
-2. **Testing:** We rely heavily on `testcontainers-go` for database testing. You will need Docker installed locally to run the full test suite.
+2. **Testing:** The **core** module is Docker-free — `GOWORK=off go test ./...` runs its full suite
+   with no daemon. The **`adapters/pgx`** module relies on `testcontainers-go`, so you need Docker
+   installed locally to run `cd adapters/pgx && go test ./...`. `make check` runs the full suite for
+   both modules. **No Docker?** Run `make test-unit` (or `go test -short ./...` in each module) — the
+   `-short` flag skips every testcontainers test, so all non-database unit tests still run and pass.
 3. **Running Checks:** Use the provided `Makefile` to ensure your code meets our standards:
    ```bash
    make check

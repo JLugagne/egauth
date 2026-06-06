@@ -279,10 +279,16 @@ func (s *service) emit(ctx context.Context, e event.Event) {
 
 // NewService creates a new identity Service. By default it enables account lockout after
 // DefaultLockThreshold failed attempts for DefaultLockDuration. It panics on a nil store (always
-// required) to fail fast at startup rather than with a nil-pointer panic deep in a request. The
-// hasher and policy may be nil for a deployment that uses no password flows (e.g. OAuth-only):
-// the password paths (Register/Authenticate/ResetPassword/ChangePassword) require them, but
-// decoyHash and the OAuth/magic-link paths tolerate their absence.
+// required) to fail fast at startup rather than with a nil-pointer panic deep in a request.
+//
+// The hasher and policy may be nil for a deployment that uses no password flows (e.g. OAuth-only);
+// the OAuth/magic-link paths and the constant-time decoy hashing tolerate their absence. The
+// password operations Register, ResetPassword and ChangePassword do require them, but a nil policy
+// or hasher is NOT a constructor panic: those operations instead fail fast by returning
+// ErrPasswordPolicyRequired (when policy is nil) or ErrPasswordHasherRequired (when hasher is nil)
+// before touching the store, rather than panicking with a nil-pointer dereference inside the
+// request. Authenticate with a nil hasher cannot succeed (no password can match) but is not a
+// panic: it returns ErrInvalidCredentials via the decoy-hash path.
 func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service {
 	if store == nil {
 		panic("identity: NewService requires a non-nil Store")
@@ -312,6 +318,11 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 }
 
 func (s *service) Register(ctx context.Context, tenantID string, email, password string) (*User, error) {
+	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
+	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
+	if err := s.requirePasswordDeps(); err != nil {
+		return nil, err
+	}
 	email, err := normalizeEmail(email)
 	if err != nil {
 		return nil, err
@@ -347,6 +358,22 @@ func (s *service) Register(ctx context.Context, tenantID string, email, password
 
 	s.emit(ctx, event.Event{Type: event.UserRegistered, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
+}
+
+// requirePasswordDeps reports whether the password-flow dependencies are present. A nil policy or
+// hasher is legal for an OAuth-only deployment (see NewService), but the password operations
+// (Register/ResetPassword/ChangePassword) cannot run without them. Calling it at the top of those
+// operations turns a forgotten dependency into a clear, fail-fast error
+// (ErrPasswordPolicyRequired / ErrPasswordHasherRequired) instead of a nil-pointer panic deep in
+// the request. The policy is checked first because it is the first dependency those operations use.
+func (s *service) requirePasswordDeps() error {
+	if s.policy == nil {
+		return ErrPasswordPolicyRequired
+	}
+	if s.hasher == nil {
+		return ErrPasswordHasherRequired
+	}
+	return nil
 }
 
 // decoyHash performs a throwaway password hash to equalize timing on authentication
@@ -537,6 +564,11 @@ func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token
 
 // ResetPassword validates the new password, consumes the token and sets the password.
 func (s *service) ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error {
+	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
+	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
+	if err := s.requirePasswordDeps(); err != nil {
+		return err
+	}
 	// Validate and hash BEFORE consuming, so a weak password or a hashing failure does not
 	// burn a single-use token.
 	if err := s.policy.Verify(ctx, newPassword); err != nil {
@@ -561,6 +593,11 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 
 // ChangePassword re-verifies the user's current password, then validates and applies a new one.
 func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error {
+	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
+	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
+	if err := s.requirePasswordDeps(); err != nil {
+		return err
+	}
 	// Validate the new password against the policy first: a weak new password must fail fast,
 	// before we spend a KDF comparison on the current credential or touch the store.
 	if err := s.policy.Verify(ctx, newPassword); err != nil {

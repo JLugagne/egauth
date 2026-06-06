@@ -40,32 +40,60 @@ func NewHasher(opts ...Option) *Hasher {
 // Option configures a Hasher's Argon2id cost parameters.
 type Option func(*Hasher)
 
+// Minimum acceptable Argon2id cost parameters. Any value passed to the
+// corresponding option below this floor is silently clamped UP to it, so a
+// caller tuning the cost down cannot drop the hasher below a safe Argon2id
+// configuration. The defaults baked into NewHasher (m=65536 KiB, t=1, p=4)
+// sit at or above every floor and are therefore never affected.
+//
+// MinMemoryKiB follows the OWASP Password Storage Cheat Sheet (2021) minimum
+// of 19 MiB (19456 KiB) for Argon2id; MinTime and MinThreads are the lowest
+// values the algorithm accepts (golang.org/x/crypto/argon2 panics below them).
+const (
+	// MinMemoryKiB is the minimum Argon2id memory cost in KiB (OWASP 2021: 19 MiB).
+	MinMemoryKiB uint32 = 19456
+	// MinTime is the minimum number of Argon2id iterations (the t parameter).
+	MinTime uint32 = 1
+	// MinThreads is the minimum Argon2id degree of parallelism (the p parameter).
+	MinThreads uint8 = 1
+)
+
 // WithTime sets the number of Argon2id iterations (the t parameter).
-// Values below 1 are ignored to keep the hasher in a valid state.
+//
+// A value below MinTime is clamped up to MinTime so the hasher cannot be tuned
+// below the safe floor (per the OWASP Password Storage Cheat Sheet, 2021).
 func WithTime(time uint32) Option {
 	return func(h *Hasher) {
-		if time >= 1 {
-			h.time = time
+		if time < MinTime {
+			time = MinTime
 		}
+		h.time = time
 	}
 }
 
 // WithMemory sets the Argon2id memory cost in KiB (the m parameter).
+//
+// A value below MinMemoryKiB (OWASP 2021: 19 MiB = 19456 KiB) is clamped up to
+// MinMemoryKiB so the hasher cannot be tuned below the safe floor.
 func WithMemory(memory uint32) Option {
 	return func(h *Hasher) {
-		if memory >= 1 {
-			h.memory = memory
+		if memory < MinMemoryKiB {
+			memory = MinMemoryKiB
 		}
+		h.memory = memory
 	}
 }
 
 // WithThreads sets the Argon2id degree of parallelism (the p parameter).
-// Values below 1 are ignored to keep the hasher in a valid state.
+//
+// A value below MinThreads is clamped up to MinThreads so the hasher cannot be
+// tuned below the safe floor (per the OWASP Password Storage Cheat Sheet, 2021).
 func WithThreads(threads uint8) Option {
 	return func(h *Hasher) {
-		if threads >= 1 {
-			h.threads = threads
+		if threads < MinThreads {
+			threads = MinThreads
 		}
+		h.threads = threads
 	}
 }
 

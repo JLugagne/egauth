@@ -115,6 +115,53 @@ func TestMiddleware_PassesThroughThenBlocks(t *testing.T) {
 	assert.Equal(t, 1, hits, "the blocked request must not reach the next handler")
 }
 
+// TestMiddleware_ThrottlesFloodBeyondBurst proves the rate-limited recipe (TASK-022) actually
+// throttles: with a configured burst of N, exactly the first N requests from one client reach
+// the wrapped handler and every request beyond the burst is rejected with 429 Too Many Requests
+// without invoking the next handler. This is the end-to-end DoS proof for the Middleware seam
+// the recipe examples compose around the unauthenticated Request* / verify endpoints.
+func TestMiddleware_ThrottlesFloodBeyondBurst(t *testing.T) {
+	const (
+		burst = 5
+		flood = 20
+	)
+	// A long refill interval so no tokens are replenished during the synchronous flood: the only
+	// thing that lets a request through is the initial burst.
+	tb := ratelimit.NewTokenBucket(burst, time.Hour)
+	var hits int
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.WriteHeader(http.StatusOK)
+	})
+	h := ratelimit.Middleware(tb, nil)(next)
+
+	req := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/auth/reset", nil)
+		r.RemoteAddr = "203.0.113.42:1234" // one client => one bucket
+		return r
+	}
+
+	allowed, rejected := 0, 0
+	for i := 0; i < flood; i++ {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req())
+		switch rec.Code {
+		case http.StatusOK:
+			allowed++
+		case http.StatusTooManyRequests:
+			rejected++
+			assert.NotEmpty(t, rec.Header().Get("Retry-After"),
+				"a throttled response should advertise Retry-After")
+		default:
+			t.Fatalf("unexpected status %d on request %d", rec.Code, i)
+		}
+	}
+
+	assert.Equal(t, burst, allowed, "exactly the configured burst should pass")
+	assert.Equal(t, flood-burst, rejected, "every request beyond the burst must be rejected")
+	assert.Equal(t, burst, hits, "rejected requests must never reach the wrapped handler")
+}
+
 func TestClientIP(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "198.51.100.4:55555"

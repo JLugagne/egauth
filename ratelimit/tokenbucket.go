@@ -11,9 +11,23 @@ import (
 // when none are available it is rejected with the time until the next token. It is safe for
 // concurrent use.
 //
-// Memory: a bucket is created per distinct key. Call Cleanup periodically (e.g. from a
-// ticker) to drop buckets that have fully refilled, so a flood of unique keys cannot grow the
-// map without bound.
+// # Production requirement: periodic eviction is MANDATORY
+//
+// A new per-key bucket is allocated on the first Allow call for that key and is only freed by
+// Cleanup. Without periodic eviction a flood of unique keys (IPs, user IDs, request paths) grows
+// the internal map without bound — a trivial denial-of-service vector in any Internet-facing
+// deployment.
+//
+// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
+//
+//	tb := ratelimit.NewTokenBucket(10, time.Second)
+//	j := janitor.Start(ctx, time.Minute, func() {
+//	    tb.Cleanup()
+//	})
+//	defer j.Stop()
+//
+// Cleanup drops only fully-refilled buckets (those indistinguishable from a fresh one), so it
+// does not reset the limit for any key that is still under pressure.
 type TokenBucket struct {
 	mu      sync.Mutex
 	burst   float64

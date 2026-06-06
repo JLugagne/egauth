@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -294,6 +295,42 @@ func TestCallbackHandler_AccountExistsConflict(t *testing.T) {
 		WithRedirectURL(testRedirect))
 
 	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// TestGetJSON_BoundsOversizedResponse proves the outbound read cap (io.LimitReader with
+// maxResponseBytes in GetJSON) is load-bearing: a hostile/oversized upstream userinfo body is
+// truncated at the cap, so a document larger than maxResponseBytes is cut off mid-JSON and the
+// decode fails with ErrUserInfoFailed rather than the client reading an unbounded body into
+// memory. This is the DoS guard against a malicious provider (or MITM) returning a giant body.
+func TestGetJSON_BoundsOversizedResponse(t *testing.T) {
+	ctx := context.Background()
+
+	// A valid JSON object whose padding pushes the total length well past the read cap. The
+	// LimitReader stops at maxResponseBytes, dropping the trailing bytes (including the closing
+	// quote and brace), so json.Unmarshal sees malformed, truncated input.
+	pad := strings.Repeat("a", maxResponseBytes+(1<<10))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"sub":"`+pad+`"}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	var dst struct {
+		Sub string `json:"sub"`
+	}
+	err := GetJSON(ctx, srv.Client(), srv.URL, "at-token", &dst)
+	require.ErrorIs(t, err, ErrUserInfoFailed,
+		"an over-cap upstream body must be truncated and fail to decode, not be read unbounded")
+
+	// Positive control: a body comfortably under the cap decodes normally, proving the cap only
+	// bites oversized responses.
+	small := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"sub":"ok"}`)
+	}))
+	t.Cleanup(small.Close)
+	require.NoError(t, GetJSON(ctx, small.Client(), small.URL, "at-token", &dst))
+	assert.Equal(t, "ok", dst.Sub)
 }
 
 // Ensure identity.Service satisfies the IdentityLinker interface the callback depends on.

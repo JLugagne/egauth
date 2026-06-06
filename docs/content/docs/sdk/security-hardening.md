@@ -247,7 +247,7 @@ The dynamic `pgx` store already validates registered URLs (`https`, non-internal
 vetted set of issuers — OFF by default so single-operator setups are unaffected:
 
 ```go
-import oauthpgx "github.com/JLugagne/egauth/oauth/pgx"
+import oauthpgx "github.com/JLugagne/egauth/adapters/pgx/oauth"
 
 store := oauthpgx.NewStore(pool,
 	oauthpgx.WithIssuerAllowlist([]string{

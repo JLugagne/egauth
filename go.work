@@ -1,0 +1,10 @@
+// Workspace for local development and CI of the multi-module monorepo: the core flagship module
+// (.) plus the nested pgx adapter module (./adapters/pgx). It lets the adapter resolve the core
+// module from local disk before any tag is published. External consumers do NOT use this file —
+// they resolve each module via its published tag. See RELEASING.md for the two-tag release dance.
+go 1.26
+
+use (
+	.
+	./adapters/pgx
+)
