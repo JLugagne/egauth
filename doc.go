@@ -37,14 +37,14 @@
 //	idStore := identitymem.NewStore()                          // or identity/pgx.NewStore(pool)
 //	idSvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 //
-//	tkStore := tokensmem.NewStore[struct{}]()                  // or tokens/pgx.NewStore(pool)
-//	issuer := jwt.New[struct{}](jwt.Config[struct{}]{          // tokens/jwt reference issuer
+//	tkStore := basic.NewMemoryStore()                          // tokens/basic: the no-custom-claims path
+//	issuer := basic.NewIssuer(basic.Config{                    // thin tokens/jwt facade, zero [struct{}]
 //		Store: tkStore, Issuer: "example-app", SecretKey: secret,
 //		AccessTTL: 15 * time.Minute, RefreshTTL: 720 * time.Hour,
 //	})
 //
 //	user, _ := idSvc.Register(ctx, tenantID, email, password)
-//	pair, _ := issuer.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: user.ID, TenantID: tenantID})
+//	pair, _ := issuer.IssueTokenPair(ctx, basic.Claims{Subject: user.ID, TenantID: tenantID})
 //
 // The complete, runnable login + refresh wiring (including the HTTP handlers) lives in the
 // identity package's example tests — see Example, ExampleNewSingleTenant and ExampleLoginHandler.
