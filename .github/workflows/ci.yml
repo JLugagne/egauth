@@ -226,9 +226,9 @@ jobs:
           cache: true
 
       - name: Check doc code samples against the current API
-        # Every egauth-qualified symbol in a ```go fence under docs/ must resolve to a real
-        # exported identifier (via `go doc`), so an example cannot drift from the API without
-        # failing CI. doctest resolves adapters/pgx/* symbols too, which needs the workspace to
-        # see the adapter module — the committed go.work provides it (no GOWORK=off here).
-        # See internal/doctest.
+        # Every egauth-qualified symbol in a ```go fence under docs/, in README.md, and in every
+        # Go package doc comment (incl. the root doc.go) must resolve to a real exported identifier
+        # (via `go doc`), so prose cannot drift from the API without failing CI. doctest resolves
+        # adapters/pgx/* symbols too, which needs the workspace to see the adapter module — the
+        # committed go.work provides it (no GOWORK=off here). See internal/doctest.
         run: go run ./internal/doctest
