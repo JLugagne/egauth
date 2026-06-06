@@ -6,10 +6,18 @@ on:
   pull_request:
     branches: [ "main" ]
 
+# Multi-module monorepo: the core flagship module (.) and the nested pgx adapter module
+# (./adapters/pgx). The committed go.work resolves the core module from local disk for the adapter
+# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to prove the
+# core module is self-contained — it builds and tests as the standalone module external consumers
+# get, with no Docker and no dependency on the workspace or the adapter.
+
 jobs:
-  test:
-    name: Test & Vet
+  test-core:
+    name: Core — Test & Vet (no Docker)
     runs-on: ubuntu-latest
+    env:
+      GOWORK: "off"
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,26 +35,40 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # Using the test command specified in your global rules.
-        # GitHub Actions 'ubuntu-latest' includes the Docker engine by default, 
-        # so testcontainers-go will work out of the box for the pgx tests.
+        # The core module carries no pgx/testcontainers dependency, so it tests with NO Docker
+        # daemon. GOWORK=off (job env) confirms it resolves entirely from its own go.mod.
         run: go test -race -failfast ./...
 
-  govulncheck:
-    name: Vulnerability Check
+  test-adapters-pgx:
+    name: adapters/pgx — Test & Vet (Docker/testcontainers)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: adapters/pgx
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run govulncheck
-        uses: golang/govulncheck-action@v1
+      - name: Set up Go
+        uses: actions/setup-go@v5
         with:
-          go-version-file: 'go.mod'
-          go-package: ./...
+          go-version-file: 'adapters/pgx/go.mod'
+          cache: true
 
-  lint:
-    name: Linting
+      - name: Verify dependencies
+        run: go mod verify
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run tests
+        # The adapter module owns the Docker-dependent pgx conformance/integration tests.
+        # ubuntu-latest ships the Docker engine, so testcontainers-go works out of the box.
+        # The committed go.work (at the repo root) resolves the core module from local disk.
+        run: go test -race -failfast ./...
+
+  govulncheck:
+    name: Vulnerability Check (both modules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -58,9 +80,37 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Run golangci-lint
-        # Use go run to ensure golangci-lint is compiled with the same Go version
-        # as the project, bypassing the "lower than targeted Go version" error.
+      - name: govulncheck — core
+        env:
+          GOWORK: "off"
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: govulncheck — adapters/pgx
+        working-directory: adapters/pgx
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  lint:
+    name: Linting (both modules)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run golangci-lint — core
+        # Use go run so golangci-lint is compiled with the same Go version as the project,
+        # bypassing the "lower than targeted Go version" error.
+        env:
+          GOWORK: "off"
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
+
+      - name: Run golangci-lint — adapters/pgx
+        working-directory: adapters/pgx
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
 
   docs:
@@ -77,7 +127,9 @@ jobs:
           cache: true
 
       - name: Check doc code samples against the current API
-        # Every egauth-qualified symbol in a ```go fence under docs/ must resolve
-        # to a real exported identifier (via `go doc`), so an example cannot drift
-        # from the API without failing CI. See internal/doctest.
+        # Every egauth-qualified symbol in a ```go fence under docs/ must resolve to a real
+        # exported identifier (via `go doc`), so an example cannot drift from the API without
+        # failing CI. doctest resolves adapters/pgx/* symbols too, which needs the workspace to
+        # see the adapter module — the committed go.work provides it (no GOWORK=off here).
+        # See internal/doctest.
         run: go run ./internal/doctest
