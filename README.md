@@ -2,6 +2,18 @@
 
 A complete, composable, non-opinionated authentication toolkit for Go.
 
+> **About this project — please read.** egauth was built mostly through "vibe coding"
+> (AI-assisted development), and its security review to date is an **AI-driven audit, not an
+> external human one**. I wrote it because I wanted a library like this for my own projects. The
+> code is engineered carefully and secure-by-default — an adversarial pass found no high/critical
+> issue — but it has **not yet had an independent third-party security audit**, so weigh the
+> pre-1.0 status accordingly before using it for anything sensitive.
+>
+> **Comments, reviews, issues, and security audits are genuinely welcome.** If you spot something —
+> a bug, a design smell, a crypto/protocol concern — please open an issue or PR; for anything
+> security-sensitive see [SECURITY.md](SECURITY.md). Independent scrutiny is exactly what this
+> project wants.
+
 egauth is a set of independent modules in the style of the standard library's `database/sql`:
 you **import the ones you need** and wire them together with dependency injection. There is no
 framework to adopt — egauth never owns your HTTP router, your database access, or your
