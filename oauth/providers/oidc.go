@@ -127,7 +127,7 @@ func fetchOIDCDiscovery(ctx context.Context, c *http.Client, issuer string, allo
 	if err != nil {
 		return nil, fmt.Errorf("oidc discovery: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, discoveryMaxBytes))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("oidc discovery: status %d", resp.StatusCode)

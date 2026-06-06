@@ -240,7 +240,7 @@ func (p *Provider) Exchange(ctx context.Context, code, redirectURI, codeVerifier
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrExchangeFailed, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: token endpoint status %d", ErrExchangeFailed, resp.StatusCode)
@@ -283,7 +283,7 @@ func GetJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, ds
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrUserInfoFailed, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%w: userinfo status %d", ErrUserInfoFailed, resp.StatusCode)

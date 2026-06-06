@@ -11,7 +11,7 @@ type Session struct {
 	ID        uuid.UUID
 	TenantID  string
 	UserID    uuid.UUID
-	TokenHash string    // Hash (SHA-256) of the session token stored on the client
+	TokenHash string // Hash (SHA-256) of the session token stored on the client
 	UserAgent string
 	IP        string
 	ExpiresAt time.Time
