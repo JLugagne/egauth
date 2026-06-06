@@ -48,7 +48,7 @@ func TestIssuerAllowlist(t *testing.T) {
 
 	t.Run("UpsertProvider rejects off-allowlist issuer before touching the DB", func(t *testing.T) {
 		s := NewStore(nil, WithIssuerAllowlist([]string{"https://idp-a.example.com"}))
-		// pool is nil; if the allowlist did not short-circuit, this would panic on s.pool.Exec.
+		// db is nil; if the allowlist did not short-circuit, this would panic on s.db.Exec.
 		err := s.UpsertProvider(context.Background(), "tenant", "sso", OIDCProviderConfig{
 			ClientID:     "id",
 			ClientSecret: "secret",

@@ -11,7 +11,7 @@ import (
 	"github.com/JLugagne/egauth/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/oauth"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // MigrationsFS embeds the SQL migration files for the oauth module's Postgres schema,
@@ -20,9 +20,19 @@ import (
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 
+// DBQuerier is the subset of pgx connection methods the OAuth store needs. It is satisfied by
+// both *pgxpool.Pool and pgx.Tx, so callers can run Migrate/NewStore inside a transaction and
+// share one uniform migration helper — matching identity/sessions/mfa/tokens/otp/passkey pgx
+// stores. (A *pgxpool.Pool satisfies it, so existing callers compile unchanged.)
+type DBQuerier interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
+
 // Migrate applies the SQL schema migrations for the OAuth pgx store.
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	return pgxmigrate.Run(ctx, pool, MigrationsFS)
+func Migrate(ctx context.Context, db DBQuerier) error {
+	return pgxmigrate.Run(ctx, db, MigrationsFS)
 }
 
 // OIDCProviderConfig holds the database-storable attributes of an OIDC connection.
@@ -39,7 +49,7 @@ type OIDCProviderConfig struct {
 // Store is a PostgreSQL-backed implementation of oauth.ProviderStore.
 // It retrieves OIDC provider configurations dynamically per-tenant.
 type Store struct {
-	pool *pgxpool.Pool
+	db DBQuerier
 	// issuerAllowlist, when non-empty, restricts which OIDC issuers a tenant may register or use.
 	// Empty (the default) means allow all, preserving existing single-operator setups.
 	issuerAllowlist map[string]struct{}
@@ -76,10 +86,11 @@ var ErrIssuerNotAllowed = errors.New("oauth/pgx: issuer not on allowlist")
 // make it fail at request time (PANIC-01).
 var ErrInvalidProviderConfig = errors.New("oauth/pgx: invalid provider configuration")
 
-// NewStore creates a new PostgreSQL store for OAuth providers. Pass StoreOptions such as
-// WithIssuerAllowlist to harden the multi-tenant configuration surface.
-func NewStore(pool *pgxpool.Pool, opts ...StoreOption) *Store {
-	s := &Store{pool: pool}
+// NewStore creates a new PostgreSQL store for OAuth providers. db may be a *pgxpool.Pool or a
+// pgx.Tx (anything satisfying DBQuerier). Pass StoreOptions such as WithIssuerAllowlist to harden
+// the multi-tenant configuration surface.
+func NewStore(db DBQuerier, opts ...StoreOption) *Store {
+	s := &Store{db: db}
 	for _, o := range opts {
 		o(s)
 	}
@@ -108,7 +119,7 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 	var (
 		clientID, clientSecret, authURL, tokenURL, issuer, jwksURL, scopesStr string
 	)
-	err := s.pool.QueryRow(ctx, query, tenantID, providerName).Scan(
+	err := s.db.QueryRow(ctx, query, tenantID, providerName).Scan(
 		&clientID, &clientSecret, &authURL, &tokenURL, &issuer, &jwksURL, &scopesStr,
 	)
 	if err != nil {
@@ -181,7 +192,7 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 			scopes = EXCLUDED.scopes,
 			updated_at = NOW()
 	`
-	_, err := s.pool.Exec(ctx, query,
+	_, err := s.db.Exec(ctx, query,
 		tenantID, providerName,
 		config.ClientID, config.ClientSecret,
 		config.AuthURL, config.TokenURL,
@@ -192,7 +203,7 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 
 // DeleteProvider removes a configured provider for a given tenant.
 func (s *Store) DeleteProvider(ctx context.Context, tenantID, providerName string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM oauth_oidc_providers WHERE tenant_id = $1 AND provider_name = $2`, tenantID, providerName)
+	_, err := s.db.Exec(ctx, `DELETE FROM oauth_oidc_providers WHERE tenant_id = $1 AND provider_name = $2`, tenantID, providerName)
 	return err
 }
 
