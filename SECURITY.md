@@ -226,4 +226,33 @@ read for an existing account — is left to the consumer's rate limiting, per th
 
 ## Reporting a vulnerability
 
-Report security issues privately to the maintainer rather than opening a public issue.
+Please use **GitHub Private Vulnerability Reporting** — do **not** open a public issue for
+security matters.
+
+1. Go to the repository's **Security** tab.
+2. Click **"Report a vulnerability"**.
+3. Fill in the advisory form and submit.
+
+Direct link: <https://github.com/JLugagne/egauth/security/advisories/new>
+
+> **Note:** GitHub Private Vulnerability Reporting must be enabled in the repository's
+> Security settings for the button to appear; this is verified separately.
+
+## Supported versions
+
+Only the latest `0.x` minor release receives security fixes. Older minor series are
+unsupported and may be retracted.
+
+| Version | Supported          |
+| ------- | ------------------ |
+| >= 0.3  | yes                |
+| 0.2.x   | no (unsupported)   |
+| 0.1.x   | no (retracted)     |
+
+## Acknowledgement window
+
+Security reports are acknowledged on a **good-faith, best-effort** basis:
+
+- **72 hours** — initial acknowledgement (confirm receipt and assign a tracking ID).
+- **7 days** — preliminary assessment (severity, reproduction status, and an estimated
+  fix timeline).
