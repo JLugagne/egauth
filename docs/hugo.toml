@@ -1,5 +1,5 @@
 baseURL = "https://jlugagne.github.io/egauth/"
-languageCode = "en-us"
+locale = "en-us"
 title = "egauth Documentation"
 theme = "hugo-book"
 
