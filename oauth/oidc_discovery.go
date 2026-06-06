@@ -38,6 +38,15 @@ func validateOIDCEndpointURL(rawURL string, allowInsecure bool) error {
 	return nil
 }
 
+// ValidateOIDCEndpointURL is the exported form of validateOIDCEndpointURL for use by sub-packages
+// (e.g. oauth/providers). It validates an OIDC endpoint URL (issuer, token, auth or JWKS).
+// When allowInsecure is false (the production default) it calls ValidateExternalURL, requiring
+// an https URL with a non-internal host. When allowInsecure is true (the dev-only opt-in for a
+// local http IdP) only a parseable http/https URL with a non-empty host is required.
+func ValidateOIDCEndpointURL(rawURL string, allowInsecure bool) error {
+	return validateOIDCEndpointURL(rawURL, allowInsecure)
+}
+
 // sameHost reports whether two URLs share the same host (case-insensitive, port-insensitive).
 // It is the defence-in-depth check that binds a JWKS / jwks_uri to its issuer.
 func sameHost(a, b string) bool {
