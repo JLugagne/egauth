@@ -41,7 +41,7 @@ var pkgAlias = map[string]string{
 	"tokens":     "github.com/JLugagne/egauth/tokens",
 	"jwtissuer":  "github.com/JLugagne/egauth/tokens/jwt",
 	"oauth":      "github.com/JLugagne/egauth/oauth",
-	"oauthpgx":   "github.com/JLugagne/egauth/oauth/pgx",
+	"oauthpgx":   "github.com/JLugagne/egauth/adapters/pgx/oauth",
 	"providers":  "github.com/JLugagne/egauth/oauth/providers",
 	"passkey":    "github.com/JLugagne/egauth/passkey",
 	"passkeymem": "github.com/JLugagne/egauth/passkey/memory",
@@ -52,8 +52,8 @@ var pkgAlias = map[string]string{
 	"policy":     "github.com/JLugagne/egauth/passwords/policy",
 	"ratelimit":  "github.com/JLugagne/egauth/ratelimit",
 	"event":      "github.com/JLugagne/egauth/event",
-	"identitypg": "github.com/JLugagne/egauth/identity/pgx",
-	"sessionspg": "github.com/JLugagne/egauth/sessions/pgx",
+	"identitypg": "github.com/JLugagne/egauth/adapters/pgx/identity",
+	"sessionspg": "github.com/JLugagne/egauth/adapters/pgx/sessions",
 }
 
 // qualifiedRef matches `alias.Symbol` where Symbol is exported (starts upper).

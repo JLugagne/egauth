@@ -47,6 +47,14 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 go get github.com/JLugagne/egauth
 ```
 
+The PostgreSQL storage backend lives in a **separate module** (`adapters/pgx`) so core consumers
+never pull the `pgx` driver or the testcontainers/Docker chain into their dependency graph. Install
+it only if you use the Postgres stores:
+
+```sh
+go get github.com/JLugagne/egauth/adapters/pgx
+```
+
 Requires Go 1.26+.
 
 ## Quickstart: login + refresh
@@ -66,7 +74,7 @@ ctx := context.Background()
 const tenant = "" // empty string is the single-tenant default partition
 
 // identity: credential verification + account lifecycle
-idStore := identitymem.NewStore() // identity/memory; or identity/pgx.NewStore(pool)
+idStore := identitymem.NewStore() // identity/memory; or adapters/pgx/identity.NewStore(pool)
 svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 
 // tokens: stateless access tokens + refresh rotation (no custom claims).
@@ -77,7 +85,7 @@ claimsProvider := basic.ClaimsProviderFunc(
         return basic.Claims{Subject: userID, TenantID: tenantID}, nil
     },
 )
-tokenStore := basic.NewMemoryStore() // tokens/memory; or tokens/pgx.NewStore(pool)
+tokenStore := basic.NewMemoryStore() // tokens/memory; or adapters/pgx/tokens.NewStore(pool)
 issuer := basic.NewIssuer(basic.Config{
     Store:          tokenStore,
     Issuer:         "example-app",
@@ -145,11 +153,14 @@ user, err := app.Register(ctx, "bob@example.com", password)
 
 Each module ships two interchangeable `Store` implementations behind one contract:
 
-- `<module>/memory` — zero-dependency, for tests and single-process apps.
-- `<module>/pgx` — PostgreSQL via `jackc/pgx`. Call `pgx.Migrate(ctx, pool)` once at startup
+- `<module>/memory` — zero-dependency, for tests and single-process apps; lives in the core module.
+- `adapters/pgx/<module>` — PostgreSQL via `jackc/pgx`, in the separate `adapters/pgx` module
+  (`go get github.com/JLugagne/egauth/adapters/pgx`). Call `Migrate(ctx, pool)` once at startup
   (forward-only, versioned via a `schema_migrations` table; re-running is a no-op).
 
 ```go
+import identitypgx "github.com/JLugagne/egauth/adapters/pgx/identity"
+
 pool, _ := pgxpool.New(ctx, dsn)
 _ = identitypgx.Migrate(ctx, pool)
 store := identitypgx.NewStore(pool)

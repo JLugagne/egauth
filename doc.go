@@ -34,7 +34,7 @@
 // credentials and manages the account lifecycle) with tokens (issues the access/refresh pair) —
 // identity never issues tokens or sessions itself, so you pick the token backend that fits.
 //
-//	idStore := identitymem.NewStore()                          // or identity/pgx.NewStore(pool)
+//	idStore := identitymem.NewStore()                          // or adapters/pgx/identity.NewStore(pool)
 //	idSvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 //
 //	tkStore := basic.NewMemoryStore()                          // tokens/basic: the no-custom-claims path
