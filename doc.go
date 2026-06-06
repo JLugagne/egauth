@@ -21,7 +21,6 @@
 //	passkey    WebAuthn / passkeys, including discoverable (usernameless) login.
 //	oauth      OAuth2 / OIDC with PKCE-S256 and id_token/nonce/JWKS; ready-made providers
 //	           (Google, GitHub, Microsoft, Apple, Okta, Auth0, ...) live in oauth/providers.
-//	delivery   Optional reference SMTP mailer, template renderer, OTP sender and SMS phone-verifier.
 //	ratelimit  Pluggable rate-limiting Limiter + token-bucket reference + middleware.
 //	event      Dependency-free security-event Sink seam (audit logging, slog adapter).
 //	health     Optional Store Ping/readiness seam.

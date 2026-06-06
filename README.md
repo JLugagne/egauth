@@ -7,7 +7,7 @@ A complete, composable, non-opinionated authentication toolkit for Go.
 > external human one**. I wrote it because I wanted a library like this for my own projects. The
 > code is engineered carefully and secure-by-default — an adversarial pass found no high/critical
 > issue — but it has **not yet had an independent third-party security audit**, so weigh the
-> pre-1.0 status accordingly before using it for anything sensitive.
+> status accordingly before using it for anything sensitive.
 >
 > **Comments, reviews, issues, and security audits are genuinely welcome.** If you spot something —
 > a bug, a design smell, a crypto/protocol concern — please open an issue or PR; for anything
@@ -20,7 +20,7 @@ framework to adopt — egauth never owns your HTTP router, your database access,
 conventions. Every module exposes a `Service` interface plus a `Store` contract, with in-memory
 and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 
-> Status: pre-1.0. The API is still settling; see [Stability](#stability).
+> Status: The API is still settling; see [Stability](#stability).
 
 ## Modules
 
@@ -34,7 +34,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 | `otp`        | One-time codes (email/SMS), enumeration-safe HTTP handlers                    |
 | `passkey`    | WebAuthn / passkeys, including discoverable (usernameless) login             |
 | `oauth`      | OAuth2 / OIDC, PKCE-S256, id_token/nonce/JWKS; 12 built-in providers (Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab, Google, Keycloak, LinkedIn, Microsoft, Okta) in `oauth/providers` |
-| `delivery`   | Optional reference SMTP mailer + template renderer + OTP sender              |
+| `identity.Mailer` / `identity.SMSSender` | Bring-your-own-delivery seams: wire your own SMTP, SendGrid, Twilio, etc. — egauth never sends mail or SMS itself |
 | `ratelimit`, `event`, `health` | Pluggable rate-limiting, audit-event, and readiness seams  |
 
 ## Install
