@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/passwords"
@@ -23,6 +24,18 @@ type ClaimsBuilder[C any] func(*User) tokens.Claims[C]
 // argon2 KDF) to prevent a pre-authentication CPU/memory amplification DoS. It is comfortably
 // larger than a legitimate email+password+token form. Override with WithMaxBodyBytes.
 const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
+
+// DefaultDeliveryConcurrency is the default cap on the number of in-flight off-response-path
+// deliveries (mail/SMS) a single handler instance will run concurrently. It bounds the
+// unauthenticated goroutine fan-out the Request* handlers can be driven to spawn: without a cap,
+// a flood of requests for valid/guessable accounts could spawn unbounded concurrent goroutines and
+// amplify into unbounded outbound mail/SMS (toll fraud). Override with WithDeliveryConcurrency.
+const DefaultDeliveryConcurrency = 64
+
+// DefaultDeliveryTimeout is the default per-delivery timeout applied to the off-response-path
+// delivery context, so a slow or hung Mailer/SMSSender cannot pin a delivery slot indefinitely.
+// Override with WithDeliveryTimeout.
+const DefaultDeliveryTimeout = 30 * time.Second
 
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
@@ -44,6 +57,13 @@ type handlerConfig struct {
 	trustedOrigins       map[string]bool
 	maxBodyBytes         int64
 	events               event.Sink
+	deliveryConcurrency  int
+	deliveryTimeout      time.Duration
+	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
+	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
+	// served by a given handler instance — a per-request channel would make the cap meaningless)
+	// with capacity deliveryConcurrency; a non-positive cap leaves it nil, disabling the bound.
+	deliverySem chan struct{}
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -63,9 +83,17 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		phoneField:           "phone",
 		recoveryEmailField:   "recovery_email",
 		maxBodyBytes:         DefaultMaxBodyBytes,
+		deliveryConcurrency:  DefaultDeliveryConcurrency,
+		deliveryTimeout:      DefaultDeliveryTimeout,
 	}
 	for _, opt := range opts {
 		opt(&c)
+	}
+	// Create the delivery semaphore ONCE here, after options are applied, so the cap is shared
+	// across every request served by the handler instance built from this config. A non-positive
+	// cap leaves it nil, disabling the bound (deliveries then fan out unbounded again).
+	if c.deliveryConcurrency > 0 {
+		c.deliverySem = make(chan struct{}, c.deliveryConcurrency)
 	}
 	return c
 }
@@ -210,6 +238,26 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 	return func(h *handlerConfig) { h.maxBodyBytes = n }
 }
 
+// WithDeliveryConcurrency caps the number of in-flight off-response-path deliveries (mail/SMS)
+// a handler instance runs concurrently (default DefaultDeliveryConcurrency). The Request*
+// handlers dispatch delivery on a detached goroutine; this bound stops an unauthenticated flood
+// from spawning unbounded goroutines or amplifying into unbounded outbound mail/SMS. When the
+// cap is reached further deliveries are DROPPED (not queued) and surface as a DeliveryFailed
+// event rather than blocking the request. A non-positive value disables the bound (deliveries
+// fan out unbounded again) — do so only if an upstream layer already bounds the fan-out.
+func WithDeliveryConcurrency(n int) HandlerOption {
+	return func(h *handlerConfig) { h.deliveryConcurrency = n }
+}
+
+// WithDeliveryTimeout sets the per-delivery timeout applied to the detached delivery context
+// (default DefaultDeliveryTimeout), so a slow or hung Mailer/SMSSender cannot pin a delivery slot
+// indefinitely. The timeout bounds delivery independently of the request lifetime: the context is
+// detached (context.WithoutCancel) so the request finishing does not cancel delivery, but the
+// timeout still abandons a delivery that runs too long. A non-positive value disables the timeout.
+func WithDeliveryTimeout(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) { h.deliveryTimeout = d }
+}
+
 // parseLimitedForm bounds the request body to cfg.maxBodyBytes before parsing the form. It
 // protects the argon2 hashing path from unbounded attacker-controlled input. On failure it
 // writes the error response (413 when the body is too large, 400 when malformed) and returns
@@ -327,15 +375,53 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 	return cfg.tenantResolver(r)
 }
 
-// dispatchDelivery hands a freshly minted credential to the Mailer off the response path (a
-// detached context, so the request finishing does not cancel delivery, and so the Mailer's
-// latency — which only occurs for existing accounts — is not a timing side channel). A delivery
-// failure is otherwise swallowed to keep the enumeration-safe response uniform; emitting a
-// DeliveryFailed event makes that otherwise-invisible outage observable to a configured sink.
+// dispatchDelivery hands a freshly minted credential to the Mailer/SMSSender off the response
+// path (a detached context, so the request finishing does not cancel delivery, and so the
+// Mailer's latency — which only occurs for existing accounts — is not a timing side channel). A
+// delivery failure is otherwise swallowed to keep the enumeration-safe response uniform; emitting
+// a DeliveryFailed event makes that otherwise-invisible outage observable to a configured sink.
+//
+// The fan-out is BOUNDED. The Request* handlers are mostly unauthenticated, so an attacker can
+// flood them for valid/guessable accounts; an unbounded goroutine-per-call would spawn unbounded
+// concurrent goroutines and amplify into unbounded outbound mail/SMS (toll fraud). A buffered
+// channel semaphore (cfg.deliverySem, created ONCE per handler instance and shared across all of
+// its concurrent requests) caps the in-flight deliveries at cfg.deliveryConcurrency. A slot is
+// acquired NON-BLOCKING: when the semaphore is full the delivery is DROPPED (never queued, never
+// blocks the caller) and surfaces as a DeliveryFailed event, so an over-cap drop is observable
+// exactly like a Mailer outage. The slot is released when the delivery goroutine finishes.
+//
+// Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
+// DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
+// delivery durable across the request finishing.
 func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) {
-	ctx := context.WithoutCancel(r.Context())
+	base := context.WithoutCancel(r.Context())
 	tenant := cfg.tenant(r)
+
+	if cfg.deliverySem != nil {
+		select {
+		case cfg.deliverySem <- struct{}{}:
+			// Slot acquired; released by the goroutine below.
+		default:
+			// Semaphore full: drop the delivery rather than block the (often unauthenticated)
+			// caller goroutine, and surface the drop as a DeliveryFailed event so it is observable.
+			event.Emit(base, cfg.events, event.Event{
+				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID,
+				Reason: "delivery_concurrency_exceeded", Err: ErrDeliveryDropped,
+			})
+			return
+		}
+	}
+
 	go func() {
+		if cfg.deliverySem != nil {
+			defer func() { <-cfg.deliverySem }()
+		}
+		ctx := base
+		if cfg.deliveryTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(base, cfg.deliveryTimeout)
+			defer cancel()
+		}
 		if err := send(ctx); err != nil {
 			event.Emit(ctx, cfg.events, event.Event{
 				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID, Err: err,

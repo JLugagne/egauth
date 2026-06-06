@@ -63,4 +63,11 @@ var (
 	// verifier matches, but it is past its expiry. It is only surfaced to a caller that
 	// presented the genuine token.
 	ErrVerificationTokenExpired = errors.New("identity: verification token expired")
+
+	// ErrDeliveryDropped is the Err carried by the DeliveryFailed event emitted when an
+	// off-response-path delivery is dropped because the handler's delivery-concurrency cap
+	// (WithDeliveryConcurrency) was already saturated. It is never returned to a caller — it
+	// only surfaces through the event sink so an over-cap drop is observable like a Mailer
+	// outage. See dispatchDelivery / WithDeliveryConcurrency.
+	ErrDeliveryDropped = errors.New("identity: delivery dropped, concurrency cap exceeded")
 )
