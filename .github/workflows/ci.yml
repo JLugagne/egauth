@@ -18,8 +18,17 @@ permissions:
 
 jobs:
   test-core:
-    name: Core — Test & Vet (no Docker)
-    runs-on: ubuntu-latest
+    name: Core — Test & Vet (${{ matrix.os }}, no Docker)
+    runs-on: ${{ matrix.os }}
+    # OS matrix: crypto/timing-sensitive code (Argon2, HMAC, constant-time compares) can behave
+    # differently across platforms, so the core suite runs on Linux, macOS and Windows. The Go
+    # version is intentionally NOT a matrix dimension: the module's `go 1.26` directive is the
+    # deliberate minimum (see TASK-035 / the keep-go-1.26 decision), and an older toolchain refuses
+    # to build a `go 1.26` module — so there is no meaningful "prior stable Go" leg to test.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       GOWORK: "off"
     steps:
@@ -125,6 +134,37 @@ jobs:
           go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=30s ./tokens/jwt
           go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=30s ./passkey
           go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=30s ./passkey
+
+  coverage:
+    name: Coverage (core security packages)
+    runs-on: ubuntu-latest
+    # Non-gating: produces a coverage profile for the security-critical core packages
+    # (passwords, tokens, oauth, passkey), prints the total to the log, and uploads the profile.
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Generate coverage profile
+        run: |
+          go test -covermode=atomic -coverprofile=coverage.out \
+            ./passwords/... ./tokens/... ./oauth/... ./passkey/...
+          echo "Total coverage:"
+          go tool cover -func=coverage.out | tail -1
+
+      - name: Upload coverage profile
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: error
 
   govulncheck:
     name: Vulnerability Check (both modules)
