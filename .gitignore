@@ -5,6 +5,7 @@
 PRD.md
 .tasks/
 docs/public
+docs/.hugo_build.lock
 
 # coverage / test artifacts
 *.out
