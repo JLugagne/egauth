@@ -1,5 +1,7 @@
 .agents
 .claude
+.antigravitycli/
+.questions/
 PRD.md
 .tasks/
 docs/public
