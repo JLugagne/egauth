@@ -77,6 +77,22 @@ func beginLoginAndCaptureFinish(t *testing.T, svc *passkey.Service, uid uuid.UUI
 	return cookie, body
 }
 
+// cookieOnlyService builds a passkey Service that deliberately opts out of the (now default)
+// challenge store, so the only replay defense is the single-use ceremony cookie. It is used to
+// document the cookie-only behavior; a default-configured Service requires a ChallengeStore.
+func cookieOnlyService(t *testing.T) *passkey.Service {
+	t.Helper()
+	svc, err := passkey.NewService(passkeymemory.NewStore(), passkey.Config{
+		RPID:                     testRPID,
+		RPDisplayName:            testRPName,
+		RPOrigins:                []string{testOrigin},
+		CookieKey:                testCookieKey,
+		InsecureNoChallengeStore: true,
+	})
+	require.NoError(t, err)
+	return svc
+}
+
 // TestFinishLogin_Replay_BlockedWithChallengeStore proves SEC-05 is fixed when a
 // ChallengeStore is wired: the first Finish succeeds, an identical replayed Finish fails.
 func TestFinishLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
@@ -109,11 +125,11 @@ func TestFinishLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 		"a replayed finish must be rejected once the challenge is consumed")
 }
 
-// TestFinishLogin_Replay_UnchangedWithoutChallengeStore documents the opt-in gap: without a
-// ChallengeStore the replay still succeeds (no server-side single-use consume). This is the
-// pre-fix behavior preserved for backward compatibility.
+// TestFinishLogin_Replay_UnchangedWithoutChallengeStore documents the cookie-only opt-out: a
+// Service built with InsecureNoChallengeStore has no server-side single-use consume, so a
+// sign-count-0 replay still succeeds. This is why a ChallengeStore is now required by default.
 func TestFinishLogin_Replay_UnchangedWithoutChallengeStore(t *testing.T) {
-	svc := newPasskeyService(t)
+	svc := cookieOnlyService(t)
 	uid := uuid.New()
 	auth := registerTenant(t, svc, "t1", uid)
 

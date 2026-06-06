@@ -61,7 +61,7 @@ jobs:
       - name: Run golangci-lint
         # Use go run to ensure golangci-lint is compiled with the same Go version
         # as the project, bypassing the "lower than targeted Go version" error.
-        run: go run github.com/golangci/golangci-lint/cmd/golangci-lint@latest run --timeout=5m
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
 
   docs:
     name: Docs API Drift

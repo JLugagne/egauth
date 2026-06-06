@@ -18,9 +18,11 @@ func testService(t *testing.T) (*passkey.Service, *memory.Store) {
 	t.Helper()
 	store := memory.NewStore()
 	svc, err := passkey.NewService(store, passkey.Config{
-		RPID:          "example.com",
-		RPDisplayName: "Example",
-		RPOrigins:     []string{"https://example.com"},
+		RPID:           "example.com",
+		RPDisplayName:  "Example",
+		RPOrigins:      []string{"https://example.com"},
+		CookieKey:      testCookieKey,
+		ChallengeStore: memory.NewChallengeStore(),
 	})
 	require.NoError(t, err)
 	return svc, store
@@ -38,7 +40,52 @@ func saveTestCredential(t *testing.T, store *memory.Store, uid uuid.UUID, id []b
 
 func TestNewService_RejectsEmptyConfig(t *testing.T) {
 	_, err := passkey.NewService(memory.NewStore(), passkey.Config{})
-	assert.Error(t, err, "an empty relying-party config must be rejected")
+	assert.Error(t, err, "an empty config must be rejected")
+}
+
+// secureCfg returns a Config that satisfies every secure-by-default requirement, so individual
+// tests can drop one field to assert the corresponding construction failure.
+func secureCfg() passkey.Config {
+	return passkey.Config{
+		RPID:           "example.com",
+		RPDisplayName:  "Example",
+		RPOrigins:      []string{"https://example.com"},
+		CookieKey:      testCookieKey,
+		ChallengeStore: memory.NewChallengeStore(),
+	}
+}
+
+func TestNewService_RequiresCookieKey(t *testing.T) {
+	cfg := secureCfg()
+	cfg.CookieKey = nil
+	_, err := passkey.NewService(memory.NewStore(), cfg)
+	assert.ErrorIs(t, err, passkey.ErrCookieKeyMissing,
+		"construction must fail fast when no cookie key is supplied")
+}
+
+func TestNewService_RejectsShortCookieKey(t *testing.T) {
+	cfg := secureCfg()
+	cfg.CookieKey = []byte("too-short")
+	_, err := passkey.NewService(memory.NewStore(), cfg)
+	assert.ErrorIs(t, err, passkey.ErrCookieKeyMissing,
+		"a cookie key shorter than MinCookieKeyLength must be rejected at construction")
+}
+
+func TestNewService_RequiresChallengeStore(t *testing.T) {
+	cfg := secureCfg()
+	cfg.ChallengeStore = nil
+	_, err := passkey.NewService(memory.NewStore(), cfg)
+	assert.ErrorIs(t, err, passkey.ErrChallengeStoreMissing,
+		"construction must fail fast when no challenge store is supplied")
+}
+
+func TestNewService_ChallengeStoreOptOut(t *testing.T) {
+	cfg := secureCfg()
+	cfg.ChallengeStore = nil
+	cfg.InsecureNoChallengeStore = true
+	svc, err := passkey.NewService(memory.NewStore(), cfg)
+	require.NoError(t, err, "the explicit opt-out must allow construction without a challenge store")
+	assert.NotNil(t, svc)
 }
 
 func TestBeginRegistration(t *testing.T) {

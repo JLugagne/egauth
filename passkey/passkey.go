@@ -3,9 +3,30 @@
 // (memory + pgx implementations with a shared contract), a Service that runs the ceremonies,
 // and à-la-carte HTTP handlers. The ceremony challenge (SessionData) is carried between the
 // Begin and Finish steps in a short-lived, HMAC-signed secure cookie (the signing key is
-// supplied via WithCookieKey and verified before the data is trusted), so the server stays
+// supplied via Config.CookieKey and verified before the data is trusted), so the server stays
 // stateless between the two calls without letting the client tamper with the challenge or the
 // user-verification requirement.
+//
+// # Passwordless / step-up hardening checklist
+//
+// The package is SECURE BY DEFAULT: NewService fails fast on a misconfigured passwordless or
+// step-up setup rather than degrading silently. For a secure deployment:
+//
+//   - Config.CookieKey — REQUIRED. A stable, random secret of at least MinCookieKeyLength (32)
+//     bytes. NewService returns ErrCookieKeyMissing if it is unset or too short. The cookie is
+//     trusted state (challenge + UV requirement); an unauthenticated cookie is forgeable.
+//   - Config.ChallengeStore — REQUIRED. Provides single-use, server-side replay protection so a
+//     captured raw Finish request cannot be replayed within the cookie TTL. NewService returns
+//     ErrChallengeStoreMissing unless it is set or the explicit opt-out
+//     Config.InsecureNoChallengeStore is true (cookie-only protection — do not use for
+//     passwordless). The memory and pgx subpackages provide implementations.
+//   - Config.UserVerification — defaults to protocol.VerificationRequired (UV enforced). Leave
+//     it at the zero value for passwordless/step-up; set it explicitly to
+//     protocol.VerificationPreferred/Discouraged ONLY for a flow where another factor already
+//     authenticated the user.
+//   - Serve over HTTPS so the Secure ceremony cookie is sent. WithInsecureCookies is for local
+//     HTTP development only.
+//   - Rate-limit ceremony attempts in front of the handlers (egauth does not throttle them).
 package passkey
 
 import (

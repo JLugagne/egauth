@@ -12,6 +12,13 @@ import (
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
 // string is a legal tenant key (the single-tenant default partition); it must still be
 // passed explicitly.
+//
+// STABILITY: Store is a single, cohesive persistence contract for the package and is
+// expected to GROW during the pre-1.0 series — new methods may be added in minor releases.
+// It is intentionally NOT split into a required core plus optional capability interfaces:
+// every method here is required for correct auth behavior, and a partial Store would
+// silently break an auth flow. Implementers should follow the reference memory and pgx
+// stores and run the package's storetest conformance suite to stay in sync as it evolves.
 type Store[C any] interface {
 	// SaveRefreshToken persists a refresh token record (storing only its hash). If the
 	// record already carries a non-empty TenantID that differs from tenantID, it returns

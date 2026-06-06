@@ -835,7 +835,7 @@ func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token
 
 // normalizePhone validates a phone number and returns its canonical E.164 form. It strips the
 // common human-formatting characters (spaces, dashes, parentheses, and dots) and then requires a
-// leading '+' followed by 8 to 15 digits, the E.164 range. libauth deliberately does NOT do
+// leading '+' followed by 8 to 15 digits, the E.164 range. egauth deliberately does NOT do
 // region-aware parsing or carrier lookup (that needs a heavyweight dependency and live data); the
 // goal is a cheap, dependency-free sanity check so uniqueness and delivery operate on a canonical
 // string. Callers that need stricter validation can normalize upstream and pass an E.164 number.

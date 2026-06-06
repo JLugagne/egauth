@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/JLugagne/egauth/passkey"
+	passkeymemory "github.com/JLugagne/egauth/passkey/memory"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -70,10 +71,11 @@ func TestBeginRegistrationHandler(t *testing.T) {
 	assert.NotEmpty(t, cookie.Value)
 }
 
-func TestBeginRegistrationHandler_RequiresCookieKey(t *testing.T) {
+func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T) {
 	svc, _ := testService(t)
-	// No WithCookieKey → must fail closed rather than emit an unauthenticated cookie.
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.New()))
+	// The Service carries a validated cookie key, but a per-handler override that clears it must
+	// still fail closed (defense in depth) rather than emit an unauthenticated cookie.
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.New()), passkey.WithCookieKey(nil))
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -139,6 +141,7 @@ func TestFinishRegistrationHandler_MissingSessionCookie(t *testing.T) {
 func TestPasskeyHandlers_StoreErrorIs500(t *testing.T) {
 	svc, err := passkey.NewService(failingStore{}, passkey.Config{
 		RPID: "example.com", RPDisplayName: "Example", RPOrigins: []string{"https://example.com"},
+		CookieKey: testCookieKey, ChallengeStore: passkeymemory.NewChallengeStore(),
 	})
 	require.NoError(t, err)
 

@@ -17,6 +17,26 @@ import (
 // went backwards, which indicates a possibly cloned authenticator. The login is rejected.
 var ErrCredentialCloned = errors.New("passkey: authenticator signature counter regressed (possible clone)")
 
+// MinCookieKeyLength is the minimum length (in bytes) accepted for the ceremony-cookie HMAC
+// key. The cookie is authenticated with HMAC-SHA-256, so a key shorter than the 32-byte hash
+// output weakens the tag; NewService rejects anything shorter. Use a stable, random secret of
+// at least this length.
+const MinCookieKeyLength = 32
+
+// ErrCookieKeyMissing is returned by NewService when Config.CookieKey is unset or shorter than
+// MinCookieKeyLength. The ceremony cookie carries the WebAuthn challenge and the
+// user-verification requirement, which the server treats as trusted state; without an
+// authenticated cookie a client could forge them (e.g. downgrade user verification), so the key
+// is required at construction.
+var ErrCookieKeyMissing = errors.New("passkey: Config.CookieKey is required and must be at least 32 bytes")
+
+// ErrChallengeStoreMissing is returned by NewService when no Config.ChallengeStore is provided
+// and the insecure opt-out (Config.InsecureNoChallengeStore) was not set. The challenge store
+// provides single-use, server-side replay protection for the ceremony; without it replay
+// protection degrades to the cookie alone, which a captured raw Finish request can bypass. A
+// secure passwordless/step-up deployment must wire a ChallengeStore.
+var ErrChallengeStoreMissing = errors.New("passkey: a ChallengeStore is required for replay protection; set Config.ChallengeStore, or set Config.InsecureNoChallengeStore to knowingly accept cookie-only protection")
+
 // Config configures the WebAuthn Relying Party.
 type Config struct {
 	// RPID is the Relying Party ID — the registrable domain, without scheme or port (e.g.
@@ -29,13 +49,35 @@ type Config struct {
 	RPOrigins []string
 	// UserVerification controls whether the authenticator must verify the user (PIN, biometric,
 	// etc.) during registration and login — i.e. whether the User Verified (UV) flag is enforced.
-	// The zero value behaves like protocol.VerificationPreferred (UV is requested but not
-	// mandatory), preserving backward compatibility. Set it to protocol.VerificationRequired to
-	// reject any assertion where the UV flag is unset — required for passwordless and step-up use
-	// cases. This requirement is propagated into the ceremony options and the SessionData, so
-	// go-webauthn enforces the UV bit at FinishRegistration, FinishLogin and
-	// FinishDiscoverableLogin.
+	//
+	// SECURE BY DEFAULT: the zero value now means protocol.VerificationRequired — any assertion
+	// whose UV flag is unset is rejected at Finish. This is the correct default for passwordless
+	// and step-up use cases. To deliberately relax it (e.g. a second-factor flow where the
+	// password already authenticated the user), set it explicitly to
+	// protocol.VerificationPreferred or protocol.VerificationDiscouraged. The chosen requirement
+	// is propagated into the ceremony options and the SessionData, so go-webauthn enforces the UV
+	// bit at FinishRegistration, FinishLogin and FinishDiscoverableLogin.
 	UserVerification protocol.UserVerificationRequirement
+	// CookieKey is the secret key used to HMAC-authenticate the short-lived ceremony cookie that
+	// carries the WebAuthn challenge and the user-verification requirement between Begin and
+	// Finish. It is REQUIRED and validated at construction (NewService fails fast with
+	// ErrCookieKeyMissing if it is unset or shorter than MinCookieKeyLength), matching jwt.New's
+	// fail-fast behavior. Use a stable, random secret of at least 32 bytes. The per-request
+	// WithCookieKey HandlerOption can still override it for a specific handler, but a service-wide
+	// key here is the recommended way to configure it once.
+	CookieKey []byte
+	// ChallengeStore enables server-side, single-use replay protection for the ceremony challenge
+	// (SEC-05): the issued challenge is recorded on Begin and atomically consumed on Finish, so a
+	// captured Finish request replayed within the cookie TTL is rejected. It is REQUIRED by
+	// default: NewService fails with ErrChallengeStoreMissing if it is nil unless
+	// InsecureNoChallengeStore is set. The per-request WithChallengeStore HandlerOption overrides
+	// it for a specific handler.
+	ChallengeStore ChallengeStore
+	// InsecureNoChallengeStore is the explicit, greppable opt-out for callers who knowingly accept
+	// cookie-only replay protection (no ChallengeStore). When true, NewService no longer requires
+	// ChallengeStore. Do NOT set this for a passwordless/step-up deployment: a captured raw Finish
+	// request can then be replayed within the cookie TTL.
+	InsecureNoChallengeStore bool
 	// Events is an optional security-event sink (see the event package). When set it receives a
 	// LoginSucceeded event on each completed passkey login and an AccountBlocked event when a
 	// regressed signature counter flags a possible cloned authenticator. A nil sink disables
@@ -45,18 +87,47 @@ type Config struct {
 
 // Service runs the WebAuthn registration and login ceremonies over a credential Store.
 type Service struct {
-	wa     *webauthn.WebAuthn
-	store  Store
-	events event.Sink
+	wa         *webauthn.WebAuthn
+	store      Store
+	events     event.Sink
+	cookieKey  []byte
+	challenges ChallengeStore
 }
 
 // ceremonyTimeout bounds how long an in-flight registration/login ceremony stays valid.
 const ceremonyTimeout = 5 * time.Minute
 
-// NewService builds a passkey Service for the given relying-party Config. Ceremony timeouts are
-// enforced server-side (the challenge expiry is written into the signed ceremony cookie and
-// re-checked at Finish), so a captured/forged ceremony cannot be completed late.
+// NewService builds a passkey Service for the given relying-party Config. It is SECURE BY
+// DEFAULT and FAILS FAST on a misconfigured passwordless/step-up setup (mirroring jwt.New):
+//
+//   - User verification defaults to protocol.VerificationRequired when Config.UserVerification
+//     is the zero value, so a UV-cleared assertion is rejected at Finish unless the caller
+//     explicitly relaxes it.
+//   - A ceremony-cookie HMAC key is required: NewService returns ErrCookieKeyMissing if
+//     Config.CookieKey is unset or shorter than MinCookieKeyLength.
+//   - A ChallengeStore is required for single-use replay protection: NewService returns
+//     ErrChallengeStoreMissing unless Config.ChallengeStore is set or the explicit opt-out
+//     Config.InsecureNoChallengeStore is true.
+//
+// Ceremony timeouts are enforced server-side (the challenge expiry is written into the signed
+// ceremony cookie and re-checked at Finish), so a captured/forged ceremony cannot be completed
+// late.
 func NewService(store Store, cfg Config) (*Service, error) {
+	// Fail fast on an unusable security configuration before building anything.
+	if len(cfg.CookieKey) < MinCookieKeyLength {
+		return nil, ErrCookieKeyMissing
+	}
+	if cfg.ChallengeStore == nil && !cfg.InsecureNoChallengeStore {
+		return nil, ErrChallengeStoreMissing
+	}
+
+	// Secure-by-default: an unset UserVerification means REQUIRED (reject UV-cleared assertions).
+	// A caller wanting the weaker behavior sets VerificationPreferred/Discouraged explicitly.
+	uv := cfg.UserVerification
+	if uv == "" {
+		uv = protocol.VerificationRequired
+	}
+
 	wa, err := webauthn.New(&webauthn.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
@@ -66,7 +137,7 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		// shouldVerifyUser is derived from SessionData.UserVerification == VerificationRequired,
 		// so wiring it here enforces the UV flag across register, login and discoverable login.
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			UserVerification: cfg.UserVerification,
+			UserVerification: uv,
 		},
 		Timeouts: webauthn.TimeoutsConfig{
 			Login:        webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
@@ -76,7 +147,13 @@ func NewService(store Store, cfg Config) (*Service, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Service{wa: wa, store: store, events: cfg.Events}, nil
+	return &Service{
+		wa:         wa,
+		store:      store,
+		events:     cfg.Events,
+		cookieKey:  cfg.CookieKey,
+		challenges: cfg.ChallengeStore,
+	}, nil
 }
 
 // BeginRegistration starts adding a passkey for the user, returning the creation options to

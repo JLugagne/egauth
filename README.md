@@ -21,7 +21,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 | `mfa`        | TOTP (RFC 6238) with recovery codes                                          |
 | `otp`        | One-time codes (email/SMS), enumeration-safe HTTP handlers                    |
 | `passkey`    | WebAuthn / passkeys, including discoverable (usernameless) login             |
-| `oauth`      | OAuth2 / OIDC (Google, GitHub, Discord), PKCE-S256, id_token/nonce/JWKS      |
+| `oauth`      | OAuth2 / OIDC, PKCE-S256, id_token/nonce/JWKS; 12 built-in providers (Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab, Google, Keycloak, LinkedIn, Microsoft, Okta) in `oauth/providers` |
 | `delivery`   | Optional reference SMTP mailer + template renderer + OTP sender              |
 | `ratelimit`, `event`, `health` | Pluggable rate-limiting, audit-event, and readiness seams  |
 
@@ -37,7 +37,13 @@ Requires Go 1.26+.
 
 The recommended stateless stack is `identity` (verify credentials) + `tokens/jwt` (issue and
 rotate tokens). This wires it with the in-memory backends; swap in the `pgx` stores for
-production. It is the runnable package example (`go test ./identity -run Example`).
+production.
+
+Most applications carry no custom data in their tokens. For that common case use the
+`tokens/basic` convenience layer, which specializes the token API to "no custom claims" so you
+never spell the `[struct{}]` type argument. (Need custom claims? Use the generic API directly
+with your own type — see [below](#with-custom-claims).) This is the runnable package example
+(`go test ./tokens/basic -run Example`).
 
 ```go
 ctx := context.Background()
@@ -47,16 +53,16 @@ const tenant = "" // empty string is the single-tenant default partition
 idStore := identitymem.NewStore() // identity/memory; or identity/pgx.NewStore(pool)
 svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 
-// tokens: stateless access tokens + refresh rotation.
+// tokens: stateless access tokens + refresh rotation (no custom claims).
 // claimsProvider re-derives a user's claims on every refresh, so a disabled or
 // role-changed user is re-evaluated rather than frozen at login.
-claimsProvider := tokens.ClaimsProviderFunc[struct{}](
-    func(_ context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
-        return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
+claimsProvider := basic.ClaimsProviderFunc(
+    func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
+        return basic.Claims{Subject: userID, TenantID: tenantID}, nil
     },
 )
-tokenStore := tokenmem.NewStore[struct{}]() // tokens/memory; or tokens/pgx.NewStore(pool)
-issuer := jwt.New[struct{}](jwt.Config[struct{}]{
+tokenStore := basic.NewMemoryStore() // tokens/memory; or tokens/pgx.NewStore(pool)
+issuer := basic.NewIssuer(basic.Config{
     Store:          tokenStore,
     Issuer:         "example-app",
     SecretKey:      hs256SecretFromYourSecretStore, // >= 32 bytes
@@ -68,7 +74,7 @@ issuer := jwt.New[struct{}](jwt.Config[struct{}]{
 // register, authenticate, issue a token pair
 user, err := svc.Register(ctx, tenant, "alice@example.com", password)
 // ... handle err
-pair, err := issuer.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: user.ID, TenantID: tenant})
+pair, err := issuer.IssueTokenPair(ctx, basic.Claims{Subject: user.ID, TenantID: tenant})
 
 // later: refresh — rotation single-use-consumes the old refresh token
 // (replaying it trips theft detection and revokes the family)
@@ -81,20 +87,28 @@ The handlers are à-la-carte `http.HandlerFunc` factories you mount on your own 
 imposes no router:
 
 ```go
-claimsOf := func(u *identity.User) tokens.Claims[struct{}] {
-    return tokens.Claims[struct{}]{Subject: u.ID, TenantID: u.TenantID}
+claimsOf := func(u *identity.User) basic.Claims {
+    return basic.Claims{Subject: u.ID, TenantID: u.TenantID}
 }
 mux := http.NewServeMux()
 mux.Handle("POST /login",   identity.LoginHandler(svc, issuer, claimsOf))
-mux.Handle("POST /refresh", tokens.RefreshHandler[struct{}](issuer))    // issuer is the Rotator
-mux.Handle("POST /logout",  tokens.LogoutHandler(tokenStore))           // revokes the refresh family
+mux.Handle("POST /refresh", basic.RefreshHandler(issuer))    // issuer is the Rotator
+mux.Handle("POST /logout",  basic.LogoutHandler(tokenStore)) // revokes the refresh family
 
 // protect a route with the access-token middleware:
-mux.Handle("GET /me", tokens.RequireAuth[struct{}](issuer,
+mux.Handle("GET /me", basic.RequireAuth(issuer,
     func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
         // actor.UserID / actor.TenantID are authenticated
     }))
 ```
+
+### With custom claims
+
+To carry application data in your tokens, use the generic `tokens` / `tokens/jwt` API directly
+with your own claims type `C`. The shape is identical — `basic` is only a thin facade over it —
+but every token type takes the type argument: `tokens.Claims[C]`, `jwt.New[C]`,
+`tokens.RequireAuth[C]`, and so on. Use `tokens.Claims[struct{}]` if you ever need the generic
+form with no custom claims. See `go doc github.com/JLugagne/egauth/tokens`.
 
 ## Multi-tenancy
 
@@ -138,7 +152,7 @@ boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mai
 ## Documentation
 
 Each module has a package overview (`go doc github.com/JLugagne/egauth/identity`) and the
-login-critical packages carry runnable examples. See also `PRD.md` for design goals.
+login-critical packages carry runnable examples.
 
 ## Stability
 

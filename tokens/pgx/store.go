@@ -15,6 +15,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+// MigrationsFS embeds the SQL migration files for the tokens module's Postgres schema,
+// applied via Migrate (which runs them through pgxmigrate).
+//
 //go:embed migrations/*.sql
 var MigrationsFS embed.FS
 

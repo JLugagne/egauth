@@ -1,5 +1,13 @@
 .agents
 .claude
+.antigravitycli/
+.questions/
 PRD.md
 .tasks/
 docs/public
+
+# coverage / test artifacts
+*.out
+coverage.out
+coverage*.out
+*.coverprofile
