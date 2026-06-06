@@ -211,6 +211,34 @@ application layer's responsibility. egauth provides no idempotency-key layer; co
 applications that need it must implement or proxy one in front of the egauth handlers, mirroring
 how rate limiting and CSRF tokens are positioned.
 
+## Evicting in-memory stores in production (consumer responsibility)
+
+The in-memory store backends (`sessions/memory`, `otp/memory`) and the `ratelimit.TokenBucket`
+accumulate entries until a caller explicitly invokes `DeleteExpired` / `Cleanup`. This is an
+intentional design choice (the in-memory stores are primarily for tests and single-process apps),
+but it is an **operational footgun** if overlooked:
+
+- A flood of short-lived sessions, OTP codes, or unique rate-limit keys will grow the internal
+  maps indefinitely, exhausting heap memory and creating a denial-of-service vector.
+- The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
+  it is O(1) on the hot path and is **not** a substitute for a full sweep.
+
+**Mitigation (consumer responsibility):** schedule periodic eviction using the optional
+`janitor` helper shipped with egauth:
+
+```go
+import "github.com/JLugagne/egauth/janitor"
+
+j := janitor.Start(ctx, 5*time.Minute, func() {
+    sessStore.DeleteExpired(context.Background(), tenantID)
+})
+defer j.Stop()
+```
+
+The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.TokenBucket.Cleanup`.
+See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
+persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
+
 ## Account-existence disclosure (by design)
 
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,

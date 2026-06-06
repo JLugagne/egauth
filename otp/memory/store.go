@@ -1,4 +1,24 @@
-// Package memory provides an in-memory otp.Store, primarily for tests and single-process use.
+// Package memory provides an in-memory otp.Store, primarily for tests and
+// single-process use.
+//
+// # Production requirement: periodic eviction is MANDATORY
+//
+// The Store grows without bound unless DeleteExpired is called periodically.
+// Every expired OTP code row remains in the in-memory map until explicitly
+// purged; under load a production deployment that skips periodic eviction will
+// exhaust available memory, creating a trivial denial-of-service vector.
+//
+// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
+//
+//	store := memory.NewStore()
+//	j := janitor.Start(ctx, 5*time.Minute, func() {
+//	    store.DeleteExpired(context.Background(), tenantID)
+//	})
+//	defer j.Stop()
+//
+// This in-memory backend is suitable for tests and single-binary deployments
+// where controlled restart bounds the total OTP count. For persistent or
+// horizontally-scaled deployments, use the otp/pgx backend instead.
 package memory
 
 import (

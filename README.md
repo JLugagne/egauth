@@ -179,6 +179,26 @@ Full API reference: [pkg.go.dev/github.com/JLugagne/egauth](https://pkg.go.dev/g
 Each module has a package overview (`go doc github.com/JLugagne/egauth/identity`) and the
 login-critical packages carry runnable examples.
 
+## Production: evict in-memory stores
+
+The `sessions/memory`, `otp/memory`, and `ratelimit.TokenBucket` backends grow without bound
+unless their eviction methods (`DeleteExpired` / `Cleanup`) are called periodically. In any
+non-trivial production deployment you **must** schedule this — a flood of unique keys, sessions,
+or OTP codes otherwise exhausts available memory. Use the optional `janitor` helper:
+
+```go
+import "github.com/JLugagne/egauth/janitor"
+
+j := janitor.Start(ctx, 5*time.Minute, func() {
+    sessStore.DeleteExpired(context.Background(), tenantID)
+})
+defer j.Stop()
+```
+
+`janitor.Start` accepts any `func()`, so the same pattern covers `otpStore.DeleteExpired` and
+`tokenBucket.Cleanup`. For production deployments beyond a single binary, swap the in-memory
+stores for their `pgx` counterparts (which rely on the database for eviction instead).
+
 ## Stability
 
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
