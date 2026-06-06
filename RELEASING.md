@@ -96,6 +96,68 @@ Or create the release manually in the GitHub UI, pasting the relevant CHANGELOG 
 
 ---
 
+## Multi-module release: core + `adapters/pgx`
+
+The repository is a **multi-module monorepo**: the core flagship module
+(`github.com/JLugagne/egauth`) and a nested pgx adapter module
+(`github.com/JLugagne/egauth/adapters/pgx`, holding the PostgreSQL stores + migration runner).
+Each module is versioned and tagged independently, and the adapter depends on core — so the two
+tags must be cut **in order**.
+
+For local development and CI, the adapter `go.mod` carries a relative `replace
+github.com/JLugagne/egauth => ../..` that resolves the (as-yet-unpublished, private) core module
+from this repo's root, so every go command — `build`, `test`, `vet`, `tidy`, `go work sync` — works
+offline without reaching the proxy for a core version that doesn't exist yet. A committed `go.work`
+also lists both modules so the workspace spans them. Both are **development-only**: `go.work` is
+never seen by external consumers, and the `replace` is dropped at release (and is ignored by
+importers even if it shipped). `go.work.sum` is a derived lock file and is not tracked.
+
+### Adapter granularity convention
+
+There is **one adapter module per backend technology**, not one per domain. `adapters/pgx` holds
+all seven pgx stores (`adapters/pgx/identity`, `.../tokens`, …) because they all share the same
+`jackc/pgx/v5` driver — a module per domain would mean seven tags to cut for zero dependency-graph
+win. A future SQL or Mongo backend gets its **own** module (`adapters/sql`, `adapters/mongo`) so a
+consumer who picks pgx never inherits another backend's driver.
+
+### The two-tag release dance (ordered, maintainer-manual)
+
+1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. The adapter's `require` can only point at
+   a published core version, so core must exist on the proxy before the adapter is tagged.
+2. **Point the adapter at the published core version.** Pre-tag, `adapters/pgx/go.mod` pins the core
+   `require` and carries the dev `replace github.com/JLugagne/egauth => ../..`. Now that core is
+   published, drop the replace, pin the require to the freshly-cut version, and regenerate `go.sum`
+   against the proxy (`GOWORK=off` forces proxy resolution instead of the workspace):
+
+   ```sh
+   cd adapters/pgx
+   go mod edit -dropreplace=github.com/JLugagne/egauth -require=github.com/JLugagne/egauth@vX.Y.Z
+   GOWORK=off go mod tidy   # resolves core from the proxy; proves the adapter builds standalone
+   cd ..
+   git add adapters/pgx/go.mod adapters/pgx/go.sum
+   git commit -m "chore: point adapters/pgx at egauth vX.Y.Z"
+   ```
+
+   A `replace` left in the shipped go.mod is ignored by external importers (so it's harmless if
+   forgotten), but dropping it keeps the published module clean.
+3. **Cut the adapter tag**, which is path-prefixed because it is a nested module:
+
+   ```sh
+   git tag -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
+   git push origin adapters/pgx/vX.Y.Z
+   ```
+4. **Consumers** then install each module at its tag, independently:
+
+   ```sh
+   go get github.com/JLugagne/egauth@vX.Y.Z
+   go get github.com/JLugagne/egauth/adapters/pgx@vX.Y.Z
+   ```
+
+The core and adapter versions need not match, but keeping them in lockstep (same `vX.Y.Z`) is the
+simplest mental model while the adapter tracks core 1:1.
+
+---
+
 ## Flipping the repository public
 
 When the repository is ready to go public, the maintainer performs this step **manually**
