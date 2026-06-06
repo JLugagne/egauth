@@ -97,6 +97,35 @@ jobs:
         working-directory: adapters/pgx
         run: go test -short ./...
 
+  fuzz:
+    name: Fuzz (short pass on untrusted-input parsers)
+    runs-on: ubuntu-latest
+    # The fuzz targets cover the highest-value attack surface of an auth SDK: the parsers fed
+    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, WebAuthn CBOR/base64).
+    # All live in the core module, so GOWORK=off. A short pass per target catches panics (DoS) and
+    # mis-parses on every push without a long-running fuzz budget.
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Short fuzz pass
+        run: |
+          set -euo pipefail
+          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=30s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=30s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=30s ./oauth
+          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=30s ./tokens/jwt
+          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=30s ./passkey
+          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=30s ./passkey
+
   govulncheck:
     name: Vulnerability Check (both modules)
     runs-on: ubuntu-latest
