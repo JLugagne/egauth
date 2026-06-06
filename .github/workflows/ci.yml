@@ -71,6 +71,32 @@ jobs:
         # The committed go.work (at the repo root) resolves the core module from local disk.
         run: go test -race -failfast ./...
 
+  test-short:
+    name: Docker-less unit tests (go test -short)
+    runs-on: ubuntu-latest
+    # Proves the documented Docker-less contributor path: `go test -short ./...` passes in BOTH
+    # modules with no Docker daemon — every testcontainers test skips under -short. We do NOT start
+    # any Docker service in this job, so a regression that makes a unit test depend on Docker fails
+    # here. (The full pgx conformance suites still run in test-adapters-pgx with Docker.)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Core — go test -short (no Docker)
+        env:
+          GOWORK: "off"
+        run: go test -short ./...
+
+      - name: adapters/pgx — go test -short (no Docker; testcontainers tests skip)
+        working-directory: adapters/pgx
+        run: go test -short ./...
+
   govulncheck:
     name: Vulnerability Check (both modules)
     runs-on: ubuntu-latest

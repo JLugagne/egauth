@@ -35,7 +35,9 @@ is not tracked.
 1. **Go Version:** We target the latest stable Go releases.
 2. **Testing:** The **core** module is Docker-free — `GOWORK=off go test ./...` runs its full suite
    with no daemon. The **`adapters/pgx`** module relies on `testcontainers-go`, so you need Docker
-   installed locally to run `cd adapters/pgx && go test ./...`. `make check` runs both modules.
+   installed locally to run `cd adapters/pgx && go test ./...`. `make check` runs the full suite for
+   both modules. **No Docker?** Run `make test-unit` (or `go test -short ./...` in each module) — the
+   `-short` flag skips every testcontainers test, so all non-database unit tests still run and pass.
 3. **Running Checks:** Use the provided `Makefile` to ensure your code meets our standards:
    ```bash
    make check

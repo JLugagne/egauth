@@ -22,6 +22,9 @@ import (
 
 func newTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
 	ctx := context.Background()
 	pgContainer, err := postgres.Run(ctx,
 		"postgres:16-alpine",

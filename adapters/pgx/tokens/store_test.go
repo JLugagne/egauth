@@ -19,6 +19,9 @@ type customClaims struct {
 }
 
 func TestStoreContract(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,

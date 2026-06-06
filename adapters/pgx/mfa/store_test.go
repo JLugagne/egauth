@@ -18,6 +18,9 @@ import (
 
 func newStore(t *testing.T) *mfapgx.Store {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,

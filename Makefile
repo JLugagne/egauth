@@ -1,4 +1,4 @@
-.PHONY: all verify vet lint vulncheck test check
+.PHONY: all verify vet lint vulncheck test test-unit check
 
 # Pinned tool versions — keep in sync with .github/workflows/ci.yml
 GOLANGCI_LINT_VERSION := v2.12.2
@@ -44,3 +44,11 @@ test:
 	GOWORK=off go test -race -failfast ./...
 	@echo "==> Running tests ($(ADAPTER), Docker/testcontainers)..."
 	cd $(ADAPTER) && go test -race -failfast ./...
+
+# Docker-less unit tests: runs both modules with -short so every testcontainers test skips.
+# Use this when you don't have Docker running; `make test` runs the full Docker-backed suite.
+test-unit:
+	@echo "==> Running unit tests (core, -short, no Docker)..."
+	GOWORK=off go test -short ./...
+	@echo "==> Running unit tests ($(ADAPTER), -short, no Docker)..."
+	cd $(ADAPTER) && go test -short ./...

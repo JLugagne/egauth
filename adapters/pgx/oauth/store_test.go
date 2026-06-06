@@ -15,6 +15,9 @@ import (
 )
 
 func TestStore(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
 	ctx := context.Background()
 
 	// 1. Setup Postgres Testcontainer

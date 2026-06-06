@@ -19,6 +19,9 @@ import (
 // backend connectivity (nil while the pool is up, error once it is closed).
 
 func TestStore_Ping(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
 	ctx := context.Background()
 
 	pgContainer, err := postgres.Run(ctx,
