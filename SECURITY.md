@@ -195,6 +195,22 @@ and general CSRF are left to the application layer):
   account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
   in front of these endpoints.
 
+## Observability and idempotency (consumer responsibility)
+
+egauth ships no first-party metrics, tracing, or request-level idempotency layer.
+
+**Observability** — wire `event.Sink` to your metrics pipeline or audit log. The ready-made
+`event.NewSlogSink` covers the "log it with slog" case; for richer consumers (Prometheus
+counters, OpenTelemetry spans, SIEM ingestion) implement `event.Sink` directly or use
+`event.MultiSink` to fan out. Every operation propagates a `context.Context`, so span
+propagation and deadline enforcement are fully under the consumer's control. egauth ships no
+first-party OpenTelemetry or Prometheus adapter (a later milestone, if wanted).
+
+**Idempotency** — request-level deduplication (idempotency keys, retry-safe mutations) is the
+application layer's responsibility. egauth provides no idempotency-key layer; consuming
+applications that need it must implement or proxy one in front of the egauth handlers, mirroring
+how rate limiting and CSRF tokens are positioned.
+
 ## Account-existence disclosure (by design)
 
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,
