@@ -46,8 +46,8 @@ func (m *MockRotator[C]) Rotate(ctx context.Context, tenantID string, refreshTok
 // MockVerifier is a function-based mock implementation of the tokens.Verifier interface.
 type MockVerifier[C any] struct {
 	VerifyAccessTokenFunc  func(ctx context.Context, token string) (*tokens.Claims[C], error)
-	VerifyRefreshTokenFunc func(ctx context.Context, token string) (*tokens.Claims[C], error)
-	VerifyAPIKeyFunc       func(ctx context.Context, key string) (*tokens.Claims[C], error)
+	VerifyRefreshTokenFunc func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
+	VerifyAPIKeyFunc       func(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error)
 }
 
 func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
@@ -57,18 +57,18 @@ func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (
 	return m.VerifyAccessTokenFunc(ctx, token)
 }
 
-func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
+func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error) {
 	if m.VerifyRefreshTokenFunc == nil {
 		panic("called not defined VerifyRefreshTokenFunc")
 	}
-	return m.VerifyRefreshTokenFunc(ctx, token)
+	return m.VerifyRefreshTokenFunc(ctx, tenantID, token)
 }
 
-func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
+func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
 	if m.VerifyAPIKeyFunc == nil {
 		panic("called not defined VerifyAPIKeyFunc")
 	}
-	return m.VerifyAPIKeyFunc(ctx, key)
+	return m.VerifyAPIKeyFunc(ctx, tenantID, key)
 }
 
 // IssuerVerifierContractTesting runs all contract tests for tokens.Issuer and tokens.Verifier implementations.
@@ -95,8 +95,11 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 		assert.Equal(t, claims.Subject, verifiedClaims.Subject, "Subject should match")
 		assert.Equal(t, claims.TenantID, verifiedClaims.TenantID, "TenantID should match")
 
-		// Verify Refresh Token
-		refClaims, err := verifier.VerifyRefreshToken(ctx, pair.RefreshToken)
+		// Verify Refresh Token under the SAME (non-empty) tenant it was saved with: the
+		// store lookup is tenant-scoped, so the matching tenantID is what resolves it. (The
+		// cross-tenant fail-closed guarantee is proven separately against a tenant-
+		// partitioning store; a non-partitioning test double cannot exhibit it.)
+		refClaims, err := verifier.VerifyRefreshToken(ctx, claims.TenantID, pair.RefreshToken)
 		require.NoError(t, err)
 		assert.Equal(t, claims.Subject, refClaims.Subject)
 	})
@@ -114,8 +117,11 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 		assert.True(t, len(apiKey.Token) > len("sk_test_"), "Token should be longer than the prefix")
 		assert.NotEmpty(t, apiKey.Hash, "Hash must not be empty")
 
-		// Verify API Key
-		verifiedClaims, err := verifier.VerifyAPIKey(ctx, apiKey.Token)
+		// Verify API Key under the SAME (non-empty) tenant it was saved with: the store
+		// lookup is tenant-scoped, so the matching tenantID is what resolves it. (The
+		// cross-tenant fail-closed guarantee is proven separately against a tenant-
+		// partitioning store; a non-partitioning test double cannot exhibit it.)
+		verifiedClaims, err := verifier.VerifyAPIKey(ctx, claims.TenantID, apiKey.Token)
 		require.NoError(t, err)
 		assert.Equal(t, claims.Subject, verifiedClaims.Subject)
 		// For API Keys, if the store is tenant-aware, it should return the tenant

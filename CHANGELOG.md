@@ -30,6 +30,11 @@ pre-1.0 API-stability changes, in preparation for an open public release.
 
 ### Changed
 
+- **BREAKING (tokens/jwt):** `jwt.VerifyRefreshToken` and `jwt.VerifyAPIKey` now take a
+  `tenantID string` parameter (after `ctx`) so multi-tenant callers can verify tokens
+  saved under a real tenant — the lookup was previously hard-wired to the empty tenant and
+  reported not-found for any token saved under a real one. Single-tenant callers pass `""`
+  (or use the `SingleTenant` facade, whose signature is unchanged).
 - **BREAKING (passkey, secure-by-default):** `passkey.NewService` now fails fast
   on insecure configuration. WebAuthn user verification is **required by default**
   (set `Config.UserVerification` explicitly to opt out); a `ChallengeStore` is

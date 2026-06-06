@@ -477,12 +477,15 @@ func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*t
 }
 
 // VerifyRefreshToken validates a refresh token against the store and returns its claims.
-func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
+// tenantID scopes the store lookup to a single tenant's partition: a token saved under a
+// real tenant resolves only when the matching tenantID is passed, and verification fails
+// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
+func (s *Service[C]) VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error) {
 	hash := tokens.HashToken(token)
 
 	// Since we don't store full claims for refresh tokens in this simple Store,
 	// we just verify existence and return a minimal Claims object with the Subject.
-	rt, err := s.store.FindRefreshToken(ctx, "", hash)
+	rt, err := s.store.FindRefreshToken(ctx, tenantID, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -503,10 +506,13 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, token string) (*tok
 }
 
 // VerifyAPIKey validates an API key against the store and returns its claims.
-func (s *Service[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
+// tenantID scopes the store lookup to a single tenant's partition: a key saved under a
+// real tenant resolves only when the matching tenantID is passed, and verification fails
+// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
+func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
 	hash := tokens.HashToken(key)
 
-	apiKey, err := s.store.FindAPIKeyByHash(ctx, "", hash)
+	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
 	if err != nil {
 		return nil, err
 	}

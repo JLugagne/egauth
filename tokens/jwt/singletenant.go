@@ -47,14 +47,18 @@ func (s *SingleTenant[C]) VerifyAccessToken(ctx context.Context, tokenStr string
 	return s.svc.VerifyAccessToken(ctx, tokenStr)
 }
 
-// VerifyRefreshToken calls Service.VerifyRefreshToken.
+// VerifyRefreshToken calls Service.VerifyRefreshToken on the empty tenant. Its signature
+// keeps the single-tenant convenience contract (no tenantID): the underlying lookup is
+// scoped to the default partition ("").
 func (s *SingleTenant[C]) VerifyRefreshToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
-	return s.svc.VerifyRefreshToken(ctx, token)
+	return s.svc.VerifyRefreshToken(ctx, "", token)
 }
 
-// VerifyAPIKey calls Service.VerifyAPIKey.
+// VerifyAPIKey calls Service.VerifyAPIKey on the empty tenant. Its signature keeps the
+// single-tenant convenience contract (no tenantID): the underlying lookup is scoped to the
+// default partition ("").
 func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
-	return s.svc.VerifyAPIKey(ctx, key)
+	return s.svc.VerifyAPIKey(ctx, "", key)
 }
 
 // Rotate calls Service.Rotate on the empty tenant.

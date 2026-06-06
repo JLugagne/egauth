@@ -19,8 +19,14 @@ type Verifier[C any] interface {
 	VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
 
 	// VerifyRefreshToken validates a refresh token against the store and returns its claims.
-	VerifyRefreshToken(ctx context.Context, token string) (*Claims[C], error)
+	// tenantID scopes the store lookup: the token is resolved only within that tenant's
+	// partition, so a token saved under a real tenant must be verified with the matching
+	// tenantID. Single-tenant callers pass "" (the default partition).
+	VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*Claims[C], error)
 
 	// VerifyAPIKey validates an API key against the store and returns its claims.
-	VerifyAPIKey(ctx context.Context, key string) (*Claims[C], error)
+	// tenantID scopes the store lookup: the key is resolved only within that tenant's
+	// partition, so a key saved under a real tenant must be verified with the matching
+	// tenantID. Single-tenant callers pass "" (the default partition).
+	VerifyAPIKey(ctx context.Context, tenantID string, key string) (*Claims[C], error)
 }
