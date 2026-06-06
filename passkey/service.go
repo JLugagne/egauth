@@ -100,6 +100,8 @@ const ceremonyTimeout = 5 * time.Minute
 // NewService builds a passkey Service for the given relying-party Config. It is SECURE BY
 // DEFAULT and FAILS FAST on a misconfigured passwordless/step-up setup (mirroring jwt.New):
 //
+//   - A nil store is rejected immediately with ErrNilStore; the store is always required and
+//     failing at construction is clearer than a nil-pointer panic on the first request.
 //   - User verification defaults to protocol.VerificationRequired when Config.UserVerification
 //     is the zero value, so a UV-cleared assertion is rejected at Finish unless the caller
 //     explicitly relaxes it.
@@ -113,6 +115,10 @@ const ceremonyTimeout = 5 * time.Minute
 // ceremony cookie and re-checked at Finish), so a captured/forged ceremony cannot be completed
 // late.
 func NewService(store Store, cfg Config) (*Service, error) {
+	// Fail fast: a nil store is always a programming error.
+	if store == nil {
+		return nil, ErrNilStore
+	}
 	// Fail fast on an unusable security configuration before building anything.
 	if len(cfg.CookieKey) < MinCookieKeyLength {
 		return nil, ErrCookieKeyMissing

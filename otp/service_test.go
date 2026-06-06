@@ -117,3 +117,9 @@ func TestService_PurposesAreIndependent(t *testing.T) {
 	// The login code is still independently valid.
 	require.NoError(t, svc.Verify(ctx, "t1", sub, "login", login.Code))
 }
+
+func TestOTPNewServiceNilStorePanics(t *testing.T) {
+	assert.Panics(t, func() {
+		otp.NewService(nil)
+	}, "NewService with a nil store must panic at construction, not on the first request")
+}

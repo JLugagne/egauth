@@ -45,8 +45,13 @@ func WithMaxAttempts(n int) ServiceOption { return func(s *service) { s.maxAttem
 // WithClock overrides the time source (primarily for tests).
 func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
 
-// NewService builds an OTP Service with sensible defaults.
+// NewService builds an OTP Service with sensible defaults. It panics on a nil store
+// (always required) to fail fast at startup rather than with a nil-pointer panic deep
+// in a request handler.
 func NewService(store Store, opts ...ServiceOption) Service {
+	if store == nil {
+		panic("otp: NewService requires a non-nil Store")
+	}
 	s := &service{
 		store:       store,
 		digits:      DefaultDigits,
