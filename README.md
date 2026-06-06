@@ -183,3 +183,9 @@ login-critical packages carry runnable examples.
 
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
 follow SemVer with a CHANGELOG. Pin a commit or tag in `go.mod` for reproducible builds.
+
+**Go version support policy.** egauth targets the newest major Go release as its minimum toolchain.
+The `go.mod` directive is currently `go 1.26` and is bumped deliberately — each time a new major
+Go version ships, the floor moves up to it. This is an intentional choice (not an accident): the
+library is expected to be adopted in greenfield projects that run the current toolchain. If you
+need support for an older Go version, pin an earlier egauth release.
