@@ -144,3 +144,37 @@ func TestSafeHTTPClientRefusesLoopbackServer(t *testing.T) {
 		t.Fatalf("error = %v, want wrapped ErrBlockedAddress", err)
 	}
 }
+
+// TestSafeHTTPClientIgnoresEnvProxy proves the dial-time IP guard inspects the RESOLVED TARGET
+// even when HTTP(S)_PROXY is set in the environment. If the safe client honored the env proxy, the
+// dial would target the (bogus) proxy host instead of the loopback test server, so the request
+// would fail with a proxy dial error rather than the internal-IP SSRF block. Asserting that the
+// error wraps ErrBlockedAddress confirms env proxies are not trusted (Proxy: nil).
+func TestSafeHTTPClientIgnoresEnvProxy(t *testing.T) {
+	// A proxy that, if honored, would intercept the dial before the target IP is ever evaluated.
+	t.Setenv("HTTP_PROXY", "http://some-proxy.invalid:3128")
+	t.Setenv("HTTPS_PROXY", "http://some-proxy.invalid:3128")
+	t.Setenv("http_proxy", "http://some-proxy.invalid:3128")
+	t.Setenv("https_proxy", "http://some-proxy.invalid:3128")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	client := SafeHTTPClient()
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	if err != nil {
+		t.Fatalf("building request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err == nil {
+		_ = resp.Body.Close()
+		t.Fatalf("SafeHTTPClient reached loopback target %s with env proxy set, want SSRF block", srv.URL)
+	}
+	// The error must be the dial-time internal-IP block (inspecting the resolved 127.0.0.1
+	// target), NOT a failed dial to the bogus proxy host.
+	if !errors.Is(err, ErrBlockedAddress) {
+		t.Fatalf("error = %v, want wrapped ErrBlockedAddress (dial-time IP guard, env proxy ignored)", err)
+	}
+}
