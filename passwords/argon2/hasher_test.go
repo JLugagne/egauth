@@ -2,6 +2,7 @@ package argon2_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -15,6 +16,50 @@ import (
 func TestArgon2Hasher_Contract(t *testing.T) {
 	hasher := argon2hasher.NewHasher()
 	hashertest.HasherContractTesting(t, hasher)
+}
+
+// TestArgon2CostFloors proves that WithMemory/WithTime/WithThreads clamp a
+// too-low cost UP to the documented safe floor (OWASP 2021) instead of
+// producing a dangerously weak hasher. The floors are exported constants,
+// referenced here at compile time.
+func TestArgon2CostFloors(t *testing.T) {
+	// Compile-time confirmation that the floors are exported and have the
+	// documented values (CRYPTO-1 / OWASP 2021).
+	require.Equal(t, uint32(19456), argon2hasher.MinMemoryKiB)
+	require.Equal(t, uint32(1), argon2hasher.MinTime)
+	require.Equal(t, uint8(1), argon2hasher.MinThreads)
+
+	// Drive every option below its floor in one hasher; each parameter in the
+	// produced PHC string must be at or above the floor.
+	hasher := argon2hasher.NewHasher(
+		argon2hasher.WithMemory(1),
+		argon2hasher.WithTime(0),
+		argon2hasher.WithThreads(0),
+	)
+
+	mem, tm, par := costParams(t, hasher)
+	assert.GreaterOrEqual(t, mem, argon2hasher.MinMemoryKiB, "WithMemory(1) must clamp up to MinMemoryKiB")
+	assert.GreaterOrEqual(t, tm, argon2hasher.MinTime, "WithTime(0) must clamp up to MinTime")
+	assert.GreaterOrEqual(t, par, uint32(argon2hasher.MinThreads), "WithThreads(0) must clamp up to MinThreads")
+
+	// Specifically, a sub-floor memory value lands exactly on the floor.
+	assert.Equal(t, argon2hasher.MinMemoryKiB, mem, "sub-floor memory must clamp to the floor value")
+}
+
+// costParams hashes a fixed password and extracts the Argon2id m/t/p cost
+// parameters from the PHC-formatted hash, mirroring how the other tests in
+// this package inspect a hasher's effective cost (the struct fields are
+// unexported).
+func costParams(t *testing.T, hasher *argon2hasher.Hasher) (memory, time, threads uint32) {
+	t.Helper()
+	hash, err := hasher.Hash(context.Background(), "TestPassword123!")
+	require.NoError(t, err)
+
+	parts := strings.Split(hash, "$")
+	require.Len(t, parts, 6)
+	_, err = fmt.Sscanf(parts[3], "m=%d,t=%d,p=%d", &memory, &time, &threads)
+	require.NoError(t, err)
+	return memory, time, threads
 }
 
 func TestArgon2Hasher_Format(t *testing.T) {
