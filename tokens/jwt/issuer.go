@@ -105,6 +105,11 @@ type Config[C any] struct {
 	// validation on the verify path (it is wired into the JWT parser too). Its primary use is
 	// deterministic testing. The zero value defaults to time.Now.
 	Clock func() time.Time
+	// InsecureAllowWeakKey suppresses the MinSecretKeyLength enforcement inside New. It must
+	// only be set in test code that intentionally uses short keys (e.g. to exercise edge-case
+	// paths without needing a 32-byte secret). Production callers must never set this field —
+	// doing so removes the brute-force resistance guarantee for HS256.
+	InsecureAllowWeakKey bool
 }
 
 // MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
@@ -179,6 +184,12 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 		if cfg.SecretKey == "" {
 			return nil, "", nil, nil, errors.New("no signing key configured (set SecretKey or SigningKeys)")
 		}
+		if !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
+			return nil, "", nil, nil, fmt.Errorf(
+				"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+				len(cfg.SecretKey), MinSecretKeyLength,
+			)
+		}
 		return legacy, "", verify, legacy, nil
 	}
 
@@ -194,8 +205,22 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 		if k.Secret == "" {
 			return nil, "", nil, nil, fmt.Errorf("SigningKeys[%q] has an empty Secret", k.KeyID)
 		}
+		if !cfg.InsecureAllowWeakKey && len(k.Secret) < MinSecretKeyLength {
+			return nil, "", nil, nil, fmt.Errorf(
+				"SigningKeys[%q].Secret is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+				k.KeyID, len(k.Secret), MinSecretKeyLength,
+			)
+		}
 		seen[k.KeyID] = true
 		verify[k.KeyID] = []byte(k.Secret)
+	}
+
+	// Also check the legacy SecretKey if present alongside SigningKeys.
+	if cfg.SecretKey != "" && !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
+		return nil, "", nil, nil, fmt.Errorf(
+			"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+			len(cfg.SecretKey), MinSecretKeyLength,
+		)
 	}
 
 	activeID := cfg.ActiveKeyID
@@ -213,8 +238,10 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 }
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
-// be built (no signing key, or a malformed keyset) to fail fast instead of silently signing with
-// an unusable key. For comprehensive startup validation call Config.Validate before New.
+// be built: no signing key, a malformed keyset, or any key shorter than MinSecretKeyLength.
+// The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
+// exists exclusively for test code that needs short keys; production callers must never set it.
+// For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
 	signKey, signKeyID, verifyKeys, legacyKey, err := resolveKeyset(cfg)
 	if err != nil {

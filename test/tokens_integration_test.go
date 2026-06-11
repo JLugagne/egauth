@@ -27,7 +27,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	// Instantiate the JWT service
 	cfg := jwt.Config[IntegrationCustomClaims]{
 		Store:      store,
-		SecretKey:  "integration-secret-key",
+		SecretKey:  "integration-secret-key----------", // 32 bytes
 		Issuer:     "egauth-integration",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
@@ -101,10 +101,12 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	})
 
 	t.Run("Scenario: Token with different signature is rejected", func(t *testing.T) {
+		// InsecureAllowWeakKey is set because key-length is not the subject of this test.
 		otherSvc := jwt.New[IntegrationCustomClaims](jwt.Config[IntegrationCustomClaims]{
-			Store:     store,
-			SecretKey: "different-secret-key",
-			AccessTTL: 5 * time.Minute,
+			Store:                store,
+			SecretKey:            "different-secret-key",
+			AccessTTL:            5 * time.Minute,
+			InsecureAllowWeakKey: true,
 		})
 
 		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{

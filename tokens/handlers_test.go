@@ -22,7 +22,7 @@ func newRotator(t *testing.T) (*jwt.Service[struct{}], *memory.Store[struct{}]) 
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      store,
-		SecretKey:  "handlers-secret",
+		SecretKey:  "handlers-secret-aaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,

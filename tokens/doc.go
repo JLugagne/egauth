@@ -26,7 +26,8 @@
 //	// ... later, refresh:
 //	next, err := issuer.Rotate(ctx, tenantID, pair.RefreshToken)
 //
-// jwt.New panics on an unusable signing key (fail-fast at startup). See the package examples for a
+// jwt.New panics on an unusable signing key (fail-fast at startup): an empty key, a key shorter
+// than jwt.MinSecretKeyLength (32 bytes), or a malformed keyset. See the package examples for a
 // full login + refresh wiring.
 //
 // # HTTP handlers and middleware

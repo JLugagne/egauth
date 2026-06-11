@@ -29,7 +29,7 @@ func newAutoRefreshFixture(t *testing.T) autoRefreshFixture {
 	store := memory.NewStore[struct{}]()
 	cfg := jwt.Config[struct{}]{
 		Store:      store,
-		SecretKey:  "mw-secret",
+		SecretKey:  "mw-secret-aaaaaaaaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,

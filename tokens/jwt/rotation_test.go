@@ -28,7 +28,7 @@ func newRotatingService(t *testing.T, provider tokens.ClaimsProvider[struct{}], 
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          store,
-		SecretKey:      "rotation-secret",
+		SecretKey:      "rotation-secret-aaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     refreshTTL,
@@ -64,7 +64,7 @@ func TestRotate_ReuseDetectionRevokesFamily(t *testing.T) {
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:            store,
-		SecretKey:        "rotation-secret",
+		SecretKey:        "rotation-secret-aaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:           "egauth-test",
 		AccessTTL:        5 * time.Minute,
 		RefreshTTL:       24 * time.Hour,
@@ -131,12 +131,14 @@ func TestRotate_NotFound(t *testing.T) {
 func TestRotate_NoClaimsProvider(t *testing.T) {
 	ctx := context.Background()
 	// Build a service WITHOUT a ClaimsProvider.
+	// InsecureAllowWeakKey is set because the key length is not the subject of this test.
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:      store,
-		SecretKey:  "s",
-		AccessTTL:  time.Minute,
-		RefreshTTL: time.Hour,
+		Store:                store,
+		SecretKey:            "s",
+		AccessTTL:            time.Minute,
+		RefreshTTL:           time.Hour,
+		InsecureAllowWeakKey: true,
 	})
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})

@@ -19,7 +19,7 @@ import (
 func stepUpService() *jwt.Service[struct{}] {
 	return jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      memory.NewStore[struct{}](),
-		SecretKey:  "step-up-secret",
+		SecretKey:  "step-up-secret-aaaaaaaaaaaaaaaaa", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  time.Hour,
 		RefreshTTL: time.Hour,

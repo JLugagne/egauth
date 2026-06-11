@@ -17,15 +17,17 @@ import (
 // sharedKeyService builds a Service that signs/verifies with a single shared HS256 key but
 // scopes itself to a given issuer and set of expected audiences. Two such services sharing the
 // key model two distinct services sitting behind one symmetric secret.
+// InsecureAllowWeakKey is set so callers may pass test-only secrets of any length.
 func sharedKeyService(t *testing.T, secret, issuer string, expectedAud []string) *jwt.Service[struct{}] {
 	t.Helper()
 	return jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:            memory.NewStore[struct{}](),
-		SecretKey:        secret,
-		Issuer:           issuer,
-		ExpectedAudience: expectedAud,
-		AccessTTL:        5 * time.Minute,
-		RefreshTTL:       24 * time.Hour,
+		Store:                memory.NewStore[struct{}](),
+		SecretKey:            secret,
+		Issuer:               issuer,
+		ExpectedAudience:     expectedAud,
+		AccessTTL:            5 * time.Minute,
+		RefreshTTL:           24 * time.Hour,
+		InsecureAllowWeakKey: true,
 	})
 }
 
@@ -111,11 +113,12 @@ func TestVerifyAccessToken_ExpiredStillReportsExpired(t *testing.T) {
 	now := time.Now()
 	clock := now
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:     store,
-		SecretKey: secret,
-		Issuer:    "service-a",
-		AccessTTL: time.Minute,
-		Clock:     func() time.Time { return clock },
+		Store:                store,
+		SecretKey:            secret,
+		Issuer:               "service-a",
+		AccessTTL:            time.Minute,
+		Clock:                func() time.Time { return clock },
+		InsecureAllowWeakKey: true,
 	})
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
 		Subject:  uuid.New(),
