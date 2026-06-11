@@ -513,9 +513,18 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 // mapAuthError maps authentication errors to an HTTP status and a stable error code.
 // Note: per the PRD, ErrAccountLocked is intentionally surfaced (429) even though it
 // reveals that the account exists; lockout is meant to be observable.
+// ErrAccountDisabled is folded into the same 429 "account_locked" response to avoid
+// leaking whether an existing account is suspended versus locked (enumeration defence).
 func mapAuthError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrAccountLocked):
+		return http.StatusTooManyRequests, "account_locked"
+	case errors.Is(err, ErrAccountDisabled):
+		// Fold disabled into the same response as locked so that callers cannot
+		// distinguish a suspended (disabled) account from a locked one: both yield
+		// 429 "account_locked". This prevents account-state enumeration while still
+		// avoiding the misleading 500 "login_failed" that the default branch would
+		// otherwise return.
 		return http.StatusTooManyRequests, "account_locked"
 	case errors.Is(err, ErrInvalidCredentials):
 		return http.StatusUnauthorized, "invalid_credentials"

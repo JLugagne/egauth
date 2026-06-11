@@ -349,3 +349,36 @@ func TestRegisterHandler_EmailTaken(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 	assert.Contains(t, rec.Body.String(), "email_taken")
 }
+
+// TestLoginHandler_AccountDisabled_MatchesLockedResponse is a regression test for TASK-057.
+// A disabled account must NOT return 500 "login_failed" (which acts as an enumeration oracle).
+// The response must be identical to ErrAccountLocked so that callers cannot distinguish
+// disabled (existing, suspended) accounts from locked ones, and no account-state information leaks.
+func TestLoginHandler_AccountDisabled_MatchesLockedResponse(t *testing.T) {
+	svcDisabled := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrAccountDisabled
+		},
+	}
+	svcLocked := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrAccountLocked
+		},
+	}
+
+	hDisabled := identity.LoginHandler[struct{}](svcDisabled, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder())
+	hLocked := identity.LoginHandler[struct{}](svcLocked, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder())
+
+	recDisabled := httptest.NewRecorder()
+	hDisabled.ServeHTTP(recDisabled, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	recLocked := httptest.NewRecorder()
+	hLocked.ServeHTTP(recLocked, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	// Both must return the exact same status code and body to prevent account-state enumeration.
+	assert.Equal(t, recLocked.Code, recDisabled.Code,
+		"disabled account must return the same HTTP status as a locked account (not 500)")
+	assert.Equal(t, recLocked.Body.String(), recDisabled.Body.String(),
+		"disabled account response body must be identical to locked account response")
+	assert.Nil(t, cookieByName(recDisabled, tokens.DefaultAccessCookieName), "no cookie on disabled login")
+}
