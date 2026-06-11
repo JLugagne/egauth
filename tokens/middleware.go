@@ -47,8 +47,31 @@ func WithAutoRefresh[C any](rotator Rotator[C], cookies Cookies) AuthOption[C] {
 	}
 }
 
+// WithAuthTenantResolver makes RequireAuth tenant-aware. The resolver maps an incoming request to
+// its tenant ID (e.g. from the Host header, a path segment, or an upstream-set context value),
+// and the middleware then verifies the access token through the tenant-bound path
+// (Verifier.VerifyAccessTokenForTenant), failing closed with ErrTenantMismatch when the token's
+// signed tenant does not match. The same resolver also scopes store-backed auto-refresh rotation.
+//
+// A configured resolver MUST return a non-empty tenant ID for any request it can map; returning
+// "" is interpreted as "tenant could not be resolved" and the middleware rejects the request with
+// 401 instead of falling back to the single-tenant ("") partition. This is the fail-closed
+// guarantee: a Verifier configured for multi-tenancy (jwt.Config.MultiTenant) must never reach the
+// tenant-unaware verification path. When no resolver is set at all, the middleware stays in
+// single-tenant mode (the "" partition) and single-tenant consumers need no changes.
+//
+// This mirrors sessions.WithTenantResolver; it carries the Auth- prefix because the package-level
+// tokens.WithTenantResolver name is already taken by the RefreshHandler/LogoutHandler option.
+func WithAuthTenantResolver[C any](f func(*http.Request) string) AuthOption[C] {
+	return func(a *authConfig[C]) { a.tenantResolver = f }
+}
+
 // WithRefreshTenantResolver supplies the tenant for store-scoped auto-refresh rotation in
 // multi-tenant setups.
+//
+// Deprecated: use WithAuthTenantResolver, which scopes BOTH access-token verification and
+// auto-refresh rotation to the resolved tenant. WithRefreshTenantResolver is retained as an alias
+// for backward compatibility and now configures the same per-request tenant resolver.
 func WithRefreshTenantResolver[C any](f func(*http.Request) string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.tenantResolver = f }
 }
@@ -95,10 +118,18 @@ func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
 
 // RequireAuth wraps an AuthenticatedHandlerFunc to enforce access-token verification.
 //
-// By default it reads a Bearer token from the Authorization header (backward-compatible).
-// Options enable reading from a cookie (WithCookieAuth) and opt-in transparent rotation
-// (WithAutoRefresh). On success it explicitly passes the extracted egauth.Actor and custom
-// claims to the next handler.
+// By default it reads a Bearer token from the Authorization header (backward-compatible) and
+// verifies it without tenant binding — correct for single-tenant deployments, where every token
+// is issued under the empty tenant. Options enable reading from a cookie (WithCookieAuth), opt-in
+// transparent rotation (WithAutoRefresh) and, for multi-tenant deployments, per-request tenant
+// resolution (WithTenantResolver).
+//
+// When a tenant resolver is configured the middleware becomes tenant-aware: it resolves the
+// request's tenant up front and verifies the access token through Verifier.VerifyAccessTokenForTenant,
+// so a token minted for one tenant cannot be replayed in another under a shared signing key. A
+// resolver that returns "" (tenant could not be resolved) fails the request closed with 401 — it
+// never falls back to the tenant-unaware path. On success it explicitly passes the extracted
+// egauth.Actor and custom claims to the next handler.
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc {
 	cfg := authConfig[C]{readHeader: true}
 	for _, opt := range opts {
@@ -106,10 +137,33 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Resolve the tenant up front so BOTH the access-token verification and any
+		// auto-refresh rotation are scoped to the same tenant. When a resolver is configured
+		// it MUST map the request to a non-empty tenant ID; an empty return means the tenant
+		// could not be determined, and failing open into the "" partition would let such a
+		// request reach the tenant-unaware verification path (which a multi-tenant Verifier
+		// refuses anyway). So we reject it. The "" partition is used only when no resolver is
+		// configured at all (single-tenant mode).
+		tenantID := ""
+		tenantAware := cfg.tenantResolver != nil
+		if tenantAware {
+			tenantID = cfg.tenantResolver(r)
+			if tenantID == "" {
+				unauthorized(w)
+				return
+			}
+		}
+
 		token, _ := extractAccessToken(r, &cfg)
 
 		if token != "" {
-			claims, err := verifier.VerifyAccessToken(r.Context(), token)
+			var claims *Claims[C]
+			var err error
+			if tenantAware {
+				claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), tenantID, token)
+			} else {
+				claims, err = verifier.VerifyAccessToken(r.Context(), token)
+			}
 			if err == nil {
 				if !cfg.stepUpSatisfied(claims) {
 					stepUpRequired(w)
@@ -119,7 +173,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 				return
 			}
 			// Only an expired token is eligible for auto-refresh; any other failure
-			// (malformed, bad signature, invalid claims) is rejected outright.
+			// (malformed, bad signature, invalid claims, tenant mismatch) is rejected outright.
 			if !errors.Is(err, ErrTokenExpired) || cfg.rotator == nil {
 				unauthorized(w)
 				return
@@ -129,10 +183,6 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 		// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
 		if cfg.rotator != nil && cfg.cookies != nil {
 			if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-				var tenantID string
-				if cfg.tenantResolver != nil {
-					tenantID = cfg.tenantResolver(r)
-				}
 				pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
 				if err != nil {
 					// ErrRefreshConcurrent is benign concurrency: a parallel request won the

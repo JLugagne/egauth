@@ -13,12 +13,43 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   `RefreshLength` and `APIKeyLength`: `Config.Validate` returns an error and `New` panics
   if either is set to a positive value below the minimum, preventing low-entropy tokens
   from being issued accidentally.
-- **Constant-time password comparison.** Password verification uses
-  `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong password cannot
-  be recovered byte-by-byte through timing.
-- **Constant-time authentication paths.** The password authentication path applies an
-  equivalent hashing cost even when the user, identity, or password hash is absent, so
-  account existence cannot be inferred from response timing (user-enumeration defence).
+- **Constant-time password comparison (by construction).** Password verification compares
+  the derived key with `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong
+  password cannot be recovered byte-by-byte through timing. The guarantee is *structural*:
+  `Compare` always reaches the constant-time comparison for any well-formed stored hash and
+  never branches on the byte-wise outcome of the secret comparison. (A *malformed* stored hash
+  is rejected before the KDF — but that depends only on the shape of the untrusted stored hash,
+  not on the candidate password, so it leaks nothing about the password.) This is not provable
+  by a boolean unit test; the supporting *evidence* is a pair of benchmarks
+  (`BenchmarkCompare_CorrectPassword` vs `BenchmarkCompare_WrongPassword` in
+  `passwords/argon2`) whose measured per-op timings land within benchmark noise of each other.
+- **Constant-time authentication paths (by construction).** The password authentication path
+  applies an equivalent hashing cost (a full Argon2id pass via the decoy-hash path) even when
+  the user, identity, or password hash is absent, or the provider is non-password, so account
+  existence cannot be inferred from response timing (user-enumeration defence). Again the
+  guarantee is structural — every enumeration-safe branch in `Authenticate` calls `decoyHash`.
+  The supporting evidence is `BenchmarkAuthenticate_ValidUser_WrongPassword` (real `Compare`)
+  vs `BenchmarkAuthenticate_UnknownUser` / `BenchmarkAuthenticate_NonPasswordProvider`
+  (decoy hash) in `identity`, whose measured deltas are within benchmark noise.
+
+  **Running the timing-evidence benchmarks.** These are evidence to inspect manually, not CI
+  pass/fail gates (a wall-clock threshold on a shared runner is too flaky to gate a build):
+
+  ```sh
+  go test -run=^$ -bench=BenchmarkCompare      -benchmem ./passwords/argon2
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem ./identity
+  # For a noise-aware comparison across a change, capture multiple runs and use benchstat:
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity | tee old.txt
+  # ...make the change...
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity | tee new.txt
+  benchstat old.txt new.txt   # go install golang.org/x/perf/cmd/benchstat@latest
+  ```
+
+  A benchstat-significant gap between the correct/valid and wrong/unknown variants would signal
+  a regression in the constant-time guarantee (e.g. a path that skips the decoy or short-circuits
+  the comparison) and should be investigated. Note the benchmark fixture disables lockout
+  (`WithNoLockout`) so the valid-user path keeps exercising `Compare` every iteration instead of
+  short-circuiting on `ErrAccountLocked`; lockout remains on by default in production.
 - **Brute-force lockout (identity).** After `DefaultLockThreshold` (5) consecutive
   password failures the identity is locked for `DefaultLockDuration` (15 min). Lockout is
   **on by default** and hardened against misconfiguration: `identity.WithLockout(0, 0)` does
@@ -254,6 +285,20 @@ redaction is in any case only a backstop. Therefore the consumer must:
   serialize the config or persist the key in plaintext.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
+- **Access-token tenant binding (fail-closed when multi-tenant).** When one `tokens/jwt.Service`
+  signs for every tenant under a shared key, a token minted for tenant A is cryptographically
+  valid in tenant B's context. The tenant-unaware `VerifyAccessToken` performs **no** tenant
+  comparison and is **deprecated**. Set `tokens/jwt.Config.MultiTenant = true` so that
+  `VerifyAccessToken` fails closed with `tokens.ErrTenantBindingRequired`, and call
+  `Service.VerifyAccessTokenForTenant(ctx, tenantID, token)` — it binds the signed `tenant_id`
+  claim to the request tenant and rejects a mismatch with `tokens.ErrTenantMismatch`. The HTTP
+  middleware exposes the same guarantee: `tokens.RequireAuth` with `tokens.WithAuthTenantResolver`
+  resolves the request's tenant and verifies through `VerifyAccessTokenForTenant`. The resolver is
+  fail-closed — returning `""` (tenant could not be resolved) rejects the request with `401` and
+  never falls back to the tenant-unaware path, so a multi-tenant verifier is never reached
+  unbound. Genuinely single-tenant deployments leave `MultiTenant` false (every token is issued
+  under the empty tenant), configure no resolver, and may keep using `VerifyAccessToken` or the
+  `SingleTenant` wrapper.
 - **`__Host-` cookie name prefix** — the tokens package defaults to `__Host-access_token`
   and `__Host-refresh_token` (`DefaultAccessCookieName` / `DefaultRefreshCookieName`).
   Browsers enforce that a `__Host-` cookie is host-locked: `Secure`, no `Domain` attribute,
@@ -264,10 +309,12 @@ redaction is in any case only a backstop. Therefore the consumer must:
   rejects any configuration that pairs a `__Host-` cookie name with `Domain != ""`, `Path != "/"`,
   or `Insecure == true`; `withDefaults` (called by every Set*/Clear*/Access/Refresh method)
   panics on such a mismatch, surfacing the programmer error at development time.
-  For the `sessions` package: configure `sessions.RequireSession` with
-  `sessions.WithCookieName("__Host-session_token")` (or any `__Host-` prefixed name).
-  The `sessions` default remains `"session_token"` for backwards compatibility; deployments
-  should migrate to a `__Host-` prefixed name.
+  For the `sessions` package: `sessions.RequireSession` now reads the session token from
+  `sessions.DefaultSessionCookieName` (`"__Host-session_token"`) **by default** — the hardened
+  host-locked name is automatic and you no longer opt in. `sessions.WithCookieName` is an escape
+  hatch for deployments that genuinely cannot satisfy the `__Host-` requirements (e.g. a
+  path-scoped cookie or local plain-HTTP development); overriding to a name without the prefix
+  forfeits the host-lock hardening and is the consumer's explicit choice.
 - **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
   lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
   timeout). Regardless of how recently `Touch` was called, a session is rejected once

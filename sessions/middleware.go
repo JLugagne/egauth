@@ -7,6 +7,14 @@ import (
 	"github.com/JLugagne/egauth"
 )
 
+// DefaultSessionCookieName is the secure-by-default cookie name RequireSession reads the
+// session token from. It carries the browser-enforced __Host- prefix, which guarantees the
+// cookie is Secure, has no Domain attribute, and is scoped to Path=/ — host-locking it so a
+// sibling/subdomain cannot plant a same-named cookie (cookie-tossing session fixation). Use
+// WithCookieName to override it only when the deployment genuinely cannot meet the __Host-
+// requirements.
+const DefaultSessionCookieName = "__Host-session_token"
+
 // AuthenticatedSessionHandlerFunc is a handler that receives the authenticated actor and session explicitly.
 type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session Session)
 
@@ -17,13 +25,16 @@ type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request
 // non-empty tenant ID; an empty return is treated as a resolution failure and the request is rejected
 // with 401 rather than falling open into the "" partition.
 //
-// The cookie name used to look up the session token defaults to "session_token". Use WithCookieName
-// to override it — for example, WithCookieName("__Host-session_token") adopts the browser-enforced
-// __Host- prefix, which guarantees the cookie is host-locked, sent only over HTTPS, and carries no
-// Domain attribute, thereby preventing subdomain/sibling-host cookie-tossing session fixation.
+// The cookie name used to look up the session token defaults to the hardened "__Host-session_token"
+// (DefaultSessionCookieName). The __Host- prefix is browser-enforced: the cookie must be Secure, must
+// carry no Domain attribute, and must have Path=/, which host-locks it and defeats subdomain/sibling-host
+// cookie-tossing session fixation. This is the secure default — consumers no longer have to opt in.
+// Use WithCookieName only as an escape hatch when the deployment genuinely cannot use a __Host- cookie
+// (e.g. a path-scoped cookie, or a non-HTTPS internal environment). Overriding to a name that violates
+// the __Host- rules is the consumer's explicit choice; the default remains safe.
 func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts ...HandlerOption) http.HandlerFunc {
 	cfg := handlerConfig{
-		cookieName: "session_token",
+		cookieName: DefaultSessionCookieName,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -32,9 +43,9 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := ""
 
-		// 1. Try Cookie — use the configured name so consumers can adopt the
-		// __Host- prefix (e.g. "__Host-session_token"), which browsers enforce
-		// as host-locked/Secure/no-Domain, defeating cookie-tossing fixation.
+		// 1. Try Cookie — the default name carries the __Host- prefix, which browsers
+		// enforce as host-locked/Secure/no-Domain, defeating cookie-tossing fixation.
+		// A consumer that opted out via WithCookieName gets whatever name they chose.
 		cookie, err := r.Cookie(cfg.cookieName)
 		if err == nil {
 			token = cookie.Value
@@ -91,8 +102,8 @@ type HandlerOption func(*handlerConfig)
 type handlerConfig struct {
 	tenantResolver func(*http.Request) string
 	// cookieName is the HTTP cookie name to look up for the session token.
-	// It defaults to "session_token". Use WithCookieName to override it,
-	// e.g. to adopt the __Host- prefix for host-locked cookie hardening.
+	// It defaults to DefaultSessionCookieName ("__Host-session_token"), the
+	// hardened host-locked name. WithCookieName overrides it as an escape hatch.
 	cookieName string
 }
 
@@ -107,10 +118,12 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 }
 
 // WithCookieName overrides the HTTP cookie name that RequireSession looks up for the session
-// token. The default is "session_token". Passing "__Host-session_token" (or any name with the
-// __Host- prefix) instructs browsers to enforce that the cookie is host-locked, sent only over
-// HTTPS, and carries no Domain attribute — the recommended deployment for production to prevent
-// subdomain/sibling-host cookie-tossing session fixation attacks.
+// token. The secure default is DefaultSessionCookieName ("__Host-session_token"), whose __Host-
+// prefix browsers enforce as host-locked, Secure, and Domain-less — preventing subdomain/sibling-host
+// cookie-tossing session fixation. This option is an escape hatch: use it only when the deployment
+// genuinely cannot satisfy the __Host- requirements (e.g. a path-scoped cookie, or local plain-HTTP
+// development). Overriding to a name that drops the __Host- prefix forfeits the host-lock hardening;
+// that is the consumer's explicit choice.
 func WithCookieName(name string) HandlerOption {
 	return func(c *handlerConfig) { c.cookieName = name }
 }

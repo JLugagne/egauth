@@ -150,3 +150,70 @@ func TestVerifyAccessTokenForTenant(t *testing.T) {
 		assert.ErrorIs(t, err, tokens.ErrTenantMismatch)
 	})
 }
+
+// newMultiTenantStrictService builds a Service with Config.MultiTenant set, which makes the
+// tenant-unaware VerifyAccessToken fail closed and forces callers onto VerifyAccessTokenForTenant.
+func newMultiTenantStrictService(t *testing.T) *jwt.Service[struct{}] {
+	t.Helper()
+	return jwt.New[struct{}](jwt.Config[struct{}]{
+		Store:       memory.NewStore[struct{}](),
+		SecretKey:   "multi-tenant-secret-key-for-tests",
+		Issuer:      "egauth-test",
+		AccessTTL:   5 * time.Minute,
+		RefreshTTL:  24 * time.Hour,
+		MultiTenant: true,
+	})
+}
+
+// TestVerifyAccessTokenFailsClosedWhenMultiTenant proves the secure-by-default deprecation path:
+// when the verifier is configured as MultiTenant, the tenant-unaware VerifyAccessToken refuses to
+// verify (returning ErrTenantBindingRequired) instead of silently accepting a token that could
+// belong to any tenant under the shared signing key. The tenant-bound VerifyAccessTokenForTenant
+// remains fully functional on the same service.
+func TestVerifyAccessTokenFailsClosedWhenMultiTenant(t *testing.T) {
+	ctx := context.Background()
+	svc := newMultiTenantStrictService(t)
+
+	const tenantA = "tenant-a"
+	userID := uuid.New()
+
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{
+		Subject:  userID,
+		TenantID: tenantA,
+	})
+	require.NoError(t, err)
+
+	t.Run("tenant-unaware VerifyAccessToken fails closed", func(t *testing.T) {
+		_, err := svc.VerifyAccessToken(ctx, pair.AccessToken)
+		assert.ErrorIs(t, err, tokens.ErrTenantBindingRequired,
+			"a multi-tenant verifier must refuse the tenant-unaware path")
+	})
+
+	t.Run("tenant-bound path still resolves under MultiTenant", func(t *testing.T) {
+		claims, err := svc.VerifyAccessTokenForTenant(ctx, tenantA, pair.AccessToken)
+		require.NoError(t, err)
+		assert.Equal(t, userID, claims.Subject)
+		assert.Equal(t, tenantA, claims.TenantID)
+	})
+
+	t.Run("tenant-bound path still fails closed on cross-tenant token", func(t *testing.T) {
+		_, err := svc.VerifyAccessTokenForTenant(ctx, "tenant-b", pair.AccessToken)
+		assert.ErrorIs(t, err, tokens.ErrTenantMismatch)
+	})
+}
+
+// TestVerifyAccessTokenSingleTenantStillWorks confirms the change is opt-out: a verifier left
+// with MultiTenant=false (the single-tenant default) keeps verifying through the deprecated
+// VerifyAccessToken exactly as before, so existing single-tenant callers are unaffected.
+func TestVerifyAccessTokenSingleTenantStillWorks(t *testing.T) {
+	ctx := context.Background()
+	svc := newMultiTenantService(t) // MultiTenant defaults to false
+
+	userID := uuid.New()
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+	require.NoError(t, err)
+
+	claims, err := svc.VerifyAccessToken(ctx, pair.AccessToken)
+	require.NoError(t, err)
+	assert.Equal(t, userID, claims.Subject)
+}

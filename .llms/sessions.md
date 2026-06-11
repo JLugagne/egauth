@@ -114,7 +114,7 @@ type Store interface {
 `RequireSession` (`sessions/middleware.go`) — wraps a handler, enforces a valid session.
 
 Token extraction order:
-1. Cookie named `session_token`
+1. Cookie named `__Host-session_token` (`sessions.DefaultSessionCookieName`, secure by default; the `__Host-` prefix host-locks it). Override with `WithCookieName` only as an escape hatch.
 2. `Authorization: Bearer <token>` header
 
 On miss or invalid token → `401 Unauthorized` (plain text body).
@@ -197,7 +197,8 @@ svc := sessions.NewService(store,
 
 // Create
 sess, token, err := svc.CreateSession(ctx, tenantID, userID, r.UserAgent(), ip, 24*time.Hour)
-// write token to client: http.SetCookie(w, &http.Cookie{Name:"session_token", Value:token, HttpOnly:true, Secure:true, SameSite:http.SameSiteLaxMode})
+// write token to client (name MUST match the middleware default __Host-session_token; __Host- requires Secure + Path=/ + no Domain):
+// http.SetCookie(w, &http.Cookie{Name:sessions.DefaultSessionCookieName, Value:token, Path:"/", HttpOnly:true, Secure:true, SameSite:http.SameSiteLaxMode})
 
 // Middleware
 mux.Handle("/protected", sessions.RequireSession(svc, myHandler,
@@ -224,7 +225,7 @@ svc.RevokeAllForUser(ctx, tenantID, userID)
 - Plaintext token is returned **once only** (at `CreateSession` / `Rotate`). Store the `Set-Cookie` response immediately; it cannot be recovered from the `Session` struct (only `TokenHash` is stored).
 - `SingleTenant` hard-wires `tenantID=""`. Do **not** mix `SingleTenant` calls with direct multi-tenant `Service` calls against the same service in a multi-tenant app — IDOR risk.
 - Concurrent `Rotate` on the same token: only the first succeeds. The second gets `ErrSessionNotFound` — handle it as a session conflict (re-validate or force re-login), not a transient error.
-- Cookie flags (`Secure`, `HttpOnly`, `SameSite`) are **not set by the library**. The middleware only reads the cookie named `session_token`; the caller writes it.
+- Cookie flags (`Secure`, `HttpOnly`, `SameSite`) are **not set by the library**. The middleware only reads the cookie — by default the hardened `__Host-session_token` (`sessions.DefaultSessionCookieName`); the caller writes it under the same name. The `__Host-` prefix is browser-enforced (`Secure`, `Path=/`, no `Domain`); use `WithCookieName` to opt out only when you genuinely can't meet those rules.
 - `DeleteExpired` is per-tenant. A multi-tenant memory store needs one `DeleteExpired` call per active tenant per janitor tick; there is no single cross-tenant purge.
 - `WithMaxLifetime` zero value disables the absolute cap entirely — a session with a long idle timeout can theoretically live forever if `Touch` is called before every expiry. Set an explicit cap for production.
 - `ValidateSession` returns `ErrSessionNotFound` for both idle-expired and absolute-cap-expired sessions — no way to tell them apart from the error alone.

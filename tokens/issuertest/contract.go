@@ -45,9 +45,10 @@ func (m *MockRotator[C]) Rotate(ctx context.Context, tenantID string, refreshTok
 
 // MockVerifier is a function-based mock implementation of the tokens.Verifier interface.
 type MockVerifier[C any] struct {
-	VerifyAccessTokenFunc  func(ctx context.Context, token string) (*tokens.Claims[C], error)
-	VerifyRefreshTokenFunc func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
-	VerifyAPIKeyFunc       func(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error)
+	VerifyAccessTokenFunc          func(ctx context.Context, token string) (*tokens.Claims[C], error)
+	VerifyAccessTokenForTenantFunc func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
+	VerifyRefreshTokenFunc         func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
+	VerifyAPIKeyFunc               func(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error)
 }
 
 func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
@@ -129,4 +130,11 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 			assert.Equal(t, claims.TenantID, verifiedClaims.TenantID)
 		}
 	})
+}
+
+func (m *MockVerifier[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error) {
+	if m.VerifyAccessTokenForTenantFunc == nil {
+		panic("called not defined VerifyAccessTokenForTenantFunc")
+	}
+	return m.VerifyAccessTokenForTenantFunc(ctx, tenantID, token)
 }

@@ -515,10 +515,15 @@ func TestService_Authenticate_NonPasswordProviderRejected(t *testing.T) {
 func TestService_Authenticate_ConstantTime(t *testing.T) {
 	ctx := context.Background()
 
-	// These tests pin the PRD requirement (§108): the password authentication path
-	// must apply an equivalent hashing cost even when no real password hash is
-	// available, so an attacker cannot distinguish "user does not exist" from
-	// "wrong password" by measuring response time (user enumeration via timing).
+	// These tests pin the STRUCTURAL half of the PRD requirement (§108): the password
+	// authentication path must apply an equivalent hashing cost even when no real password
+	// hash is available, so an attacker cannot distinguish "user does not exist" from
+	// "wrong password". They assert the decoy hash is *invoked* on each enumeration-safe
+	// path — they do NOT (and cannot) prove timing uniformity, since a passing boolean
+	// assertion says nothing about the wall-clock delta. The timing *evidence* lives in the
+	// BenchmarkAuthenticate_* benchmarks (authenticate_bench_test.go): run them with
+	//   go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity
+	// and compare the valid-user vs unknown-user variants with benchstat (see SECURITY.md).
 
 	t.Run("user not found still performs a hashing cost", func(t *testing.T) {
 		var hashed bool

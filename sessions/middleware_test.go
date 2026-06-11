@@ -40,7 +40,8 @@ func TestMiddleware(t *testing.T) {
 
 	t.Run("Valid session in cookie", func(t *testing.T) {
 		req := httptest.NewRequest("GET", "/", nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+		// The secure default cookie name is now "__Host-session_token".
+		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
 
 		middleware := sessions.RequireSession(svc, handler)
@@ -79,7 +80,7 @@ func TestMiddleware(t *testing.T) {
 		svcError := sessions.NewService(mockStoreError)
 
 		req := httptest.NewRequest("GET", "/", nil)
-		req.AddCookie(&http.Cookie{Name: "session_token", Value: "invalid"})
+		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: "invalid"})
 		rr := httptest.NewRecorder()
 
 		middleware := sessions.RequireSession(svcError, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {})
@@ -131,7 +132,7 @@ func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
 	resolver := func(*http.Request) string { return "" }
 
 	req := httptest.NewRequest("GET", "/", nil)
-	req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+	req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 
 	middleware := sessions.RequireSession(svc, handler, sessions.WithTenantResolver(resolver))
@@ -188,5 +189,70 @@ func TestMiddleware_WithCookieName(t *testing.T) {
 		middleware.ServeHTTP(rr, req)
 
 		assert.Equal(t, http.StatusUnauthorized, rr.Code, "should not fall back to session_token when WithCookieName is set")
+	})
+}
+
+// TestMiddleware_SecureCookieNameIsDefault proves the secure-by-default behavior: without any
+// option, RequireSession reads the session token from the hardened "__Host-session_token" cookie
+// (DefaultSessionCookieName) and ignores the legacy plain "session_token" name. WithCookieName
+// remains an escape hatch for deployments that genuinely cannot use a __Host- cookie.
+func TestMiddleware_SecureCookieNameIsDefault(t *testing.T) {
+	userID := uuid.New()
+	tenantID := "tenant-1"
+	token := "valid_token"
+
+	mockStore := &storetest.MockStore{
+		FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
+			return &sessions.Session{
+				UserID:    userID,
+				TenantID:  tenantID,
+				ExpiresAt: time.Now().Add(time.Hour),
+				CreatedAt: time.Now(),
+			}, nil
+		},
+	}
+	svc := sessions.NewService(mockStore)
+
+	handler := func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	t.Run("the default name carries the __Host- prefix", func(t *testing.T) {
+		assert.Equal(t, "__Host-session_token", sessions.DefaultSessionCookieName)
+	})
+
+	t.Run("default reads the __Host- cookie without any option", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
+		rr := httptest.NewRecorder()
+
+		middleware := sessions.RequireSession(svc, handler)
+		middleware.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code, "the secure __Host- cookie must be read by default")
+	})
+
+	t.Run("default ignores the legacy plain session_token cookie", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		// Only the old hardcoded name is present; the secure default name is absent.
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+		rr := httptest.NewRecorder()
+
+		middleware := sessions.RequireSession(svc, handler)
+		middleware.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code, "the insecure plain name must not be read by default")
+	})
+
+	t.Run("WithCookieName escape hatch overrides the secure default", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+		rr := httptest.NewRecorder()
+
+		// A consumer that genuinely cannot use __Host- opts back to the plain name.
+		middleware := sessions.RequireSession(svc, handler, sessions.WithCookieName("session_token"))
+		middleware.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code, "WithCookieName must let a consumer opt out of the __Host- default")
 	})
 }
