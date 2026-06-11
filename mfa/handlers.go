@@ -11,6 +11,10 @@ import (
 	"github.com/google/uuid"
 )
 
+// DefaultMaxBodyBytes bounds the request body of the MFA handlers before form parsing (4 KiB),
+// matching the same cap applied by the otp package.
+const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
+
 // UserResolver extracts the authenticated user (and its tenant) from the request — typically
 // from whatever the application's auth middleware stored on the request context. All MFA
 // handlers require it; when it reports ok=false the handler responds 401.
@@ -27,13 +31,20 @@ type handlerConfig struct {
 	cookies tokens.Cookies
 	// trustedOrigins, when non-empty, enables CSRF Origin/Referer enforcement (see WithTrustedOrigins).
 	trustedOrigins map[string]bool
+	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
+	maxBodyBytes int64
 }
 
 // HandlerOption configures the MFA HTTP handlers.
 type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
-	c := handlerConfig{accountField: "account", codeField: "code", cookies: tokens.DefaultCookies()}
+	c := handlerConfig{
+		accountField: "account",
+		codeField:    "code",
+		cookies:      tokens.DefaultCookies(),
+		maxBodyBytes: DefaultMaxBodyBytes,
+	}
 	for _, opt := range opts {
 		opt(&c)
 	}
@@ -89,6 +100,12 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 			h.trustedOrigins[o] = true
 		}
 	}
+}
+
+// WithMaxBodyBytes overrides the request-body cap applied in guarded() before form parsing
+// (default DefaultMaxBodyBytes = 4 KiB). A non-positive value disables the cap.
+func WithMaxBodyBytes(n int64) HandlerOption {
+	return func(h *handlerConfig) { h.maxBodyBytes = n }
 }
 
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
@@ -180,7 +197,8 @@ func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 }
 
 // guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
-// user resolution and tenant derivation, then invokes fn with the resolved user ID and tenant string.
+// user resolution and tenant derivation, body-size cap (DefaultMaxBodyBytes, overridable via
+// WithMaxBodyBytes), then invokes fn with the resolved user ID and tenant string.
 func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -201,12 +219,29 @@ func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uui
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 		fn(w, r, uid, tenant)
 	}
+}
+
+// parseLimitedForm wraps r.Body with http.MaxBytesReader (when maxBodyBytes > 0), parses the
+// form, and writes the appropriate error response on failure. It returns true on success.
+func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
+		} else {
+			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		}
+		return false
+	}
+	return true
 }
 
 func (cfg handlerConfig) ok(w http.ResponseWriter, r *http.Request) {
