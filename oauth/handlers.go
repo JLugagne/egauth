@@ -322,6 +322,11 @@ func mapLinkError(err error) (int, string) {
 		// An account with this email already exists via another identity. The app should
 		// drive explicit linking from an authenticated session rather than auto-merging.
 		return http.StatusConflict, "account_exists"
+	case errors.Is(err, identity.ErrAccountDisabled):
+		// The already-linked account has been administratively suspended. Refuse the social
+		// login with a clean 403 instead of issuing a fresh session, matching the password
+		// and token-gated login paths.
+		return http.StatusForbidden, "account_disabled"
 	default:
 		return http.StatusInternalServerError, "link_failed"
 	}

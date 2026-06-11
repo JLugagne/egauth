@@ -111,3 +111,32 @@ func TestDisableEnableUser_EmitsEvents(t *testing.T) {
 	assert.Contains(t, got, event.AccountDisabled)
 	assert.Contains(t, got, event.AccountEnabled)
 }
+
+// TestDisableUser_BlocksOAuthRelink is the bug-confirming test for TASK-056: an account that
+// has been administratively disabled must not be able to re-complete the social-login flow
+// through its already-linked OAuth identity. LinkOrCreateIdentity's already-linked branch must
+// gate on DisabledAt and return ErrAccountDisabled rather than handing back the suspended user
+// (which the OAuth callback would turn into a fresh access+refresh session).
+func TestDisableUser_BlocksOAuthRelink(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newVerificationService(t)
+
+	// JIT-provision a user with a linked OAuth identity (google, sub-disabled).
+	user, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	// Sanity: the already-linked path resolves the same user while the account is active.
+	again, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	require.NoError(t, err)
+	require.Equal(t, user.ID, again.ID)
+
+	// Administratively suspend the account.
+	require.NoError(t, svc.DisableUser(ctx, "", user.ID))
+
+	// Re-completing the social login through the already-linked identity must now be refused
+	// with ErrAccountDisabled, not silently return the suspended user.
+	_, err = svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	assert.ErrorIs(t, err, identity.ErrAccountDisabled,
+		"a disabled account must not regain a session via its linked OAuth identity")
+}

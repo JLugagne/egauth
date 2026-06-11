@@ -791,7 +791,23 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 	// 1. Already linked? Return the owning user.
 	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 	if err == nil {
-		return s.store.FindUserByID(ctx, tenantID, ident.UserID)
+		user, err := s.store.FindUserByID(ctx, tenantID, ident.UserID)
+		if err != nil {
+			return nil, err
+		}
+		// Gate on account state before handing the user back: the OAuth callback turns this
+		// user into a fresh access+refresh session, so a soft-deleted or administratively
+		// suspended account must be refused here exactly as the password path (Authenticate)
+		// and the token-gated paths (consumeForLiveUser) do. FindUserByID deliberately still
+		// returns disabled/soft-deleted users, so this is the single chokepoint that covers
+		// every consumer of LinkOrCreateIdentity, not just the shipped OAuth handler.
+		if user.DeletedAt != nil {
+			return nil, ErrUserNotFound
+		}
+		if user.DisabledAt != nil {
+			return nil, ErrAccountDisabled
+		}
+		return user, nil
 	}
 	if !errors.Is(err, ErrIdentityNotFound) {
 		return nil, err
