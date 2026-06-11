@@ -117,7 +117,13 @@ func WithPersistentRefresh() HandlerOption {
 }
 
 // WithTenantResolver derives the tenant from the request to scope identity store operations
-// in multi-tenant deployments.
+// in multi-tenant deployments. The resolver MUST be a pure, deterministic function of the
+// request: given the same *http.Request it must always return the same string. DynamicBeginHandler
+// and DynamicCallbackHandler resolve the tenant exactly once per request and thread that single
+// value through all subsequent operations (provider lookup, CSRF gate, identity link), so a
+// resolver that consults mutable external state and returns different values on successive calls
+// would violate that guarantee and could cause the token-exchange, security gate, and identity
+// partition to operate on different tenants within the same request.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
@@ -384,6 +390,9 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 }
 
 // DynamicCallbackHandler is like CallbackHandler but resolves the Provider dynamically.
+// The tenant is resolved exactly once at the start of each request; that single value is
+// threaded through the CSRF/tenant gate check and the identity link so all operations are
+// consistent even if the supplied resolver is not perfectly pure (see WithTenantResolver).
 func DynamicCallbackHandler[C any](store ProviderStore, providerName string, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -393,7 +402,13 @@ func DynamicCallbackHandler[C any](store ProviderStore, providerName string, lin
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
 			return
 		}
-		// Delegate to the static handler
-		CallbackHandler(p, linker, issuer, claimsOf, opts...)(w, r)
+		// Thread the pre-resolved tenant into the delegated handler as a constant resolver
+		// so that the cookieTenant binding check and LinkOrCreateIdentity operate on the
+		// same value that was used to look up the provider above. Without this, an impure
+		// resolver could return a different tenant on later calls inside CallbackHandler,
+		// causing the identity to be linked into a different partition than the one whose
+		// provider minted the token (TASK-092 / 2026-06 audit INFO).
+		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
+		CallbackHandler(p, linker, issuer, claimsOf, append(opts, fixedTenantOpt)...)(w, r)
 	}
 }
