@@ -239,6 +239,17 @@ and general CSRF are left to the application layer):
   account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
   in front of these endpoints.
 
+The **`mfa` handlers** (`EnrollHandler`, `ConfirmHandler`, `VerifyHandler`,
+`VerifyRecoveryHandler`, `RegenerateRecoveryCodesHandler`, `DisableHandler`,
+`StepUpHandler`) are also state-changing POST endpoints. If the session cookie they rely
+on is `SameSite=None` (e.g. in a cross-subdomain or embedded app), a cross-site form POST
+could silently strip a victim's second factor (MFA downgrade via `DisableHandler`) or
+invalidate their recovery codes (`RegenerateRecoveryCodesHandler`). Use
+**`mfa.WithTrustedOrigins(...)`** to apply the same `Origin`/`Referer` host allowlist
+check on all MFA handlers. Supply hostnames without scheme, e.g.
+`mfa.WithTrustedOrigins("app.example.com")`. When unset (the default), no origin check
+is performed — CSRF protection remains the consumer's responsibility.
+
 ## Observability and idempotency (consumer responsibility)
 
 egauth ships no first-party metrics, tracing, or request-level idempotency layer.

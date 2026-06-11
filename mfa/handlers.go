@@ -25,6 +25,8 @@ type handlerConfig struct {
 	// cookies controls how StepUpHandler writes the re-issued access+refresh pair. The other
 	// handlers do not mint tokens and ignore it. It defaults to tokens.DefaultCookies().
 	cookies tokens.Cookies
+	// trustedOrigins, when non-empty, enables CSRF Origin/Referer enforcement (see WithTrustedOrigins).
+	trustedOrigins map[string]bool
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -71,6 +73,22 @@ func WithFailureRedirect(rawURL string) HandlerOption {
 // the step-up cookies overwrite the interim ones. Defaults to tokens.DefaultCookies().
 func WithCookies(c tokens.Cookies) HandlerOption {
 	return func(h *handlerConfig) { h.cookies = c }
+}
+
+// WithTrustedOrigins enables a CSRF Origin/Referer allowlist check on all state-changing MFA
+// handlers. When set, any POST whose Origin (or Referer, as fallback) host is not in the list
+// and does not equal the request Host is rejected with 403 "cross_site_blocked". When unset
+// (the default), no origin check is performed, preserving backwards-compatible behaviour.
+// Supply hosts WITHOUT scheme, e.g. "app.example.com". Use this option whenever the MFA
+// endpoints are reachable from a browser session backed by a SameSite=None cookie
+// (e.g. cross-subdomain or embedded apps).
+func WithTrustedOrigins(origins ...string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.trustedOrigins = make(map[string]bool, len(origins))
+		for _, o := range origins {
+			h.trustedOrigins[o] = true
+		}
+	}
 }
 
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
@@ -161,13 +179,17 @@ func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	})
 }
 
-// guarded wraps the common preamble: POST-only, form parse, user resolution and tenant
-// derivation, then invokes fn with the resolved user ID and tenant string.
+// guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
+// user resolution and tenant derivation, then invokes fn with the resolved user ID and tenant string.
 func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
 		if cfg.resolve == nil {
@@ -206,6 +228,37 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 		return
 	}
 	http.Error(w, code, status)
+}
+
+// originAllowed reports whether the request's origin is permitted. When no trusted origins are
+// configured it always returns true (backwards-compatible). When configured, a request is allowed
+// only if its Origin/Referer host matches the server Host or appears in the allowlist.
+func (cfg handlerConfig) originAllowed(r *http.Request) bool {
+	if len(cfg.trustedOrigins) == 0 {
+		return true
+	}
+	host := mfaRequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
+}
+
+// mfaRequestOriginHost extracts the host from the request's Origin header, falling back to the
+// Referer header when Origin is absent or "null".
+func mfaRequestOriginHost(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+		if u, err := url.Parse(o); err == nil {
+			return u.Host
+		}
+		return ""
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		if u, err := url.Parse(ref); err == nil {
+			return u.Host
+		}
+	}
+	return ""
 }
 
 func mapMFAError(err error) (int, string) {
