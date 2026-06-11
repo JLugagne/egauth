@@ -1234,11 +1234,11 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		}
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
-		token, user, channels, err := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
-		if err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
-			return
-		}
+		// Swallow the service error: the client-visible response must be identical whether or
+		// not the email maps to an account, so a backend error must NOT be surfaced as a
+		// distinct status — a 500 reachable only for existing accounts would itself be an
+		// enumeration oracle. Errors are observable via the store/event instrumentation.
+		token, user, channels, _ := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
 		// Uniform response regardless of account existence or recovery-channel availability; deliver
 		// off the response path to the verified channels only (token/user are empty otherwise).
 		if token != "" && user != nil {
