@@ -129,6 +129,14 @@ const MinTokenLength = 16
 func (cfg Config[C]) Validate() error {
 	var errs []error
 
+	// Fail fast on missing mandatory dependencies.
+	if cfg.Store == nil {
+		errs = append(errs, errors.New("jwt: Store must not be nil"))
+	}
+	if cfg.ClaimsProvider == nil {
+		errs = append(errs, errors.New("jwt: ClaimsProvider must not be nil"))
+	}
+
 	if len(cfg.SigningKeys) == 0 {
 		switch {
 		case cfg.SecretKey == "":
@@ -257,6 +265,12 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 // exists exclusively for test code that needs short keys; production callers must never set it.
 // For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
+	// Fail fast at startup rather than with a nil-pointer panic deep in a request,
+	// matching the convention of identity.NewService, sessions.NewService, otp.NewService
+	// and mfa.NewService.
+	if cfg.Store == nil {
+		panic("jwt: New requires a non-nil Store")
+	}
 	signKey, signKeyID, verifyKeys, legacyKey, err := resolveKeyset(cfg)
 	if err != nil {
 		panic("jwt: New: " + err.Error() + " (call Config.Validate to check configuration)")

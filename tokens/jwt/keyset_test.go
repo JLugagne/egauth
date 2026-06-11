@@ -258,7 +258,9 @@ func TestNew_PanicsOnMalformedKeyset(t *testing.T) {
 
 func TestValidate_Keyset(t *testing.T) {
 	good := jwt.Config[struct{}]{
-		Issuer: "egauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
+		Store:          memory.NewStore[struct{}](),
+		ClaimsProvider: okProvider(t),
+		Issuer:         "egauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
 		SigningKeys: []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, ActiveKeyID: "k-new",
 	}
 	require.NoError(t, good.Validate())

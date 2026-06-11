@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -19,6 +20,7 @@ func TestNew_PanicsOnWeakSecretKey(t *testing.T) {
 	t.Run("single-key mode short SecretKey panics", func(t *testing.T) {
 		assert.Panics(t, func() {
 			jwt.New[struct{}](jwt.Config[struct{}]{
+				Store:      memory.NewStore[struct{}](),
 				SecretKey:  "too-short", // well under MinSecretKeyLength (32)
 				Issuer:     "x",
 				AccessTTL:  time.Minute,
@@ -30,6 +32,7 @@ func TestNew_PanicsOnWeakSecretKey(t *testing.T) {
 	t.Run("keyset mode short Secret panics", func(t *testing.T) {
 		assert.Panics(t, func() {
 			jwt.New[struct{}](jwt.Config[struct{}]{
+				Store:       memory.NewStore[struct{}](),
 				SigningKeys: []jwt.SigningKey{{KeyID: "k1", Secret: "tooshort"}},
 				ActiveKeyID: "k1",
 				Issuer:      "x",
@@ -42,6 +45,7 @@ func TestNew_PanicsOnWeakSecretKey(t *testing.T) {
 	t.Run("InsecureAllowWeakKey bypasses the check", func(t *testing.T) {
 		assert.NotPanics(t, func() {
 			jwt.New[struct{}](jwt.Config[struct{}]{
+				Store:                memory.NewStore[struct{}](),
 				SecretKey:            "weak",
 				Issuer:               "x",
 				AccessTTL:            time.Minute,
