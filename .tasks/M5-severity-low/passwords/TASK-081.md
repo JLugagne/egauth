@@ -4,7 +4,7 @@ title: "Residual enumeration timing channel: pre-rehash accounts verify faster t
 description: "The decoy path (unknown account) always hashes at the hasher's CURRENT configured cost (h.time/h.memory/h.threads via Hash). The real path (Compare) runs Argon2id at the cost recorded IN THE STORED HASH."
 milestone: M5-severity-low
 epic: passwords
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ Decoy uses configured cost: Hash() builds the PHC with `h.memory, h.time, h.thre
 
 **Recommended fix**
 Document this residual channel explicitly (it currently is not), and/or have the decoy path mirror the weakest acceptable cost rather than the current target so the gap is not directly correlated with the upgrade. Operators raising cost should be advised the enumeration-resistance is degraded until the fleet is rehashed; consumer rate-limiting (already the stated mitigation for residual timing) covers the rest.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
