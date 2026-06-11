@@ -31,7 +31,15 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 	var inFlight int64
 	var peak int64
 
+	// The handler's semaphore pins every acquired slot until gate closes, so excess requests are
+	// dropped and exactly `cap` delivery goroutines ever run. deliveries lets the test wait for all
+	// of them to finish before reading peak, establishing the happens-before that a bare sleep does
+	// not — without it the read of peak below races the atomic CAS writes here.
+	var deliveries sync.WaitGroup
+	deliveries.Add(cap)
+
 	deliver := func(_ context.Context, _ *otp.Challenge) error {
+		defer deliveries.Done()
 		cur := atomic.AddInt64(&inFlight, 1)
 		// Track the peak in-flight count.
 		for {
@@ -68,14 +76,13 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 	}
 	wg.Wait() // all HTTP responses are back
 
-	// Release all delivery goroutines.
+	// Release all delivery goroutines and wait for every one to return; deliveries.Wait()
+	// happens-after each deliver's peak update, so the read below is race-free.
 	close(gate)
-
-	// Give goroutines time to finish.
-	time.Sleep(50 * time.Millisecond)
+	deliveries.Wait()
 
 	// The peak number of simultaneous in-flight deliveries must not exceed the cap.
-	assert.LessOrEqual(t, peak, int64(cap),
+	assert.LessOrEqual(t, atomic.LoadInt64(&peak), int64(cap),
 		"IssueHandler must not spawn more than WithMaxConcurrentDeliveries(%d) concurrent delivery goroutines", cap)
 }
 
