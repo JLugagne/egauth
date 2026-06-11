@@ -49,7 +49,7 @@ func TestVerifyAccessToken_RejectsForeignIssuer(t *testing.T) {
 
 	tok := mintAccess(t, svcA, nil)
 
-	_, err := svcB.VerifyAccessToken(context.Background(), tok)
+	_, err := svcB.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	assert.NotErrorIs(t, err, tokens.ErrTokenExpired)
@@ -62,7 +62,7 @@ func TestVerifyAccessToken_RejectsForeignAudience(t *testing.T) {
 
 	tok := mintAccess(t, svcA, []string{"aud-a"})
 
-	_, err := svcB.VerifyAccessToken(context.Background(), tok)
+	_, err := svcB.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	assert.NotErrorIs(t, err, tokens.ErrTokenExpired)
@@ -74,7 +74,7 @@ func TestVerifyAccessToken_AcceptsOwnIssuerAndAudience(t *testing.T) {
 
 	tok := mintAccess(t, svcA, []string{"aud-a"})
 
-	claims, err := svcA.VerifyAccessToken(context.Background(), tok)
+	claims, err := svcA.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 	assert.Contains(t, claims.Audiences, "aud-a")
@@ -88,7 +88,7 @@ func TestVerifyAccessToken_AnyOfExpectedAudienceMatches(t *testing.T) {
 
 	tok := mintAccess(t, issuer, []string{"aud-y"})
 
-	claims, err := verifier.VerifyAccessToken(context.Background(), tok)
+	claims, err := verifier.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 }
@@ -101,7 +101,7 @@ func TestVerifyAccessToken_BackwardCompatNoIssuerNoAudience(t *testing.T) {
 
 	tok := mintAccess(t, issuer, []string{"whatever"})
 
-	claims, err := verifier.VerifyAccessToken(context.Background(), tok)
+	claims, err := verifier.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 }
@@ -127,7 +127,7 @@ func TestVerifyAccessToken_ExpiredStillReportsExpired(t *testing.T) {
 	require.NoError(t, err)
 
 	clock = now.Add(2 * time.Minute)
-	_, err = svc.VerifyAccessToken(context.Background(), pair.AccessToken)
+	_, err = svc.VerifyAccessTokenForTenant(context.Background(), "t", pair.AccessToken)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, tokens.ErrTokenExpired))
 }

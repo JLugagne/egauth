@@ -45,17 +45,9 @@ func (m *MockRotator[C]) Rotate(ctx context.Context, tenantID string, refreshTok
 
 // MockVerifier is a function-based mock implementation of the tokens.Verifier interface.
 type MockVerifier[C any] struct {
-	VerifyAccessTokenFunc          func(ctx context.Context, token string) (*tokens.Claims[C], error)
 	VerifyAccessTokenForTenantFunc func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
 	VerifyRefreshTokenFunc         func(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error)
 	VerifyAPIKeyFunc               func(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error)
-}
-
-func (m *MockVerifier[C]) VerifyAccessToken(ctx context.Context, token string) (*tokens.Claims[C], error) {
-	if m.VerifyAccessTokenFunc == nil {
-		panic("called not defined VerifyAccessTokenFunc")
-	}
-	return m.VerifyAccessTokenFunc(ctx, token)
 }
 
 func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*tokens.Claims[C], error) {
@@ -90,8 +82,8 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 		require.NotNil(t, pair, "TokenPair must not be nil")
 		require.NotEmpty(t, pair.AccessToken, "AccessToken must not be empty")
 
-		verifiedClaims, err := verifier.VerifyAccessToken(ctx, pair.AccessToken)
-		require.NoError(t, err, "VerifyAccessToken should succeed for a valid token")
+		verifiedClaims, err := verifier.VerifyAccessTokenForTenant(ctx, "tenant-123", pair.AccessToken)
+		require.NoError(t, err, "VerifyAccessTokenForTenant should succeed for a valid token")
 		require.NotNil(t, verifiedClaims, "Verified claims must not be nil")
 		assert.Equal(t, claims.Subject, verifiedClaims.Subject, "Subject should match")
 		assert.Equal(t, claims.TenantID, verifiedClaims.TenantID, "TenantID should match")

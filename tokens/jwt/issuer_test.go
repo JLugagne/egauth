@@ -89,7 +89,7 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 		pair, err := svc.IssueTokenPair(ctx, claims)
 		require.NoError(t, err)
 
-		_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+		_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 		assert.ErrorIs(t, err, tokens.ErrTokenExpired)
 	})
 
@@ -105,7 +105,7 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: uuid.New()})
 		require.NoError(t, err)
 
-		_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+		_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 		assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	})
 }

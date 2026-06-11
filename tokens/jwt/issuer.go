@@ -52,8 +52,6 @@ type Service[C any] struct {
 	reuseGrace        time.Duration
 	events            event.Sink
 	now               func() time.Time
-	// when true the tenant-unaware VerifyAccessToken fails closed (see Config.MultiTenant)
-	multiTenant bool
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -112,13 +110,6 @@ type Config[C any] struct {
 	// paths without needing a 32-byte secret). Production callers must never set this field —
 	// doing so removes the brute-force resistance guarantee for HS256.
 	InsecureAllowWeakKey bool
-	// MultiTenant declares that this verifier serves more than one tenant under a shared signing
-	// key. When true, the tenant-unaware VerifyAccessToken fails closed with ErrTenantBindingRequired
-	// and callers MUST use VerifyAccessTokenForTenant so every access token is bound to an explicit
-	// tenant. Leave it false only for genuinely single-tenant deployments (where every token is issued
-	// under the empty tenant). This is a fail-closed safety switch, not a feature toggle: setting it does
-	// not change issuance, only the strictness of the verify path.
-	MultiTenant bool
 }
 
 // MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
@@ -321,7 +312,6 @@ func New[C any](cfg Config[C]) *Service[C] {
 		reuseGrace:        cfg.ReuseGracePeriod,
 		events:            cfg.EventSink,
 		now:               cfg.Clock,
-		multiTenant:       cfg.MultiTenant,
 	}
 }
 
@@ -716,25 +706,4 @@ func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID st
 		return nil, tokens.ErrTenantMismatch
 	}
 	return claims, nil
-}
-
-// VerifyAccessToken parses and validates an access token, returning its claims.
-//
-// Deprecated: this entry point performs NO tenant binding — the returned Claims.TenantID is read
-// straight from the signed token and is not compared against any expected tenant. In a multi-tenant
-// deployment where one Service signs for every tenant (shared signing key), a token minted for
-// tenant A would otherwise verify successfully here when presented in tenant B's context. Use
-// VerifyAccessTokenForTenant, which binds the token to an explicit tenant and fails closed on a
-// mismatch. When the verifier is configured with Config.MultiTenant, this method fails closed with
-// ErrTenantBindingRequired instead of verifying cross-tenant. It remains usable as-is only for
-// genuinely single-tenant deployments (Config.MultiTenant left false), where every token is issued
-// under the empty tenant.
-func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
-	// Fail closed in a multi-tenant deployment: the tenant-unaware path cannot tell tenant A's
-	// token apart from tenant B's under a shared signing key, so refuse it and direct the caller
-	// to the tenant-bound entry point rather than silently verifying cross-tenant.
-	if s.multiTenant {
-		return nil, tokens.ErrTenantBindingRequired
-	}
-	return s.verifyAccessToken(ctx, tokenStr)
 }

@@ -77,7 +77,7 @@ func TestVerifyAccessToken_AMRRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	claims, err := svc.VerifyAccessToken(context.Background(), pair.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(context.Background(), "", pair.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMRWebAuthn}, claims.AMR)
 }

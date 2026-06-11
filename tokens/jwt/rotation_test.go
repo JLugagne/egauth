@@ -53,7 +53,7 @@ func TestRotate_HappyPath(t *testing.T) {
 	assert.Equal(t, userID, newPair.Claims.Subject, "subject preserved via claims provider")
 
 	// The rotated token must verify and the new access token must be valid.
-	claims, err := svc.VerifyAccessToken(ctx, newPair.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(ctx, "", newPair.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, userID, claims.Subject)
 }

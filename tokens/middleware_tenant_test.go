@@ -17,21 +17,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestRequireAuthTenantAware covers the multi-tenant verification path of RequireAuth, added so
-// multi-tenant consumers can use the HTTP middleware instead of hitting the tenant-unaware path.
+// TestRequireAuthTenantAware covers the tenant-aware verification path of RequireAuth, added so
+// multi-tenant consumers can bind access tokens to a per-request tenant via the HTTP middleware.
 func TestRequireAuthTenantAware(t *testing.T) {
 	subject := uuid.New()
 	const tenantA = "tenant-a"
 	const tenantB = "tenant-b"
 
-	// A verifier that ONLY accepts the tenant-bound entry point and binds the token's signed
-	// tenant to the requested one (mirroring jwt.Service under Config.MultiTenant). Calling the
-	// tenant-unaware VerifyAccessToken fails closed, just like the real multi-tenant Service.
+	// A verifier that binds the token's signed tenant to the requested one (mirroring
+	// jwt.Service.VerifyAccessTokenForTenant). Verification is always tenant-scoped: a token
+	// minted for one tenant fails closed when presented under another.
 	newMultiTenantVerifier := func() *issuertest.MockVerifier[any] {
 		return &issuertest.MockVerifier[any]{
-			VerifyAccessTokenFunc: func(ctx context.Context, token string) (*tokens.Claims[any], error) {
-				return nil, tokens.ErrTenantBindingRequired
-			},
 			VerifyAccessTokenForTenantFunc: func(ctx context.Context, tenantID, token string) (*tokens.Claims[any], error) {
 				// token value encodes the tenant it was minted for: "valid-<tenant>".
 				switch token {
@@ -118,35 +115,14 @@ func TestRequireAuthTenantAware(t *testing.T) {
 		assert.False(t, called, "a token minted for another tenant must be rejected")
 	})
 
-	t.Run("multi-tenant: WithRefreshTenantResolver alias also drives access-token binding", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("Authorization", "Bearer valid-"+tenantB)
-		rec := httptest.NewRecorder()
-
-		var called bool
-		handler := tokens.RequireAuth[any](newMultiTenantVerifier(),
-			func(w http.ResponseWriter, r *http.Request, a egauth.Actor, custom any) {
-				called = true
-				w.WriteHeader(http.StatusOK)
-			},
-			tokens.WithRefreshTenantResolver[any](func(*http.Request) string { return tenantB }),
-		)
-
-		handler.ServeHTTP(rec, req)
-
-		assert.Equal(t, http.StatusOK, rec.Code)
-		assert.True(t, called)
-	})
-
 	t.Run("integration: real multi-tenant jwt.Service binds and rejects cross-tenant", func(t *testing.T) {
 		store := memory.NewStore[struct{}]()
 		cfg := jwt.Config[struct{}]{
-			Store:       store,
-			SecretKey:   "mw-secret-aaaaaaaaaaaaaaaaaaaaa!", // 32 bytes
-			Issuer:      "egauth-test",
-			AccessTTL:   5 * time.Minute,
-			RefreshTTL:  24 * time.Hour,
-			MultiTenant: true,
+			Store:      store,
+			SecretKey:  "mw-secret-aaaaaaaaaaaaaaaaaaaaa!", // 32 bytes
+			Issuer:     "egauth-test",
+			AccessTTL:  5 * time.Minute,
+			RefreshTTL: 24 * time.Hour,
 			ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
 				return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
 			}),
@@ -195,7 +171,8 @@ func TestRequireAuthTenantAware(t *testing.T) {
 			assert.False(t, *called)
 		}
 
-		// No resolver against a MultiTenant Service: tenant-unaware path fails closed.
+		// No resolver: the access token is verified against the empty tenant (""), which the
+		// tenant-bound token of tenantA does not match, so the request fails closed.
 		{
 			req := httptest.NewRequest(http.MethodGet, "/", nil)
 			req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
@@ -207,21 +184,23 @@ func TestRequireAuthTenantAware(t *testing.T) {
 			})
 			h.ServeHTTP(rec, req)
 			assert.Equal(t, http.StatusUnauthorized, rec.Code)
-			assert.False(t, called, "a MultiTenant Service must fail closed on the tenant-unaware path")
+			assert.False(t, called, "a tenant-bound token must fail closed against the empty tenant")
 		}
 	})
 
-	t.Run("single-tenant: no resolver keeps the tenant-unaware path (unchanged behavior)", func(t *testing.T) {
-		// No WithAuthTenantResolver -> the middleware MUST call VerifyAccessToken, never
-		// VerifyAccessTokenForTenant. The for-tenant func panics if reached, proving the path.
+	t.Run("single-tenant: no resolver verifies against the empty tenant (unchanged behavior)", func(t *testing.T) {
+		// No WithAuthTenantResolver -> the middleware calls VerifyAccessTokenForTenant with the
+		// empty tenant (""), the single-tenant default partition.
 		verifier := &issuertest.MockVerifier[any]{
-			VerifyAccessTokenFunc: func(ctx context.Context, token string) (*tokens.Claims[any], error) {
+			VerifyAccessTokenForTenantFunc: func(ctx context.Context, tenantID, token string) (*tokens.Claims[any], error) {
+				if tenantID != "" {
+					return nil, tokens.ErrTenantMismatch
+				}
 				if token == "single-valid" {
 					return &tokens.Claims[any]{Subject: subject, TenantID: ""}, nil
 				}
 				return nil, tokens.ErrInvalidToken
 			},
-			// VerifyAccessTokenForTenantFunc intentionally left nil: it must not be called.
 		}
 
 		req := httptest.NewRequest(http.MethodGet, "/", nil)

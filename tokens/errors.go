@@ -43,11 +43,4 @@ var (
 	// ErrTenantMismatch is returned by a Save* operation when the record already carries a
 	// non-empty TenantID that differs from the tenantID argument passed to the call.
 	ErrTenantMismatch = errors.New("tokens: tenant ID mismatch")
-
-	// ErrTenantBindingRequired is returned by the tenant-unaware VerifyAccessToken when the
-	// verifier was configured as multi-tenant. In a multi-tenant deployment a token minted for
-	// tenant A is cryptographically valid in tenant B's context (shared signing key), so the
-	// tenant-unaware path fails closed and the caller must use VerifyAccessTokenForTenant, which
-	// binds the token to an explicit tenant.
-	ErrTenantBindingRequired = errors.New("tokens: tenant binding required: call VerifyAccessTokenForTenant")
 )

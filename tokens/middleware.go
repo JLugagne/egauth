@@ -56,23 +56,14 @@ func WithAutoRefresh[C any](rotator Rotator[C], cookies Cookies) AuthOption[C] {
 // A configured resolver MUST return a non-empty tenant ID for any request it can map; returning
 // "" is interpreted as "tenant could not be resolved" and the middleware rejects the request with
 // 401 instead of falling back to the single-tenant ("") partition. This is the fail-closed
-// guarantee: a Verifier configured for multi-tenancy (jwt.Config.MultiTenant) must never reach the
-// tenant-unaware verification path. When no resolver is set at all, the middleware stays in
-// single-tenant mode (the "" partition) and single-tenant consumers need no changes.
+// guarantee: when a resolver is configured, the middleware only ever calls
+// VerifyAccessTokenForTenant with the resolved tenant ID, never the single-tenant ("") partition.
+// When no resolver is set at all, the middleware calls VerifyAccessTokenForTenant with "" and
+// stays in single-tenant mode, so single-tenant consumers need no changes.
 //
 // This mirrors sessions.WithTenantResolver; it carries the Auth- prefix because the package-level
 // tokens.WithTenantResolver name is already taken by the RefreshHandler/LogoutHandler option.
 func WithAuthTenantResolver[C any](f func(*http.Request) string) AuthOption[C] {
-	return func(a *authConfig[C]) { a.tenantResolver = f }
-}
-
-// WithRefreshTenantResolver supplies the tenant for store-scoped auto-refresh rotation in
-// multi-tenant setups.
-//
-// Deprecated: use WithAuthTenantResolver, which scopes BOTH access-token verification and
-// auto-refresh rotation to the resolved tenant. WithRefreshTenantResolver is retained as an alias
-// for backward compatibility and now configures the same per-request tenant resolver.
-func WithRefreshTenantResolver[C any](f func(*http.Request) string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.tenantResolver = f }
 }
 
@@ -162,7 +153,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 			if tenantAware {
 				claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), tenantID, token)
 			} else {
-				claims, err = verifier.VerifyAccessToken(r.Context(), token)
+				claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), "", token)
 			}
 			if err == nil {
 				if !cfg.stepUpSatisfied(claims) {

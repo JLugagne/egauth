@@ -35,14 +35,14 @@ func TestAuthTime_SetOnIssueAndPreservedAcrossRotate(t *testing.T) {
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), AuthTime: past})
 	require.NoError(t, err)
 
-	c1, err := svc.VerifyAccessToken(ctx, pair.AccessToken)
+	c1, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.NoError(t, err)
 	assert.WithinDuration(t, past, c1.AuthTime, 2*time.Second, "auth_time is carried on the access token")
 
 	// A silent refresh must NOT reset auth_time, even though IssuedAt advances.
 	rotated, err := svc.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
-	c2, err := svc.VerifyAccessToken(ctx, rotated.AccessToken)
+	c2, err := svc.VerifyAccessTokenForTenant(ctx, "", rotated.AccessToken)
 	require.NoError(t, err)
 	assert.WithinDuration(t, past, c2.AuthTime, 2*time.Second, "auth_time must survive rotation")
 	assert.True(t, c2.IssuedAt.After(c2.AuthTime), "IssuedAt advances on refresh while auth_time stays put")
@@ -54,7 +54,7 @@ func TestAuthTime_DefaultsToIssueTimeForInitialPair(t *testing.T) {
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
 	require.NoError(t, err)
-	c, err := svc.VerifyAccessToken(ctx, pair.AccessToken)
+	c, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.NoError(t, err)
 	assert.WithinDuration(t, time.Now(), c.AuthTime, 5*time.Second, "initial auth_time defaults to issue time")
 }
@@ -80,7 +80,7 @@ func TestAuthTime_RotationOfLegacyTokenDoesNotManufactureFreshness(t *testing.T)
 	rotated, err := svc.Rotate(ctx, "", plaintext)
 	require.NoError(t, err)
 
-	claims, err := svc.VerifyAccessToken(ctx, rotated.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(ctx, "", rotated.AccessToken)
 	require.NoError(t, err)
 	assert.True(t, claims.AuthTime.IsZero(), "rotation must not invent an auth_time for a legacy token")
 	assert.False(t, claims.FreshAuth(5*time.Minute), "a legacy-rooted token must still require step-up")

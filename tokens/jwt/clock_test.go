@@ -46,17 +46,17 @@ func TestWithClock_DeterministicTokenExpiry(t *testing.T) {
 	// Verify under the SAME frozen clock: a token whose iat/exp are in 2035 would be rejected
 	// by golang-jwt's real-wall-clock validator unless WithTimeFunc(clock) is wired into the
 	// parser. Success here proves the verify path honors the injected clock.
-	claims, err := svc.VerifyAccessToken(ctx, pair.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.NoError(t, err, "token must validate under the injected clock")
 	assert.Equal(t, pair.AccessTokenExpiresAt.Unix(), claims.ExpiresAt.Unix())
 
 	// Just before expiry: still valid.
 	now = base.Add(5*time.Minute - time.Second)
-	_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+	_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.NoError(t, err)
 
 	// Past expiry: the verify path must report expiry deterministically.
 	now = base.Add(5*time.Minute + time.Second)
-	_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+	_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	assert.ErrorIs(t, err, tokens.ErrTokenExpired, "expired token must fail verification under the injected clock")
 }
