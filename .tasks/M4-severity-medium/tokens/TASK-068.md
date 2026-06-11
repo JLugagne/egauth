@@ -4,7 +4,7 @@ title: "Refresh rotation structurally cannot preserve per-session AMR: ClaimsPro
 description: "SECURITY.md:96-97 states 'On refresh the AMR is re-evaluated by the ClaimsProvider, not frozen at login.' But ClaimsProvider.ClaimsForUser receives only the user ID and tenant (tokens/rotation.go:20) — no family ID, no session identifier, and no previously-issued AMR. The persisted tokens.RefreshTok…"
 milestone: M4-severity-medium
 epic: tokens
-status: in_progress
+status: done
 priority: normal
 type: bugfix
 blocked_by: []
@@ -48,3 +48,5 @@ Implemented the second recommended variant (inform the re-evaluation) rather tha
 `Rotate` now attaches a `tokens.RotationContext{FamilyID, AuthTime}` to the context handed to `ClaimsProvider.ClaimsForUser`. A provider recovers it with `tokens.RotationContextFromContext(ctx)` and can therefore re-evaluate assurance for the *specific* family/session being rotated — keyed by `FamilyID` — instead of being limited to the per-user signal. This makes the documented "AMR re-evaluated, not frozen" semantics actually implementable: a provider can preserve a legitimately MFA-elevated session's AMR across silent refreshes, or deliberately downgrade it (e.g. MFA disabled), without being forced into either silent decay or blanket elevation (the step-up bypass).
 
 New API in `tokens/rotation.go`: `RotationContext` struct, `WithRotationContext` (issuer-side setter) and `RotationContextFromContext` (provider-side getter). The `ClaimsForUser` signature is unchanged, so the carrier is additive and providers that ignore it keep compiling. Regression test: `TestRotate_ClaimsProviderReceivesRotationContext` in `tokens/jwt/rotation_test.go`. `SECURITY.md` updated around the "AMR is re-evaluated" sentence. The AMR-persist-on-RefreshToken + storetest-contract variant was intentionally NOT done, so the store layer is untouched.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
