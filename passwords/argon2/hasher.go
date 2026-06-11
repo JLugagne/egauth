@@ -52,6 +52,12 @@ type Option func(*Hasher)
 const (
 	// MinMemoryKiB is the minimum Argon2id memory cost in KiB (OWASP 2021: 19 MiB).
 	MinMemoryKiB uint32 = 19456
+	// MaxMemoryKiB is the upper bound on the memory parameter accepted by Compare.
+	// Any stored PHC hash carrying a memory value above this ceiling is rejected as
+	// ErrInvalidPassword before the KDF is invoked, preventing an OOM DoS via a
+	// tampered or corrupt stored hash row. 512 MiB (524288 KiB) is far above any
+	// legitimate operational cost while remaining easy to reason about.
+	MaxMemoryKiB uint32 = 524288
 	// MinTime is the minimum number of Argon2id iterations (the t parameter).
 	MinTime uint32 = 1
 	// MinThreads is the minimum Argon2id degree of parallelism (the p parameter).
@@ -281,6 +287,14 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 	// produced this hash (IDKey would have re-derived with the clamped value), so the hash is
 	// corrupt; reject it rather than silently verify against a different cost than was recorded.
 	if memory < 8*uint32(threads) {
+		return passwords.ErrInvalidPassword
+	}
+	// Reject an unreasonably large memory parameter before handing it to argon2.IDKey.
+	// argon2.IDKey allocates memory*1024 bytes; a uint32 goes up to ~4 TiB. A tampered or
+	// corrupt stored hash row with e.g. m=4000000000 would OOM-kill the process on the
+	// victim's next login. MaxMemoryKiB (512 MiB) is far above any legitimate operational
+	// cost and ensures a single bad row cannot trigger a multi-GiB allocation.
+	if memory > MaxMemoryKiB {
 		return passwords.ErrInvalidPassword
 	}
 

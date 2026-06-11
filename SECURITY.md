@@ -191,6 +191,14 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   not interruptible mid-hash, so the guard is a pre-call check, not a kill switch for an in-flight
   pass; in-memory map lookups in the reference stores are not individually cancellable but complete
   in microseconds.
+- **Argon2id cost parameters from stored hashes are bounds-checked on both sides.** `Compare`
+  parses the `m`/`t`/`p` cost fields from the stored PHC string and validates them before invoking
+  `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads) prevent library panics.
+  An upper bound (`MaxMemoryKiB` = 512 MiB = 524 288 KiB) prevents an OOM DoS: `argon2.IDKey`
+  allocates `memory × 1 024` bytes, so a tampered or corrupt stored hash row carrying e.g.
+  `m=4000000000` would attempt a multi-TiB allocation on the victim's next login. Any stored hash
+  whose memory parameter exceeds `MaxMemoryKiB` is rejected as `ErrInvalidPassword` (same opaque
+  mismatch signal as all other validation failures) before the KDF is invoked.
 - **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
