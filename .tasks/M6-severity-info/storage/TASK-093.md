@@ -4,7 +4,7 @@ title: "pgx CreateSession is an upsert that silently rebinds an existing (tenant
 description: "CreateSession uses ON CONFLICT (tenant_id, token_hash) DO UPDATE SET id = EXCLUDED.id, user_id = EXCLUDED.user_id, ... — so inserting a session whose token hash already exists silently replaces the existing row's owner (user_id), primary key and expiry instead of failing."
 milestone: M6-severity-info
 epic: storage
-status: in_progress
+status: done
 priority: low
 type: chore
 blocked_by: []
@@ -43,3 +43,5 @@ ON CONFLICT (tenant_id, token_hash) DO UPDATE
 
 **Recommended fix**
 Use a plain INSERT and surface the unique-violation (map pgcode 23505 to a distinct error); in the memory store, reject CreateSession when the byHash key already exists. A duplicate 256-bit token hash should be treated as an integrity failure, not absorbed.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
