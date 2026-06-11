@@ -4,7 +4,7 @@ title: "Recovery-email independence check is byte-exact, so a Unicode/IDN varian
 description: "RequestRecoveryEmail enforces that a recovery email must be INDEPENDENT of the primary login address via a byte-exact comparison recoveryEmail == user.Email (both run through the same normalizeEmail, which does no Unicode/IDN folding). Because an NFD-form localpart or a punycode-vs-Unicode domain of…"
 milestone: M5-severity-low
 epic: identity
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -43,3 +43,5 @@ if recoveryEmail == user.Email {
 
 **Recommended fix**
 Compare the recovery address against the primary using the same fully-canonicalized form proposed in the related finding (NFC + IDN A-label), so a Unicode/IDN-equivalent of the primary is correctly rejected as ErrRecoveryEmailIsPrimary.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
