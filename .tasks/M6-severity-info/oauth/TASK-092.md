@@ -4,7 +4,7 @@ title: "DynamicCallbackHandler resolves the tenant multiple times and assumes a 
 description: "In the dynamic path the tenant resolver is invoked at least three times for one callback: once in DynamicCallbackHandler (handlers.go:378, used to fetch the provider that performs the token exchange), once inside the delegated CallbackHandler for the cookieTenant binding check (handlers.go:204), and…"
 milestone: M6-severity-info
 epic: oauth
-status: in_progress
+status: done
 priority: low
 type: chore
 blocked_by: []
@@ -41,3 +41,5 @@ DynamicCallbackHandler: `tenant := cfg.tenant(r)` then `p, err := store.GetProvi
 
 **Recommended fix**
 Resolve the tenant exactly once at the top of the request and thread that single value (and the resolved provider) through the binding check, the exchange, and LinkOrCreateIdentity, instead of re-invoking cfg.tenant(r) in the delegated static handler. Document that the tenant resolver MUST be a pure function of the request.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
