@@ -55,6 +55,14 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
   deployments that need defense against a database leak should encrypt the `secret` column at the
   storage/DB layer (envelope encryption).
+  **Failed-attempt lockout is time-bound.** Once `FailedAttempts` exceeds `MaxAttempts` (default 5)
+  the factor is locked and both `VerifyTOTP` and `VerifyRecoveryCode` return `ErrTooManyAttempts`.
+  The lockout automatically resets after `LockoutDuration` (default 15 min, measured from the last
+  failed attempt), giving legitimate users a self-service recovery path without operator action.
+  Operators can also unblock a user immediately via `Service.UnlockMFA(ctx, tenantID, userID)`,
+  which wraps `Store.ResetTOTPAttempts`. The window is configurable via
+  `mfa.WithLockoutDuration(d)`; passing `0` makes the lockout permanent until `UnlockMFA` is
+  called or the factor is disabled.
 - **Passkeys (WebAuthn).** The `passkey` module wraps go-webauthn. Credentials are scoped to the
   configured Relying Party ID; the ceremony challenge and user-verification requirement
   (`SessionData`) are carried between Begin and Finish in a short-lived, **HMAC-signed**

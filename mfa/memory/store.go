@@ -75,11 +75,12 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.U
 		return false, nil // replay: not strictly newer than the last accepted step
 	}
 	e.LastUsedStep = step
-	e.FailedAttempts = 0 // a fresh accepted code clears the lock-out budget
+	e.FailedAttempts = 0          // a fresh accepted code clears the lock-out budget
+	e.LastAttemptAt = time.Time{} // reset decay timestamp alongside the counter
 	return true, nil
 }
 
-func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
+func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -88,6 +89,7 @@ func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, user
 		return 0, mfa.ErrNotEnrolled
 	}
 	e.FailedAttempts++
+	e.LastAttemptAt = now
 	return e.FailedAttempts, nil
 }
 
@@ -119,9 +121,10 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID
 			now := time.Now()
 			c.UsedAt = &now
 			// A valid recovery code is a successful second-factor verification: clear the TOTP
-			// lock-out budget if an enrollment exists (no-op otherwise).
+			// lock-out budget and decay timestamp if an enrollment exists (no-op otherwise).
 			if e, ok := s.totp[key(tenantID, userID)]; ok {
 				e.FailedAttempts = 0
+				e.LastAttemptAt = time.Time{}
 			}
 			return nil
 		}
@@ -138,3 +141,16 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID
 }
 
 var _ mfa.Store = (*Store)(nil)
+
+func (s *Store) ResetTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	e, ok := s.totp[key(tenantID, userID)]
+	if !ok {
+		return mfa.ErrNotEnrolled
+	}
+	e.FailedAttempts = 0
+	e.LastAttemptAt = time.Time{}
+	return nil
+}

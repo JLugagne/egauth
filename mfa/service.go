@@ -42,6 +42,12 @@ type Service interface {
 	DisableTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// IsEnrolled reports whether the user has a CONFIRMED TOTP factor.
 	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+	// UnlockMFA is an admin escape hatch that immediately resets the failed-attempt counter
+	// for the user's second factor, regardless of elapsed time. Use this when the operator
+	// wants to unblock a user without waiting for the lockout window to expire and without
+	// forcing a full DisableTOTP / re-enrollment cycle. Returns ErrNotEnrolled if the user
+	// has no enrollment.
+	UnlockMFA(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 type service struct {
@@ -54,8 +60,12 @@ type service struct {
 	// maxAttempts is the failed-verification ceiling for the second factor. 0 disables
 	// limiting entirely (set via WithNoAttemptLimit); any positive value is the active limit.
 	maxAttempts int
-	now         func() time.Time
-	events      event.Sink
+	// lockoutDuration is the time window after which a locked-out factor auto-resets.
+	// 0 means no automatic decay — the lockout is permanent until UnlockMFA is called or the
+	// factor is disabled. Defaults to DefaultLockoutDuration.
+	lockoutDuration time.Duration
+	now             func() time.Time
+	events          event.Sink
 }
 
 // ServiceOption configures the MFA Service.
@@ -86,6 +96,15 @@ func WithMaxAttempts(n int) ServiceOption { return func(s *service) { s.maxAttem
 // external rate limiter fronts verification — the second factor becomes online-brute-forceable.
 // Limiting is ON by default; only use this if you knowingly enforce the budget elsewhere.
 func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.maxAttempts = -1 } }
+
+// WithLockoutDuration sets the time window after which a locked-out second factor
+// automatically resets its attempt counter. The window is measured from the last failed
+// attempt (TOTPEnrollment.LastAttemptAt). Once the window elapses, the next attempt is
+// treated as a fresh budget. 0 disables time-based decay — the lockout is permanent until
+// UnlockMFA is called or the factor is disabled. Default: DefaultLockoutDuration (15 min).
+func WithLockoutDuration(d time.Duration) ServiceOption {
+	return func(s *service) { s.lockoutDuration = d }
+}
 
 // WithClock overrides the time source (primarily for tests).
 func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
@@ -138,6 +157,11 @@ func NewService(store Store, opts ...ServiceOption) Service {
 		s.maxAttempts = DefaultMaxAttempts
 	case s.maxAttempts < 0:
 		s.maxAttempts = 0 // explicitly disabled via WithNoAttemptLimit
+	}
+	// Lockout decay is on by default: an untouched (zero) value means "use the default window".
+	// WithLockoutDuration(0) explicitly disables decay (permanent lockout until admin action).
+	if s.lockoutDuration == 0 {
+		s.lockoutDuration = DefaultLockoutDuration
 	}
 	return s
 }
@@ -299,11 +323,28 @@ func (s *service) atLimit(n int) bool { return s.maxAttempts > 0 && n >= s.maxAt
 
 // reserveAttempt atomically claims one slot of the attempt budget and returns the new count.
 // When limiting is disabled it is a no-op that reports 0 (never locked).
+// If a lockoutDuration is configured and the elapsed time since the last failed attempt
+// exceeds it, the counter is reset before claiming a new slot so the caller starts with a
+// fresh budget (time-based lockout decay).
 func (s *service) reserveAttempt(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
 	if s.maxAttempts <= 0 {
 		return 0, nil
 	}
-	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID)
+	// Check whether the lockout window has expired so we can decay the counter before
+	// incrementing. We read the current enrollment to inspect LastAttemptAt.
+	if s.lockoutDuration > 0 {
+		enrollment, err := s.store.GetTOTP(ctx, tenantID, userID)
+		if err == nil && enrollment.FailedAttempts >= s.maxAttempts {
+			// The factor is currently locked; check whether the window has elapsed.
+			if !enrollment.LastAttemptAt.IsZero() && s.now().Sub(enrollment.LastAttemptAt) > s.lockoutDuration {
+				// Window expired: reset the counter so this attempt starts a fresh budget.
+				if rerr := s.store.ResetTOTPAttempts(ctx, tenantID, userID); rerr != nil {
+					return 0, rerr
+				}
+			}
+		}
+	}
+	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID, s.now())
 }
 
 // emitBlocked reports that a second factor was locked after exhausting its attempt budget.
@@ -348,6 +389,10 @@ func (s *service) IsEnrolled(ctx context.Context, tenantID string, userID uuid.U
 		return false, err
 	}
 	return enrollment.Confirmed(), nil
+}
+
+func (s *service) UnlockMFA(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	return s.store.ResetTOTPAttempts(ctx, tenantID, userID)
 }
 
 func (s *service) mintRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) ([]string, error) {
