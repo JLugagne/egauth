@@ -4,7 +4,7 @@ title: "Auth cookies do not use (or support enforcing) the __Host- prefix, enabl
 description: "The default cookie names are plain 'access_token' / 'refresh_token' and nothing in Cookies validates or encourages the __Host- prefix. With host-only cookies (Domain empty), any attacker-controlled or XSS'd sibling subdomain (evil.example.com, a common reality in multi-app SaaS estates) can set a 'r…"
 milestone: M5-severity-low
 epic: tokens
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ cookies.go:9-12: `const (\n\tDefaultAccessCookieName  = \"access_token\"\n\tDefa
 
 **Recommended fix**
 Default DefaultAccessCookieName/DefaultRefreshCookieName to '__Host-access_token' / '__Host-refresh_token' (the secure defaults — Secure on, Path '/', no Domain — already satisfy the prefix requirements), and have withDefaults()/SetAccess/SetRefresh fail fast or strip the prefix expectations when a consumer sets Domain or a non-'/' path with a __Host- name. At minimum, document the subdomain cookie-tossing risk in SECURITY.md and make the prefix trivially opt-in.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
