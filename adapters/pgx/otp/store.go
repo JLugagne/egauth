@@ -100,8 +100,11 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, tenantID string, subje
 	return attempts, nil
 }
 
-func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (bool, error) {
-	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3`, tenantID, subjectID, purpose)
+func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, expectedCodeHash string) (bool, error) {
+	// Identity guard: the code_hash predicate makes this a compare-and-delete. A code reissued
+	// between the verifier's read and this consume carries a different hash and is not deleted,
+	// so a superseded code cannot burn its replacement.
+	tag, err := s.db.Exec(ctx, `DELETE FROM otp_codes WHERE tenant_id = $1 AND subject_id = $2 AND purpose = $3 AND code_hash = $4`, tenantID, subjectID, purpose, expectedCodeHash)
 	if err != nil {
 		return false, err
 	}

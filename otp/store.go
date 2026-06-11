@@ -17,10 +17,14 @@ type Store interface {
 	// IncrementOTPAttempts atomically increments and returns the new attempt count for the
 	// subject+purpose. Returns ErrCodeNotFound if there is no outstanding code.
 	IncrementOTPAttempts(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (int, error)
-	// ConsumeOTP atomically removes the outstanding code and reports whether THIS call was the
-	// one that removed it. It is the single-use guard: under concurrent verification only one
-	// caller observes consumed=true, so a code cannot authorize more than one verification.
-	ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (consumed bool, err error)
+	// ConsumeOTP atomically removes the outstanding code ONLY IF its CodeHash equals
+	// expectedCodeHash, and reports whether THIS call was the one that removed it. It is both the
+	// single-use guard (under concurrent verification only one caller observes consumed=true, so a
+	// code cannot authorize more than one verification) AND the identity guard: a row whose hash
+	// no longer matches expectedCodeHash — e.g. a code reissued between the verifier's read and
+	// this consume — is left untouched and consumed=false is returned, so a superseded code can
+	// never burn its replacement.
+	ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, expectedCodeHash string) (consumed bool, err error)
 	// DeleteOTP removes the outstanding code for the subject+purpose. Idempotent (used for
 	// expiry/burn/invalidate where the row may already be gone).
 	DeleteOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error

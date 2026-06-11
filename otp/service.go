@@ -144,10 +144,13 @@ func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UU
 		return ErrInvalidCode
 	}
 
-	// Correct code: consume atomically. Only the caller that actually removes the row wins, so
-	// a single code can never authorize more than one verification (single-use under
-	// concurrency).
-	consumed, err := s.store.ConsumeOTP(ctx, tenantID, subjectID, purpose)
+	// Correct code: consume atomically, guarded on the exact hash we just compared against. Only
+	// the caller that removes THAT row wins, so a single code can never authorize more than one
+	// verification (single-use under concurrency). The hash guard also closes the TOCTOU window:
+	// if the code was reissued between the GetOTP read above and here, the row now carries a
+	// different hash, ConsumeOTP removes nothing, and this stale verification fails instead of
+	// burning the fresh replacement.
+	consumed, err := s.store.ConsumeOTP(ctx, tenantID, subjectID, purpose, record.CodeHash)
 	if err != nil {
 		return err
 	}

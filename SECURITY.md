@@ -167,8 +167,12 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
   is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).
   Both guarantees hold under concurrency: success consumes the code through an atomic guarded
-  delete (only one of N parallel correct-code verifications wins), and an attempt slot is reserved
-  atomically *before* the code is compared, so concurrent wrong guesses cannot exceed the limit.
+  delete keyed on the exact hash that was compared (only one of N parallel correct-code
+  verifications wins), and an attempt slot is reserved atomically *before* the code is compared,
+  so concurrent wrong guesses cannot exceed the limit. The hash guard also covers the Issue/Verify
+  interleave: if the code is reissued between a verifier's read and its consume, the stored row
+  now carries a different hash, so the stale verification deletes nothing and fails — a superseded
+  code can neither be accepted nor burn its freshly issued replacement.
   Because numeric OTPs are intentionally low-entropy, the at-rest SHA-256 hash is not a barrier
   against an attacker who already has the database; the real defenses are the short TTL,
   single-use consumption and the attempt limit — and, as always, the consumer's own rate limiting

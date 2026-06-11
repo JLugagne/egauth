@@ -82,12 +82,18 @@ func (s *Store) IncrementOTPAttempts(ctx context.Context, tenantID string, subje
 	return o.Attempts, nil
 }
 
-func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (bool, error) {
+func (s *Store) ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, expectedCodeHash string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	k := key(tenantID, subjectID, purpose)
-	if _, ok := s.codes[k]; !ok {
+	o, ok := s.codes[k]
+	if !ok {
+		return false, nil
+	}
+	// Identity guard: only delete the row that still matches the hash the verifier compared
+	// against. A code reissued since that read carries a different hash and must be left intact.
+	if o.CodeHash != expectedCodeHash {
 		return false, nil
 	}
 	delete(s.codes, k)
