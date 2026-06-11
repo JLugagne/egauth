@@ -4,7 +4,7 @@ title: "Tenant resolver failure fails open into the single-tenant ('') partition
 description: "RequireSession treats an empty string from a configured tenantResolver exactly like the intentional single-tenant partition. The resolver signature is func(*http.Request) string, so the natural 'could not resolve tenant' value (unknown Host header, missing path segment, absent claim) is '' — and the…"
 milestone: M4-severity-medium
 epic: sessions
-status: in_progress
+status: done
 priority: normal
 type: bugfix
 blocked_by: []
@@ -46,3 +46,5 @@ tenantID := ""
 
 **Recommended fix**
 When a tenantResolver IS configured, treat an empty return as resolution failure and respond 401 (or change the option to accept func(*http.Request) (string, bool) / (string, error)). Keep "" as the partition only for the nil-resolver single-tenant case. Document explicitly that a configured resolver must never return "" for an unresolved tenant.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
