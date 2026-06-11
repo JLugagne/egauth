@@ -1084,7 +1084,16 @@ func (s *service) RequestRecoveryEmail(ctx context.Context, tenantID string, use
 	if user.DeletedAt != nil {
 		return "", ErrUserNotFound
 	}
-	if recoveryEmail == user.Email {
+	// Compare against the primary in the SAME fully-canonicalized form (NFC + IDN A-label)
+	// that normalizeEmail produced for the candidate. The stored primary may not have been
+	// normalized (e.g. an externally provisioned account), so a byte-exact comparison would
+	// let a Unicode/IDN-equivalent of the primary slip past as an "independent" channel.
+	// If the stored primary cannot be canonicalized, fall back to the raw stored value.
+	primary := user.Email
+	if canonical, normErr := normalizeEmail(primary); normErr == nil {
+		primary = canonical
+	}
+	if recoveryEmail == primary {
 		return "", ErrRecoveryEmailIsPrimary
 	}
 

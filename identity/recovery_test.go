@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/text/unicode/norm"
 )
 
 func TestRecoveryEmail_RoundTrip(t *testing.T) {
@@ -187,4 +188,33 @@ func TestRequestPasswordResetViaRecovery_UnknownAccountIsUniform(t *testing.T) {
 	assert.Empty(t, token)
 	assert.Nil(t, user)
 	assert.False(t, channels.Any())
+}
+
+// TestRecoveryEmail_RejectsUnicodeVariantOfPrimary proves the independence guard rejects a
+// Unicode/IDN-equivalent of the primary address, not just a byte-exact match. The primary
+// email is stored in NFD (decomposed) form — as a legacy or externally provisioned account
+// may be — while the recovery candidate is supplied in NFC (composed) form of the SAME
+// address. normalizeEmail folds the candidate to NFC, so a byte-exact comparison against the
+// raw stored primary would miss it and accept the same physical mailbox as an "independent"
+// recovery channel. The guard must canonicalize the primary the same way and reject it.
+func TestRecoveryEmail_RejectsUnicodeVariantOfPrimary(t *testing.T) {
+	ctx := context.Background()
+	svc, store := newVerificationService(t)
+
+	// "josé@example.com" with the accented 'e' in NFD form: 'e' + U+0301 combining acute.
+	const nfdPrimary = "josé@example.com"
+	// The NFC (precomposed) form of the very same address: 'é' as U+00E9.
+	const nfcVariant = "josé@example.com"
+	require.NotEqual(t, nfdPrimary, nfcVariant, "test setup: the two forms must differ byte-wise")
+	require.Equal(t, nfcVariant, norm.NFC.String(nfdPrimary), "test setup: NFC of the NFD primary is the variant")
+
+	// Provision the user directly with the non-normalized (NFD) primary, modelling an account
+	// whose stored email never passed through normalizeEmail.
+	user, err := store.CreateUser(ctx, "", nfdPrimary)
+	require.NoError(t, err)
+
+	// Enrolling the NFC variant of the primary must be rejected as the primary address.
+	_, err = svc.RequestRecoveryEmail(ctx, "", user.ID, nfcVariant)
+	assert.ErrorIs(t, err, identity.ErrRecoveryEmailIsPrimary,
+		"a Unicode-equivalent of the primary must not be accepted as an independent recovery channel")
 }
