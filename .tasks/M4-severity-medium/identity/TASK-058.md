@@ -4,7 +4,7 @@ title: "RequestPasswordResetViaRecoveryHandler returns 500 on backend error, bre
 description: "Unlike the primary RequestPasswordResetHandler (which swallows ALL service errors with `_` and always replies 204/redirect), the via-recovery handler surfaces any service error as HTTP 500 'internal_error'. The service RequestPasswordResetViaRecovery returns a non-nil error at two paths that are rea…"
 milestone: M4-severity-medium
 epic: identity
-status: in_progress
+status: done
 priority: normal
 type: bugfix
 blocked_by: []
@@ -45,3 +45,5 @@ if err != nil {
 
 **Recommended fix**
 Swallow the service error exactly like RequestPasswordResetHandler and RequestMagicLinkHandler do: assign err to `_` and always reply with the uniform 204/success redirect. Observe backend errors via the event sink / store instrumentation, never via a differential HTTP status on this endpoint.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified

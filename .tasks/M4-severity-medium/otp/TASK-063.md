@@ -4,7 +4,7 @@ title: "OTP IssueHandler dispatches delivery on an unbounded, untimed goroutine 
 description: "IssueHandler spawns a fresh `go func()` per request to run the consumer's deliver callback (email/SMS) on a detached context, with NO concurrency bound and NO per-delivery timeout. The documented subject-resolution model includes resolving the subject from a submitted email, so this endpoint can be…"
 milestone: M4-severity-medium
 epic: otp
-status: in_progress
+status: done
 priority: normal
 type: bugfix
 blocked_by: []
@@ -44,3 +44,5 @@ if ch, err := svc.Issue(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r))
 
 **Recommended fix**
 Mirror identity.handlerConfig.dispatchDelivery: add a shared buffered-channel semaphore created once per handler instance (non-blocking acquire, drop-on-full) and a per-delivery context.WithTimeout, both configurable. This bounds the goroutine fan-out and prevents a hung Mailer/SMSSender from leaking goroutines, independent of any external rate limiter.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
