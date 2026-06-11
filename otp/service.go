@@ -62,10 +62,14 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	for _, opt := range opts {
 		opt(s)
 	}
-	// Clamp to safe minimums so a misconfiguration cannot produce predictable/never-expiring
-	// codes or an unbounded attempt count.
-	if s.digits <= 0 {
-		s.digits = DefaultDigits
+	// Enforce safe bounds on digits so a misconfiguration cannot produce
+	// predictable codes (too few digits) or an allocation footgun (too many).
+	// Minimum 6: a 6-digit code has 1,000,000 possible values, making brute
+	// force impractical even with generous attempt limits.
+	// Maximum 10: beyond this the big.Int arithmetic and zero-padded Sprintf
+	// allocate proportionally with no security benefit.
+	if s.digits < 6 || s.digits > 10 {
+		panic("otp: NewService requires digits in the range [6, 10]")
 	}
 	if s.ttl <= 0 {
 		s.ttl = DefaultTTL

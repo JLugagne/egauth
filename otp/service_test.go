@@ -123,3 +123,30 @@ func TestOTPNewServiceNilStorePanics(t *testing.T) {
 		otp.NewService(nil)
 	}, "NewService with a nil store must panic at construction, not on the first request")
 }
+
+// TestNewService_DigitsBounds verifies that NewService enforces a safe digit
+// range [6, 10]. Values below 6 or above 10 must panic so that the comment's
+// promise ("clamp to safe minimums") matches the actual behaviour.
+func TestNewService_DigitsBounds(t *testing.T) {
+	store := memory.NewStore()
+
+	// digits=3 is below the safe minimum — must panic.
+	assert.Panics(t, func() {
+		otp.NewService(store, otp.WithDigits(3))
+	}, "NewService with digits=3 must panic: code space is too small to be secure")
+
+	// digits=6 is the exact minimum — must succeed.
+	assert.NotPanics(t, func() {
+		otp.NewService(store, otp.WithDigits(6))
+	}, "NewService with digits=6 must not panic: 6 is the documented safe minimum")
+
+	// digits=10 is the exact maximum — must succeed.
+	assert.NotPanics(t, func() {
+		otp.NewService(store, otp.WithDigits(10))
+	}, "NewService with digits=10 must not panic: 10 is the documented safe maximum")
+
+	// digits=11 is above the safe maximum — must panic.
+	assert.Panics(t, func() {
+		otp.NewService(store, otp.WithDigits(11))
+	}, "NewService with digits=11 must panic: excessively large digit count is a footgun")
+}
