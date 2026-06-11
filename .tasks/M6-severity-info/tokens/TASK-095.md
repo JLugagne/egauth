@@ -4,7 +4,7 @@ title: "jwt.New and Config.Validate never check Store (or ClaimsProvider) for ni
 description: "Every other module constructor fails fast on a nil store: identity.NewService, sessions.NewService, otp.NewService and mfa.NewService panic, and passkey.NewService returns ErrNilStore — each with a comment explaining the convention ('fail fast at startup rather than with a nil-pointer panic deep in…"
 milestone: M6-severity-info
 epic: tokens
-status: in_progress
+status: done
 priority: low
 type: chore
 blocked_by: []
@@ -41,3 +41,5 @@ jwt.New builds the Service with `store: cfg.Store` and no nil check (issuer.go:2
 
 **Recommended fix**
 Panic in jwt.New on a nil Store (matching the documented convention) and add nil-Store / nil-ClaimsProvider checks to Config.Validate so startup validation catches it.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
