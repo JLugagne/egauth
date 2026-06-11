@@ -4,7 +4,7 @@ title: "OTP Verify TOCTOU: code compared against stale read, consumed by key —
 description: "Verify reads the record once (GetOTP, line 109), compares the presented code against that stale CodeHash (line 133), then consumes whatever row currently exists for (tenant, subject, purpose) — ConsumeOTP takes no hash, so it is guarded only on existence, not identity (otp/store.go:23, memory/store.…"
 milestone: M5-severity-low
 epic: otp
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ record, err := s.store.GetOTP(...) ... if !compareCode(record.CodeHash, code) ..
 
 **Recommended fix**
 Make consumption identity-guarded: extend ConsumeOTP (and the burn/expiry DeleteOTP calls) to take the expected CodeHash (or CreatedAt) and delete only the row that matches — a guarded compare-and-delete, mirroring the selector/verifier tokens' guarded delete.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
