@@ -238,16 +238,20 @@ redaction is in any case only a backstop. Therefore the consumer must:
   serialize the config or persist the key in plaintext.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
-- **Use the `__Host-` cookie name prefix** for session cookies in production.
-  Configure `sessions.RequireSession` with `sessions.WithCookieName("__Host-session_token")`
-  (or any `__Host-` prefixed name). Browsers enforce that a `__Host-` cookie is host-locked
-  (no `Domain` attribute), `Secure`, and `Path=/` — this defeats subdomain/sibling-host
-  cookie-tossing session fixation, where an attacker on `evil.example.com` injects a
-  `Domain=.example.com session_token` cookie containing the attacker's own valid token and
-  the victim transparently operates inside the attacker's session. Without the prefix the
-  hardcoded `session_token` name cannot be protected from this attack by the library alone.
-  The default remains `"session_token"` for backwards compatibility; deployments should
-  migrate to a `__Host-` prefixed name.
+- **`__Host-` cookie name prefix** — the tokens package defaults to `__Host-access_token`
+  and `__Host-refresh_token` (`DefaultAccessCookieName` / `DefaultRefreshCookieName`).
+  Browsers enforce that a `__Host-` cookie is host-locked: `Secure`, no `Domain` attribute,
+  and `Path=/`. This defeats subdomain/sibling-host cookie-tossing / refresh-token fixation,
+  where an attacker on `evil.example.com` plants a `Domain=.example.com refresh_token` cookie
+  containing the attacker's own token — the victim's auto-refresh then rotates the attacker's
+  family and silently signs the victim into the attacker's session. `tokens.Cookies.Validate()`
+  rejects any configuration that pairs a `__Host-` cookie name with `Domain != ""`, `Path != "/"`,
+  or `Insecure == true`; `withDefaults` (called by every Set*/Clear*/Access/Refresh method)
+  panics on such a mismatch, surfacing the programmer error at development time.
+  For the `sessions` package: configure `sessions.RequireSession` with
+  `sessions.WithCookieName("__Host-session_token")` (or any `__Host-` prefixed name).
+  The `sessions` default remains `"session_token"` for backwards compatibility; deployments
+  should migrate to a `__Host-` prefixed name.
 - **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
   lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
   timeout). Regardless of how recently `Touch` was called, a session is rejected once

@@ -65,10 +65,11 @@ func TestCookiesZeroValueIsSecure(t *testing.T) {
 }
 
 func TestWithInsecureClearsSecure(t *testing.T) {
-	c := tokens.Cookies{Insecure: true}
+	// Insecure:true is incompatible with __Host- names, so we must use plain names.
+	c := tokens.Cookies{AccessName: "access_token", RefreshName: "refresh_token", Insecure: true}
 	rec := httptest.NewRecorder()
 	c.SetAccess(rec, "v")
-	cookie := findCookie(t, rec, tokens.DefaultAccessCookieName)
+	cookie := findCookie(t, rec, "access_token")
 	require.NotNil(t, cookie)
 	assert.False(t, cookie.Secure, "Insecure must disable the Secure attribute")
 }
@@ -154,4 +155,67 @@ func TestCustomCookieAttributes(t *testing.T) {
 	assert.Equal(t, http.SameSiteStrictMode, access.SameSite)
 	assert.False(t, access.Secure)
 	assert.Equal(t, "/auth/refresh", refresh.Path)
+}
+
+// TestHostPrefixDefaultNames verifies that both default cookie names use the __Host- prefix,
+// which forces browsers to enforce host-locked, Secure, Path=/ — defeating subdomain cookie-tossing.
+func TestHostPrefixDefaultNames(t *testing.T) {
+	const wantAccess = "__Host-access_token"
+	const wantRefresh = "__Host-refresh_token"
+	assert.Equal(t, wantAccess, tokens.DefaultAccessCookieName, "DefaultAccessCookieName must use __Host- prefix")
+	assert.Equal(t, wantRefresh, tokens.DefaultRefreshCookieName, "DefaultRefreshCookieName must use __Host- prefix")
+}
+
+// TestHostPrefixValidation verifies that using a __Host- name with an incompatible attribute
+// combination (Domain set, non-root Path, or Insecure) is rejected by Validate.
+func TestHostPrefixValidation(t *testing.T) {
+	t.Run("__Host- with Domain fails", func(t *testing.T) {
+		c := tokens.Cookies{
+			AccessName: "__Host-access_token",
+			Domain:     "example.com",
+			Path:       "/",
+		}
+		err := c.Validate()
+		require.Error(t, err, "__Host- name with Domain set must fail validation")
+	})
+
+	t.Run("__Host- with non-root Path fails", func(t *testing.T) {
+		c := tokens.Cookies{
+			AccessName: "__Host-access_token",
+			Path:       "/api",
+		}
+		err := c.Validate()
+		require.Error(t, err, "__Host- name with non-root Path must fail validation")
+	})
+
+	t.Run("__Host- with Insecure fails", func(t *testing.T) {
+		c := tokens.Cookies{
+			AccessName: "__Host-access_token",
+			Path:       "/",
+			Insecure:   true,
+		}
+		err := c.Validate()
+		require.Error(t, err, "__Host- name with Insecure=true must fail validation")
+	})
+
+	t.Run("non-__Host- name with Domain is fine", func(t *testing.T) {
+		c := tokens.Cookies{
+			AccessName: "access_token",
+			Domain:     "example.com",
+			Path:       "/",
+		}
+		err := c.Validate()
+		require.NoError(t, err)
+	})
+
+	t.Run("RefreshName __Host- with Domain fails", func(t *testing.T) {
+		c := tokens.Cookies{
+			RefreshName: "__Host-refresh_token",
+			Domain:      "example.com",
+			Path:        "/",
+			RefreshPath: "/",
+		}
+		err := c.Validate()
+		require.Error(t, err, "__Host- RefreshName with Domain set must fail validation")
+	})
 }
