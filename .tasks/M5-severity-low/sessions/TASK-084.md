@@ -4,7 +4,7 @@ title: "No absolute session lifetime by default — Touch can keep a stolen toke
 description: "WithMaxLifetime is opt-in and the zero value disables the absolute cap entirely (absoluteDeadline returns ok=false when maxLifetime <= 0). The package doc's recommended usage pattern (doc.go:22, 'on activity: svc.Touch(...) // slide idle timeout') means a default-configured service lets any session…"
 milestone: M5-severity-low
 epic: sessions
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -44,3 +44,5 @@ func (s *service) absoluteDeadline(session *Session) (time.Time, bool) {
 
 **Recommended fix**
 Make the absolute cap secure-by-default: apply a generous default maxLifetime (e.g. 30 days) in NewService and require an explicit opt-out (WithNoMaxLifetime or WithMaxLifetime(0) documented as insecure), or at minimum add session absolute-lifetime guidance to SECURITY.md so the trade-off is a documented decision rather than a silent default.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
