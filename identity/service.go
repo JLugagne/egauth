@@ -238,12 +238,28 @@ type service struct {
 // ServiceOption configures optional behavior of the identity Service.
 type ServiceOption func(*service)
 
-// WithLockout overrides the default account-lockout threshold and duration.
+// WithLockout overrides the account-lockout threshold and duration.
+//
+// A non-positive threshold or duration is treated as "use the safe default" (DefaultLockThreshold /
+// DefaultLockDuration), matching the convention of mfa.WithMaxAttempts. This means
+// WithLockout(0, 0) is a safe no-op that keeps the default lockout active — it does NOT disable
+// lockout. To explicitly opt out of lockout (e.g. because an external rate-limiter enforces the
+// budget), use WithNoLockout instead.
 func WithLockout(threshold int, duration time.Duration) ServiceOption {
 	return func(s *service) {
 		s.lockThreshold = threshold
 		s.lockDuration = duration
 	}
+}
+
+// WithNoLockout DISABLES brute-force account lockout. This is insecure unless an external
+// rate-limiter or WAF fronts the authentication endpoint — without it the password login path
+// is online-brute-forceable. Lockout is ON by default; only use this option when you
+// knowingly enforce the attempt budget elsewhere.
+func WithNoLockout() ServiceOption {
+	// A negative sentinel is normalized to zero (the internal "disabled" value) inside
+	// NewService after all options have been applied, so the verify path only tests > 0.
+	return func(s *service) { s.lockThreshold = -1 }
 }
 
 // WithPasswordResetTTL overrides how long a password-reset token stays valid.
@@ -338,11 +354,25 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Lockout is secure-by-default: a non-positive threshold (e.g. from WithLockout(0, ...))
+	// means "use the safe default ceiling", not "disable". The negative sentinel written by
+	// WithNoLockout() is normalized to zero (the internal "disabled" value) so the downstream
+	// paths only need to test lockThreshold > 0.
+	switch {
+	case s.lockThreshold == 0:
+		s.lockThreshold = DefaultLockThreshold
+	case s.lockThreshold < 0:
+		s.lockThreshold = 0 // explicitly disabled via WithNoLockout
+	}
+	// Similarly, a non-positive duration is treated as "use the safe default".
+	// Zero duration would produce a LockedUntil at/before now, so the lock would never bite.
+	if s.lockDuration <= 0 {
+		s.lockDuration = DefaultLockDuration
+	}
 	if s.now == nil {
 		s.now = time.Now
 	}
 	return s
-
 }
 
 func (s *service) Register(ctx context.Context, tenantID string, email, password string) (*User, error) {

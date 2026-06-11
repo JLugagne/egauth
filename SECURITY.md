@@ -15,6 +15,13 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Constant-time authentication paths.** The password authentication path applies an
   equivalent hashing cost even when the user, identity, or password hash is absent, so
   account existence cannot be inferred from response timing (user-enumeration defence).
+- **Brute-force lockout (identity).** After `DefaultLockThreshold` (5) consecutive
+  password failures the identity is locked for `DefaultLockDuration` (15 min). Lockout is
+  **on by default** and hardened against misconfiguration: `identity.WithLockout(0, 0)` does
+  NOT disable it — a non-positive argument falls back to the safe default, matching the
+  convention of `mfa.WithMaxAttempts`. To explicitly opt out (e.g. when an external
+  WAF or rate-limiter enforces the budget), use `identity.WithNoLockout()`, which makes the
+  intent auditable and greppable.
 - **Single-use refresh-token rotation with theft detection.** Refresh tokens are
   single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
   and mints a new one in the same family; the access-token lifetime is always
