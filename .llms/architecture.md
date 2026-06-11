@@ -89,5 +89,5 @@ secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
 Consumer responsibilities (NOT provided by egauth): CSRF tokens (origin check available via
 `WithTrustedOrigins`), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.
 
-Full threat model + explicit trade-offs: `SECURITY.md`. Findings log: `SECURITY-FINDINGS.md`, `AUDIT.md`.
+Full threat model + explicit trade-offs: `SECURITY.md`.
 NOTE: security review to date is an AI-driven audit, not an independent third-party human audit (pre-1.0).
