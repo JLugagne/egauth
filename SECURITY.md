@@ -274,7 +274,9 @@ persistence or horizontal scaling should use the `pgx` backends instead of the i
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,
 not a bug:
 
-- **`ErrAccountLocked` → 429** on login: lockout is meant to be observable (PRD §105–106).
+- **`ErrAccountLocked` / `ErrAccountDisabled` → 429** on login: lockout and administrative
+  suspension are both meant to be observable (PRD §105–106). Both map to the same 429 response
+  so suspended accounts are indistinguishable from locked ones to an external observer.
 - **`email_taken` → 409** on registration: standard registration UX. If your threat model
   requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
   `400` (note that `Register` already hashes before the uniqueness check, so the timing
