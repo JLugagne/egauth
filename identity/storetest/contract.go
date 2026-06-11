@@ -732,3 +732,73 @@ func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant strin
 	assert.ErrorIs(t, store.DisableUser(ctx, tenant, gone.ID, time.Now()), identity.ErrUserNotFound)
 	assert.ErrorIs(t, store.EnableUser(ctx, tenant, gone.ID), identity.ErrUserNotFound)
 }
+
+// StoreDeleteAuthGateContract verifies that DeleteUser correctly sets up the authorization
+// invariant relied upon by the service layer (FindUserByID + DeletedAt check). Specifically:
+//
+//   - FindUserByID must still return the deleted user (inspection contract: the service's
+//     consumeForLiveUser and LinkOrCreateIdentity already-linked branch depend on this).
+//   - FindUserByEmail must NOT return the deleted user (email was anonymized).
+//   - The password-provider identity's ProviderID must be anonymized (it held the email, which is PII).
+//   - Non-password (OAuth/OIDC) identity ProviderIDs must be preserved intact, so that
+//     FindIdentityByProvider can still locate the identity and the service-layer DeletedAt gate
+//     can refuse it. Without this, a re-auth with the same OAuth credentials would fall through
+//     to the JIT-provision path and create a new account for the deleted user.
+//
+// Each backend's test must run this alongside StoreContractTesting.
+func StoreDeleteAuthGateContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	const email = "authgate_del@example.com"
+	const oauthProvider = "google"
+	const oauthSub = "google-sub-authgate"
+
+	user, err := store.CreateUser(ctx, tenant, email)
+	require.NoError(t, err)
+
+	// Add a password identity (ProviderID = email, which is PII and must be anonymized).
+	passwordHash := "hash"
+	pwIdent := &identity.Identity{
+		UserID:       user.ID,
+		Provider:     "password",
+		ProviderID:   email,
+		PasswordHash: &passwordHash,
+	}
+	require.NoError(t, store.AddIdentity(ctx, tenant, pwIdent))
+
+	// Add a non-password OAuth identity (ProviderID = opaque subject ID, must be preserved).
+	oauthIdent := &identity.Identity{
+		UserID:     user.ID,
+		Provider:   oauthProvider,
+		ProviderID: oauthSub,
+	}
+	require.NoError(t, store.AddIdentity(ctx, tenant, oauthIdent))
+
+	// Soft-delete the user.
+	require.NoError(t, store.DeleteUser(ctx, tenant, user.ID))
+
+	// 1. FindUserByID must still return the row (inspection contract).
+	deleted, err := store.FindUserByID(ctx, tenant, user.ID)
+	require.NoError(t, err, "FindUserByID must still return a soft-deleted user (inspection contract)")
+	require.NotNil(t, deleted.DeletedAt, "deleted user must have DeletedAt set")
+
+	// 2. FindUserByEmail must not return the deleted user (email was anonymized).
+	_, err = store.FindUserByEmail(ctx, tenant, email)
+	assert.ErrorIs(t, err, identity.ErrUserNotFound,
+		"FindUserByEmail must not find a soft-deleted user (email was anonymized)")
+
+	// 3. Password identity ProviderID must be anonymized (it was the email address, PII).
+	_, err = store.FindIdentityByProvider(ctx, tenant, "password", email)
+	assert.ErrorIs(t, err, identity.ErrIdentityNotFound,
+		"password identity ProviderID must be anonymized after deletion")
+
+	// 4. OAuth identity ProviderID must be PRESERVED so the service-layer DeletedAt gate fires.
+	//    Without this, LinkOrCreateIdentity's already-linked branch cannot detect the deleted
+	//    account and would fall through to JIT-provisioning a new account.
+	foundOAuth, err := store.FindIdentityByProvider(ctx, tenant, oauthProvider, oauthSub)
+	require.NoError(t, err,
+		"non-password identity ProviderID must be preserved after deletion so the auth gate fires")
+	assert.Equal(t, user.ID, foundOAuth.UserID,
+		"preserved OAuth identity must still reference the (now-deleted) user")
+}

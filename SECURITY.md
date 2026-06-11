@@ -140,10 +140,17 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
   account, an OAuth-only account, and a known account with no recovery channel all produce the
   same empty, no-error response.
-- **Deactivation revokes pending tokens.** Magic-link, password-reset and email-verification all
-  reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
-  re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its
-  outstanding passwordless logins and reset links (a token minted while live cannot resurrect it).
+- **Deactivation revokes pending tokens and blocks re-authentication.** Magic-link,
+  password-reset and email-verification all reject a token whose account has since been
+  soft-deleted (`DeleteUser`): the consume path re-checks `DeletedAt` and returns "not found",
+  so deleting an account reliably invalidates its outstanding passwordless logins and reset links.
+  `LinkOrCreateIdentity`'s already-linked branch likewise re-checks `DeletedAt` and returns
+  "not found", so a deleted account cannot regain a session through its previously-linked OAuth
+  identity. To make this gate reachable, `DeleteUser` only anonymizes the `provider_id` of
+  **password-provider** identity rows (the `provider_id` for password identities is the user's
+  email address, which is PII); non-password (OAuth/OIDC) identity `provider_id` values are
+  opaque external subject identifiers and are preserved intact so that `FindIdentityByProvider`
+  can still locate the identity after deletion, allowing the `DeletedAt` check to fire.
 - **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — egauth never
   sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
   is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).

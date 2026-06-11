@@ -151,7 +151,11 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 	return nil
 }
 
-// DeleteUser performs a soft delete and anonymizes the email.
+// DeleteUser performs a soft delete and anonymizes the user row plus any password-provider
+// identity rows. Non-password (OAuth/OIDC) identity ProviderIDs are intentionally preserved so
+// that the already-linked branch of LinkOrCreateIdentity can still resolve the identity and
+// reach the DeletedAt guard in the service layer — without this, re-authenticating with the
+// same OAuth credentials would JIT-provision a new account instead of being refused.
 func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,7 +172,14 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 
 	for _, ident := range s.identities {
 		if ident.UserID == id && ident.TenantID == tenantID {
-			ident.ProviderID = uuid.New().String()
+			// Only anonymize password-provider identities: their ProviderID is the user's
+			// email address, which is PII that must be erased. OAuth/OIDC ProviderIDs are
+			// opaque external subject identifiers; keeping them intact lets the already-linked
+			// branch of LinkOrCreateIdentity detect the deleted account and refuse it (via the
+			// DeletedAt gate in the service) rather than silently provisioning a new account.
+			if ident.Provider == "password" {
+				ident.ProviderID = uuid.New().String()
+			}
 		}
 	}
 
