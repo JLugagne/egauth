@@ -10,20 +10,48 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/google/uuid"
+	"golang.org/x/net/idna"
+	"golang.org/x/text/unicode/norm"
 )
 
-// normalizeEmail validates an email against RFC 5322 and returns its canonical form (trimmed,
-// lowercased). Because account uniqueness is byte-exact at the store, normalizing here means
-// "User@Example.com" and "user@example.com" resolve to a single account — closing both a
-// duplicate-account hazard and a pre-registration takeover of a victim's case-variant. The
-// local part is lowercased too: although RFC 5321 permits case-sensitive local parts, virtually
-// all providers treat them case-insensitively, so this is the safe, expected behavior.
+// normalizeEmail validates an email against RFC 5322 and returns its canonical form. The local
+// part is trimmed, NFC-normalized (golang.org/x/text/unicode/norm) and lowercased; the domain is
+// lowercased and folded to its IDN A-label (punycode) via golang.org/x/net/idna. Because account
+// uniqueness is byte-exact at the store, this canonicalization means "User@Example.com" and
+// "user@example.com", the NFC and NFD forms of an accented local part, and a Unicode domain and
+// its punycode equivalent all resolve to a single account — closing both a duplicate-account
+// hazard and a pre-registration takeover of a victim's case-variant or Unicode-variant address.
+// The local part is lowercased too: although RFC 5321 permits case-sensitive local parts,
+// virtually all providers treat them case-insensitively, so this is the safe, expected behavior.
 func normalizeEmail(email string) (string, error) {
 	addr, err := mail.ParseAddress(strings.TrimSpace(email))
 	if err != nil {
 		return "", ErrInvalidEmail
 	}
-	return strings.ToLower(addr.Address), nil
+
+	// Split into local part and domain on the last '@'. RFC 5322 allows '@'
+	// inside a quoted local part, so we cannot split on the first one.
+	at := strings.LastIndex(addr.Address, "@")
+	if at <= 0 || at == len(addr.Address)-1 {
+		return "", ErrInvalidEmail
+	}
+	local := addr.Address[:at]
+	domain := addr.Address[at+1:]
+
+	// NFC-normalize the local part so precomposed and decomposed Unicode forms
+	// of the same address (e.g. "josé" precomposed vs "e"+combining acute)
+	// collapse to one key, then lowercase for case-insensitive matching.
+	local = strings.ToLower(norm.NFC.String(local))
+
+	// Fold the domain to its IDN A-label (punycode) so a Unicode (U-label)
+	// domain and its punycode equivalent map to one key. ToASCII also
+	// lowercases and applies the IDNA mapping; it rejects malformed domains.
+	asciiDomain, err := idna.Lookup.ToASCII(domain)
+	if err != nil {
+		return "", ErrInvalidEmail
+	}
+
+	return local + "@" + asciiDomain, nil
 }
 
 // Default lockout configuration values.
