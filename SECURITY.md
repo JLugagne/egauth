@@ -109,6 +109,14 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
   pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the
   password alone. On refresh the AMR is re-evaluated by the `ClaimsProvider`, not frozen at login.
+  To make that re-evaluation per-session rather than per-user, `Rotate` attaches a
+  `tokens.RotationContext` (the rotation family ID and the family's preserved `auth_time`) to the
+  context passed to `ClaimsProvider.ClaimsForUser`; recover it with `tokens.RotationContextFromContext`.
+  This lets a provider keyed by family ID preserve (or deliberately downgrade) the assurance the
+  family originally proved, instead of being forced to either silently decay a legitimately
+  MFA-elevated session after one access-token TTL or blanket-elevate every session of an
+  MFA-enrolled user — the latter being a step-up bypass where a password-only family would gain
+  `AMRMFA` on its first silent refresh.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
