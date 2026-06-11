@@ -11,6 +11,7 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
 // ClaimsBuilder maps an authenticated user to the claims embedded in their issued tokens.
@@ -36,6 +37,12 @@ const DefaultDeliveryConcurrency = 64
 // delivery context, so a slow or hung Mailer/SMSSender cannot pin a delivery slot indefinitely.
 // Override with WithDeliveryTimeout.
 const DefaultDeliveryTimeout = 30 * time.Second
+
+// DefaultInterimTokenTTL is the lifetime of the short-lived INTERIM access token issued by an
+// MFA-gated LoginHandler to an enrolled user after a correct password but before the second
+// factor is verified. It must be just long enough for the user to complete the TOTP/recovery
+// step, never long enough to be a usable session. Override with WithInterimTokenTTL.
+const DefaultInterimTokenTTL = 5 * time.Minute
 
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
@@ -64,6 +71,13 @@ type handlerConfig struct {
 	// served by a given handler instance — a per-request channel would make the cap meaningless)
 	// with capacity deliveryConcurrency; a non-positive cap leaves it nil, disabling the bound.
 	deliverySem chan struct{}
+	// mfaGate, when non-nil, turns LoginHandler into an MFA-gated handler: after a correct
+	// password it checks whether the user has a confirmed second factor and, if so, issues a
+	// short-lived INTERIM access token (AMR=[pwd], no refresh cookie) instead of the full pair,
+	// forcing a step-up (see mfa.StepUpHandler) before a refreshable session is granted.
+	mfaGate MFAEnrollmentChecker
+	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
+	interimTTL time.Duration
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -85,6 +99,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		maxBodyBytes:         DefaultMaxBodyBytes,
 		deliveryConcurrency:  DefaultDeliveryConcurrency,
 		deliveryTimeout:      DefaultDeliveryTimeout,
+		interimTTL:           DefaultInterimTokenTTL,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -308,6 +323,26 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			status, code := mapAuthError(err)
 			cfg.fail(w, r, status, code)
 			return
+		}
+
+		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
+		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
+		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
+		// the full pair. Users without an enrolled factor fall through to the full pair below.
+		if cfg.mfaGate != nil {
+			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
+			if err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				return
+			}
 		}
 
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
@@ -844,7 +879,9 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 // cookies (the account is gone) and responds 204 (or redirects). Deletion is sensitive and
 // irreversible: you SHOULD gate it behind a re-authentication / step-up check (fresh proof of
 // presence) in front of this handler in addition to the session, and configure WithTrustedOrigins
-// so the CSRF origin check is active. A first-class enforceable step-up primitive is planned.
+// so the CSRF origin check is active. For a first-class enforceable step-up, gate the route with
+// tokens.WithRequiredAMR(tokens.AMRMFA) and produce MFA-bearing tokens via identity.WithMFAGate +
+// mfa.StepUpHandler.
 func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1207,4 +1244,63 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		}
 		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
+}
+
+// MFAEnrollmentChecker reports whether a user has a confirmed second factor enrolled. It is
+// the minimal slice of mfa.Service that the MFA login gate needs; mfa.Service satisfies it
+// directly. It is consumed by WithMFAGate so the identity package does not import the mfa
+// package (which would create an import cycle: mfa already depends on tokens, not identity).
+type MFAEnrollmentChecker interface {
+	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+}
+
+// WithMFAGate turns LoginHandler into an MFA-gated handler. After a correct password it asks
+// the checker whether the user has a confirmed second factor enrolled. An enrolled user is NOT
+// granted the full access+refresh pair; instead they receive a short-lived INTERIM access token
+// stamped AMR=[tokens.AMRPassword] (never the MFA marker) and NO refresh cookie, so the pre-MFA
+// state is not an indefinitely renewable session. The application then drives the second factor
+// (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR including tokens.AMRMFA. Users
+// without an enrolled factor are unaffected and still receive the full pair.
+//
+// This is the producing half of the AMR/step-up model whose enforcing half is
+// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly.
+func WithMFAGate(checker MFAEnrollmentChecker) HandlerOption {
+	return func(h *handlerConfig) { h.mfaGate = checker }
+}
+
+// WithInterimTokenTTL overrides the lifetime of the INTERIM access token issued by an
+// MFA-gated LoginHandler (default DefaultInterimTokenTTL). A non-positive value falls back to
+// the default rather than minting a non-expiring token.
+func WithInterimTokenTTL(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) {
+		if d > 0 {
+			h.interimTTL = d
+		}
+	}
+}
+
+// issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
+// who has passed the password step but not yet the second factor, and writes ONLY the access
+// cookie. The interim token carries AMR=[tokens.AMRPassword] (so tokens.WithRequiredAMR with the
+// MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
+// pre-step-up state is not a renewable session. The application completes the flow with
+// mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User) error {
+	claims := claimsOf(user)
+	// Stamp the password factor only and force a short explicit access-token expiry, overriding
+	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
+	claims.AMR = []string{tokens.AMRPassword}
+	ttl := cfg.interimTTL
+	if ttl <= 0 {
+		ttl = DefaultInterimTokenTTL
+	}
+	claims.ExpiresAt = time.Now().Add(ttl)
+	pair, err := issuer.IssueTokenPair(r.Context(), claims)
+	if err != nil {
+		return err
+	}
+	// Deliberately set ONLY the access cookie: the refresh token (minted by the issuer) is not
+	// surfaced to the client, so the interim state cannot be renewed via /refresh.
+	cfg.cookies.SetAccess(w, pair.AccessToken)
+	return nil
 }

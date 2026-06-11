@@ -92,9 +92,23 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   recovery-code / passkey attempts is the consumer's responsibility; egauth exposes the errors
   and propagates `context.Context` so an external limiter can be attached in front of the handlers.
 - **Step-up / AAL enforcement.** Tokens carry an `AMR` claim (RFC 8176) recording the factors used
-  to obtain them; `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
-  `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. On refresh the AMR is
-  re-evaluated by the `ClaimsProvider`, not frozen at login.
+  to obtain them. The model has two halves and **both ship in egauth**:
+  - *Enforcement.* `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
+    `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. It fails **closed**: a
+    token that does not carry the required AMR value never passes, so a password-only session can
+    never satisfy `WithRequiredAMR(AMRMFA)`.
+  - *Production.* `identity.WithMFAGate(mfaSvc)` makes `LoginHandler` check `IsEnrolled` after a
+    correct password; an enrolled user receives a **short-lived interim access token**
+    (`AMR=[AMRPassword]`, default 5 min, configurable via `WithInterimTokenTTL`) and **no refresh
+    cookie**, so the pre-MFA state is not an indefinitely renewable session. The second factor is
+    then driven by `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full**
+    access+refresh pair with `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the
+    interim access cookie. Users with no enrolled factor are unaffected and receive the full pair.
+
+  Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
+  application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
+  pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the
+  password alone. On refresh the AMR is re-evaluated by the `ClaimsProvider`, not frozen at login.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.

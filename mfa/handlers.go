@@ -1,11 +1,13 @@
 package mfa
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
 
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 )
 
@@ -20,13 +22,16 @@ type handlerConfig struct {
 	codeField    string
 	successURL   string
 	failureURL   string
+	// cookies controls how StepUpHandler writes the re-issued access+refresh pair. The other
+	// handlers do not mint tokens and ignore it. It defaults to tokens.DefaultCookies().
+	cookies tokens.Cookies
 }
 
 // HandlerOption configures the MFA HTTP handlers.
 type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
-	c := handlerConfig{accountField: "account", codeField: "code"}
+	c := handlerConfig{accountField: "account", codeField: "code", cookies: tokens.DefaultCookies()}
 	for _, opt := range opts {
 		opt(&c)
 	}
@@ -59,6 +64,13 @@ func WithSuccessRedirect(rawURL string) HandlerOption {
 // failure instead of an HTTP error status.
 func WithFailureRedirect(rawURL string) HandlerOption {
 	return func(h *handlerConfig) { h.failureURL = rawURL }
+}
+
+// WithCookies configures how StepUpHandler writes the re-issued access+refresh pair. It must
+// match the cookie configuration of the identity LoginHandler that issued the interim token so
+// the step-up cookies overwrite the interim ones. Defaults to tokens.DefaultCookies().
+func WithCookies(c tokens.Cookies) HandlerOption {
+	return func(h *handlerConfig) { h.cookies = c }
 }
 
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
@@ -228,4 +240,43 @@ func withErrorParam(rawURL, code string) string {
 	q.Set("error", code)
 	u.RawQuery = q.Encode()
 	return u.String()
+}
+
+// StepUpClaimsBuilder maps the stepped-up user (resolved from the interim session) to the claims
+// embedded in the full token pair StepUpHandler re-issues. The handler overwrites the returned
+// AMR with [pwd, otp, mfa]; the builder supplies the rest (subject, tenant, scopes, custom).
+// Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
+// applies to the full session.
+type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[C]
+
+// StepUpHandler is the completion half of the AMR/step-up model whose pre-step-up half is
+// identity.WithMFAGate. It is mounted behind the interim session (the access cookie set by an
+// MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code it verifies the
+// second factor, then re-issues the FULL access+refresh pair with AMR=[tokens.AMRPassword,
+// tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the interim access cookie.
+// A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new token but never the
+// interim one. On an incorrect/expired code it fails (like VerifyHandler) and mints nothing, so
+// the interim session is never upgraded.
+//
+// Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
+func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.VerifyTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
+			cfg.failErr(w, r, err)
+			return
+		}
+		claims := claimsOf(r.Context(), uid, tenant)
+		// The factor set is now password + a verified TOTP, so the token reaches the MFA
+		// assurance level. AMR is set here (not by the builder) so it is authoritative.
+		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
+		pair, err := issuer.IssueTokenPair(r.Context(), claims)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+			return
+		}
+		cfg.cookies.SetAccess(w, pair.AccessToken)
+		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		cfg.ok(w, r)
+	})
 }
