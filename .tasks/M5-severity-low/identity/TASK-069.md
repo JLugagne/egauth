@@ -4,7 +4,7 @@ title: "FindUserByID does not filter DeletedAt/DisabledAt in either store, leavi
 description: "FindUserByID in the memory store returns the user with no DeletedAt or DisabledAt filtering (the only guard is tenant match), and the pgx FindUserByID likewise selects WHERE id=$1 AND tenant_id=$2 with NO `deleted_at IS NULL` filter (adapters/pgx/identity/store.go:87-104) — unlike FindUserByEmail in…"
 milestone: M5-severity-low
 epic: identity
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -49,3 +49,5 @@ WHERE id = $1 AND tenant_id = $2          // no `AND deleted_at IS NULL`, unlike
 
 **Recommended fix**
 Keep FindUserByID returning soft-deleted rows for inspection (the contract depends on it), but make the authorization invariant explicit: gate on DisabledAt/DeletedAt at every authentication/authorization caller (Authenticate, consumeForLiveUser, and the LinkOrCreateIdentity fix above), and add a storetest contract assertion that exercises an OAuth-linked, suspended account through LinkOrCreateIdentity and asserts it is refused — so the gate cannot silently regress in either store.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
