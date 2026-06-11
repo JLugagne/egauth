@@ -16,7 +16,12 @@ type Store interface {
 	// TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	CreateSession(ctx context.Context, tenantID string, session *Session) error
 
-	// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
+	// FindSessionByHash retrieves a non-expired session by its token hash, scoped to tenantID.
+	// Expired sessions are treated as not found: a record whose ExpiresAt is in the past must
+	// yield ErrSessionNotFound, never the stale row. This is part of the contract every backend
+	// must honour (the memory store evicts the expired match opportunistically; SQL backends add
+	// an expires_at >= now() predicate) so that direct callers such as service.RevokeSession see
+	// identical behaviour on every Store implementation.
 	FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*Session, error)
 
 	// UpdateSession updates a mutable session (its token hash, expiry, and last-seen
