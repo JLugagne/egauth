@@ -212,6 +212,16 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 
 // Compare checks a plaintext password against a PHC formatted Argon2id hash.
 func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
+	// Reject empty candidates immediately, mirroring Hash() which also short-circuits before
+	// the KDF on empty input. No stored hash can ever correspond to "": Hash rejects empty
+	// passwords, so the round-trip is impossible. Returning here restores timing symmetry with
+	// the decoy path (decoyHash -> Hash("") also returns instantly), preventing an
+	// empty-password timing oracle that would otherwise reveal which accounts have a stored
+	// password hash. See TASK-065 / SECURITY.md enumeration-defence contract.
+	if password == "" {
+		return passwords.ErrInvalidPassword
+	}
+
 	// Refuse to run the KDF on oversized candidate input (pre-auth DoS guard). A stored hash
 	// can only have come from an in-bounds password, so an oversized candidate cannot match;
 	// report it as an ordinary mismatch to avoid leaking a distinct signal.
