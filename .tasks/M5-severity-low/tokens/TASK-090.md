@@ -4,7 +4,7 @@ title: "VerifyAccessToken performs no tenant binding, unlike the tenant-scoped r
 description: "VerifyRefreshToken and VerifyAPIKey both take a tenantID and fail closed on a cross-tenant lookup (proven by multitenant_test.go). VerifyAccessToken takes NO tenant parameter: it parses the JWT, reads the signed tenant_id claim, and returns it in Claims.TenantID without comparing it to any expected…"
 milestone: M5-severity-low
 epic: tokens
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*t
 
 **Recommended fix**
 Offer a tenant-scoped variant (e.g. VerifyAccessTokenForTenant(ctx, tenantID, token) that rejects a mismatched tenant_id), or document prominently at the VerifyAccessToken call site that multi-tenant consumers MUST compare the returned Claims.TenantID against the request tenant. Mirror the fail-closed scoping the refresh path already provides.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
