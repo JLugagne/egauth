@@ -26,6 +26,7 @@ func TestMiddleware(t *testing.T) {
 				UserID:    userID,
 				TenantID:  tenantID,
 				ExpiresAt: time.Now().Add(time.Hour),
+				CreatedAt: time.Now(),
 			}, nil
 		},
 	}
@@ -114,6 +115,7 @@ func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
 				UserID:    userID,
 				TenantID:  "",
 				ExpiresAt: time.Now().Add(time.Hour),
+				CreatedAt: time.Now(),
 			}, nil
 		},
 	}
@@ -155,6 +157,7 @@ func TestMiddleware_WithCookieName(t *testing.T) {
 				UserID:    userID,
 				TenantID:  tenantID,
 				ExpiresAt: time.Now().Add(time.Hour),
+				CreatedAt: time.Now(),
 			}, nil
 		},
 	}

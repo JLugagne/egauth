@@ -114,7 +114,7 @@ func TestTouchAndRotate_RejectExpiredSession(t *testing.T) {
 // store's compare-and-set fails (the token was already swapped by the winner), so Rotate must
 // return ErrSessionNotFound rather than a fresh token that would never validate.
 func TestRotate_ConcurrentLoserGetsHonestError(t *testing.T) {
-	sess := &sessions.Session{ID: uuid.New(), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour)}
+	sess := &sessions.Session{ID: uuid.New(), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
 	store := &storetest.MockStore{
 		FindSessionByHashFunc: func(_ context.Context, _ string, _ string) (*sessions.Session, error) {
 			c := *sess

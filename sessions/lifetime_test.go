@@ -122,9 +122,11 @@ func TestMaxLifetime_RotateClampsExpiryToDeadline(t *testing.T) {
 	assert.Equal(t, deadline, rotated.ExpiresAt, "Rotate must clamp ExpiresAt to the absolute deadline")
 }
 
-// TestMaxLifetime_ZeroDisablesCap verifies backward compatibility: the zero value disables
-// the absolute cap, so Touch can keep extending indefinitely.
-func TestMaxLifetime_ZeroDisablesCap(t *testing.T) {
+// TestNoMaxLifetime_TouchCanExtendIndefinitely verifies that WithNoMaxLifetime disables the
+// absolute cap so Touch can keep extending the session indefinitely (idle timeout only).
+// This replaces the old TestMaxLifetime_ZeroDisablesCap now that WithMaxLifetime(0) means
+// "keep the default" rather than "disable the cap".
+func TestNoMaxLifetime_TouchCanExtendIndefinitely(t *testing.T) {
 	ctx := context.Background()
 
 	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
@@ -134,7 +136,7 @@ func TestMaxLifetime_ZeroDisablesCap(t *testing.T) {
 	svc := sessions.NewService(
 		memory.NewStore(),
 		sessions.WithClock(clock),
-		sessions.WithMaxLifetime(0),
+		sessions.WithNoMaxLifetime(), // explicit insecure opt-out
 	)
 
 	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", time.Minute)
@@ -146,6 +148,42 @@ func TestMaxLifetime_ZeroDisablesCap(t *testing.T) {
 		_, err := svc.Touch(ctx, "", token, time.Minute)
 		require.NoError(t, err)
 	}
+}
+
+// TestWithMaxLifetime_ZeroKeepsDefault verifies that WithMaxLifetime(0) is treated as
+// "keep the default 30-day cap" — not as "disable the cap".
+func TestWithMaxLifetime_ZeroKeepsDefault(t *testing.T) {
+	ctx := context.Background()
+
+	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := frozen
+	clock := func() time.Time { return now }
+
+	// WithMaxLifetime(0) must keep the secure default, not disable it.
+	svc := sessions.NewService(
+		memory.NewStore(),
+		sessions.WithClock(clock),
+		sessions.WithMaxLifetime(0),
+	)
+
+	const idle = time.Hour
+	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	require.NoError(t, err)
+
+	// Advance 31 days touching every hour: the session must be rejected around the 30-day mark.
+	const thirtyOneDays = 31 * 24 * time.Hour
+	var rejected bool
+	for elapsed := time.Duration(0); elapsed < thirtyOneDays; elapsed += idle {
+		now = frozen.Add(elapsed + idle)
+		_, err := svc.Touch(ctx, "", token, idle)
+		if err != nil {
+			require.ErrorIs(t, err, sessions.ErrSessionNotFound)
+			rejected = true
+			break
+		}
+	}
+	require.True(t, rejected,
+		"WithMaxLifetime(0) must keep the 30-day default cap, not disable it")
 }
 
 // TestRevokeAllForUser verifies SEC-09: revoking all sessions for a user stops every one of
@@ -207,4 +245,46 @@ func TestSingleTenant_RevokeAllForUser(t *testing.T) {
 
 	_, err = st.ValidateSession(ctx, otherToken)
 	assert.NoError(t, err)
+}
+
+// TestDefaultMaxLifetime_TouchCannotExtendPastDefaultDeadline is the regression test for
+// TASK-084: a default-configured NewService (no WithMaxLifetime) must enforce a 30-day
+// absolute session lifetime. Without the fix, Touch keeps extending the session forever.
+func TestDefaultMaxLifetime_TouchCannotExtendPastDefaultDeadline(t *testing.T) {
+	ctx := context.Background()
+
+	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	now := frozen
+	clock := func() time.Time { return now }
+
+	const idle = time.Hour
+	const thirtyOneDays = 31 * 24 * time.Hour
+
+	// Default service — no WithMaxLifetime option.
+	svc := sessions.NewService(
+		memory.NewStore(),
+		sessions.WithClock(clock),
+	)
+
+	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	require.NoError(t, err)
+
+	// Advance 31 days in 1-hour steps, Touching on every step to keep the idle window alive.
+	// After the fix the session must be rejected once CreatedAt+30days is crossed; before the
+	// fix every Touch succeeds because there is no absolute cap at all.
+	var rejectedAt time.Duration
+	for elapsed := time.Duration(0); elapsed < thirtyOneDays; elapsed += idle {
+		now = frozen.Add(elapsed + idle)
+		_, touchErr := svc.Touch(ctx, "", token, idle)
+		if touchErr != nil {
+			require.ErrorIs(t, touchErr, sessions.ErrSessionNotFound,
+				"expected ErrSessionNotFound once past 30-day absolute deadline")
+			rejectedAt = elapsed + idle
+			break
+		}
+	}
+	require.NotZero(t, rejectedAt,
+		"session was never rejected: default NewService must enforce a 30-day absolute lifetime")
+	require.LessOrEqual(t, rejectedAt, 31*24*time.Hour,
+		"session should have been rejected at or before 31 days, got rejection at %s", rejectedAt)
 }

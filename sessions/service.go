@@ -45,21 +45,28 @@ type Service interface {
 }
 
 type service struct {
-	store       Store
-	now         func() time.Time
-	maxLifetime time.Duration
-	events      event.Sink
+	store         Store
+	now           func() time.Time
+	maxLifetime   time.Duration
+	noMaxLifetime bool
+	events        event.Sink
 }
 
 // NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
 // startup rather than with a nil-pointer panic deep in a request).
+//
+// By default an absolute session lifetime of 30 days is enforced (SEC-08): regardless of how
+// recently Touch was called a session is rejected once now exceeds CreatedAt+30d. Use
+// WithMaxLifetime to override the cap duration or WithNoMaxLifetime to disable it entirely
+// (disabling is documented as insecure — prefer a longer cap over no cap).
 func NewService(store Store, opts ...ServiceOption) Service {
 	if store == nil {
 		panic("sessions: NewService requires a non-nil Store")
 	}
 	s := &service{
-		store: store,
-		now:   time.Now,
+		store:       store,
+		now:         time.Now,
+		maxLifetime: 30 * 24 * time.Hour, // secure-by-default: 30-day absolute cap (SEC-08)
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -226,17 +233,37 @@ func (s *service) hashToken(token string) string {
 // Once now is past CreatedAt+d the session stops validating and can no longer be touched or
 // rotated, regardless of how recently it was active — an idle-timeout slide can never keep a
 // stolen-but-kept-warm token alive indefinitely. Touch and Rotate additionally clamp the new
-// ExpiresAt so it never slides past the absolute deadline. The zero value disables the cap
-// (idle timeout only), preserving the previous behaviour.
+// ExpiresAt so it never slides past the absolute deadline.
+//
+// NewService already applies a 30-day default cap (SEC-08). Pass WithMaxLifetime to shorten or
+// lengthen that cap. A zero duration is treated as "keep the default" (same as not calling
+// WithMaxLifetime at all). To disable the cap entirely use WithNoMaxLifetime (insecure).
 func WithMaxLifetime(d time.Duration) ServiceOption {
-	return func(s *service) { s.maxLifetime = d }
+	return func(s *service) {
+		if d > 0 {
+			s.maxLifetime = d
+		}
+		// zero → keep the default set in NewService; callers that want no cap must use WithNoMaxLifetime.
+	}
+}
+
+// WithNoMaxLifetime disables the absolute session lifetime cap entirely, relying on the idle
+// timeout alone. This is insecure: an attacker who keeps a stolen token warm with periodic
+// requests can extend the session forever. Prefer a longer WithMaxLifetime over this option.
+// If you call both WithMaxLifetime and WithNoMaxLifetime the last option wins (standard
+// ServiceOption ordering applies).
+func WithNoMaxLifetime() ServiceOption {
+	return func(s *service) {
+		s.noMaxLifetime = true
+		s.maxLifetime = 0
+	}
 }
 
 // absoluteDeadline returns the absolute expiry deadline (CreatedAt+maxLifetime) for a session
-// and whether an absolute cap is configured. When maxLifetime is zero the cap is disabled and
-// ok is false.
+// and whether an absolute cap is active. The cap is disabled only when WithNoMaxLifetime was
+// explicitly called; a positive maxLifetime always enforces the cap.
 func (s *service) absoluteDeadline(session *Session) (time.Time, bool) {
-	if s.maxLifetime <= 0 {
+	if s.noMaxLifetime || s.maxLifetime <= 0 {
 		return time.Time{}, false
 	}
 	return session.CreatedAt.Add(s.maxLifetime), true

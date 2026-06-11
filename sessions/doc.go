@@ -25,6 +25,14 @@
 //
 // NewService panics on a nil Store (fail-fast at startup).
 //
+// # Absolute session lifetime (SEC-08)
+//
+// NewService enforces a 30-day absolute session lifetime by default. Regardless of how
+// recently Touch was called, a session is rejected once now > CreatedAt+30d. Use
+// WithMaxLifetime to shorten or lengthen the cap. Use WithNoMaxLifetime to disable it
+// entirely — this is insecure and should only be used in explicitly documented contexts.
+// WithMaxLifetime(0) keeps the default (it does not disable the cap).
+//
 // # HTTP middleware
 //
 // RequireSession validates the session cookie and hands the authenticated egauth.Actor and Session

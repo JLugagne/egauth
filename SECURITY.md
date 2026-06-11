@@ -248,6 +248,16 @@ redaction is in any case only a backstop. Therefore the consumer must:
   hardcoded `session_token` name cannot be protected from this attack by the library alone.
   The default remains `"session_token"` for backwards compatibility; deployments should
   migrate to a `__Host-` prefixed name.
+- **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
+  lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
+  timeout). Regardless of how recently `Touch` was called, a session is rejected once
+  `now > CreatedAt + 30d`. Use `sessions.WithMaxLifetime(d)` to shorten or lengthen this
+  cap. Use `sessions.WithNoMaxLifetime()` to disable it entirely — this is insecure: an
+  attacker who keeps a stolen token warm with periodic requests can extend the session
+  forever, and should only be used in explicitly documented, low-risk contexts.
+  `WithMaxLifetime(0)` is treated as "keep the default" (not "disable"), so callers that
+  pass a configurable duration do not silently opt out of the cap when the user configures
+  zero.
 
 ## CSRF on the form handlers (consumer responsibility)
 
