@@ -323,9 +323,22 @@ not a bug:
   conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
   time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
   the interim).
+- **`no_credentials` → 400** on `BeginLoginHandler`: when the resolved user has no registered
+  passkeys, `BeginLogin` returns `ErrNoCredentials`, which `BeginLoginHandler` maps to HTTP 400
+  `no_credentials`. A user with at least one passkey receives HTTP 200 plus a challenge. A
+  caller that can drive the begin-login endpoint with a chosen/identified userID can therefore
+  distinguish "account has passkeys" from "account has none" — a passkey-enrolment enumeration
+  oracle. This is an accepted trade-off: WebAuthn UX fundamentally requires the server to
+  know whether the account has any credential before issuing a challenge, and a silent generic
+  error would break the client flow. **Consumer guidance:** gate `BeginLoginHandler` behind
+  per-IP or per-subject rate limiting (egauth does not throttle ceremony attempts — see the
+  hardening checklist above). If your threat model forbids passkey-enrolment enumeration,
+  change your `UserResolver` to return `ok=false` (→ 401) for unenrolled subjects before the
+  handler reaches `BeginLogin`, or handle `ErrNoCredentials` yourself and return a generic 400
+  without the `no_credentials` body.
 
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
-decoy hashing); the three disclosures above are the only intentional exceptions.
+decoy hashing); the four disclosures above are the only intentional exceptions.
 
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an
