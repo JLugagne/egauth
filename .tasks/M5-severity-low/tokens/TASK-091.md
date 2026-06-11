@@ -4,7 +4,7 @@ title: "Auto-refresh race clears freshly minted cookies, defeating the documente
 description: "SECURITY.md promises that a replay within ReuseGracePeriod is treated as benign concurrency precisely 'to avoid logging users out on ordinary request concurrency (parallel tabs, prefetch, concurrent sub-resource loads racing the same cookie)'. The server side delivers this (jwt.Service.Rotate keeps…"
 milestone: M5-severity-low
 epic: tokens
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ middleware.go:136-142: `pair, err := cfg.rotator.Rotate(r.Context(), tenantID, r
 
 **Recommended fix**
 Make the benign outcome distinguishable and non-destructive: have Rotate return a distinct sentinel (e.g. tokens.ErrRefreshConcurrent, wrapping ErrRefreshTokenReused for compatibility) for the within-grace replay and the lost-Consume-race cases, and have RequireAuth and RefreshHandler skip cookies.Clear (or clear only the access cookie) for that error, returning 401/retry so the winner's cookies survive. Keep the unconditional Clear for after-grace reuse, expiry and not-found.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
