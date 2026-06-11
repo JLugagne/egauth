@@ -1,6 +1,7 @@
 package passkey
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/event"
+	"github.com/go-webauthn/webauthn/metadata"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
@@ -83,6 +85,10 @@ type Config struct {
 	// regressed signature counter flags a possible cloned authenticator. A nil sink disables
 	// emission.
 	Events event.Sink
+	// Attestation is the opt-in attestation policy (conveyance preference + AAGUID allow/deny +
+	// optional MDS trust validation). Its zero value preserves today's behavior: no preference, no
+	// filtering, no MDS. See AttestationConfig.
+	Attestation AttestationConfig
 }
 
 // Service runs the WebAuthn registration and login ceremonies over a credential Store.
@@ -134,7 +140,7 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		uv = protocol.VerificationRequired
 	}
 
-	wa, err := webauthn.New(&webauthn.Config{
+	waCfg := &webauthn.Config{
 		RPID:          cfg.RPID,
 		RPDisplayName: cfg.RPDisplayName,
 		RPOrigins:     cfg.RPOrigins,
@@ -149,7 +155,23 @@ func NewService(store Store, cfg Config) (*Service, error) {
 			Login:        webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
 			Registration: webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
 		},
-	})
+		// Attestation policy passthrough. AttestationPreference and MDS are zero-safe ("" and nil),
+		// so a caller who never touches Config.Attestation gets exactly the prior behavior.
+		AttestationPreference: cfg.Attestation.ConveyancePreference,
+		MDS:                   cfg.Attestation.MDS,
+	}
+	// Build Filtering ONLY when an AAGUID/backup rule is set; otherwise leave it nil so the
+	// no-attestation-config path is byte-for-byte unchanged (go-webauthn skips
+	// ValidateFilteredCredential when Filtering is nil).
+	if len(cfg.Attestation.PermittedAAGUIDs) > 0 || len(cfg.Attestation.ProhibitedAAGUIDs) > 0 || cfg.Attestation.ProhibitBackupEligibility {
+		waCfg.Filtering = &webauthn.FilteringConfig{
+			PermittedAAGUIDs:          cfg.Attestation.PermittedAAGUIDs,
+			ProhibitedAAGUIDs:         cfg.Attestation.ProhibitedAAGUIDs,
+			ProhibitBackupEligibility: cfg.Attestation.ProhibitBackupEligibility,
+		}
+	}
+
+	wa, err := webauthn.New(waCfg)
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +207,15 @@ func (s *Service) FinishRegistration(ctx context.Context, tenantID string, userI
 	}
 	cred, err := s.wa.FinishRegistration(u, session, r)
 	if err != nil {
+		// go-webauthn runs ValidateFilteredCredential when Config.Filtering is set and returns a
+		// *protocol.Error with Type=="policy_restriction" when the authenticator is outside the
+		// configured AAGUID allow/deny or backup-eligibility policy. Map that to
+		// ErrAttestationRejected, emit a rejection event, and return BEFORE any SaveCredential so
+		// nothing is stored.
+		if isAttestationPolicyError(err) {
+			s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: userID.String(), TenantID: tenantID, Reason: "passkey_attestation_rejected"})
+			return nil, ErrAttestationRejected
+		}
 		return nil, err
 	}
 	stored, err := toStored(userID, cred)
@@ -229,7 +260,13 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
+	// Preserve the registration-time metadata the assertion response does not carry (nickname,
+	// transports, created-at) and stamp LastUsedAt; UpdateCredential is a full-record replace.
+	existing, err := s.findStoredCredential(ctx, tenantID, userID, stored.ID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.applyLoginMetadata(ctx, tenantID, existing, stored); err != nil {
 		return nil, err
 	}
 	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: userID.String(), TenantID: tenantID, Reason: "passkey"})
@@ -277,7 +314,13 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 	if err != nil {
 		return nil, uuid.Nil, err
 	}
-	if err := s.store.UpdateCredential(ctx, tenantID, stored); err != nil {
+	// Preserve registration-time metadata and stamp LastUsedAt (full-record replace), same as the
+	// username-based login path.
+	existing, err := s.findStoredCredential(ctx, tenantID, resolvedID, stored.ID)
+	if err != nil {
+		return nil, uuid.Nil, err
+	}
+	if err := s.applyLoginMetadata(ctx, tenantID, existing, stored); err != nil {
 		return nil, uuid.Nil, err
 	}
 	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_discoverable"})
@@ -316,13 +359,27 @@ func toStored(userID uuid.UUID, cred *webauthn.Credential) (*Credential, error) 
 	if err != nil {
 		return nil, err
 	}
+	// Capture the management metadata carried by the ceremony response: transports (only present on
+	// the attestation/registration response), and the BE/BS backup flags from the authenticator
+	// data. The assertion (login) response carries no transports, so applyLoginMetadata preserves
+	// the registration-time values across logins.
+	transports := make([]string, 0, len(cred.Transport))
+	for _, t := range cred.Transport {
+		transports = append(transports, string(t))
+	}
+	if len(transports) == 0 {
+		transports = nil
+	}
 	return &Credential{
-		UserID:    userID,
-		ID:        cred.ID,
-		PublicKey: cred.PublicKey,
-		SignCount: cred.Authenticator.SignCount,
-		Data:      data,
-		CreatedAt: time.Now().UTC(),
+		UserID:         userID,
+		ID:             cred.ID,
+		PublicKey:      cred.PublicKey,
+		SignCount:      cred.Authenticator.SignCount,
+		Data:           data,
+		CreatedAt:      time.Now().UTC(),
+		Transports:     transports,
+		BackupEligible: cred.Flags.BackupEligible,
+		BackupState:    cred.Flags.BackupState,
 	}, nil
 }
 
@@ -344,3 +401,117 @@ var _ webauthn.User = (*waUser)(nil)
 
 // emit sends a security event to the configured sink (a no-op when none is set).
 func (s *Service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }
+
+// AttestationConfig is the opt-in attestation policy for a passkey Service. Every field's zero
+// value reproduces today's behavior: no conveyance preference, no AAGUID filtering, no MDS trust
+// validation. Set it on Config.Attestation to enforce a stricter policy at FinishRegistration.
+type AttestationConfig struct {
+	// ConveyancePreference is the attestation conveyance preference flowed into the registration
+	// ceremony options via webauthn.Config.AttestationPreference (e.g. protocol.PreferNoAttestation,
+	// protocol.PreferDirectAttestation). The zero value ("") keeps go-webauthn's default.
+	ConveyancePreference protocol.ConveyancePreference
+	// PermittedAAGUIDs, when non-empty, restricts registration to authenticators whose AAGUID is in
+	// the list (allow-list). Mutually exclusive with ProhibitedAAGUIDs.
+	PermittedAAGUIDs []uuid.UUID
+	// ProhibitedAAGUIDs, when non-empty, rejects registration from authenticators whose AAGUID is in
+	// the list (deny-list). Mutually exclusive with PermittedAAGUIDs.
+	ProhibitedAAGUIDs []uuid.UUID
+	// ProhibitBackupEligibility, when true, rejects registration from backup-eligible (syncable)
+	// authenticators.
+	ProhibitBackupEligibility bool
+	// MDS is an optional FIDO Metadata Service provider for attestation trust-anchor validation. When
+	// set it is passed through to webauthn.Config.MDS. The zero value (nil) disables MDS validation.
+	MDS metadata.Provider
+}
+
+// isAttestationPolicyError reports whether err is a go-webauthn attestation-filtering rejection.
+// ValidateFilteredCredential surfaces a *protocol.Error whose Type is "policy_restriction" (a copy
+// of protocol.ErrPolicyRestriction built via WithInfo), so matching on Type rather than pointer
+// identity is the stable seam.
+func isAttestationPolicyError(err error) bool {
+	var protoErr *protocol.Error
+	return errors.As(err, &protoErr) && protoErr.Type == "policy_restriction"
+}
+
+// findStoredCredential loads the user's stored credential whose ID matches credentialID, scoped to
+// the tenant and user (so a caller cannot reach another user's/tenant's credential). It returns nil
+// (no error) when the user has no matching credential.
+func (s *Service) findStoredCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) (*Credential, error) {
+	creds, err := s.store.GetCredentials(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	for _, c := range creds {
+		if bytes.Equal(c.ID, credentialID) {
+			return c, nil
+		}
+	}
+	return nil, nil
+}
+
+// applyLoginMetadata folds a successful login into the stored credential record and persists it.
+// Because Store.UpdateCredential is a full-record replace on every backend, the assertion-derived
+// record (stored) would otherwise blank the fields the assertion response does not carry. This
+// copies forward from the existing record the non-assertion-carried fields (Nickname, Transports,
+// CreatedAt, BackupEligible — BE never changes per spec), stamps LastUsedAt, and keeps the
+// fresh SignCount and BackupState from the assertion.
+func (s *Service) applyLoginMetadata(ctx context.Context, tenantID string, existing, stored *Credential) error {
+	if existing != nil {
+		stored.Nickname = existing.Nickname
+		stored.Transports = existing.Transports
+		stored.CreatedAt = existing.CreatedAt
+		stored.BackupEligible = existing.BackupEligible
+	}
+	now := time.Now().UTC()
+	stored.LastUsedAt = &now
+	return s.store.UpdateCredential(ctx, tenantID, stored)
+}
+
+// RenameCredential sets the human-friendly nickname on one of the user's credentials. The lookup is
+// tenant- and user-scoped (so a caller cannot rename another user's or tenant's credential); it
+// returns ErrCredentialNotFound when no matching credential exists. The full existing record is
+// re-supplied to UpdateCredential with only Nickname mutated, so transports/backup-flags/created-at
+// are untouched (UpdateCredential is a full-record replace).
+func (s *Service) RenameCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte, nickname string) error {
+	existing, err := s.findStoredCredential(ctx, tenantID, userID, credentialID)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		return ErrCredentialNotFound
+	}
+	existing.Nickname = nickname
+	return s.store.UpdateCredential(ctx, tenantID, existing)
+}
+
+// SignalAllAcceptedCredentials builds a WebAuthn L3 signalAllAcceptedCredentials report for the
+// user: the full set of credential IDs still valid for (RPID, user handle). After a credential is
+// deleted, the integrator relays this to the client so the authenticator prunes any stored
+// credential no longer in the list. The user handle (userId) is the account UUID bytes, matching
+// waUser.WebAuthnID().
+func (s *Service) SignalAllAcceptedCredentials(ctx context.Context, tenantID string, userID uuid.UUID) (*protocol.SignalAllAcceptedCredentials, error) {
+	creds, err := s.ListCredentials(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]protocol.URLEncodedBase64, 0, len(creds))
+	for _, c := range creds {
+		ids = append(ids, protocol.URLEncodedBase64(c.ID))
+	}
+	handle := userID
+	return &protocol.SignalAllAcceptedCredentials{
+		RPID:                     s.wa.Config.RPID,
+		UserID:                   protocol.URLEncodedBase64(handle[:]),
+		AllAcceptedCredentialIDs: ids,
+	}, nil
+}
+
+// SignalUnknownCredential builds a WebAuthn L3 signalUnknownCredential report for a credential the
+// RP no longer recognizes (revoked/deleted). The integrator relays it to the client so the
+// authenticator removes that one credential.
+func (s *Service) SignalUnknownCredential(credentialID []byte) *protocol.SignalUnknownCredential {
+	return &protocol.SignalUnknownCredential{
+		CredentialID: protocol.URLEncodedBase64(credentialID),
+		RPID:         s.wa.Config.RPID,
+	}
+}

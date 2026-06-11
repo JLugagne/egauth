@@ -46,4 +46,10 @@ type Credential struct {
 	SignCount uint32
 	Data      []byte // JSON of webauthn.Credential
 	CreatedAt time.Time
+
+	Nickname       string     // user-assigned label; empty by default
+	LastUsedAt     *time.Time // pointer so "never used" (nil) differs from zero time; nil until a login bumps it
+	Transports     []string   // authenticator transports (e.g. "usb","internal","hybrid"); nil/empty when unknown
+	BackupEligible bool       // WebAuthn L3 BE flag: credential CAN be backed up / synced
+	BackupState    bool       // WebAuthn L3 BS flag: credential IS currently backed up
 }

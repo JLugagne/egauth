@@ -518,3 +518,43 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 		w.WriteHeader(http.StatusNoContent)
 	}
 }
+
+// RenameCredentialHandler sets a human-friendly nickname on one of the authenticated user's
+// credentials. It is POST-only and requires the user resolver (cfg.subject preamble), caps the
+// request body via http.MaxBytesReader, and decodes a JSON body of the shape:
+//
+//	{"credentialId": "<base64url, no padding>", "nickname": "..."}
+//
+// On success it replies 204 No Content; errors are routed through cfg.fail (ErrCredentialNotFound
+// -> 404). It does not touch the ceremony cookie/challenge machinery — rename is not a WebAuthn
+// ceremony.
+func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(svc, opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid, _, _, tenant, ok := cfg.subject(w, r)
+		if !ok {
+			return
+		}
+		if cfg.maxBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+		}
+		var body struct {
+			CredentialID string `json:"credentialId"`
+			Nickname     string `json:"nickname"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid_request", http.StatusBadRequest)
+			return
+		}
+		credID, err := base64.RawURLEncoding.DecodeString(body.CredentialID)
+		if err != nil {
+			http.Error(w, "invalid_request", http.StatusBadRequest)
+			return
+		}
+		if err := svc.RenameCredential(r.Context(), tenant, uid, credID, body.Nickname); err != nil {
+			cfg.fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

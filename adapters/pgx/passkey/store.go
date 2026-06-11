@@ -55,10 +55,10 @@ func (s *Store) SaveCredential(ctx context.Context, tenantID string, c *passkey.
 		c.CreatedAt = time.Now().UTC()
 	}
 	const query = `
-		INSERT INTO passkey_credentials (tenant_id, user_id, credential_id, public_key, sign_count, data, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO passkey_credentials (tenant_id, user_id, credential_id, public_key, sign_count, data, created_at, nickname, last_used_at, transports, backup_eligible, backup_state)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, c.UserID, c.ID, c.PublicKey, int64(c.SignCount), c.Data, c.CreatedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, c.UserID, c.ID, c.PublicKey, int64(c.SignCount), c.Data, c.CreatedAt, c.Nickname, c.LastUsedAt, c.Transports, c.BackupEligible, c.BackupState)
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "23505" { // unique_violation on (tenant_id, credential_id)
 		return passkey.ErrCredentialExists
@@ -69,7 +69,7 @@ func (s *Store) SaveCredential(ctx context.Context, tenantID string, c *passkey.
 // GetCredentials returns all credentials registered by the user (empty slice if none).
 func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid.UUID) ([]*passkey.Credential, error) {
 	const query = `
-		SELECT credential_id, public_key, sign_count, data, created_at
+		SELECT credential_id, public_key, sign_count, data, created_at, nickname, last_used_at, transports, backup_eligible, backup_state
 		FROM passkey_credentials
 		WHERE tenant_id = $1 AND user_id = $2
 		ORDER BY created_at
@@ -84,7 +84,7 @@ func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid
 	for rows.Next() {
 		c := &passkey.Credential{UserID: userID, TenantID: tenantID}
 		var signCount int64
-		if err := rows.Scan(&c.ID, &c.PublicKey, &signCount, &c.Data, &c.CreatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PublicKey, &signCount, &c.Data, &c.CreatedAt, &c.Nickname, &c.LastUsedAt, &c.Transports, &c.BackupEligible, &c.BackupState); err != nil {
 			return nil, err
 		}
 		c.SignCount = uint32(signCount)
@@ -98,10 +98,10 @@ func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid
 func (s *Store) UpdateCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
 	const query = `
 		UPDATE passkey_credentials
-		SET public_key = $4, sign_count = $5, data = $6
+		SET public_key = $4, sign_count = $5, data = $6, nickname = $7, last_used_at = $8, transports = $9, backup_eligible = $10, backup_state = $11
 		WHERE tenant_id = $1 AND user_id = $2 AND credential_id = $3
 	`
-	tag, err := s.db.Exec(ctx, query, tenantID, c.UserID, c.ID, c.PublicKey, int64(c.SignCount), c.Data)
+	tag, err := s.db.Exec(ctx, query, tenantID, c.UserID, c.ID, c.PublicKey, int64(c.SignCount), c.Data, c.Nickname, c.LastUsedAt, c.Transports, c.BackupEligible, c.BackupState)
 	if err != nil {
 		return err
 	}

@@ -23,12 +23,13 @@ import (
 // "none" attestation and an ES256 (P-256) credential key — enough to drive the full Finish
 // ceremonies end-to-end (signature verification, clone detection, sign-count persistence).
 type softAuthenticator struct {
-	rpID      string
-	origin    string
-	key       *ecdsa.PrivateKey
-	credID    []byte
-	aaguid    []byte
-	signCount uint32
+	rpID       string
+	origin     string
+	key        *ecdsa.PrivateKey
+	credID     []byte
+	aaguid     []byte
+	signCount  uint32
+	transports []string
 }
 
 // WebAuthn authenticator-data flag bits.
@@ -36,6 +37,8 @@ const (
 	flagUP = 0x01 // user present
 	flagUV = 0x04 // user verified
 	flagAT = 0x40 // attested credential data included
+	flagBE = 0x08 // backup eligible
+	flagBS = 0x10 // backup state (backed up)
 )
 
 func newSoftAuthenticator(t *testing.T, rpID, origin string) *softAuthenticator {
@@ -45,7 +48,7 @@ func newSoftAuthenticator(t *testing.T, rpID, origin string) *softAuthenticator 
 	credID := make([]byte, 16)
 	_, err = rand.Read(credID)
 	require.NoError(t, err)
-	return &softAuthenticator{rpID: rpID, origin: origin, key: key, credID: credID, aaguid: make([]byte, 16)}
+	return &softAuthenticator{rpID: rpID, origin: origin, key: key, credID: credID, aaguid: make([]byte, 16), transports: []string{"internal", "hybrid"}}
 }
 
 func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
@@ -104,26 +107,7 @@ func clientDataJSON(t *testing.T, typ, challenge, origin string) []byte {
 // ceremony challenge (the base64url SessionData.Challenge).
 func (a *softAuthenticator) registrationRequest(t *testing.T, challenge string) *http.Request {
 	t.Helper()
-	authData := a.authData(t, flagUP|flagUV|flagAT, true)
-	attObj := map[string]any{
-		"fmt":      "none",
-		"attStmt":  map[string]any{},
-		"authData": authData,
-	}
-	attCBOR, err := cbor.Marshal(attObj)
-	require.NoError(t, err)
-
-	body := map[string]any{
-		"id":    b64(a.credID),
-		"rawId": b64(a.credID),
-		"type":  "public-key",
-		"response": map[string]any{
-			"attestationObject": b64(attCBOR),
-			"clientDataJSON":    b64(clientDataJSON(t, "webauthn.create", challenge, a.origin)),
-		},
-		"clientExtensionResults": map[string]any{},
-	}
-	return jsonPost(t, body)
+	return a.registrationRequestWithFlags(t, challenge, flagUP|flagUV|flagAT)
 }
 
 // loginRequest produces the POST request body FinishLogin / FinishDiscoverableLogin parses. It
@@ -194,4 +178,32 @@ func jsonPost(t *testing.T, body map[string]any) *http.Request {
 func userHandleOf(id uuid.UUID) []byte {
 	b := id
 	return b[:]
+}
+
+// registrationRequestWithFlags is like registrationRequest but lets the caller control the
+// authenticator-data flag bits (e.g. set flagBE/flagBS to assert backup eligibility/state) and
+// emits the authenticator transports from a.transports in the attestation response.
+func (a *softAuthenticator) registrationRequestWithFlags(t *testing.T, challenge string, flags byte) *http.Request {
+	t.Helper()
+	authData := a.authData(t, flags, true)
+	attObj := map[string]any{
+		"fmt":      "none",
+		"attStmt":  map[string]any{},
+		"authData": authData,
+	}
+	attCBOR, err := cbor.Marshal(attObj)
+	require.NoError(t, err)
+
+	body := map[string]any{
+		"id":    b64(a.credID),
+		"rawId": b64(a.credID),
+		"type":  "public-key",
+		"response": map[string]any{
+			"attestationObject": b64(attCBOR),
+			"clientDataJSON":    b64(clientDataJSON(t, "webauthn.create", challenge, a.origin)),
+			"transports":        a.transports,
+		},
+		"clientExtensionResults": map[string]any{},
+	}
+	return jsonPost(t, body)
 }
