@@ -113,7 +113,13 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	return c
 }
 
-// WithProvider sets the identity provider used for authentication (default "password").
+// WithProvider sets the identity provider used by the credential (form) login path
+// (default "password"). Only "password" carries a verifiable secret on this path:
+// Service.Authenticate compares the submitted password against the stored hash. Any other
+// provider (e.g. "google"/"github") has no password to compare, so the credential path now
+// rejects it with ErrInvalidCredentials rather than authenticating on identifier alone —
+// setting it here does NOT turn the login form into a passwordless bypass. External
+// identities must be established through their own OAuth/OIDC flow, not this handler.
 func WithProvider(provider string) HandlerOption {
 	return func(h *handlerConfig) { h.provider = provider }
 }

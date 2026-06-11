@@ -465,27 +465,17 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 		return user, nil
 	}
 
-	// Fallback for other providers (if any)
-	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
-	if err != nil {
-		loginFailed("", "invalid_credentials")
-		return nil, ErrInvalidCredentials
-	}
-
-	user, err := s.store.FindUserByID(ctx, tenantID, ident.UserID)
-	if err != nil {
-		loginFailed("", "invalid_credentials")
-		return nil, ErrInvalidCredentials
-	}
-
-	// A disabled account cannot authenticate via any provider.
-	if user.DisabledAt != nil {
-		loginFailed(user.ID.String(), "account_disabled")
-		return nil, ErrAccountDisabled
-	}
-
-	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
-	return user, nil
+	// Credential (form) login is only defined for the "password" provider. Any other provider
+	// (e.g. "google"/"github") carries no verifiable secret on this path: the supplied password
+	// cannot be compared against anything. Authenticating such an identity here would turn the
+	// login form into a passwordless bypass — anyone who knows an external identifier (an OAuth
+	// sub) plus any/empty password would be issued a session. External identities must be
+	// established through their own (OAuth/OIDC) flow, never through credential login. Reject
+	// uniformly with ErrInvalidCredentials, after a decoy hash so the rejection is
+	// indistinguishable by timing from a wrong-password failure on the password path.
+	s.decoyHash(ctx, password)
+	loginFailed("", "invalid_credentials")
+	return nil, ErrInvalidCredentials
 }
 
 // RequestPasswordReset mints a password-reset token for the account owning email.
