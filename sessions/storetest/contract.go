@@ -304,6 +304,28 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 		assert.Equal(t, userA, found.UserID, "original owner must not be overwritten")
 	})
 
+	t.Run("Contract: FindSessionByHash returns ErrSessionNotFound for expired session", func(t *testing.T) {
+		// Both memory and pgx stores must treat expired sessions as not found on direct lookup.
+		// The memory store opportunistically evicts; the pgx store must filter via
+		// expires_at >= NOW() so both backends are consistent and RevokeSession behaves
+		// identically regardless of which store is in use.
+		userID := uuid.New()
+		expired := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    userID,
+			TokenHash: "expired-lookup-h",
+			UserAgent: "UA",
+			IP:        "127.0.0.1",
+			ExpiresAt: time.Now().Add(-time.Hour), // already expired
+			CreatedAt: time.Now().Add(-2 * time.Hour),
+		}
+		require.NoError(t, store.CreateSession(ctx, tenantA, expired))
+
+		_, err := store.FindSessionByHash(ctx, tenantA, "expired-lookup-h")
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "expired session must not be returned by FindSessionByHash")
+	})
+
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_session_hash"

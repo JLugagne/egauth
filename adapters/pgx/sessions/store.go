@@ -64,12 +64,14 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	return err
 }
 
-// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
+// FindSessionByHash retrieves a non-expired session by its token hash, scoped to tenantID.
+// Expired sessions are treated as not found (expires_at >= NOW()), matching the memory
+// store's opportunistic-eviction behaviour so both backends present a consistent contract.
 func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error) {
 	query := `
 		SELECT id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at
 		FROM sessions
-		WHERE token_hash = $1 AND tenant_id = $2
+		WHERE token_hash = $1 AND tenant_id = $2 AND expires_at >= NOW()
 	`
 
 	row := s.db.QueryRow(ctx, query, tokenHash, tenantID)
