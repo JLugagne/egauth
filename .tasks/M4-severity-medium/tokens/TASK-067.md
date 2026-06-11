@@ -4,7 +4,7 @@ title: "jwt.New silently accepts an arbitrarily weak HS256 signing key; MinSecre
 description: "resolveKeyset (called by jwt.New and basic.NewIssuer) only rejects an EMPTY key: in single-key mode `if cfg.SecretKey == '' { return ... }` and in keyset mode `if k.Secret == '' { ..."
 milestone: M4-severity-medium
 epic: tokens
-status: in_progress
+status: done
 priority: normal
 type: bugfix
 blocked_by: []
@@ -41,3 +41,5 @@ resolveKeyset, single-key mode: `if cfg.SecretKey == "" { return nil, "", nil, n
 
 **Recommended fix**
 Enforce len(key) >= MinSecretKeyLength inside resolveKeyset/New (panic, matching the existing fail-fast convention) for both SecretKey and every SigningKeys[].Secret. If test code genuinely needs short keys, add an explicit greppable escape hatch (e.g. Config.InsecureAllowWeakKey) mirroring passkey's InsecureNoChallengeStore pattern. At minimum, fix the tokens/doc.go claim so it does not say New fail-fasts on an "unusable" key when it only rejects an empty one.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
