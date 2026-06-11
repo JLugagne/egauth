@@ -98,3 +98,44 @@ func TestMiddleware(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, rr.Code)
 	})
 }
+
+// TestMiddleware_ResolverEmptyReturnIsRejected proves that when a tenantResolver
+// IS configured, an empty-string return (meaning the resolver could not map the
+// request to a tenant) must be treated as a resolution failure and rejected with
+// a 4xx, NOT silently admitted into the single-tenant ("") partition.
+func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
+	userID := uuid.New()
+	token := "valid_token"
+
+	// A session exists under the "" partition (e.g. a bootstrap/admin session).
+	mockStore := &storetest.MockStore{
+		FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
+			return &sessions.Session{
+				UserID:    userID,
+				TenantID:  "",
+				ExpiresAt: time.Now().Add(time.Hour),
+			}, nil
+		},
+	}
+	svc := sessions.NewService(mockStore)
+
+	handlerCalled := false
+	handler := func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {
+		handlerCalled = true
+		w.WriteHeader(http.StatusOK)
+	}
+
+	// Resolver that cannot map the request (e.g. unmapped Host) and returns "".
+	resolver := func(*http.Request) string { return "" }
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+	rr := httptest.NewRecorder()
+
+	middleware := sessions.RequireSession(svc, handler, sessions.WithTenantResolver(resolver))
+	middleware.ServeHTTP(rr, req)
+
+	assert.False(t, handlerCalled, "handler must not be invoked when the resolver fails to map a tenant")
+	assert.GreaterOrEqual(t, rr.Code, 400, "an unresolved tenant must be rejected with a 4xx")
+	assert.Less(t, rr.Code, 500, "rejection must be a client error (4xx), not a server error")
+}
