@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/oauth"
@@ -53,6 +54,14 @@ type Store struct {
 	// issuerAllowlist, when non-empty, restricts which OIDC issuers a tenant may register or use.
 	// Empty (the default) means allow all, preserving existing single-operator setups.
 	issuerAllowlist map[string]struct{}
+	// mu guards the providerCache below.
+	mu sync.RWMutex
+	// providerCache memoizes built oauth.Provider instances keyed by (tenantID, providerName)
+	// so the verifier's 1h JWKS cache and warm OIDC discovery survive across requests. Without
+	// this, every callback rebuilt the Provider (and an empty jwksCache), forcing a fresh discovery
+	// + JWKS fetch to the tenant-controlled issuer on each login (DoS-amplification / availability).
+	// Entries are dropped on UpsertProvider/DeleteProvider.
+	providerCache map[string]*oauth.Provider
 }
 
 // StoreOption configures a Store at construction.
@@ -90,7 +99,7 @@ var ErrInvalidProviderConfig = errors.New("oauth/pgx: invalid provider configura
 // pgx.Tx (anything satisfying DBQuerier). Pass StoreOptions such as WithIssuerAllowlist to harden
 // the multi-tenant configuration surface.
 func NewStore(db DBQuerier, opts ...StoreOption) *Store {
-	s := &Store{db: db}
+	s := &Store{db: db, providerCache: make(map[string]*oauth.Provider)}
 	for _, o := range opts {
 		o(s)
 	}
@@ -111,6 +120,18 @@ func (s *Store) checkIssuerAllowed(issuer string) error {
 
 // GetProvider retrieves a provider configuration for a specific tenant and builds an OIDC provider.
 func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) (*oauth.Provider, error) {
+	key := providerCacheKey(tenantID, providerName)
+
+	// Fast path: return the already-built provider so its verifier's JWKS cache (1h TTL) and
+	// warm OIDC discovery survive across requests. The issuer allowlist is fixed at construction,
+	// so a cached provider necessarily passed checkIssuerAllowed when it was first built.
+	s.mu.RLock()
+	if p, ok := s.providerCache[key]; ok {
+		s.mu.RUnlock()
+		return p, nil
+	}
+	s.mu.RUnlock()
+
 	query := `
 		SELECT client_id, client_secret, auth_url, token_url, issuer, jwks_url, scopes
 		FROM oauth_oidc_providers
@@ -162,8 +183,18 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		HTTPClient: safeClient,
 	}
 
+	// Build the provider once and memoize it. Under a concurrent miss two goroutines may both
+	// build; we keep whichever wins the lock and return that one so all callers share a single
+	// instance (and therefore a single JWKS cache) from then on.
+	s.mu.Lock()
+	if existing, ok := s.providerCache[key]; ok {
+		s.mu.Unlock()
+		return existing, nil
+	}
 	p := oauth.New(providerName, clientID, clientSecret, authURL, tokenURL, scopes, fetch,
 		oauth.WithHTTPClient(safeClient), oauth.WithOIDC(cfg))
+	s.providerCache[key] = p
+	s.mu.Unlock()
 	return p, nil
 }
 
@@ -198,12 +229,19 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 		config.AuthURL, config.TokenURL,
 		config.Issuer, config.JWKSURL, strings.Join(config.Scopes, " "),
 	)
+	if err == nil {
+		// Drop the stale cached provider so the next GetProvider reflects the new row.
+		s.invalidateProvider(tenantID, providerName)
+	}
 	return err
 }
 
 // DeleteProvider removes a configured provider for a given tenant.
 func (s *Store) DeleteProvider(ctx context.Context, tenantID, providerName string) error {
 	_, err := s.db.Exec(ctx, `DELETE FROM oauth_oidc_providers WHERE tenant_id = $1 AND provider_name = $2`, tenantID, providerName)
+	if err == nil {
+		s.invalidateProvider(tenantID, providerName)
+	}
 	return err
 }
 
@@ -253,4 +291,18 @@ func validateProviderConfig(config OIDCProviderConfig) error {
 		return fmt.Errorf("%w: issuer is required", ErrInvalidProviderConfig)
 	}
 	return nil
+}
+
+// providerCacheKey builds the cache key for a (tenant, provider) pair. The NUL separator
+// cannot appear in a Postgres text identifier, so distinct pairs never collide.
+func providerCacheKey(tenantID, providerName string) string {
+	return tenantID + "\x00" + providerName
+}
+
+// invalidateProvider drops any cached oauth.Provider for the given (tenant, provider) so the
+// next GetProvider rebuilds it from the current database row.
+func (s *Store) invalidateProvider(tenantID, providerName string) {
+	s.mu.Lock()
+	delete(s.providerCache, providerCacheKey(tenantID, providerName))
+	s.mu.Unlock()
 }
