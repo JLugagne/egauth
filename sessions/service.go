@@ -20,13 +20,22 @@ type Service interface {
 	// updated session. It is the idle-timeout primitive: call it on activity to keep an active
 	// session alive. An unknown or already-expired session yields ErrSessionNotFound.
 	Touch(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, error)
-	// Rotate issues a fresh token for the SAME logical session (same session ID and metadata),
-	// invalidating the old token, and resets the lifetime to now+duration. It returns the updated
-	// session and the new plaintext token. Call it after any privilege change — login over an
-	// existing anonymous session, MFA/step-up, a role grant — to defeat session fixation: a token
-	// an attacker may have fixed stops working the moment the victim authenticates. An unknown or
-	// already-expired session yields ErrSessionNotFound.
+	// Rotate issues a fresh token for the SAME logical session (same session ID, UserID and
+	// metadata), invalidating the old token, and resets the lifetime to now+duration. It returns
+	// the updated session and the new plaintext token. Rotate does NOT change the session's
+	// UserID — call it after a privilege change that keeps the same identity (MFA/step-up, a role
+	// grant) to defeat session fixation: a token an attacker may have fixed stops working the
+	// moment the victim re-authenticates. To promote an anonymous session to an authenticated one
+	// (a change of UserID), use BindUser instead. An unknown or already-expired session yields
+	// ErrSessionNotFound.
 	Rotate(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, string, error)
+	// BindUser promotes a session to a new user identity, atomically re-binding its UserID and
+	// rotating its token (the old token stops validating) and resetting the lifetime to
+	// now+duration. It returns the updated session and the new plaintext token. This is the
+	// anonymous-to-authenticated upgrade primitive: log a user in over their existing pre-auth
+	// session without minting a new session row, while defeating session fixation. The session ID
+	// and CreatedAt are preserved. An unknown or already-expired session yields ErrSessionNotFound.
+	BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error)
 	RevokeSession(ctx context.Context, tenantID string, token string) error
 	// RevokeAllForUser deletes every session belonging to userID within tenantID — the
 	// "log out everywhere" primitive. Call it after a password reset or account compromise to
@@ -161,6 +170,32 @@ func (s *service) Rotate(ctx context.Context, tenantID string, token string, dur
 	// Clamp the reset lifetime so it can never push ExpiresAt past the absolute deadline (SEC-08).
 	session.ExpiresAt = s.clampExpiry(session, s.now().Add(duration))
 	if err := s.store.UpdateSession(ctx, tenantID, session, oldHash); err != nil {
+		return nil, "", err
+	}
+	return session, newToken, nil
+}
+
+// BindUser re-binds a session to a new user identity while rotating its token, the
+// anonymous-to-authenticated upgrade primitive.
+func (s *service) BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error) {
+	session, err := s.ValidateSession(ctx, tenantID, token)
+	if err != nil {
+		return nil, "", err
+	}
+
+	newToken, err := generateToken()
+	if err != nil {
+		return nil, "", err
+	}
+	// Compare-and-set on the old hash (same concurrency contract as Rotate): a racing caller that
+	// already rotated this token makes the loser observe ErrSessionNotFound. The new UserID is
+	// written through BindSession; CreatedAt stays pinned so the absolute-lifetime cap still
+	// measures from the original session start.
+	oldHash := session.TokenHash
+	session.UserID = userID
+	session.TokenHash = s.hashToken(newToken)
+	session.ExpiresAt = s.clampExpiry(session, s.now().Add(duration))
+	if err := s.store.BindSession(ctx, tenantID, session, oldHash); err != nil {
 		return nil, "", err
 	}
 	return session, newToken, nil

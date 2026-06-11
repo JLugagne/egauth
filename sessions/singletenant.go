@@ -51,6 +51,11 @@ func (s *SingleTenant) Rotate(ctx context.Context, token string, duration time.D
 	return s.svc.Rotate(ctx, "", token, duration)
 }
 
+// BindUser calls Service.BindUser on the empty tenant.
+func (s *SingleTenant) BindUser(ctx context.Context, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error) {
+	return s.svc.BindUser(ctx, "", token, userID, duration)
+}
+
 // RevokeSession calls Service.RevokeSession on the empty tenant.
 func (s *SingleTenant) RevokeSession(ctx context.Context, token string) error {
 	return s.svc.RevokeSession(ctx, "", token)

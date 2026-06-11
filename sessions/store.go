@@ -25,8 +25,24 @@ type Store interface {
 	// ErrSessionNotFound (also returned for an unknown id/tenant). This makes the service's Rotate
 	// safe under concurrency — two requests racing to rotate the same token: the first swaps the
 	// hash, the second's compare fails and it gets an honest ErrSessionNotFound rather than a
-	// fresh token that would never validate. The session ID and tenant are immutable.
+	// fresh token that would never validate.
+	//
+	// The session ID, tenant, UserID and CreatedAt are immutable: only TokenHash, ExpiresAt,
+	// UserAgent and IP are copied onto the stored record. Any change to UserID or CreatedAt in
+	// the passed session is ignored — re-binding a session to a different user is the job of
+	// BindSession, not UpdateSession. Pinning CreatedAt also keeps the absolute-lifetime cap
+	// (WithMaxLifetime) honest: a caller cannot extend a session past its cap by resetting it.
 	UpdateSession(ctx context.Context, tenantID string, session *Session, expectedTokenHash string) error
+
+	// BindSession atomically re-binds a session to a new UserID while rotating its token,
+	// identified by session.ID and gated by a compare-and-set on expectedTokenHash (same
+	// concurrency contract as UpdateSession: a stale expected hash yields ErrSessionNotFound).
+	// It is the anonymous-to-authenticated upgrade primitive: a pre-auth session can be promoted
+	// to an authenticated one without minting a new session row, defeating session fixation while
+	// preserving the logical session ID. It copies UserID, TokenHash, ExpiresAt, UserAgent and IP
+	// onto the stored record; the session ID, tenant and CreatedAt remain immutable. An unknown
+	// id/tenant or a failed compare yields ErrSessionNotFound.
+	BindSession(ctx context.Context, tenantID string, session *Session, expectedTokenHash string) error
 
 	// DeleteSession removes a session by its ID within the given tenant.
 	DeleteSession(ctx context.Context, tenantID string, id uuid.UUID) error

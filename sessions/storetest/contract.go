@@ -16,6 +16,7 @@ type MockStore struct {
 	CreateSessionFunc          func(ctx context.Context, tenantID string, session *sessions.Session) error
 	FindSessionByHashFunc      func(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error)
 	UpdateSessionFunc          func(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error
+	BindSessionFunc            func(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error
 	DeleteSessionFunc          func(ctx context.Context, tenantID string, id uuid.UUID) error
 	DeleteSessionsByUserIDFunc func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	DeleteExpiredFunc          func(ctx context.Context, tenantID string) (int64, error)
@@ -40,6 +41,13 @@ func (m *MockStore) UpdateSession(ctx context.Context, tenantID string, session 
 		panic("called not defined UpdateSessionFunc")
 	}
 	return m.UpdateSessionFunc(ctx, tenantID, session, expectedTokenHash)
+}
+
+func (m *MockStore) BindSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
+	if m.BindSessionFunc == nil {
+		panic("called not defined BindSessionFunc")
+	}
+	return m.BindSessionFunc(ctx, tenantID, session, expectedTokenHash)
 }
 
 func (m *MockStore) DeleteSession(ctx context.Context, tenantID string, id uuid.UUID) error {
@@ -148,6 +156,82 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 
 		// Updating an unknown session reports not-found.
 		err = store.UpdateSession(ctx, tenantA, &sessions.Session{ID: uuid.New(), TenantID: tenantA, TokenHash: "x", ExpiresAt: newExpiry}, "whatever")
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
+	})
+
+	t.Run("Contract: UpdateSession pins UserID and CreatedAt", func(t *testing.T) {
+		// UpdateSession is a token/expiry/last-seen mutator only. It must never re-bind the
+		// session to a different user (that is BindSession's job) nor reset CreatedAt, which
+		// anchors the absolute-lifetime cap. Both stores must agree here.
+		originalUser := uuid.New()
+		originalCreatedAt := time.Now().Add(-2 * time.Hour)
+		sess := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    originalUser,
+			TokenHash: "pin-h1",
+			UserAgent: "UA",
+			IP:        "1.1.1.1",
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: originalCreatedAt,
+		}
+		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
+
+		// Attempt to re-bind the user and reset CreatedAt through UpdateSession.
+		tampered := *sess
+		tampered.UserID = uuid.New()
+		tampered.CreatedAt = time.Now()
+		tampered.TokenHash = "pin-h2"
+		require.NoError(t, store.UpdateSession(ctx, tenantA, &tampered, "pin-h1"))
+
+		found, err := store.FindSessionByHash(ctx, tenantA, "pin-h2")
+		require.NoError(t, err)
+		assert.Equal(t, originalUser, found.UserID, "UpdateSession must not change UserID")
+		assert.WithinDuration(t, originalCreatedAt, found.CreatedAt, time.Second, "UpdateSession must not change CreatedAt")
+	})
+
+	t.Run("Contract: BindSession re-binds the user", func(t *testing.T) {
+		// BindSession is the anonymous-to-authenticated upgrade: it changes UserID and rotates the
+		// token on the SAME logical session, while keeping CreatedAt pinned.
+		anonUser := uuid.New()
+		originalCreatedAt := time.Now().Add(-3 * time.Hour)
+		sess := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    anonUser,
+			TokenHash: "bind-anon",
+			UserAgent: "UA",
+			IP:        "1.1.1.1",
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: originalCreatedAt,
+		}
+		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
+
+		authUser := uuid.New()
+		rebound := *sess
+		rebound.UserID = authUser
+		rebound.TokenHash = "bind-auth"
+		rebound.CreatedAt = time.Now() // must be ignored
+		require.NoError(t, store.BindSession(ctx, tenantA, &rebound, "bind-anon"))
+
+		// Old token gone, new token resolves to the SAME session now bound to the auth user.
+		_, err := store.FindSessionByHash(ctx, tenantA, "bind-anon")
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "old token must be invalidated")
+
+		found, err := store.FindSessionByHash(ctx, tenantA, "bind-auth")
+		require.NoError(t, err)
+		assert.Equal(t, sess.ID, found.ID, "same logical session")
+		assert.Equal(t, authUser, found.UserID, "BindSession must change UserID")
+		assert.WithinDuration(t, originalCreatedAt, found.CreatedAt, time.Second, "BindSession must keep CreatedAt pinned")
+
+		// Compare-and-set: a stale expected hash is rejected.
+		stale := found
+		stale.TokenHash = "bind-h3"
+		err = store.BindSession(ctx, tenantA, stale, "bind-anon")
+		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "stale compare-and-set must be rejected")
+
+		// Unknown session reports not-found.
+		err = store.BindSession(ctx, tenantA, &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: uuid.New(), TokenHash: "y", ExpiresAt: time.Now().Add(time.Hour)}, "whatever")
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 	})
 

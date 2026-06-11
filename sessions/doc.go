@@ -20,7 +20,8 @@
 //	svc := sessions.NewService(store)
 //	sess, token, err := svc.CreateSession(ctx, tenantID, userID, userAgent, ip, 24*time.Hour)
 //	// on activity: svc.Touch(ctx, tenantID, token, 24*time.Hour)        // slide idle timeout
-//	// after a privilege change: svc.Rotate(ctx, tenantID, token, 24*time.Hour) // defeat fixation
+//	// after a privilege change (same identity): svc.Rotate(ctx, tenantID, token, 24*time.Hour) // defeat fixation
+//	// login over an anonymous session (change identity): svc.BindUser(ctx, tenantID, token, userID, 24*time.Hour)
 //
 // NewService panics on a nil Store (fail-fast at startup).
 //
