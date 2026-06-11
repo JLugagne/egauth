@@ -115,3 +115,38 @@ func TestSingleTenantVerifyUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, userID, keyClaims.Subject)
 }
+
+// TestVerifyAccessTokenForTenant proves the tenant-scoped access-token verifier fails closed
+// on a cross-tenant token: a token minted for tenant A must verify under tenant A but be
+// rejected with ErrTenantMismatch when presented in tenant B's context. The empty tenant is
+// likewise rejected against a tenant-bound token.
+func TestVerifyAccessTokenForTenant(t *testing.T) {
+	ctx := context.Background()
+	svc := newMultiTenantService(t)
+
+	const tenantA = "tenant-a"
+	userID := uuid.New()
+
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{
+		Subject:  userID,
+		TenantID: tenantA,
+	})
+	require.NoError(t, err)
+
+	t.Run("matching tenant resolves", func(t *testing.T) {
+		claims, err := svc.VerifyAccessTokenForTenant(ctx, tenantA, pair.AccessToken)
+		require.NoError(t, err)
+		assert.Equal(t, userID, claims.Subject)
+		assert.Equal(t, tenantA, claims.TenantID)
+	})
+
+	t.Run("wrong tenant fails closed", func(t *testing.T) {
+		_, err := svc.VerifyAccessTokenForTenant(ctx, "tenant-b", pair.AccessToken)
+		assert.ErrorIs(t, err, tokens.ErrTenantMismatch)
+	})
+
+	t.Run("empty tenant fails closed", func(t *testing.T) {
+		_, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
+		assert.ErrorIs(t, err, tokens.ErrTenantMismatch)
+	})
+}

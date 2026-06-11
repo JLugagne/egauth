@@ -462,6 +462,13 @@ func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
 }
 
 // VerifyAccessToken parses and validates an access token, returning its claims.
+//
+// SECURITY — NO TENANT BINDING: the returned Claims.TenantID is read straight from the signed
+// token and is NOT compared against any expected tenant. In a multi-tenant deployment where one
+// Service signs for every tenant (shared signing key), a token minted for tenant A verifies
+// successfully here even when presented in tenant B's context. Multi-tenant consumers MUST either
+// call VerifyAccessTokenForTenant, which fails closed on a mismatch, or compare the returned
+// Claims.TenantID against the request tenant themselves before trusting the token.
 func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
@@ -657,4 +664,23 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
 	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
 	return s.issuePair(ctx, claims, rt.FamilyID, false)
+}
+
+// VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring
+// the fail-closed tenant scoping of VerifyRefreshToken / VerifyAPIKey. It first runs the full
+// signature/expiry/issuer/audience validation of VerifyAccessToken, then rejects the token with
+// ErrTenantMismatch unless its signed tenant_id claim equals tenantID. Multi-tenant callers
+// served by a single shared signing key MUST use this entry point (or perform the equivalent
+// comparison themselves): a token minted for tenant A is otherwise cryptographically valid in
+// tenant B's context, since the signing key is shared. Single-tenant callers issue under the
+// empty tenant and pass "".
+func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
+	claims, err := s.VerifyAccessToken(ctx, tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if claims.TenantID != tenantID {
+		return nil, tokens.ErrTenantMismatch
+	}
+	return claims, nil
 }
