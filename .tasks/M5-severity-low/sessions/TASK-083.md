@@ -4,7 +4,7 @@ title: "Documented login-over-anonymous-session Rotate flow cannot re-bind the u
 description: "The Rotate doc explicitly tells consumers to call it for 'login over an existing anonymous session', but neither Rotate nor any Service method can change the session's UserID — the post-login session keeps the pre-auth identity. A consumer following this guidance will either ship a broken/ambiguous…"
 milestone: M5-severity-low
 epic: sessions
-status: in_progress
+status: done
 priority: low
 type: bugfix
 blocked_by: []
@@ -42,3 +42,5 @@ service.go:26-27 doc: "Call it after any privilege change — login over an exis
 
 **Recommended fix**
 Pick one contract and enforce it in both stores: have memory.UpdateSession copy only TokenHash/ExpiresAt/UserAgent/IP onto the existing record (pinning UserID and CreatedAt like pgx does), add UserID/CreatedAt-immutability assertions to storetest.StoreContractTesting, and fix the Rotate doc — either state that login must create a NEW session via CreateSession (recommended), or add an explicit service primitive that atomically rotates the token and re-binds the user.
+
+### 2026-06-11 — Closed by close-auditor: all Actions and DoD verified
