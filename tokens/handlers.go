@@ -152,9 +152,17 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 }
 
 // LogoutHandler builds an HTTP handler that revokes the entire rotation family of the
-// presented refresh token (global logout) and clears the auth cookies. It is best-effort:
-// the cookies are always cleared and a success response is returned even if the token is
-// absent or already gone, so logout is idempotent.
+// presented refresh token (global logout) and clears the auth cookies.
+//
+// Idempotency: if the token is absent or already gone (ErrRefreshTokenNotFound) the
+// handler clears the cookies and returns success (204 / success redirect), so a
+// client-side double-logout does not fail.
+//
+// Store errors are surfaced: if FindRefreshToken returns any error other than
+// ErrRefreshTokenNotFound, or if RevokeFamily returns an error, the cookies are still
+// cleared (the local session ends) but the handler responds with 500 (or with a
+// failure redirect carrying error=logout_incomplete when WithFailureRedirect is set).
+// This lets clients retry and lets monitoring catch un-revoked families.
 func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -171,8 +179,23 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
 			tenantID := cfg.tenant(r)
 			hash := HashToken(refreshToken)
-			if rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash); err == nil {
-				_ = revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID)
+			rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash)
+			switch {
+			case err == nil:
+				// Token found: revoke the whole rotation family.
+				if err := revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID); err != nil {
+					cfg.cookies.Clear(w)
+					cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
+					return
+				}
+			case errors.Is(err, ErrRefreshTokenNotFound):
+				// Token already gone: idempotent success — fall through.
+			default:
+				// Unexpected store error: clear cookies but report failure so the
+				// client knows the server-side revocation did not happen.
+				cfg.cookies.Clear(w)
+				cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
+				return
 			}
 		}
 

@@ -2,6 +2,7 @@ package tokens_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -233,4 +234,120 @@ func TestLogoutHandler_MethodNotAllowed(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/auth/logout", nil))
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// mockRevoker is a minimal tokens.FamilyRevoker that delegates to function fields.
+type mockRevoker struct {
+	findFunc   func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error)
+	revokeFunc func(ctx context.Context, tenantID string, familyID uuid.UUID) error
+}
+
+func (m *mockRevoker) FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
+	return m.findFunc(ctx, tenantID, tokenHash)
+}
+
+func (m *mockRevoker) RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error {
+	return m.revokeFunc(ctx, tenantID, familyID)
+}
+
+// TestLogoutHandler_FindStoreErrorIndicatesFailure verifies that when FindRefreshToken
+// returns any error other than ErrRefreshTokenNotFound, the handler clears cookies but
+// reports failure (not 204 success).
+func TestLogoutHandler_FindStoreErrorIndicatesFailure(t *testing.T) {
+	storeErr := errors.New("db: connection refused")
+	rev := &mockRevoker{
+		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
+			return nil, storeErr
+		},
+		revokeFunc: func(_ context.Context, _ string, _ uuid.UUID) error {
+			return nil // should not be reached
+		},
+	}
+	h := tokens.LogoutHandler(rev)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, postWithRefresh("valid-looking-token"))
+
+	// Cookies must always be cleared.
+	refresh := findCookie(t, rec, tokens.DefaultRefreshCookieName)
+	require.NotNil(t, refresh)
+	assert.Less(t, refresh.MaxAge, 0, "refresh cookie must be cleared even on failure")
+
+	// Must NOT report success.
+	assert.NotEqual(t, http.StatusNoContent, rec.Code, "must not report 204 success when FindRefreshToken fails with a store error")
+	assert.GreaterOrEqual(t, rec.Code, 400, "expected a 4xx/5xx status code")
+}
+
+// TestLogoutHandler_RevokeFamilyErrorIndicatesFailure verifies that when RevokeFamily
+// returns an error, the handler clears cookies but reports failure (not 204 success).
+func TestLogoutHandler_RevokeFamilyErrorIndicatesFailure(t *testing.T) {
+	storeErr := errors.New("db: connection refused")
+	familyID := uuid.New()
+	rev := &mockRevoker{
+		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
+			return &tokens.RefreshToken{FamilyID: familyID}, nil
+		},
+		revokeFunc: func(_ context.Context, _ string, _ uuid.UUID) error {
+			return storeErr
+		},
+	}
+	h := tokens.LogoutHandler(rev)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, postWithRefresh("valid-looking-token"))
+
+	// Cookies must always be cleared.
+	refresh := findCookie(t, rec, tokens.DefaultRefreshCookieName)
+	require.NotNil(t, refresh)
+	assert.Less(t, refresh.MaxAge, 0, "refresh cookie must be cleared even on failure")
+
+	// Must NOT report success.
+	assert.NotEqual(t, http.StatusNoContent, rec.Code, "must not report 204 success when RevokeFamily fails")
+	assert.GreaterOrEqual(t, rec.Code, 400, "expected a 4xx/5xx status code")
+}
+
+// TestLogoutHandler_RevokeFamilyErrorWithFailureRedirect verifies that when RevokeFamily
+// returns an error and a failure redirect is configured, the handler redirects to the
+// failure URL with error=logout_incomplete.
+func TestLogoutHandler_RevokeFamilyErrorWithFailureRedirect(t *testing.T) {
+	storeErr := errors.New("db: connection refused")
+	familyID := uuid.New()
+	rev := &mockRevoker{
+		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
+			return &tokens.RefreshToken{FamilyID: familyID}, nil
+		},
+		revokeFunc: func(_ context.Context, _ string, _ uuid.UUID) error {
+			return storeErr
+		},
+	}
+	h := tokens.LogoutHandler(rev, tokens.WithFailureRedirect("/logout-failed"))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, postWithRefresh("valid-looking-token"))
+
+	// Cookies must always be cleared.
+	refresh := findCookie(t, rec, tokens.DefaultRefreshCookieName)
+	require.NotNil(t, refresh)
+	assert.Less(t, refresh.MaxAge, 0, "refresh cookie must be cleared even on failure")
+
+	// Must redirect to failure URL with error=logout_incomplete.
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	location := rec.Header().Get("Location")
+	assert.True(t, strings.HasPrefix(location, "/logout-failed?"), "redirect must go to failure URL, got: %s", location)
+	assert.Contains(t, location, "error=logout_incomplete")
+}
+
+// TestLogoutHandler_NotFoundIsIdempotentSuccess verifies that when FindRefreshToken
+// returns ErrRefreshTokenNotFound specifically, logout is treated as idempotent success.
+func TestLogoutHandler_NotFoundIsIdempotentSuccess(t *testing.T) {
+	rev := &mockRevoker{
+		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
+			return nil, tokens.ErrRefreshTokenNotFound
+		},
+		revokeFunc: func(_ context.Context, _ string, _ uuid.UUID) error {
+			return nil // must not be called
+		},
+	}
+	h := tokens.LogoutHandler(rev)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, postWithRefresh("already-gone-token"))
+
+	assert.Equal(t, http.StatusNoContent, rec.Code, "ErrRefreshTokenNotFound is idempotent success")
 }
