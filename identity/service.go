@@ -91,7 +91,13 @@ type Service interface {
 	// is returned too, so the caller can deliver the token (e.g. via a Mailer).
 	RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 	// ResetPassword validates newPassword against the policy, then consumes the reset token
-	// (single-use) and sets the new password, clearing any lockout.
+	// (single-use), sets the new password (clearing any lockout), and runs the registered
+	// AccountErasers to revoke the user's existing sessions and refresh-token families.
+	// Password reset is the canonical account-recovery flow when a user believes they are
+	// compromised; the erasers provide the same cross-module revocation seam used by
+	// DeleteAccount, so an attacker who holds a live session is evicted immediately. The
+	// caller SHOULD also revoke any additional cross-module state not covered by their
+	// registered erasers (e.g. trusted-device records).
 	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
 	// RequestEmailVerification mints an email-verification token for the given user.
 	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
@@ -610,7 +616,9 @@ func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token
 	return user, metadata, nil
 }
 
-// ResetPassword validates the new password, consumes the token and sets the password.
+// ResetPassword validates the new password, consumes the token and sets the password,
+// then runs every registered AccountEraser to revoke the user's existing sessions and
+// refresh-token families.
 func (s *service) ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error {
 	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
 	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
@@ -635,6 +643,27 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash); err != nil {
 		return err
 	}
+
+	// Run the cross-module erasers to evict any attacker-held sessions or refresh-token families.
+	// Password reset is the canonical account-recovery flow when a user believes they are
+	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
+	// intact. Collect every eraser error so one failure does not mask another.
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := erase(ctx, tenantID, user.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
 	s.emit(ctx, event.Event{Type: event.PasswordReset, UserID: user.ID.String(), TenantID: user.TenantID})
 	return nil
 }
