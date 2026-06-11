@@ -206,8 +206,27 @@ func (s *service) ConfirmTOTP(ctx context.Context, tenantID string, userID uuid.
 		return nil, ErrAlreadyEnrolled
 	}
 
+	// Reserve an attempt slot atomically BEFORE the constant-time compare, matching the
+	// same discipline used by VerifyTOTP. This prevents unbounded online guessing of the
+	// enrollment-confirmation code (audit finding TASK-076).
+	n, err := s.reserveAttempt(ctx, tenantID, userID)
+	if err != nil {
+		return nil, err
+	}
+	if s.overLimit(n) {
+		s.emitBlocked(ctx, tenantID, userID, "totp-confirm")
+		return nil, ErrTooManyAttempts
+	}
+
 	step, ok := validateTOTP(enrollment.Secret, code, s.now(), s.digits, s.period, s.skew)
 	if !ok {
+		if s.atLimit(n) {
+			// The last allowed guess was wrong: delete the pending enrollment so the
+			// attacker cannot keep trying and the user must restart from EnrollTOTP.
+			s.emitBlocked(ctx, tenantID, userID, "totp-confirm")
+			_ = s.store.DeleteTOTP(ctx, tenantID, userID)
+			return nil, ErrTooManyAttempts
+		}
 		return nil, ErrInvalidCode
 	}
 

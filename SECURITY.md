@@ -66,7 +66,9 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   deployments that need defense against a database leak should encrypt the `secret` column at the
   storage/DB layer (envelope encryption).
   **Failed-attempt lockout is time-bound.** Once `FailedAttempts` exceeds `MaxAttempts` (default 5)
-  the factor is locked and both `VerifyTOTP` and `VerifyRecoveryCode` return `ErrTooManyAttempts`.
+  the factor is locked and `ConfirmTOTP`, `VerifyTOTP`, and `VerifyRecoveryCode` all return
+  `ErrTooManyAttempts`. When `ConfirmTOTP` exhausts the budget the pending enrollment is deleted
+  so an attacker cannot continue guessing; the user must restart from `EnrollTOTP`.
   The lockout automatically resets after `LockoutDuration` (default 15 min, measured from the last
   failed attempt), giving legitimate users a self-service recovery path without operator action.
   Operators can also unblock a user immediately via `Service.UnlockMFA(ctx, tenantID, userID)`,
