@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/JLugagne/egauth/oauth"
@@ -37,6 +38,9 @@ func fetchLinkedInUser(ctx context.Context, c *http.Client, accessToken string) 
 	}
 	if err := oauth.GetJSON(ctx, c, linkedinUserInfoURL, accessToken, &u); err != nil {
 		return nil, err
+	}
+	if u.Sub == "" {
+		return nil, fmt.Errorf("%w: provider returned no subject id", oauth.ErrUserInfoFailed)
 	}
 	return &oauth.UserInfo{
 		ProviderID:    u.Sub,

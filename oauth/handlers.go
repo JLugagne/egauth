@@ -224,6 +224,13 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusBadRequest, "email_missing")
 			return
 		}
+		if info.ProviderID == "" {
+			// Defense-in-depth: fetchers already reject an empty subject, but guard here
+			// too so a future custom fetcher cannot accidentally open a ProviderID=""
+			// identity-collision window (see TASK-062).
+			cfg.fail(w, r, http.StatusBadGateway, "provider_id_missing")
+			return
+		}
 		if !info.EmailVerified && !cfg.allowUnverifiedEmail {
 			// Refuse to provision/log in from an email the provider has not verified — it
 			// could be an arbitrary address the OAuth principal merely typed in (account

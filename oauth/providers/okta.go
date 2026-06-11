@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/JLugagne/egauth/oauth"
@@ -72,8 +73,12 @@ func oidcUserInfoFetcher(userInfoURL string) oauth.FetchUserFunc {
 		if err := oauth.GetJSON(ctx, c, userInfoURL, accessToken, &u); err != nil {
 			return nil, err
 		}
+		providerID := stringifyID(u.Sub)
+		if providerID == "" {
+			return nil, fmt.Errorf("%w: provider returned no subject id", oauth.ErrUserInfoFailed)
+		}
 		return &oauth.UserInfo{
-			ProviderID:    stringifyID(u.Sub),
+			ProviderID:    providerID,
 			Email:         u.Email,
 			EmailVerified: u.EmailVerified,
 			Name:          u.Name,

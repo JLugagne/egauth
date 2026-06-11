@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -32,6 +33,9 @@ func fetchGitHubUser(ctx context.Context, c *http.Client, accessToken string) (*
 	}
 	if err := oauth.GetJSON(ctx, c, githubUserURL, accessToken, &profile); err != nil {
 		return nil, err
+	}
+	if profile.ID == 0 {
+		return nil, fmt.Errorf("%w: provider returned no subject id", oauth.ErrUserInfoFailed)
 	}
 
 	info := &oauth.UserInfo{
