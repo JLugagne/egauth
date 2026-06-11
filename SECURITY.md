@@ -348,6 +348,28 @@ not a bug:
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
 decoy hashing); the four disclosures above are the only intentional exceptions.
 
+### Residual enumeration timing after raising Argon2id cost (rehash-on-login)
+
+The decoy-hashing defence is not perfectly uniform across a cost upgrade. The decoy path
+(the hash run for an **unknown** account) always uses the hasher's **current** configured
+cost — `Hash` bakes in `m`/`t`/`p` from the live `Hasher`. The real verify path (`Compare`)
+runs Argon2id at the cost recorded **in the stored hash**, which for a not-yet-rehashed
+account is the **old, lower** cost. So immediately after an operator raises the cost
+parameters (the documented rehash-on-login upgrade), every existing account whose hash has
+not yet been rehashed verifies at the old (faster) cost, while an unknown account is
+decoy-hashed at the new (slower) cost. The measurable timing gap is a **partial enumeration
+oracle**: it can distinguish "registered account that last logged in before the cost bump"
+from "unknown". The gap closes for each account the moment it next authenticates and its hash
+is transparently rehashed at the new cost, and it disappears entirely once the population has
+refreshed.
+
+**Operator guidance.** When you raise Argon2id cost, treat enumeration-resistance as
+**degraded until the fleet is rehashed**. Either proactively re-hash all stored passwords to
+the new cost (so no account verifies at the old cost), or accept the degraded
+enumeration-resistance during the natural rehash-on-login refresh window. As with all residual
+in-process timing in `egauth`, the standing mitigation is the consumer's own rate limiting on
+the login endpoint (per the non-objectives), which covers the remainder.
+
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an
 OAuth-only account (no password to reset), and even a backend error — and it dispatches email
