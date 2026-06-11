@@ -16,8 +16,15 @@ type AuthenticatedSessionHandlerFunc func(w http.ResponseWriter, r *http.Request
 // string (single-tenant default partition) is used. When a resolver IS configured it must return a
 // non-empty tenant ID; an empty return is treated as a resolution failure and the request is rejected
 // with 401 rather than falling open into the "" partition.
+//
+// The cookie name used to look up the session token defaults to "session_token". Use WithCookieName
+// to override it — for example, WithCookieName("__Host-session_token") adopts the browser-enforced
+// __Host- prefix, which guarantees the cookie is host-locked, sent only over HTTPS, and carries no
+// Domain attribute, thereby preventing subdomain/sibling-host cookie-tossing session fixation.
 func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts ...HandlerOption) http.HandlerFunc {
-	cfg := handlerConfig{}
+	cfg := handlerConfig{
+		cookieName: "session_token",
+	}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -25,8 +32,10 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 	return func(w http.ResponseWriter, r *http.Request) {
 		token := ""
 
-		// 1. Try Cookie
-		cookie, err := r.Cookie("session_token")
+		// 1. Try Cookie — use the configured name so consumers can adopt the
+		// __Host- prefix (e.g. "__Host-session_token"), which browsers enforce
+		// as host-locked/Secure/no-Domain, defeating cookie-tossing fixation.
+		cookie, err := r.Cookie(cfg.cookieName)
 		if err == nil {
 			token = cookie.Value
 		}
@@ -81,6 +90,10 @@ type HandlerOption func(*handlerConfig)
 
 type handlerConfig struct {
 	tenantResolver func(*http.Request) string
+	// cookieName is the HTTP cookie name to look up for the session token.
+	// It defaults to "session_token". Use WithCookieName to override it,
+	// e.g. to adopt the __Host- prefix for host-locked cookie hardening.
+	cookieName string
 }
 
 // WithTenantResolver sets a function that extracts the tenant ID from an incoming request
@@ -91,4 +104,13 @@ type handlerConfig struct {
 // partition. When no resolver is set at all, the empty string (single-tenant partition) is used.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(c *handlerConfig) { c.tenantResolver = f }
+}
+
+// WithCookieName overrides the HTTP cookie name that RequireSession looks up for the session
+// token. The default is "session_token". Passing "__Host-session_token" (or any name with the
+// __Host- prefix) instructs browsers to enforce that the cookie is host-locked, sent only over
+// HTTPS, and carries no Domain attribute — the recommended deployment for production to prevent
+// subdomain/sibling-host cookie-tossing session fixation attacks.
+func WithCookieName(name string) HandlerOption {
+	return func(c *handlerConfig) { c.cookieName = name }
 }

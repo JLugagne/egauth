@@ -139,3 +139,51 @@ func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
 	assert.GreaterOrEqual(t, rr.Code, 400, "an unresolved tenant must be rejected with a 4xx")
 	assert.Less(t, rr.Code, 500, "rejection must be a client error (4xx), not a server error")
 }
+
+// TestMiddleware_WithCookieName is the regression test for TASK-082.
+// It proves that RequireSession configured with WithCookieName reads the session
+// token from the specified cookie name (e.g. "__Host-session") instead of
+// the hardcoded "session_token". This test MUST fail before the fix is applied.
+func TestMiddleware_WithCookieName(t *testing.T) {
+	userID := uuid.New()
+	tenantID := "tenant-1"
+	token := "valid_token"
+
+	mockStore := &storetest.MockStore{
+		FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
+			return &sessions.Session{
+				UserID:    userID,
+				TenantID:  tenantID,
+				ExpiresAt: time.Now().Add(time.Hour),
+			}, nil
+		},
+	}
+	svc := sessions.NewService(mockStore)
+
+	handler := func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {
+		w.WriteHeader(http.StatusOK)
+	}
+
+	t.Run("WithCookieName reads from custom cookie", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		req.AddCookie(&http.Cookie{Name: "__Host-session", Value: token})
+		rr := httptest.NewRecorder()
+
+		middleware := sessions.RequireSession(svc, handler, sessions.WithCookieName("__Host-session"))
+		middleware.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusOK, rr.Code, "should authenticate using the custom __Host-session cookie")
+	})
+
+	t.Run("WithCookieName ignores the default session_token cookie", func(t *testing.T) {
+		req := httptest.NewRequest("GET", "/", nil)
+		// Only the old hardcoded name is present; the custom name is absent.
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
+		rr := httptest.NewRecorder()
+
+		middleware := sessions.RequireSession(svc, handler, sessions.WithCookieName("__Host-session"))
+		middleware.ServeHTTP(rr, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rr.Code, "should not fall back to session_token when WithCookieName is set")
+	})
+}

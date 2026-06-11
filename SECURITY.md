@@ -238,6 +238,16 @@ redaction is in any case only a backstop. Therefore the consumer must:
   serialize the config or persist the key in plaintext.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
+- **Use the `__Host-` cookie name prefix** for session cookies in production.
+  Configure `sessions.RequireSession` with `sessions.WithCookieName("__Host-session_token")`
+  (or any `__Host-` prefixed name). Browsers enforce that a `__Host-` cookie is host-locked
+  (no `Domain` attribute), `Secure`, and `Path=/` — this defeats subdomain/sibling-host
+  cookie-tossing session fixation, where an attacker on `evil.example.com` injects a
+  `Domain=.example.com session_token` cookie containing the attacker's own valid token and
+  the victim transparently operates inside the attacker's session. Without the prefix the
+  hardcoded `session_token` name cannot be protected from this attack by the library alone.
+  The default remains `"session_token"` for backwards compatibility; deployments should
+  migrate to a `__Host-` prefixed name.
 
 ## CSRF on the form handlers (consumer responsibility)
 
