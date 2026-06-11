@@ -115,7 +115,9 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 // RefreshHandler builds an HTTP handler that rotates the refresh token carried in the
 // refresh cookie: it consumes the old token, issues a fresh access+refresh pair within the
 // same family, and rewrites both cookies. A replayed token causes family revocation and a
-// rejection. On any failure the cookies are cleared.
+// rejection. On failure the cookies are cleared, except for the benign concurrency case
+// (ErrRefreshConcurrent: a parallel request won the rotation race within the reuse grace),
+// where only the stale access cookie is cleared so the winner's fresh refresh cookie survives.
 func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -138,8 +140,18 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 
 		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
 		if err != nil {
-			// Including the reuse case: Rotate already revoked the family; we only need to
-			// clear the client's now-useless cookies.
+			// ErrRefreshConcurrent is benign concurrency: a parallel request won the rotation
+			// race and already minted a fresh, valid refresh cookie for this client (the family
+			// is NOT poisoned). Clearing the refresh cookie would wipe the winner's freshly
+			// issued cookie and log the user out — the lockout the reuse grace prevents. Drop
+			// only the stale access cookie and reject; the client retries with the live cookie.
+			if errors.Is(err, ErrRefreshConcurrent) {
+				cfg.cookies.ClearAccess(w)
+				cfg.fail(w, r, http.StatusUnauthorized, refreshErrorCode(err))
+				return
+			}
+			// Any other failure (after-grace reuse already revoked the family, expired, not
+			// found): clear the client's now-useless cookies.
 			cfg.cookies.Clear(w)
 			cfg.fail(w, r, http.StatusUnauthorized, refreshErrorCode(err))
 			return
@@ -256,6 +268,11 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 
 func refreshErrorCode(err error) string {
 	switch {
+	case errors.Is(err, ErrRefreshConcurrent):
+		// Benign concurrency, not theft: a parallel request already rotated the token. Distinct
+		// from token_reuse_detected so clients can retry with the winner's fresh cookie. Checked
+		// before ErrRefreshTokenReused since ErrRefreshConcurrent wraps it.
+		return "concurrent_refresh"
 	case errors.Is(err, ErrRefreshTokenReused):
 		return "token_reuse_detected"
 	case errors.Is(err, ErrTokenExpired):

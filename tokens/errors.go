@@ -1,6 +1,9 @@
 package tokens
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+)
 
 var (
 	// ErrInvalidToken is returned when a token is malformed, missing, or cryptographically invalid.
@@ -21,6 +24,17 @@ var (
 	// ErrRefreshTokenReused is returned when an already-consumed refresh token is presented again,
 	// which indicates a possible token theft (replay) and should trigger family revocation.
 	ErrRefreshTokenReused = errors.New("tokens: refresh token reused")
+
+	// ErrRefreshConcurrent is returned by Rotate for the benign concurrency cases — a replay of a
+	// just-consumed token within the reuse grace window, or losing the atomic consume race to a
+	// parallel in-flight rotation of the same not-yet-consumed token (parallel tabs, prefetch,
+	// concurrent sub-resource loads racing the same cookie). The rotation family is explicitly NOT
+	// poisoned in these cases: the winning request already minted a fresh, valid cookie pair. It
+	// wraps ErrRefreshTokenReused so existing errors.Is(err, ErrRefreshTokenReused) checks (e.g.
+	// error-code mapping) keep working, while letting cookie-clearing callers (RequireAuth,
+	// RefreshHandler) preserve the winner's freshly issued refresh cookie instead of logging the
+	// user out — the very lockout the grace period exists to prevent.
+	ErrRefreshConcurrent = fmt.Errorf("%w: concurrent rotation within grace", ErrRefreshTokenReused)
 
 	// ErrNoClaimsProvider is returned by Rotate when the issuer was constructed without a
 	// ClaimsProvider, which is required to resolve fresh claims during refresh-token rotation.

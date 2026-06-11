@@ -618,6 +618,11 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
 		} else {
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
+			// Benign concurrency: the legitimate client raced itself and the winning request
+			// already minted a fresh pair. Surface the distinct ErrRefreshConcurrent sentinel
+			// (which still wraps ErrRefreshTokenReused) so cookie-clearing callers preserve the
+			// winner's freshly issued refresh cookie instead of logging the user out.
+			return nil, tokens.ErrRefreshConcurrent
 		}
 		return nil, tokens.ErrRefreshTokenReused
 	}
@@ -632,6 +637,14 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// request WITHOUT revoking the family. A genuine replay is still caught above on the
 	// next presentation, once ConsumedAt has been set by the completed rotation.
 	if err := s.store.ConsumeRefreshToken(ctx, tenantID, hash); err != nil {
+		// Losing the consume race returns ErrRefreshTokenReused from the store: a parallel
+		// request consumed the SAME not-yet-consumed token first. That is benign concurrency,
+		// not theft — report it as ErrRefreshConcurrent so the winner's freshly minted cookies
+		// are preserved rather than cleared. Any other store error propagates unchanged.
+		if errors.Is(err, tokens.ErrRefreshTokenReused) {
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
+			return nil, tokens.ErrRefreshConcurrent
+		}
 		return nil, err
 	}
 

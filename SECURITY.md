@@ -38,8 +38,16 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   token grants no access regardless.) To avoid logging
   users out on ordinary request concurrency (parallel tabs, prefetch, concurrent
   sub-resource loads racing the same cookie), a replay within `ReuseGracePeriod`
-  (default 10s) of consumption is treated as benign and rejected *without* revoking the
-  family — set a negative `ReuseGracePeriod` for strict mode where any replay revokes.
+  (default 10s) of consumption — and the lost-race case where two requests rotate the
+  *same not-yet-consumed* token in parallel — is treated as benign and rejected *without*
+  revoking the family. These benign cases surface the distinct `tokens.ErrRefreshConcurrent`
+  sentinel (which wraps `ErrRefreshTokenReused` for compatibility), so the cookie-clearing
+  callers (`RequireAuth` auto-refresh and `RefreshHandler`) clear **only the stale access
+  cookie** and leave the refresh cookie intact: the winning request already minted a fresh,
+  valid refresh cookie for this client, and clearing it would wipe that and force a full
+  re-login — the very lockout the grace window exists to prevent. After-grace reuse, expiry
+  and not-found still clear all cookies. Set a negative `ReuseGracePeriod` for strict mode
+  where any replay revokes.
 - **Single-use verification tokens (selector/verifier).** Password-reset and email-verification
   tokens follow a selector/verifier scheme: a 128-bit random `selector` indexes the row, and only
   the SHA-256 of the secret `verifier` half is stored. Consumption compares the verifier in

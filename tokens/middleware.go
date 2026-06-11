@@ -135,8 +135,20 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 				}
 				pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
 				if err != nil {
-					// Rotation failed (reuse/expired/not found): clear cookies so a
-					// poisoned family cannot keep retrying, then reject.
+					// ErrRefreshConcurrent is benign concurrency: a parallel request won the
+					// rotation race and already minted a fresh, valid refresh cookie for this
+					// client. The family is explicitly NOT poisoned. Clearing the refresh
+					// cookie here would wipe the winner's freshly issued cookie and log the
+					// user out — the exact lockout the reuse grace exists to prevent. So we
+					// drop only the stale access cookie and reject this request; the client
+					// retries with the winner's still-valid refresh cookie.
+					if errors.Is(err, ErrRefreshConcurrent) {
+						cfg.cookies.ClearAccess(w)
+						unauthorized(w)
+						return
+					}
+					// Any other rotation failure (after-grace reuse/expired/not found): clear
+					// all cookies so a poisoned family cannot keep retrying, then reject.
 					cfg.cookies.Clear(w)
 					unauthorized(w)
 					return
