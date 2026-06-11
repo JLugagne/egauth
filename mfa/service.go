@@ -118,9 +118,9 @@ func WithEventSink(sink event.Sink) ServiceOption { return func(s *service) { s.
 func (s *service) emit(ctx context.Context, e event.Event) { event.Emit(ctx, s.events, e) }
 
 // NewService builds an MFA Service with RFC 6238 defaults. It panics on a nil store or on an
-// option that sets a TOTP parameter to a value that cannot produce valid codes (non-positive
-// digits/period, negative skew, non-positive recovery-code count, or a nil clock) — fail fast at
-// startup rather than minting unverifiable codes later.
+// option that sets a TOTP parameter to a value that cannot produce valid codes (digits outside
+// the RFC 6238 range 6–8, non-positive period, negative skew, non-positive recovery-code count,
+// or a nil clock) — fail fast at startup rather than minting unverifiable codes later.
 func NewService(store Store, opts ...ServiceOption) Service {
 	if store == nil {
 		panic("mfa: NewService requires a non-nil Store")
@@ -138,8 +138,8 @@ func NewService(store Store, opts ...ServiceOption) Service {
 		opt(s)
 	}
 	switch {
-	case s.digits <= 0:
-		panic("mfa: digits must be positive")
+	case s.digits < 6 || s.digits > 8:
+		panic("mfa: digits must be between 6 and 8 (RFC 6238)")
 	case s.period <= 0:
 		panic("mfa: period must be positive")
 	case s.skew < 0:

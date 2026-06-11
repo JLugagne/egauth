@@ -57,7 +57,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **TOTP & recovery codes.** The `mfa` module implements RFC 6238 TOTP (authenticator apps only,
   no SMS) with a ±skew window and **replay protection** via a monotonic last-used time-step (a
   code, including the enrolling one, cannot be reused). Recovery codes are single-use and stored
-  only as SHA-256 hashes. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
+  only as SHA-256 hashes. `NewService` panics at construction if `WithDigits` is called with a
+  value outside the RFC 6238 range **6–8** — values below 6 produce a trivially guessable code
+  space and values above 8 cause uint32 truncation in the HOTP truncation step, neither of which
+  will be accepted by any compliant authenticator app. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
   server recomputes codes from it), so — unlike passwords/opaque tokens — it is NOT hashed. Per the
   PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
   deployments that need defense against a database leak should encrypt the `secret` column at the
