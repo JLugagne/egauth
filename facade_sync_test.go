@@ -41,30 +41,30 @@ func TestSingleTenantFacadeInSync(t *testing.T) {
 	}{
 		{
 			pkg:     "identity",
-			service: reflect.TypeOf((*identity.Service)(nil)).Elem(),
-			facade:  reflect.TypeOf((*identity.SingleTenant)(nil)),
+			service: reflect.TypeFor[identity.Service](),
+			facade:  reflect.TypeFor[*identity.SingleTenant](),
 		},
 		{
 			pkg:     "sessions",
-			service: reflect.TypeOf((*sessions.Service)(nil)).Elem(),
-			facade:  reflect.TypeOf((*sessions.SingleTenant)(nil)),
+			service: reflect.TypeFor[sessions.Service](),
+			facade:  reflect.TypeFor[*sessions.SingleTenant](),
 		},
 		{
 			pkg:     "mfa",
-			service: reflect.TypeOf((*mfa.Service)(nil)).Elem(),
-			facade:  reflect.TypeOf((*mfa.SingleTenant)(nil)),
+			service: reflect.TypeFor[mfa.Service](),
+			facade:  reflect.TypeFor[*mfa.SingleTenant](),
 		},
 		{
 			pkg:     "otp",
-			service: reflect.TypeOf((*otp.Service)(nil)).Elem(),
-			facade:  reflect.TypeOf((*otp.SingleTenant)(nil)),
+			service: reflect.TypeFor[otp.Service](),
+			facade:  reflect.TypeFor[*otp.SingleTenant](),
 		},
 		{
 			// passkey.Service is a concrete struct (not an interface); its exported methods on
 			// *Service form the public API the facade mirrors.
 			pkg:     "passkey",
-			service: reflect.TypeOf((*passkey.Service)(nil)),
-			facade:  reflect.TypeOf((*passkey.SingleTenant)(nil)),
+			service: reflect.TypeFor[*passkey.Service](),
+			facade:  reflect.TypeFor[*passkey.SingleTenant](),
 		},
 	}
 
@@ -97,8 +97,8 @@ func TestSingleTenantFacadeInSync(t *testing.T) {
 // methods, so no additional name filtering is needed.
 func exportedMethodNames(t reflect.Type) map[string]struct{} {
 	names := make(map[string]struct{}, t.NumMethod())
-	for i := 0; i < t.NumMethod(); i++ {
-		names[t.Method(i).Name] = struct{}{}
+	for method := range t.Methods() {
+		names[method.Name] = struct{}{}
 	}
 	return names
 }
