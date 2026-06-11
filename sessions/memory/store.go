@@ -101,8 +101,13 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	sCopy := *session
 	sCopy.TenantID = tenantID
 
+	key := hashKey(sCopy.TenantID, sCopy.TokenHash)
+	if _, exists := s.byHash[key]; exists {
+		return sessions.ErrDuplicateToken
+	}
+
 	s.sessions[sCopy.ID] = &sCopy
-	s.byHash[hashKey(sCopy.TenantID, sCopy.TokenHash)] = sCopy.ID
+	s.byHash[key] = sCopy.ID
 
 	return nil
 }

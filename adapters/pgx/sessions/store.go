@@ -53,10 +53,14 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	query := `
 		INSERT INTO sessions (id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (tenant_id, token_hash) DO UPDATE
-		SET id = EXCLUDED.id, user_id = EXCLUDED.user_id, user_agent = EXCLUDED.user_agent, ip = EXCLUDED.ip, expires_at = EXCLUDED.expires_at
 	`
 	_, err := s.db.Exec(ctx, query, session.ID, session.TenantID, session.UserID, session.TokenHash, session.UserAgent, session.IP, session.ExpiresAt, session.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return sessions.ErrDuplicateToken
+		}
+	}
 	return err
 }
 

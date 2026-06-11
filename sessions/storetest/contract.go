@@ -267,6 +267,43 @@ func StoreContractTesting(t *testing.T, store sessions.Store, useMultiTenant boo
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 	})
 
+	t.Run("Contract: CreateSession duplicate token hash is rejected", func(t *testing.T) {
+		// A second CreateSession call with the same (tenant_id, token_hash) must return
+		// ErrDuplicateToken rather than silently overwriting the existing session's owner.
+		userA := uuid.New()
+		userB := uuid.New()
+		sess := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    userA,
+			TokenHash: "dup-hash-contract",
+			UserAgent: "UA",
+			IP:        "127.0.0.1",
+			ExpiresAt: time.Now().Add(time.Hour),
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
+
+		// Second call — same tenant + token_hash, different session ID and user.
+		duplicate := &sessions.Session{
+			ID:        uuid.New(),
+			TenantID:  tenantA,
+			UserID:    userB,
+			TokenHash: "dup-hash-contract",
+			UserAgent: "UA2",
+			IP:        "10.0.0.1",
+			ExpiresAt: time.Now().Add(2 * time.Hour),
+			CreatedAt: time.Now(),
+		}
+		err := store.CreateSession(ctx, tenantA, duplicate)
+		assert.ErrorIs(t, err, sessions.ErrDuplicateToken, "duplicate token hash must be rejected")
+
+		// The original session must be intact.
+		found, err := store.FindSessionByHash(ctx, tenantA, "dup-hash-contract")
+		require.NoError(t, err)
+		assert.Equal(t, userA, found.UserID, "original owner must not be overwritten")
+	})
+
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_session_hash"
