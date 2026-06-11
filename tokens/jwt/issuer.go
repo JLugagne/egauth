@@ -116,6 +116,11 @@ type Config[C any] struct {
 // shorter than the HMAC-SHA-256 output weakens the signature. Config.Validate enforces it.
 const MinSecretKeyLength = 32
 
+// MinTokenLength is the minimum allowed length for opaque tokens (refresh tokens and API
+// keys). Values shorter than this produce tokens with insufficient entropy and are
+// online-brute-forceable. Config.Validate and New both enforce this limit.
+const MinTokenLength = 16
+
 // Validate reports configuration that would make the issuer insecure or non-functional: an
 // empty/too-short signing key (or keyset), an empty Issuer, or a non-positive Access/Refresh
 // TTL. Production callers SHOULD call it at startup (it returns all problems joined). New itself
@@ -166,6 +171,14 @@ func (cfg Config[C]) Validate() error {
 	}
 	if cfg.RefreshTTL <= 0 {
 		errs = append(errs, errors.New("jwt: RefreshTTL must be positive"))
+	}
+	// A non-zero RefreshLength or APIKeyLength below MinTokenLength yields guessable tokens.
+	// Zero means "use the default (32)" and is accepted here; New substitutes the safe default.
+	if cfg.RefreshLength != 0 && cfg.RefreshLength < MinTokenLength {
+		errs = append(errs, fmt.Errorf("jwt: RefreshLength must be 0 (use default) or at least %d bytes", MinTokenLength))
+	}
+	if cfg.APIKeyLength != 0 && cfg.APIKeyLength < MinTokenLength {
+		errs = append(errs, fmt.Errorf("jwt: APIKeyLength must be 0 (use default) or at least %d bytes", MinTokenLength))
 	}
 	return errors.Join(errs...)
 }
@@ -238,7 +251,8 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 }
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
-// be built: no signing key, a malformed keyset, or any key shorter than MinSecretKeyLength.
+// be built: no signing key, a malformed keyset, any key shorter than MinSecretKeyLength, or a
+// RefreshLength/APIKeyLength below MinTokenLength.
 // The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
 // exists exclusively for test code that needs short keys; production callers must never set it.
 // For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
@@ -252,6 +266,14 @@ func New[C any](cfg Config[C]) *Service[C] {
 	}
 	if cfg.APIKeyLength == 0 {
 		cfg.APIKeyLength = 32
+	}
+	// Reject sub-minimum token lengths after the zero-means-default substitution above,
+	// so any explicitly low positive value is caught here (not silently accepted).
+	if cfg.RefreshLength < MinTokenLength {
+		panic(fmt.Sprintf("jwt: New: RefreshLength %d is below MinTokenLength %d — tokens would be guessable (call Config.Validate to check configuration)", cfg.RefreshLength, MinTokenLength))
+	}
+	if cfg.APIKeyLength < MinTokenLength {
+		panic(fmt.Sprintf("jwt: New: APIKeyLength %d is below MinTokenLength %d — tokens would be guessable (call Config.Validate to check configuration)", cfg.APIKeyLength, MinTokenLength))
 	}
 	if cfg.ReuseGracePeriod == 0 {
 		cfg.ReuseGracePeriod = DefaultReuseGracePeriod

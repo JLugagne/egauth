@@ -9,6 +9,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   never persisted in clear text. Only their SHA-256 hash is stored (`tokens.HashToken`),
   so a database leak does not expose usable credentials. Lookups are performed on the
   hash, which is what makes a plain index/equality lookup safe for high-entropy tokens.
+  The library enforces a minimum token byte length (`jwt.MinTokenLength = 16`) for
+  `RefreshLength` and `APIKeyLength`: `Config.Validate` returns an error and `New` panics
+  if either is set to a positive value below the minimum, preventing low-entropy tokens
+  from being issued accidentally.
 - **Constant-time password comparison.** Password verification uses
   `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong password cannot
   be recovered byte-by-byte through timing.
