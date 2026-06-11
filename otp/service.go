@@ -34,6 +34,10 @@ type service struct {
 type ServiceOption func(*service)
 
 // WithDigits sets the number of digits in generated codes (default 6).
+// The value must be in the range [6, 10]: NewService panics if it falls outside
+// this range. Values below 6 produce a trivially guessable code space (a 5-digit
+// code has only 100 000 candidates); values above 10 cause big.Int allocations
+// with no security benefit. Most authenticator apps support only 6 and 8 digits.
 func WithDigits(n int) ServiceOption { return func(s *service) { s.digits = n } }
 
 // WithTTL sets how long an issued code stays valid (default 10m).

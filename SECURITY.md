@@ -185,6 +185,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   interleave: if the code is reissued between a verifier's read and its consume, the stored row
   now carries a different hash, so the stale verification deletes nothing and fails — a superseded
   code can neither be accepted nor burn its freshly issued replacement.
+  `NewService` panics at construction if `WithDigits` is called with a value outside **[6, 10]**:
+  values below 6 produce a trivially guessable code space (a 5-digit code has only 100 000
+  candidates, giving a 50 % win rate with 5 attempts); values above 10 cause big.Int allocations
+  with no security benefit. Most authenticator apps support only 6 and 8 digits.
   Because numeric OTPs are intentionally low-entropy, the at-rest SHA-256 hash is not a barrier
   against an attacker who already has the database; the real defenses are the short TTL,
   single-use consumption and the attempt limit — and, as always, the consumer's own rate limiting
