@@ -99,6 +99,13 @@ func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.
 		return identity.ErrUserNotFound
 	}
 
+	// Refuse to mutate a soft-deleted user, matching the pgx store's
+	// "WHERE deleted_at IS NULL" gate. Without this check the memory store
+	// would silently resurrect an anonymized account.
+	if existing.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
 	if existing.Email != user.Email {
 		for _, u := range s.users {
 			if u.TenantID == tenantID && u.Email == user.Email && u.DeletedAt == nil && u.ID != user.ID {

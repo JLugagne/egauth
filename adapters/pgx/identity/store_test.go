@@ -60,4 +60,5 @@ func TestPgxStore_Contract(t *testing.T) {
 	// 5. Run Contract Tests
 	storetest.StoreContractTesting(t, store, true)
 	storetest.StoreDisableEnableContract(t, store, "tenant-A")
+	storetest.StoreUpdateUserSoftDeleteContract(t, store, "tenant-A")
 }

@@ -802,3 +802,28 @@ func StoreDeleteAuthGateContract(t *testing.T, store identity.Store, tenant stri
 	assert.Equal(t, user.ID, foundOAuth.UserID,
 		"preserved OAuth identity must still reference the (now-deleted) user")
 }
+
+// StoreUpdateUserSoftDeleteContract verifies that UpdateUser rejects a soft-deleted user with
+// ErrUserNotFound, matching the pgx behaviour (WHERE deleted_at IS NULL). Both the memory and pgx
+// backends must agree: calling UpdateUser on a soft-deleted account must not resurrect it.
+// Each backend's test must run this alongside StoreContractTesting.
+func StoreUpdateUserSoftDeleteContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	user, err := store.CreateUser(ctx, tenant, "update_softdel_contract@example.com")
+	require.NoError(t, err)
+
+	// Verify UpdateUser works on a live user.
+	now := time.Now()
+	user.EmailVerifiedAt = &now
+	require.NoError(t, store.UpdateUser(ctx, tenant, user), "UpdateUser must succeed on a live user")
+
+	// Soft-delete the user.
+	require.NoError(t, store.DeleteUser(ctx, tenant, user.ID))
+
+	// UpdateUser on a soft-deleted user must return ErrUserNotFound, not silently resurrect it.
+	err = store.UpdateUser(ctx, tenant, user)
+	assert.ErrorIs(t, err, identity.ErrUserNotFound,
+		"UpdateUser on a soft-deleted user must return ErrUserNotFound (resurrection gate)")
+}
