@@ -112,7 +112,10 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		assert.Equal(t, 2, n)
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
 		assert.Equal(t, 2, got.FailedAttempts)
-		assert.Equal(t, t2.UTC(), got.LastAttemptAt.UTC(), "LastAttemptAt must reflect the most recent increment's now")
+		// Truncate to microsecond precision: SQL stores (e.g. PostgreSQL) have µs resolution,
+		// not nanosecond, so comparing the stored-and-retrieved value against the original
+		// nanosecond timestamp would spuriously fail on a pgx store.
+		assert.Equal(t, t2.Truncate(time.Microsecond).UTC(), got.LastAttemptAt.Truncate(time.Microsecond).UTC(), "LastAttemptAt must reflect the most recent increment's now")
 
 		// A successful TOTP step (MarkTOTPUsed) resets the counter and LastAttemptAt to zero.
 		applied, err := store.MarkTOTPUsed(ctx, tenantA, uid, 1)
