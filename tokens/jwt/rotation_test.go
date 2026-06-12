@@ -200,7 +200,7 @@ func TestRotate_ConcurrentBenignKeepsFamily(t *testing.T) {
 	results := make(chan *tokens.TokenPair[struct{}], n)
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			np, err := svc.Rotate(ctx, "", pair.RefreshToken)
@@ -281,7 +281,7 @@ func TestRotate_ConcurrentSingleUse(t *testing.T) {
 	var success int32
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			if _, err := svc.Rotate(ctx, "", pair.RefreshToken); err == nil {

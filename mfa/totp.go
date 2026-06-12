@@ -85,7 +85,7 @@ func hotp(key []byte, counter uint64, digits int) string {
 
 func pow10(n int) int {
 	r := 1
-	for i := 0; i < n; i++ {
+	for range n {
 		r *= 10
 	}
 	return r

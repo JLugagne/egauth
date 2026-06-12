@@ -54,8 +54,8 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 		// 2. Try Authorization Header
 		if token == "" {
 			authHeader := r.Header.Get("Authorization")
-			if strings.HasPrefix(authHeader, "Bearer ") {
-				token = strings.TrimPrefix(authHeader, "Bearer ")
+			if after, ok := strings.CutPrefix(authHeader, "Bearer "); ok {
+				token = after
 			}
 		}
 

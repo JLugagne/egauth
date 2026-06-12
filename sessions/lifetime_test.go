@@ -36,7 +36,7 @@ func TestMaxLifetime_TouchCannotExtendPastAbsoluteDeadline(t *testing.T) {
 
 	// Touch every 30s (well within the idle window) until we cross the absolute deadline.
 	// Idle alone would keep the session alive forever; the absolute cap must not.
-	for i := 0; i < 9; i++ {
+	for range 9 {
 		now = now.Add(30 * time.Second)
 		if now.Sub(frozen) < maxLifetime {
 			_, err := svc.Touch(ctx, "", token, idle)
@@ -143,7 +143,7 @@ func TestNoMaxLifetime_TouchCanExtendIndefinitely(t *testing.T) {
 	require.NoError(t, err)
 
 	// Far past any plausible absolute deadline, but each Touch is within idle: must stay valid.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		now = now.Add(30 * time.Second)
 		_, err := svc.Touch(ctx, "", token, time.Minute)
 		require.NoError(t, err)
@@ -197,7 +197,7 @@ func TestRevokeAllForUser(t *testing.T) {
 	other := uuid.New()
 
 	var victimTokens []string
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, token, err := svc.CreateSession(ctx, tenantID, victim, "UA", "1.1.1.1", time.Hour)
 		require.NoError(t, err)
 		victimTokens = append(victimTokens, token)

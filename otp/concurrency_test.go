@@ -27,15 +27,13 @@ func TestService_ConcurrentVerify_SingleUse(t *testing.T) {
 	var successes int64
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			<-start
 			if svc.Verify(ctx, "t1", sub, "login", ch.Code) == nil {
 				atomic.AddInt64(&successes, 1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -59,15 +57,13 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 	var invalid int64 // ErrInvalidCode == a comparison was actually performed and failed
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			<-start
 			if err := svc.Verify(ctx, "t1", sub, "login", bad); err == otp.ErrInvalidCode {
 				atomic.AddInt64(&invalid, 1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

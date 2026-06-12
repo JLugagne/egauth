@@ -58,7 +58,7 @@ func TestWithLockout_ZeroThreshold_UsesDefault(t *testing.T) {
 	ctx := context.Background()
 
 	// Fail enough attempts to exceed DefaultLockThreshold.
-	for i := 0; i < identity.DefaultLockThreshold; i++ {
+	for range identity.DefaultLockThreshold {
 		_, err := svc.Authenticate(ctx, "", "password", email, "wrong")
 		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
 	}
@@ -97,7 +97,7 @@ func TestWithNoLockout_DisablesLockout(t *testing.T) {
 	ctx := context.Background()
 
 	// Exceed the default threshold many times over — no lock must ever be set.
-	for i := 0; i < identity.DefaultLockThreshold*3; i++ {
+	for i := range identity.DefaultLockThreshold * 3 {
 		_, err := svc.Authenticate(ctx, "", "password", email, "wrong")
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials,
 			"WithNoLockout must keep returning ErrInvalidCredentials, never ErrAccountLocked (attempt %d)", i+1)

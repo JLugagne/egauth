@@ -453,7 +453,7 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 // or single-key mode) is verified with the legacy SecretKey. An unknown kid — or a present but
 // malformed kid (non-string, or empty) — is rejected outright rather than falling back to the
 // legacy key, so a present kid header can never be passed off as "kid-less".
-func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
+func (s *Service[C]) verificationKey(token *jwt.Token) (any, error) {
 	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 		return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 	}

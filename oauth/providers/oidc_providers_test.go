@@ -169,7 +169,6 @@ func TestOIDC_RejectsInternalIssuerBeforeGET(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			// A RoundTripper that fails the test if it is ever called — the issuer validation
 			// must reject the URL before any network I/O occurs.

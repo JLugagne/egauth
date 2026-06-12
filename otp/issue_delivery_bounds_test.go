@@ -65,14 +65,12 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 
 	// Fire total concurrent HTTP requests; each responds immediately (204).
 	var wg sync.WaitGroup
-	for i := 0; i < total; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range total {
+		wg.Go(func() {
 			rec := httptest.NewRecorder()
 			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/otp/issue", nil))
 			assert.Equal(t, http.StatusNoContent, rec.Code)
-		}()
+		})
 	}
 	wg.Wait() // all HTTP responses are back
 

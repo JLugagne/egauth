@@ -183,16 +183,14 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		seen := make([]int64, goroutines+1) // count occurrences of each returned value
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for i := 0; i < goroutines; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range goroutines {
+			wg.Go(func() {
 				<-start
 				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, time.Now())
 				if err == nil && n >= 1 && n <= goroutines {
 					atomic.AddInt64(&seen[n], 1)
 				}
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()

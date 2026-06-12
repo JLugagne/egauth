@@ -222,7 +222,7 @@ func TestVerifyTOTP_NoAttemptLimit(t *testing.T) {
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	// Far more wrong guesses than any default limit: none lock the factor.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrInvalidCode)
 	}
 	// A valid code still succeeds afterwards.
@@ -244,15 +244,13 @@ func TestVerifyTOTP_ConcurrentAttemptLimit(t *testing.T) {
 	var invalid int64 // ErrInvalidCode == a comparison actually ran and failed
 	var wg sync.WaitGroup
 	start := make(chan struct{})
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			<-start
 			if err := svc.VerifyTOTP(ctx, "", uid, "000000"); err == mfa.ErrInvalidCode {
 				atomic.AddInt64(&invalid, 1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

@@ -138,7 +138,6 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 	}
 
 	for _, h := range handlers {
-		h := h
 		t.Run(h.name+"/untrusted_origin_blocked", func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.handler(rec, mfaPostOrigin(h.form, "https://evil.attacker.com"))

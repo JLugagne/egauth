@@ -38,7 +38,7 @@ func generateRecoveryCodes(n int) (plaintext, hashes []string, err error) {
 	enc := base32.StdEncoding.WithPadding(base32.NoPadding)
 	plaintext = make([]string, 0, n)
 	hashes = make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		b := make([]byte, recoveryCodeBytes)
 		if _, err = rand.Read(b); err != nil {
 			return nil, nil, err

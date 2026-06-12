@@ -53,7 +53,6 @@ func TestGuarded_RejectsOversizedBody(t *testing.T) {
 	}
 
 	for _, h := range handlers {
-		h := h
 		t.Run(h.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			h.handler(rec, oversizedBody())

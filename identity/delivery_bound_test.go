@@ -67,12 +67,10 @@ func TestDispatchDeliveryBounded(t *testing.T) {
 		identity.WithHandlerEventSink(sink))
 
 	var wg sync.WaitGroup
-	for i := 0; i < nBursts; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range nBursts {
+		wg.Go(func() {
 			fireReset(h, "u@example.com")
-		}()
+		})
 	}
 	wg.Wait() // all requests have returned (delivery dispatch is non-blocking)
 
@@ -271,12 +269,10 @@ func TestDeliveryConcurrencyDefault(t *testing.T) {
 
 	const nBursts = identity.DefaultDeliveryConcurrency + 50
 	var wg sync.WaitGroup
-	for i := 0; i < nBursts; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range nBursts {
+		wg.Go(func() {
 			fireReset(h, "u@example.com")
-		}()
+		})
 	}
 	wg.Wait()
 

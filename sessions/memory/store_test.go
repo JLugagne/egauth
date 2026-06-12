@@ -37,7 +37,7 @@ func TestIndexConsistency(t *testing.T) {
 
 	// Create many sessions to ensure lookups don't depend on iteration.
 	var created []*sessions.Session
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		sess := newSession("tenantA", "hash-"+strconv.Itoa(i), future)
 		if err := store.CreateSession(ctx, "tenantA", sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)

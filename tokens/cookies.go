@@ -172,10 +172,7 @@ func (c Cookies) SetRefresh(w http.ResponseWriter, refreshToken string, expiresA
 		SameSite: c.SameSite,
 	}
 	if persistent {
-		maxAge := int(time.Until(expiresAt).Seconds())
-		if maxAge < 1 {
-			maxAge = 1
-		}
+		maxAge := max(int(time.Until(expiresAt).Seconds()), 1)
 		cookie.MaxAge = maxAge
 		cookie.Expires = expiresAt
 	}

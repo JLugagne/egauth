@@ -49,7 +49,7 @@ func TestOTPEvents_BlockedOnTooManyAttempts(t *testing.T) {
 	require.NoError(t, err)
 
 	// Burn all attempts with wrong codes; the final one trips the limit.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		err = svc.Verify(ctx, tenantID, subjectID, purpose, "000000")
 		require.Error(t, err)
 	}

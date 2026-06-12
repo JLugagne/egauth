@@ -37,7 +37,7 @@ func TestTokenBucket_BurstThenDeny(t *testing.T) {
 	tb := ratelimit.NewTokenBucket(3, time.Second, ratelimit.WithClock(clk.now))
 
 	// First 3 requests consume the burst.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		allowed, _ := tb.Allow(ctx, "ip-1")
 		assert.True(t, allowed, "burst request %d should be allowed", i)
 	}
@@ -142,7 +142,7 @@ func TestMiddleware_ThrottlesFloodBeyondBurst(t *testing.T) {
 	}
 
 	allowed, rejected := 0, 0
-	for i := 0; i < flood; i++ {
+	for i := range flood {
 		rec := httptest.NewRecorder()
 		h.ServeHTTP(rec, req())
 		switch rec.Code {
