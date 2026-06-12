@@ -69,6 +69,12 @@ type Config struct {
 	// POST endpoint (login, register, refresh, logout). List the exact origins your forms
 	// are served from, e.g. "https://app.example.com".
 	TrustedOrigins []string
+	// InsecureNoOriginCheck opts out of the preset's CSRF-by-default guarantee. NewWebApp refuses
+	// to build when TrustedOrigins is empty unless this is set; when set, it wires
+	// WithInsecureNoOriginCheck into BOTH the identity and tokens handlers so the whole preset is
+	// consistently insecure (every origin accepted), restoring the pre-v1 behavior. Only set this
+	// when CSRF is handled by a separate layer.
+	InsecureNoOriginCheck bool
 	// EventSink receives security events (login, registration, refresh reuse, logout, ...).
 	// Nil selects event.NewSlogSink(nil), so events go to slog.Default() instead of being
 	// silently dropped — silent auth is un-auditable auth.
@@ -107,6 +113,14 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 	}
 	if cfg.Issuer == "" {
 		return nil, errors.New("webapp: Config.Issuer is required")
+	}
+	// CSRF-by-default guarantee: the preset enforces a strict same-origin check on every mounted
+	// endpoint (identity login/register and tokens refresh/logout alike). Same-origin works out of
+	// the box, but a cross-origin front-end needs its host on the allowlist — so refuse to build
+	// with an empty TrustedOrigins unless the consumer explicitly opts out. This makes
+	// "CSRF-by-default" mean the same thing across both handler families.
+	if len(cfg.TrustedOrigins) == 0 && !cfg.InsecureNoOriginCheck {
+		return nil, errors.New("webapp: Config.TrustedOrigins must be set for CSRF-by-default (or set Config.InsecureNoOriginCheck to opt out)")
 	}
 
 	accessTTL := cfg.AccessTTL
@@ -155,6 +169,12 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 	if len(cfg.TrustedOrigins) > 0 {
 		idOpts = append(idOpts, identity.WithTrustedOrigins(cfg.TrustedOrigins...))
 		tkOpts = append(tkOpts, tokens.WithTrustedOrigins(cfg.TrustedOrigins...))
+	}
+	if cfg.InsecureNoOriginCheck {
+		// Opt-out: disable the same-origin check on BOTH families so the preset is consistently
+		// insecure rather than protecting only one half.
+		idOpts = append(idOpts, identity.WithInsecureNoOriginCheck())
+		tkOpts = append(tkOpts, tokens.WithInsecureNoOriginCheck())
 	}
 	if cfg.Tenant != "" {
 		tenant := cfg.Tenant

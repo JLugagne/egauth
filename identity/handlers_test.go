@@ -48,6 +48,10 @@ func loginForm(t *testing.T, path, email, password, remember string) *http.Reque
 	}
 	req := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin by default so business-logic tests pass the strict-by-default CSRF check
+	// (httptest.NewRequest sets Host to "example.com"). CSRF tests override this header (or
+	// delete it) to exercise the cross-origin / missing-origin paths explicitly.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -108,6 +112,8 @@ func changePwForm(t *testing.T, current, newPw string) *http.Request {
 	form.Set("new_password", newPw)
 	req := httptest.NewRequest(http.MethodPost, "/account/password", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin by default so business-logic tests pass the strict-by-default CSRF check.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -314,8 +320,10 @@ func TestLoginHandler_CSRFMissingOriginRejected(t *testing.T) {
 	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(),
 		identity.WithTrustedOrigins("app.example.com"))
 
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Header.Del("Origin") // a browser POST lacking both Origin and Referer must be untrusted
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+	h.ServeHTTP(rec, req)
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
@@ -381,4 +389,70 @@ func TestLoginHandler_AccountDisabled_MatchesLockedResponse(t *testing.T) {
 	assert.Equal(t, recLocked.Body.String(), recDisabled.Body.String(),
 		"disabled account response body must be identical to locked account response")
 	assert.Nil(t, cookieByName(recDisabled, tokens.DefaultAccessCookieName), "no cookie on disabled login")
+}
+
+// TestLoginHandler_CSRFBlocksCrossOriginByDefault proves the secure-by-default CSRF behavior:
+// with NO WithTrustedOrigins configured, a cross-origin POST must still be rejected, matching
+// the tokens handlers. Authenticate must never run for a blocked request.
+func TestLoginHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
+	called := false
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			called = true
+			return &identity.User{ID: uuid.New()}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "Authenticate must not run for a cross-site request with default config")
+}
+
+// TestLoginHandler_CSRFAllowsSameOriginByDefault proves the secure default is not a false
+// positive: a same-origin POST with no WithTrustedOrigins still succeeds.
+func TestLoginHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return &identity.User{ID: uuid.New()}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// TestLoginHandler_WithInsecureNoOriginCheck proves the loud opt-out restores the pre-v1
+// accept-all behavior: a cross-origin POST is accepted and reaches Authenticate.
+func TestLoginHandler_WithInsecureNoOriginCheck(t *testing.T) {
+	called := false
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			called = true
+			return &identity.User{ID: uuid.New()}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
+		identity.WithInsecureNoOriginCheck())
+
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.True(t, called, "Authenticate must run when the origin check is disabled")
 }

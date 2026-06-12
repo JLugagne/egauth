@@ -19,6 +19,10 @@ import (
 func mfaPost(form url.Values) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin by default so business-logic tests pass the strict-by-default CSRF check
+	// (httptest.NewRequest sets Host to "example.com"). CSRF tests override this header to
+	// exercise the cross-origin path explicitly.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -153,11 +157,20 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		})
 	}
 
-	t.Run("no_trusted_origins_passes_any_origin", func(t *testing.T) {
-		// No WithTrustedOrigins — any origin (or none) is accepted.
-		handlerNoOriginCheck := mfa.EnrollHandler(svc, resolver)
+	t.Run("no_trusted_origins_still_blocks_cross_origin", func(t *testing.T) {
+		// Strict by default (TASK-025 parity with tokens/identity): with NO WithTrustedOrigins,
+		// a cross-origin POST must still be rejected.
+		handlerDefault := mfa.EnrollHandler(svc, resolver)
 		rec := httptest.NewRecorder()
-		handlerNoOriginCheck(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
+		handlerDefault(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("with_insecure_no_origin_check_passes_any_origin", func(t *testing.T) {
+		// The loud opt-out restores the pre-v1 accept-all behavior.
+		handlerInsecure := mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoOriginCheck())
+		rec := httptest.NewRecorder()
+		handlerInsecure(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)
 	})
 }

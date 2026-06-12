@@ -31,6 +31,8 @@ type handlerConfig struct {
 	cookies tokens.Cookies
 	// trustedOrigins, when non-empty, enables CSRF Origin/Referer enforcement (see WithTrustedOrigins).
 	trustedOrigins map[string]bool
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
 	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
 	maxBodyBytes int64
 }
@@ -86,13 +88,15 @@ func WithCookies(c tokens.Cookies) HandlerOption {
 	return func(h *handlerConfig) { h.cookies = c }
 }
 
-// WithTrustedOrigins enables a CSRF Origin/Referer allowlist check on all state-changing MFA
-// handlers. When set, any POST whose Origin (or Referer, as fallback) host is not in the list
-// and does not equal the request Host is rejected with 403 "cross_site_blocked". When unset
-// (the default), no origin check is performed, preserving backwards-compatible behaviour.
-// Supply hosts WITHOUT scheme, e.g. "app.example.com". Use this option whenever the MFA
-// endpoints are reachable from a browser session backed by a SameSite=None cookie
-// (e.g. cross-subdomain or embedded apps).
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for all state-changing
+// MFA handlers.
+//
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
+// trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
+// own Host is rejected with 403 "cross_site_blocked". This option WIDENS that allowlist to permit
+// additional hosts. Supply hosts WITHOUT scheme, e.g. "app.example.com". Use it whenever the MFA
+// endpoints are reachable from a browser session on another origin (e.g. cross-subdomain or
+// embedded apps). To turn the check off entirely, use WithInsecureNoOriginCheck.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -261,11 +265,14 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
-// originAllowed reports whether the request's origin is permitted. When no trusted origins are
-// configured it always returns true (backwards-compatible). When configured, a request is allowed
-// only if its Origin/Referer host matches the server Host or appears in the allowlist.
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
+// by default — even with an empty trustedOrigins allowlist — to match the tokens/identity handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed only
+// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host;
+// a POST carrying neither header is treated as untrusted. WithInsecureNoOriginCheck restores the
+// pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
+	if cfg.insecureNoOriginCheck {
 		return true
 	}
 	host := httputil.RequestOriginHost(r)
@@ -329,4 +336,17 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
 		cfg.ok(w, r)
 	})
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on all state-changing MFA
+// handlers.
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins).
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer or in trusted test setups. Prefer WithTrustedOrigins to extend, rather than
+// remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

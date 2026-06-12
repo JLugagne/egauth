@@ -24,6 +24,9 @@ func fireReset(h http.HandlerFunc, email string) {
 	body := url.Values{"email": {email}}.Encode()
 	req := httptest.NewRequest(http.MethodPost, "/auth/reset", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin so the strict-by-default CSRF check passes; this suite exercises the delivery
+	// path, not the origin path (httptest.NewRequest sets Host to "example.com").
+	req.Header.Set("Origin", "https://"+req.Host)
 	h(httptest.NewRecorder(), req)
 }
 
@@ -169,6 +172,7 @@ func TestDispatchDeliveryTimeout(t *testing.T) {
 	body := url.Values{"email": {"u@example.com"}}.Encode()
 	req := httptest.NewRequest(http.MethodPost, "/auth/reset", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://"+req.Host) // same-origin: pass strict-by-default CSRF check
 	h(rec, req)
 
 	// The request returns immediately (delivery is off the response path) and stays uniform.
@@ -217,7 +221,8 @@ func TestDispatchDeliveryTimeoutDoesNotCancelOnRequestEnd(t *testing.T) {
 	body := url.Values{"email": {"u@example.com"}}.Encode()
 	req := httptest.NewRequest(http.MethodPost, "/auth/reset", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	h(rec, req) // returns while the delivery is still parked in started/proceed
+	req.Header.Set("Origin", "https://"+req.Host) // same-origin: pass strict-by-default CSRF check
+	h(rec, req)                                   // returns while the delivery is still parked in started/proceed
 
 	<-started
 	require.Equal(t, http.StatusNoContent, rec.Code)

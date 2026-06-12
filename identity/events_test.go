@@ -185,6 +185,7 @@ func TestEvents_HandlerEmitsDeliveryFailed(t *testing.T) {
 	body := url.Values{"email": {"user@example.com"}}.Encode()
 	req := httptest.NewRequest(http.MethodPost, "/auth/reset", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://"+req.Host) // same-origin: pass strict-by-default CSRF check
 	handler(rec, req)
 
 	// Response is uniform (enumeration-safe) regardless of the delivery outcome.

@@ -25,6 +25,10 @@ func newTestHandler(t *testing.T, routes webapp.Routes) http.Handler {
 		SigningKey: "a-high-entropy-secret-kept-out-of-source-control",
 		Issuer:     "test-app",
 		Routes:     routes,
+		// These tests exercise routing, not CSRF, and drive the handler with http.PostForm (which
+		// sends no Origin). Opt out of the strict same-origin check so the routing assertions hold;
+		// the CSRF guarantee itself is covered by csrf_test.go.
+		InsecureNoOriginCheck: true,
 	})
 	require.NoError(t, err)
 	return h

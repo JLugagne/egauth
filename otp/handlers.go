@@ -27,18 +27,20 @@ const DefaultDeliveryTimeout = 30 * time.Second
 
 // handlerConfig holds the configurable behavior of the OTP HTTP handlers.
 type handlerConfig struct {
-	subjectResolver     func(*http.Request) (uuid.UUID, bool)
-	purpose             string
-	purposeResolver     func(*http.Request) string
-	codeField           string
-	tenantResolver      func(*http.Request) string
-	trustedOrigins      map[string]bool
-	maxBodyBytes        int64
-	successURL          string
-	failureURL          string
-	onVerified          func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)
-	deliveryConcurrency int
-	deliveryTimeout     time.Duration
+	subjectResolver func(*http.Request) (uuid.UUID, bool)
+	purpose         string
+	purposeResolver func(*http.Request) string
+	codeField       string
+	tenantResolver  func(*http.Request) string
+	trustedOrigins  map[string]bool
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
+	maxBodyBytes          int64
+	successURL            string
+	failureURL            string
+	onVerified            func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)
+	deliveryConcurrency   int
+	deliveryTimeout       time.Duration
 	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
 	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
 	// served by a given handler instance — a per-request channel would make the cap meaningless)
@@ -97,8 +99,13 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
 
-// WithTrustedOrigins enables a CSRF Origin/Referer allowlist check (see the identity/tokens
-// handlers). Disabled when unset.
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for the OTP handlers.
+//
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
+// trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
+// own Host is rejected with 403. This option WIDENS that allowlist to permit additional hosts.
+// Supply hosts WITHOUT scheme, e.g. "app.example.com". To turn the check off entirely, use
+// WithInsecureNoOriginCheck. See the identity/tokens handlers for the same behavior.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -299,10 +306,35 @@ func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request
 	return httputil.ParseLimitedForm(w, r, cfg.maxBodyBytes, cfg.fail)
 }
 
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
+// by default — even with an empty trustedOrigins allowlist — to match the tokens/identity handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed only
+// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host;
+// a POST carrying neither header is treated as untrusted. WithInsecureNoOriginCheck restores the
+// pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	return httputil.OriginAllowed(r, cfg.trustedOrigins)
+	if cfg.insecureNoOriginCheck {
+		return true
+	}
+	host := httputil.RequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
 	httputil.Fail(w, r, cfg.failureURL, status, code)
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on the OTP handlers.
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins).
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer or in trusted test setups. Prefer WithTrustedOrigins to extend, rather than
+// remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

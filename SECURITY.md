@@ -326,33 +326,42 @@ redaction is in any case only a backstop. Therefore the consumer must:
   pass a configurable duration do not silently opt out of the cap when the user configures
   zero.
 
-## CSRF on the form handlers (consumer responsibility)
+## CSRF on the form handlers (strict same-origin by default)
 
-`LoginHandler`, `RegisterHandler`, `RefreshHandler` and `LogoutHandler` are
-state-changing endpoints driven by the request (form body / cookies). egauth applies two
-partial defences but does **not** ship a full CSRF-token system (per the PRD, rate limiting
-and general CSRF are left to the application layer):
+`LoginHandler`, `RegisterHandler`, the authenticated identity mutations
+(`ChangePasswordHandler`, change-email, delete-account, recovery, phone/email
+verification), `RefreshHandler`, `LogoutHandler`, the `mfa` handlers and the `otp`
+handlers are all state-changing endpoints driven by the request (form body / cookies).
+egauth does **not** ship a full CSRF-token system (per the PRD, that is left to the
+application layer), but it now applies a **strict same-origin check on every one of these
+handler families by default**:
 
-- **`SameSite=Lax` cookies** (default) stop a cross-site request from *sending* the
-  refresh/session cookie, which protects `RefreshHandler`/`LogoutHandler` against classic
-  CSRF acting on an existing session.
-- **`identity.WithTrustedOrigins(...)`** (opt-in) rejects a login/register POST whose
-  `Origin`/`Referer` host is not allow-listed. This closes the **login-CSRF / session
-  fixation** gap, where `SameSite` does *not* help because the attack needs no
-  pre-existing cookie (it forces the victim's browser to log into the *attacker's*
-  account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
-  in front of these endpoints.
+- **Same-origin is enforced even with no configuration.** A state-changing POST is allowed
+  only when its `Origin` (or `Referer` fallback) host equals the request's own `Host` or an
+  explicitly allow-listed host. A browser-driven POST carrying **neither** `Origin` nor
+  `Referer` is treated as untrusted and rejected with `403 cross_site_blocked`. This closes
+  the **login-CSRF / session-fixation** gap (where `SameSite` does *not* help, because the
+  attack needs no pre-existing cookie) and the MFA/OTP downgrade gaps (a cross-site POST to
+  `DisableHandler`/`RegenerateRecoveryCodesHandler` stripping a victim's second factor)
+  *out of the box* — the previous behavior, where an empty allowlist disabled the check, is
+  gone.
+- **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
+  from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
+  against classic CSRF on an existing session.
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`) **widens** the
+  same-origin allowlist to additional hosts — e.g. a front-end served from another subdomain.
+  Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`) is the explicit,
+  loudly-named opt-out: it disables the same-origin check entirely, restoring the pre-v1
+  accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g. a
+  synchronizer/double-submit token middleware) or in trusted test setups.
 
-The **`mfa` handlers** (`EnrollHandler`, `ConfirmHandler`, `VerifyHandler`,
-`VerifyRecoveryHandler`, `RegenerateRecoveryCodesHandler`, `DisableHandler`,
-`StepUpHandler`) are also state-changing POST endpoints. If the session cookie they rely
-on is `SameSite=None` (e.g. in a cross-subdomain or embedded app), a cross-site form POST
-could silently strip a victim's second factor (MFA downgrade via `DisableHandler`) or
-invalidate their recovery codes (`RegenerateRecoveryCodesHandler`). Use
-**`mfa.WithTrustedOrigins(...)`** to apply the same `Origin`/`Referer` host allowlist
-check on all MFA handlers. Supply hostnames without scheme, e.g.
-`mfa.WithTrustedOrigins("app.example.com")`. When unset (the default), no origin check
-is performed — CSRF protection remains the consumer's responsibility.
+The **`webapp` v1 preset** (`webapp.NewWebApp`) carries this guarantee across both handler
+families it mounts: it **refuses to build** when `Config.TrustedOrigins` is empty unless you
+explicitly set `Config.InsecureNoOriginCheck`, in which case the opt-out is wired into *both*
+the identity and tokens handlers so the preset is consistently insecure rather than protecting
+only one half. This makes "CSRF-by-default" mean the same thing across every endpoint the
+preset exposes.
 
 ## Observability and idempotency (consumer responsibility)
 

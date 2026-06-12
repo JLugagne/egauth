@@ -62,10 +62,12 @@ type handlerConfig struct {
 	recoveryEmailField   string
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
-	maxBodyBytes         int64
-	events               event.Sink
-	deliveryConcurrency  int
-	deliveryTimeout      time.Duration
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
+	maxBodyBytes          int64
+	events                event.Sink
+	deliveryConcurrency   int
+	deliveryTimeout       time.Duration
 	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
 	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
 	// served by a given handler instance — a per-request channel would make the cap meaningless)
@@ -206,15 +208,19 @@ func WithHandlerEventSink(sink event.Sink) HandlerOption {
 	return func(h *handlerConfig) { h.events = sink }
 }
 
-// WithTrustedOrigins enables CSRF origin checking on the form handlers (login/register).
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for the form handlers
+// (login/register and the authenticated mutations).
 //
-// Login and registration are state-changing endpoints driven purely by the request body,
-// so SameSite=Lax cookies alone do not prevent login-CSRF / session fixation (the attack
-// needs no pre-existing cookie). When trusted origins are configured, a request whose
-// Origin — or, failing that, Referer — host is neither the request's own Host nor one of
-// the supplied hosts is rejected with 403. Supply hosts WITHOUT scheme, e.g.
-// "app.example.com". When left unset the check is disabled and CSRF protection becomes the
-// consumer's responsibility (see SECURITY.md).
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with
+// no trusted origins configured, a request whose Origin — or, failing that, Referer — host is
+// not the request's own Host is rejected with 403. This option WIDENS that allowlist to permit
+// additional hosts (e.g. a separate front-end origin on another subdomain). Supply hosts WITHOUT
+// scheme, e.g. "app.example.com". To turn the check off entirely, use WithInsecureNoOriginCheck.
+//
+// Login and registration are state-changing endpoints driven purely by the request body, so
+// SameSite=Lax cookies alone do not prevent login-CSRF / session fixation (the attack needs no
+// pre-existing cookie) — which is why the default is now strict rather than the consumer's
+// responsibility (see SECURITY.md).
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -459,13 +465,22 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send f
 	}()
 }
 
-// originAllowed reports whether the request passes the CSRF origin check. When no trusted
-// origins are configured the check is disabled (CSRF protection is then the consumer's
-// responsibility, per SECURITY.md). A configured check rejects any request whose Origin
-// (or Referer fallback) host is neither the request's own Host nor an allowlisted host;
-// a browser-driven POST that carries neither header is treated as untrusted.
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is
+// ON by default — even with an empty trustedOrigins allowlist — to match the tokens handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed
+// only when its Origin (or Referer fallback) host equals the request's own Host or an explicitly
+// allowlisted host; a browser-driven POST that carries neither header is treated as untrusted.
+// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. The strict allow/deny
+// policy is enforced here — NOT httputil.OriginAllowed, whose empty-allowlist default is permissive.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	return httputil.OriginAllowed(r, cfg.trustedOrigins)
+	if cfg.insecureNoOriginCheck {
+		return true
+	}
+	host := httputil.RequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
@@ -1261,4 +1276,21 @@ func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg
 	// surfaced to the client, so the interim state cannot be renewed via /refresh.
 	cfg.cookies.SetAccess(w, pair.AccessToken)
 	return nil
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on the identity form handlers
+// (login, register, and the authenticated mutations: change-password, change-email,
+// delete-account, recovery, phone/email verification).
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins),
+// because login/register are driven purely by the request body and SameSite=Lax alone does not
+// prevent login-CSRF / session fixation.
+//
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer (e.g. a synchronizer-token middleware) or in trusted test setups. Prefer
+// WithTrustedOrigins to extend, rather than remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

@@ -29,6 +29,8 @@ func oversizedBody() *http.Request {
 	body := "code=" + strings.Repeat("x", bodyBytes)
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin so the strict-by-default CSRF check passes; this test targets the body cap.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -74,6 +76,8 @@ func TestGuarded_WithMaxBodyBytes_CustomCap(t *testing.T) {
 		body := "code=" + strings.Repeat("x", n)
 		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		// Same-origin so the strict-by-default CSRF check passes; this test targets the body cap.
+		req.Header.Set("Origin", "https://"+req.Host)
 		return req
 	}
 

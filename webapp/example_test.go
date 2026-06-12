@@ -29,6 +29,11 @@ func ExampleNewWebApp() {
 		TokenStore: basic.NewMemoryStore(),
 		SigningKey: "a-high-entropy-secret-kept-out-of-source-control",
 		Issuer:     "example-app",
+		// A real deployment lists the origins its forms are served from, e.g.
+		// TrustedOrigins: []string{"app.example.com"}, which enforces a strict same-origin CSRF
+		// check on every mounted endpoint. This runnable example drives the handler with
+		// http.PostForm (which sends no Origin header), so it opts out instead.
+		InsecureNoOriginCheck: true,
 		// EventSink left nil -> events go to slog.Default() instead of being dropped.
 	})
 	if err != nil {

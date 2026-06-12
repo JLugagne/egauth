@@ -68,7 +68,7 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 	for range total {
 		wg.Go(func() {
 			rec := httptest.NewRecorder()
-			h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/otp/issue", nil))
+			h.ServeHTTP(rec, issuePost())
 			assert.Equal(t, http.StatusNoContent, rec.Code)
 		})
 	}
@@ -111,7 +111,7 @@ func TestIssueHandler_DeliveryTimeout(t *testing.T) {
 	)
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/otp/issue", nil))
+	h.ServeHTTP(rec, issuePost())
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	// The delivery context must be cancelled within a generous multiple of the configured timeout.
