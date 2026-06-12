@@ -2,10 +2,10 @@ package mfa
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
-	"net/url"
+
+	"github.com/JLugagne/egauth/internal/httputil"
 
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -122,7 +122,7 @@ func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"secret": enrollment.Secret, "uri": enrollment.URI})
+		httputil.WriteJSON(w, http.StatusOK, map[string]string{"secret": enrollment.Secret, "uri": enrollment.URI})
 	})
 }
 
@@ -136,7 +136,7 @@ func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
+		httputil.WriteJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
 	})
 }
 
@@ -180,7 +180,7 @@ func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.Han
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
+		httputil.WriteJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
 	})
 }
 
@@ -258,11 +258,7 @@ func (cfg handlerConfig) failErr(w http.ResponseWriter, r *http.Request, err err
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 // originAllowed reports whether the request's origin is permitted. When no trusted origins are
@@ -272,28 +268,11 @@ func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if len(cfg.trustedOrigins) == 0 {
 		return true
 	}
-	host := mfaRequestOriginHost(r)
+	host := httputil.RequestOriginHost(r)
 	if host == "" {
 		return false
 	}
 	return host == r.Host || cfg.trustedOrigins[host]
-}
-
-// mfaRequestOriginHost extracts the host from the request's Origin header, falling back to the
-// Referer header when Origin is absent or "null".
-func mfaRequestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
 }
 
 func mapMFAError(err error) (int, string) {
@@ -311,23 +290,6 @@ func mapMFAError(err error) (int, string) {
 	default:
 		return http.StatusInternalServerError, "mfa_error"
 	}
-}
-
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
 }
 
 // StepUpClaimsBuilder maps the stepped-up user (resolved from the interim session) to the claims

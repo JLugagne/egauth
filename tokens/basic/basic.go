@@ -15,6 +15,7 @@
 package basic
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/JLugagne/egauth/tokens"
@@ -90,3 +91,17 @@ var (
 	_ tokens.Verifier[struct{}] = (*Issuer)(nil)
 	_ tokens.Rotator[struct{}]  = (*Issuer)(nil)
 )
+
+// ContextMiddleware builds the context bridge for the no-claims case (wrapping
+// tokens.ContextMiddleware[struct{}]). It verifies the access token and injects the
+// egauth.Actor into the request context before calling next, for bridging token auth into
+// the passkey/mfa/otp handlers. Read the Actor back with tokens.ActorFromContext.
+func ContextMiddleware(verifier tokens.Verifier[struct{}], next http.Handler, opts ...tokens.AuthOption[struct{}]) http.Handler {
+	return tokens.ContextMiddleware[struct{}](verifier, next, opts...)
+}
+
+// ClaimsFromContext returns the verified no-claims Claims injected by ContextMiddleware.
+// It is tokens.ClaimsFromContext specialized to struct{}; the custom-claims field is empty.
+func ClaimsFromContext(ctx context.Context) (*Claims, bool) {
+	return tokens.ClaimsFromContext[struct{}](ctx)
+}

@@ -46,13 +46,15 @@ next, _ := issuer.Rotate(ctx, tenant, pair.RefreshToken) // single-use; replay t
 claimsOf := func(u *identity.User) basic.Claims { return basic.Claims{Subject: u.ID, TenantID: u.TenantID} }
 mux := http.NewServeMux()
 mux.Handle("POST /login",   identity.LoginHandler(svc, issuer, claimsOf))
-mux.Handle("POST /refresh", basic.RefreshHandler(issuer))
+mux.Handle("POST /refresh", basic.RefreshHandler(issuer)) // same-origin CSRF check on by default
 mux.Handle("POST /logout",  basic.LogoutHandler(basic.NewMemoryStore())) // revokes refresh family
 mux.Handle("GET /me", basic.RequireAuth(issuer,
     func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
         // actor.UserID / actor.TenantID authenticated
     }))
 ```
+
+`RefreshHandler`/`LogoutHandler` reject cross-origin POSTs by default (same-origin check); add `tokens.WithTrustedOrigins(...)` for extra front-end hosts, or `tokens.WithInsecureNoOriginCheck()` to disable it when CSRF is handled elsewhere.
 
 Details: [identity.md](identity.md), [tokens.md](tokens.md), [passwords.md](passwords.md).
 
@@ -127,14 +129,22 @@ second factor, mint tokens whose `AMR` includes `mfa` and gate sensitive routes 
 import (
     "github.com/JLugagne/egauth/mfa"
     mfamem "github.com/JLugagne/egauth/mfa/memory"
+    "github.com/JLugagne/egauth/tokens"
 )
 
 mfaSvc := mfa.NewService(mfamem.NewStore(), mfa.WithIssuer("Example"))
-resolve := func(r *http.Request) (uuid.UUID, string, bool) { return userID, tenant, true } // from session/JWT
 
-mux.Handle("POST /mfa/enroll",  mfa.EnrollHandler(mfaSvc, mfa.WithUserResolver(resolve)))  // → {secret, otpauth:// uri}
-mux.Handle("POST /mfa/confirm", mfa.ConfirmHandler(mfaSvc, mfa.WithUserResolver(resolve))) // → {recovery_codes:[...]}
-mux.Handle("POST /mfa/verify",  mfa.VerifyHandler(mfaSvc, mfa.WithUserResolver(resolve)))  // 204 / 429 too_many_attempts
+// The MFA handlers need the authenticated user. Don't hand-roll the
+// RequireAuth -> context -> resolver glue: front each handler with
+// tokens.ContextMiddleware (verifies the access token, injects the Actor into
+// the request context) and pass tokens.UserResolverFromContext, which reads it
+// back in mfa.WithUserResolver's (userID, tenant, ok) shape. `verifier` is the
+// tokens.Verifier[C] from §1 (a *jwtissuer issuer satisfies it).
+protect := func(h http.Handler) http.Handler { return tokens.ContextMiddleware(verifier, h) }
+
+mux.Handle("POST /mfa/enroll",  protect(mfa.EnrollHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext))))  // → {secret, otpauth:// uri}
+mux.Handle("POST /mfa/confirm", protect(mfa.ConfirmHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext)))) // → {recovery_codes:[...]}
+mux.Handle("POST /mfa/verify",  protect(mfa.VerifyHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext))))  // 204 / 429 too_many_attempts
 
 // step-up: issue access token with AMR after factor verified; protect route with FreshAuth:
 if !claims.FreshAuth(5 * time.Minute) { http.Error(w, "reauth_required", 401); return }

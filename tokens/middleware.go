@@ -128,85 +128,96 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		// Resolve the tenant up front so BOTH the access-token verification and any
-		// auto-refresh rotation are scoped to the same tenant. When a resolver is configured
-		// it MUST map the request to a non-empty tenant ID; an empty return means the tenant
-		// could not be determined, and failing open into the "" partition would let such a
-		// request reach the tenant-unaware verification path (which a multi-tenant Verifier
-		// refuses anyway). So we reject it. The "" partition is used only when no resolver is
-		// configured at all (single-tenant mode).
-		tenantID := ""
-		tenantAware := cfg.tenantResolver != nil
+		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
+			next(w, r, actorFromClaims(claims), claims.Custom)
+		})
+	}
+}
+
+// serveAuthenticated runs the shared access-token verification + opt-in auto-refresh path
+// and, on success, invokes onAuth with the verified claims. It is the single fail-closed
+// authentication implementation behind both RequireAuth (which forwards claims as explicit
+// arguments) and ContextMiddleware (which injects them into the request context). Every
+// failure mode writes its own response and returns WITHOUT calling onAuth.
+func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier Verifier[C], cfg *authConfig[C], onAuth func(http.ResponseWriter, *http.Request, *Claims[C])) {
+	// Resolve the tenant up front so BOTH the access-token verification and any
+	// auto-refresh rotation are scoped to the same tenant. When a resolver is configured
+	// it MUST map the request to a non-empty tenant ID; an empty return means the tenant
+	// could not be determined, and failing open into the "" partition would let such a
+	// request reach the tenant-unaware verification path (which a multi-tenant Verifier
+	// refuses anyway). So we reject it. The "" partition is used only when no resolver is
+	// configured at all (single-tenant mode).
+	tenantID := ""
+	tenantAware := cfg.tenantResolver != nil
+	if tenantAware {
+		tenantID = cfg.tenantResolver(r)
+		if tenantID == "" {
+			unauthorized(w)
+			return
+		}
+	}
+
+	token, _ := extractAccessToken(r, cfg)
+
+	if token != "" {
+		var claims *Claims[C]
+		var err error
 		if tenantAware {
-			tenantID = cfg.tenantResolver(r)
-			if tenantID == "" {
-				unauthorized(w)
-				return
-			}
+			claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), tenantID, token)
+		} else {
+			claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), "", token)
 		}
-
-		token, _ := extractAccessToken(r, &cfg)
-
-		if token != "" {
-			var claims *Claims[C]
-			var err error
-			if tenantAware {
-				claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), tenantID, token)
-			} else {
-				claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), "", token)
-			}
-			if err == nil {
-				if !cfg.stepUpSatisfied(claims) {
-					stepUpRequired(w)
-					return
-				}
-				next(w, r, actorFromClaims(claims), claims.Custom)
+		if err == nil {
+			if !cfg.stepUpSatisfied(claims) {
+				stepUpRequired(w)
 				return
 			}
-			// Only an expired token is eligible for auto-refresh; any other failure
-			// (malformed, bad signature, invalid claims, tenant mismatch) is rejected outright.
-			if !errors.Is(err, ErrTokenExpired) || cfg.rotator == nil {
-				unauthorized(w)
-				return
-			}
+			onAuth(w, r, claims)
+			return
 		}
+		// Only an expired token is eligible for auto-refresh; any other failure
+		// (malformed, bad signature, invalid claims, tenant mismatch) is rejected outright.
+		if !errors.Is(err, ErrTokenExpired) || cfg.rotator == nil {
+			unauthorized(w)
+			return
+		}
+	}
 
-		// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
-		if cfg.rotator != nil && cfg.cookies != nil {
-			if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-				pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
-				if err != nil {
-					// ErrRefreshConcurrent is benign concurrency: a parallel request won the
-					// rotation race and already minted a fresh, valid refresh cookie for this
-					// client. The family is explicitly NOT poisoned. Clearing the refresh
-					// cookie here would wipe the winner's freshly issued cookie and log the
-					// user out — the exact lockout the reuse grace exists to prevent. So we
-					// drop only the stale access cookie and reject this request; the client
-					// retries with the winner's still-valid refresh cookie.
-					if errors.Is(err, ErrRefreshConcurrent) {
-						cfg.cookies.ClearAccess(w)
-						unauthorized(w)
-						return
-					}
-					// Any other rotation failure (after-grace reuse/expired/not found): clear
-					// all cookies so a poisoned family cannot keep retrying, then reject.
-					cfg.cookies.Clear(w)
+	// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
+	if cfg.rotator != nil && cfg.cookies != nil {
+		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
+			pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
+			if err != nil {
+				// ErrRefreshConcurrent is benign concurrency: a parallel request won the
+				// rotation race and already minted a fresh, valid refresh cookie for this
+				// client. The family is explicitly NOT poisoned. Clearing the refresh
+				// cookie here would wipe the winner's freshly issued cookie and log the
+				// user out — the exact lockout the reuse grace exists to prevent. So we
+				// drop only the stale access cookie and reject this request; the client
+				// retries with the winner's still-valid refresh cookie.
+				if errors.Is(err, ErrRefreshConcurrent) {
+					cfg.cookies.ClearAccess(w)
 					unauthorized(w)
 					return
 				}
-				cfg.cookies.SetAccess(w, pair.AccessToken)
-				cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-				if !cfg.stepUpSatisfied(&pair.Claims) {
-					stepUpRequired(w)
-					return
-				}
-				next(w, r, actorFromClaims(&pair.Claims), pair.Claims.Custom)
+				// Any other rotation failure (after-grace reuse/expired/not found): clear
+				// all cookies so a poisoned family cannot keep retrying, then reject.
+				cfg.cookies.Clear(w)
+				unauthorized(w)
 				return
 			}
+			cfg.cookies.SetAccess(w, pair.AccessToken)
+			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+			if !cfg.stepUpSatisfied(&pair.Claims) {
+				stepUpRequired(w)
+				return
+			}
+			onAuth(w, r, &pair.Claims)
+			return
 		}
-
-		unauthorized(w)
 	}
+
+	unauthorized(w)
 }
 
 // extractAccessToken pulls the access token from the configured cookie and/or the

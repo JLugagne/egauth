@@ -2,10 +2,10 @@ package otp
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"net/url"
 	"time"
+
+	"github.com/JLugagne/egauth/internal/httputil"
 
 	"github.com/google/uuid"
 )
@@ -187,7 +187,7 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 				})
 			}
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -232,7 +232,7 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.onVerified(w, r, subjectID)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -296,70 +296,13 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
-	if cfg.maxBodyBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
-	}
-	if err := r.ParseForm(); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
-		} else {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
-		}
-		return false
-	}
-	return true
+	return httputil.ParseLimitedForm(w, r, cfg.maxBodyBytes, cfg.fail)
 }
 
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
-		return true
-	}
-	host := requestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
-}
-
-func requestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
-}
-
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
-	if url != "" {
-		http.Redirect(w, r, url, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }

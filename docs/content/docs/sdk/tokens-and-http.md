@@ -107,3 +107,11 @@ handler := tokens.RequireAuth(
 A resolved token whose signed `tenant_id` does not match the request tenant is rejected (`tokens.ErrTenantMismatch` → 401). The same resolver scopes any auto-refresh rotation. `tokens.WithRefreshTenantResolver` is retained as a deprecated alias.
 
 The `tokens` package also provides ready-made HTTP handlers for the refresh and logout endpoints: `tokens.RefreshHandler` and `tokens.LogoutHandler`, both configurable with options such as `tokens.WithCookies`, `tokens.WithTrustedOrigins`, and `tokens.WithTenantResolver`.
+
+### CSRF same-origin check (on by default)
+
+These endpoints are state-changing `POST`s authenticated purely by the refresh cookie, so `SameSite=Lax` alone does not fully prevent a forged cross-site refresh/logout. Both handlers therefore apply a **same-origin check by default**: a request whose `Origin` (or, failing that, `Referer`) host is neither the request's own `Host` nor an explicitly trusted origin is rejected with `403` and the code `cross_site_blocked`, and a `POST` carrying neither header is treated as untrusted.
+
+- For a single-origin app this is zero-config: a same-origin browser `POST` just works.
+- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")` — supply hosts without scheme.
+- To turn the check off entirely (restoring the pre-v1 accept-every-origin behavior), pass `tokens.WithInsecureNoOriginCheck()`. Only do this when CSRF is handled by a separate layer; the name is deliberately loud.

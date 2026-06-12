@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
 )
 
@@ -259,7 +259,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		}
 		cfg.cookies.SetAccess(w, pair.AccessToken)
 		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -346,30 +346,7 @@ func mapLinkError(err error) (int, string) {
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
-}
-
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, rawURL string, okStatus int) {
-	if rawURL != "" {
-		http.Redirect(w, r, rawURL, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 // DynamicBeginHandler is like BeginHandler but resolves the Provider dynamically using a

@@ -4,11 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -284,19 +284,7 @@ func WithDeliveryTimeout(d time.Duration) HandlerOption {
 // writes the error response (413 when the body is too large, 400 when malformed) and returns
 // false.
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
-	if cfg.maxBodyBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
-	}
-	if err := r.ParseForm(); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
-		} else {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
-		}
-		return false
-	}
-	return true
+	return httputil.ParseLimitedForm(w, r, cfg.maxBodyBytes, cfg.fail)
 }
 
 // LoginHandler builds an HTTP handler that authenticates form credentials and, on success,
@@ -346,7 +334,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
-				redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 				return
 			}
 		}
@@ -355,7 +343,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -392,7 +380,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -477,37 +465,11 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send f
 // (or Referer fallback) host is neither the request's own Host nor an allowlisted host;
 // a browser-driven POST that carries neither header is treated as untrusted.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
-		return true
-	}
-	host := requestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
-}
-
-func requestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 // mapAuthError maps authentication errors to an HTTP status and a stable error code.
@@ -571,7 +533,7 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 				return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -601,7 +563,7 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -638,7 +600,7 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 				return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -664,7 +626,7 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -696,7 +658,7 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 				return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -735,7 +697,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -788,7 +750,7 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 			}
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -852,7 +814,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 				return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -883,7 +845,7 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -931,7 +893,7 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 		// The account no longer exists; clear this session's auth cookies client-side. Revoking
 		// the server-side session/refresh artifacts is handled by the Service's AccountErasers.
 		cfg.cookies.Clear(w)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1004,25 +966,6 @@ func parseFormBool(v string) bool {
 	}
 }
 
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
-	if url != "" {
-		http.Redirect(w, r, url, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 // RequestPhoneVerificationHandler builds an authenticated HTTP handler that starts the
 // phone-verification flow for the signed-in user. The current user is obtained via
 // WithUserResolver (typically reading whatever the application's auth middleware stashed on the
@@ -1084,7 +1027,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 				return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1116,7 +1059,7 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1176,7 +1119,7 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 				return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1206,7 +1149,7 @@ func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.Handle
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1257,7 +1200,7 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 				})
 			}
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 

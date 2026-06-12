@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JLugagne/egauth/internal/httputil"
+
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
@@ -141,7 +143,7 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 		if !cfg.storeSession(w, session) {
 			return
 		}
-		writeJSON(w, http.StatusOK, creation)
+		httputil.WriteJSON(w, http.StatusOK, creation)
 	}
 }
 
@@ -196,7 +198,7 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		if !cfg.storeSession(w, session) {
 			return
 		}
-		writeJSON(w, http.StatusOK, assertion)
+		httputil.WriteJSON(w, http.StatusOK, assertion)
 	}
 }
 
@@ -360,12 +362,6 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 // WithChallengeStore overrides, for a single handler, the ChallengeStore that provides
 // server-side, single-use replay protection for the ceremony challenge (SEC-05). On Begin the
 // issued challenge is recorded; on Finish it is atomically consumed before the assertion is
@@ -470,7 +466,7 @@ func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Han
 		if !cfg.storeSession(w, session) {
 			return
 		}
-		writeJSON(w, http.StatusOK, assertion)
+		httputil.WriteJSON(w, http.StatusOK, assertion)
 	}
 }
 

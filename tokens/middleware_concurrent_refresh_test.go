@@ -86,6 +86,10 @@ func TestRefreshHandler_ConcurrentRefreshPreservesCookies(t *testing.T) {
 	h := tokens.RefreshHandler[struct{}](f.svc, tokens.WithCookies(f.cookies))
 
 	req := httptest.NewRequest(http.MethodPost, "/refresh", nil)
+	// httptest.NewRequest sets Host to example.com; send a same-origin Origin so the request
+	// passes the secure-by-default CSRF check (TASK-025) and reaches the concurrent-refresh path
+	// this test actually exercises.
+	req.Header.Set("Origin", "http://"+req.Host)
 	req.AddCookie(&http.Cookie{Name: f.cookies.RefreshName, Value: pair.RefreshToken})
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)

@@ -36,6 +36,9 @@ func newRotator(t *testing.T) (*jwt.Service[struct{}], *memory.Store[struct{}]) 
 
 func postWithRefresh(value string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	// The CSRF same-origin check is on by default, so model a real same-origin browser
+	// POST: httptest.NewRequest sets Host to "example.com", so the Origin must match.
+	req.Header.Set("Origin", "http://"+req.Host)
 	if value != "" {
 		req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: value})
 	}
@@ -350,4 +353,81 @@ func TestLogoutHandler_NotFoundIsIdempotentSuccess(t *testing.T) {
 	h.ServeHTTP(rec, postWithRefresh("already-gone-token"))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code, "ErrRefreshTokenNotFound is idempotent success")
+}
+
+// TestRefreshHandler_CSRFBlocksCrossOriginByDefault proves that, with no
+// WithTrustedOrigins configured, a cross-origin POST must be rejected. This is the
+// secure-by-default behavior required by TASK-025: the origin check is on by default
+// and only same-origin (or explicitly trusted) requests are accepted.
+func TestRefreshHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
+	called := false
+	rot := &issuertest.MockRotator[struct{}]{
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
+			called = true
+			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}, nil
+		},
+	}
+	h := tokens.RefreshHandler[struct{}](rot)
+
+	req := postWithRefresh("some-refresh")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "rotator must not run for a cross-site request with default config")
+}
+
+// TestRefreshHandler_CSRFAllowsSameOriginByDefault proves the secure default does not
+// produce a false positive: a same-origin POST with no WithTrustedOrigins still succeeds.
+func TestRefreshHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {
+	svc, _ := newRotator(t)
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	require.NoError(t, err)
+
+	h := tokens.RefreshHandler[struct{}](svc)
+	req := postWithRefresh(pair.RefreshToken)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// TestRefreshHandler_WithInsecureNoOriginCheck proves the loud opt-out re-enables the old
+// behavior: with WithInsecureNoOriginCheck the origin check is disabled and a cross-origin
+// POST is accepted (and reaches the rotator).
+func TestRefreshHandler_WithInsecureNoOriginCheck(t *testing.T) {
+	svc, _ := newRotator(t)
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	require.NoError(t, err)
+
+	h := tokens.RefreshHandler[struct{}](svc, tokens.WithInsecureNoOriginCheck())
+	req := postWithRefresh(pair.RefreshToken)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// TestLogoutHandler_CSRFBlocksCrossOriginByDefault mirrors the refresh case for logout.
+func TestLogoutHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
+	store := memory.NewStore[struct{}]()
+	h := tokens.LogoutHandler(store)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: "x"})
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
 }

@@ -46,7 +46,8 @@ const (
 	MFAConfirmed            Type = "mfa.confirmed"
 	MFAVerificationFailed   Type = "mfa.verification_failed"
 	MFADisabled             Type = "mfa.disabled"
-	DeliveryFailed          Type = "delivery.failed" // a swallowed mailer/delivery error (outage signal)
+	DeliveryFailed          Type = "delivery.failed"         // a swallowed mailer/delivery error (outage signal)
+	InsecureCookieMisuse    Type = "cookies.insecure_misuse" // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
 )
 
 // Event is a single security-relevant occurrence.
@@ -104,8 +105,8 @@ type slogSink struct{ logger *slog.Logger }
 
 // NewSlogSink returns a Sink that logs events to logger (slog.Default() when nil). An event
 // carrying an Err is logged at Error; known failure/anomaly events (failed login, lockout,
-// refresh reuse, family revoke, MFA verification failure, delivery failure) at Warn; the rest at
-// Info.
+// refresh reuse, family revoke, MFA verification failure, delivery failure, insecure-cookie
+// misuse) at Warn; the rest at Info.
 func NewSlogSink(logger *slog.Logger) Sink {
 	if logger == nil {
 		logger = slog.Default()
@@ -139,7 +140,7 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelError
 	}
 	switch e.Type {
-	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed:
+	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed, InsecureCookieMisuse:
 		return slog.LevelWarn
 	default:
 		return slog.LevelInfo
