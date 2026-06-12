@@ -45,7 +45,7 @@ func ExampleNewWebApp() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var gotAccessCookie bool
 	for _, c := range resp.Cookies() {

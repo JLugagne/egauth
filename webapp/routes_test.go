@@ -42,7 +42,7 @@ func TestRoutes_DefaultsWhenUnset(t *testing.T) {
 
 	resp, err := http.PostForm(srv.URL+"/auth/register", registerForm())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "default /auth/register must be mounted")
 }
 
@@ -58,13 +58,13 @@ func TestRoutes_CustomPathIsMounted(t *testing.T) {
 	// Custom path works.
 	resp, err := http.PostForm(srv.URL+"/api/v1/sign-up", registerForm())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusNoContent, resp.StatusCode, "custom register path must be mounted")
 
 	// Default path is gone (override replaces it).
 	resp2, err := http.PostForm(srv.URL+"/auth/register", registerForm())
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	assert.Equal(t, http.StatusNotFound, resp2.StatusCode, "default register path must not be mounted once overridden")
 }
 
@@ -78,12 +78,12 @@ func TestRoutes_PartialOverride(t *testing.T) {
 	// Overridden login route lives at the custom path; the default /auth/login is gone.
 	resp, err := http.PostForm(srv.URL+"/auth/login", registerForm())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode, "default login path must be gone when Login is overridden")
 
 	// Register was NOT overridden, so its default path still works.
 	resp2, err := http.PostForm(srv.URL+"/auth/register", registerForm())
 	require.NoError(t, err)
-	defer resp2.Body.Close()
+	defer func() { _ = resp2.Body.Close() }()
 	assert.Equal(t, http.StatusNoContent, resp2.StatusCode, "un-overridden register must stay at its default path")
 }
