@@ -177,10 +177,10 @@ trade-offs (e.g. TOTP secrets stored recoverably, accepted account-existence dis
 boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mail/SMS transport,
 observability, idempotency).
 
-**Observability and idempotency** — egauth ships no first-party metrics or tracing adapter and no
-request-level idempotency layer. Wire your metrics/audit pipeline to `event.Sink` (use
-`event.NewSlogSink` for the common slog case, or implement the interface for Prometheus/OpenTelemetry);
-use the propagated `context.Context` for span injection. Request-level idempotency is the application
+**Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
+for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for
+OpenTelemetry spans (`NewSpanSink` creates one child span per security event with `egauth.*`
+attributes). Combine them with `event.MultiSink`. Request-level idempotency is the application
 layer's responsibility. See [SECURITY.md § Observability and idempotency](SECURITY.md#observability-and-idempotency-consumer-responsibility).
 
 ## Documentation
