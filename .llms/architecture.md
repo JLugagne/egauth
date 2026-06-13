@@ -3,6 +3,17 @@
 module: `github.com/JLugagne/egauth` (Go 1.26+)
 root package exports only `Actor` (see [infra.md](infra.md)). All behavior lives in sub-packages.
 
+## Go version support policy
+
+- **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.
+  v1.0 through v1.x will all use `go 1.26` as the minimum toolchain. Bumping to a newer major Go
+  release is deferred to v2, ensuring maximum build compatibility within v1. This is a stability
+  guarantee for consumers building against v1.x.
+  
+- **Pre-v1 releases**: egauth targets the newest major Go release as its minimum toolchain and bumps
+  deliberately with each new major Go version. This allows pre-v1 development to track the cutting
+  edge. If you need support for an older Go version, pin an earlier egauth release.
+
 ## Model: à-la-carte, not a framework
 
 egauth is a set of independent modules in the style of `database/sql`: import the ones you need,

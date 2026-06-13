@@ -215,8 +215,15 @@ stores for their `pgx` counterparts (which rely on the database for eviction ins
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
 follow SemVer with a CHANGELOG. Pin a commit or tag in `go.mod` for reproducible builds.
 
-**Go version support policy.** egauth targets the newest major Go release as its minimum toolchain.
-The `go.mod` directive is currently `go 1.26` and is bumped deliberately — each time a new major
-Go version ships, the floor moves up to it. This is an intentional choice (not an accident): the
-library is expected to be adopted in greenfield projects that run the current toolchain. If you
-need support for an older Go version, pin an earlier egauth release.
+**Go version support policy.**
+
+- **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.
+  v1.0 through v1.x will all require `go 1.26` (the minimum toolchain at v1.0 release). Bumping to a
+  newer major Go release is deferred to v2. This provides maximum build stability within a major
+  version.
+  
+- **Pre-v1 releases**: egauth targets the newest major Go release as its minimum toolchain. The `go.mod`
+  directive is bumped deliberately — each time a new major Go version ships, the floor moves up to it.
+  This is an intentional choice (not an accident): the library is expected to be adopted in greenfield
+  projects that run the current toolchain. If you need support for an older Go version, pin an earlier
+  egauth release.
