@@ -52,3 +52,15 @@ test-unit:
 	GOWORK=off go test -short ./...
 	@echo "==> Running unit tests ($(ADAPTER), -short, no Docker)..."
 	cd $(ADAPTER) && go test -short ./...
+
+# Generate SBOM (Software Bill of Materials) for release
+# Generates both JSON and XML formats using syft tool
+# Usage: make sbom VERSION=vX.Y.Z
+sbom:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1; fi
+	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$(VERSION)..."
+	go install github.com/anchore/syft@latest
+	syft -o cyclonedx-json github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.json
+	syft -o cyclonedx github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.xml
+	@echo "==> SBOM generated: libauth-$(VERSION).sbom.json and libauth-$(VERSION).sbom.xml"
+	@echo "==> Attach these files to the GitHub release using: gh release upload $(VERSION) libauth-$(VERSION).sbom.*"

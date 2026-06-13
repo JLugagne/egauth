@@ -71,28 +71,87 @@ git commit -m "chore: prepare release vX.Y.Z"
 
 ---
 
-## Step 4 — Create an annotated tag
+## Step 4 — Generate an SBOM (Software Bill of Materials)
 
-Annotated tags (not lightweight tags) are the correct form for Go module releases because
-they carry author, date, and message metadata:
+Generate a Software Bill of Materials (SBOM) in CycloneDX format. This documents all dependencies
+and their versions, critical for supply-chain transparency and vulnerability tracking:
 
 ```sh
-git tag -a vX.Y.Z -m "Release vX.Y.Z"
-git push origin vX.Y.Z
+# Install syft if not already present (https://github.com/anchore/syft)
+go install github.com/anchore/syft@latest
+
+# Generate SBOM from the module and save to the release directory
+syft -o cyclonedx-json github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.json
+syft -o cyclonedx github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.xml
 ```
 
-Pushing the tag makes the release visible to `go get` and triggers the Go module proxy to
-index the new version.
+Verify the SBOM is generated and contains an entry for each direct and transitive dependency.
+Attach both JSON and XML versions to the GitHub Release (Step 6).
 
 ---
 
-## Step 5 — Create the GitHub Release
+## Step 5 — Sign the release tag with GPG
+
+Before creating the tag, ensure your GPG key is configured:
+
+```sh
+# List your GPG keys (choose the one you want to use for releases)
+gpg --list-keys
+
+# Configure git to sign tags with your key (optional, if not already set)
+git config user.signingkey <KEY_ID>
+```
+
+Create a signed (GPG-annotated) tag. This adds cryptographic assurance that the tag was
+created by you:
+
+```sh
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+git push origin vX.Y.Z
+```
+
+The `-s` flag signs the tag with your GPG key; `-a` makes it an annotated tag.
+
+**Verification:**
+Others can verify the tag signature with:
+
+```sh
+git tag -v vX.Y.Z
+```
+
+If you are using ephemeral keys or do not have GPG set up, you may alternatively use
+[Sigstore/cosign](https://docs.sigstore.dev/):
+
+```sh
+# Sign the tag with cosign (requires GITHUB_TOKEN)
+cosign sign-blob --key cosign.key vX.Y.Z
+```
+
+Signed tags are recorded in the repository history and serve as a tamper-evident record
+of the release date, author, and message.
+
+---
+
+## Step 6 — Create the GitHub Release and attach SBOM
+
+Create the GitHub release with the CHANGELOG notes:
 
 ```sh
 gh release create vX.Y.Z --title "vX.Y.Z" --notes-file <(awk '/^## \[vX\.Y\.Z\]/,/^## \[/' CHANGELOG.md | head -n -1)
 ```
 
-Or create the release manually in the GitHub UI, pasting the relevant CHANGELOG section.
+Then attach the SBOM files to the release:
+
+```sh
+gh release upload vX.Y.Z libauth-vX.Y.Z.sbom.json libauth-vX.Y.Z.sbom.xml
+```
+
+Alternatively, create the release manually in the GitHub UI:
+1. Go to Releases and click "Create a new release"
+2. Select the tag `vX.Y.Z` (which you just pushed)
+3. Paste the relevant CHANGELOG section as the release notes
+4. Attach the SBOM files (JSON and XML) as release assets
+5. Publish the release
 
 ---
 
@@ -177,6 +236,35 @@ GitHub → Settings → Branches → Add branch protection rule for `main`:
 - Require status checks to pass (select the CI jobs)
 - Require conversation resolution before merging
 - Do not allow force pushes
+
+---
+
+## Release checklist summary
+
+Before pushing a new release, ensure all steps below are complete:
+
+- [ ] **Pre-release verification**: Confirm `main` is green in CI, run local `go test ./...` and `make check`
+- [ ] **CHANGELOG updated**: Move `[Unreleased]` section to a dated version header (`## [vX.Y.Z] — YYYY-MM-DD`)
+- [ ] **go.mod retract block**: Add `retract` directive for any pre-release or yanked versions (if applicable)
+- [ ] **Changes committed**: Stage and commit CHANGELOG.md and go.mod with message "chore: prepare release vX.Y.Z"
+- [ ] **SBOM generated**: Run `syft` to generate SBOM in both JSON and XML format
+- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` (requires GPG setup)
+- [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
+- [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes
+- [ ] **SBOM attached**: Upload SBOM JSON and XML files to the GitHub release
+- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the adapter tag after the core tag is published
+
+### Vulnerability gate
+
+Before releasing, verify that:
+- [ ] `govulncheck ./...` passes with no unresolved vulnerabilities
+- [ ] `govulncheck ./adapters/pgx/...` passes (if releasing adapters)
+
+### Documentation
+
+- [ ] RELEASING.md is up to date with the current signing and SBOM procedures
+- [ ] CHANGELOG.md accurately reflects all changes since the last release
+- [ ] README.md versions are accurate and any breaking changes are highlighted
 
 ---
 
