@@ -2,15 +2,28 @@ package otp
 
 import (
 	"context"
-	"errors"
 	"net/http"
-	"net/url"
+	"time"
+
+	"github.com/JLugagne/egauth/internal/httputil"
 
 	"github.com/google/uuid"
 )
 
 // DefaultMaxBodyBytes bounds the request body of the OTP handlers before form parsing.
 const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
+
+// DefaultDeliveryConcurrency is the default cap on the number of in-flight off-response-path
+// deliveries (mail/SMS) a single IssueHandler instance will run concurrently. It bounds the
+// unauthenticated goroutine fan-out the handler can be driven to spawn: without a cap, a flood
+// of requests for valid/guessable subjects could spawn unbounded concurrent goroutines and
+// amplify into unbounded outbound mail/SMS (toll fraud). Override with WithMaxConcurrentDeliveries.
+const DefaultDeliveryConcurrency = 100
+
+// DefaultDeliveryTimeout is the default per-delivery timeout applied to the off-response-path
+// delivery context, so a slow or hung Mailer/SMSSender cannot pin a delivery slot indefinitely.
+// Override with WithDeliveryTimeout.
+const DefaultDeliveryTimeout = 30 * time.Second
 
 // handlerConfig holds the configurable behavior of the OTP HTTP handlers.
 type handlerConfig struct {
@@ -20,10 +33,19 @@ type handlerConfig struct {
 	codeField       string
 	tenantResolver  func(*http.Request) string
 	trustedOrigins  map[string]bool
-	maxBodyBytes    int64
-	successURL      string
-	failureURL      string
-	onVerified      func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
+	maxBodyBytes          int64
+	successURL            string
+	failureURL            string
+	onVerified            func(w http.ResponseWriter, r *http.Request, subjectID uuid.UUID)
+	deliveryConcurrency   int
+	deliveryTimeout       time.Duration
+	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
+	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
+	// served by a given handler instance — a per-request channel would make the cap meaningless)
+	// with capacity deliveryConcurrency; a non-positive cap leaves it nil, disabling the bound.
+	deliverySem chan struct{}
 }
 
 // HandlerOption configures the OTP HTTP handlers (IssueHandler, VerifyHandler).
@@ -31,12 +53,20 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		codeField:    "code",
-		purpose:      "login",
-		maxBodyBytes: DefaultMaxBodyBytes,
+		codeField:           "code",
+		purpose:             "login",
+		maxBodyBytes:        DefaultMaxBodyBytes,
+		deliveryConcurrency: DefaultDeliveryConcurrency,
+		deliveryTimeout:     DefaultDeliveryTimeout,
 	}
 	for _, opt := range opts {
 		opt(&c)
+	}
+	// Create the delivery semaphore ONCE here, after options are applied, so the cap is shared
+	// across every request served by the handler instance built from this config. A non-positive
+	// cap leaves it nil, disabling the bound (deliveries then fan out unbounded again).
+	if c.deliveryConcurrency > 0 {
+		c.deliverySem = make(chan struct{}, c.deliveryConcurrency)
 	}
 	return c
 }
@@ -69,8 +99,13 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
 
-// WithTrustedOrigins enables a CSRF Origin/Referer allowlist check (see the identity/tokens
-// handlers). Disabled when unset.
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for the OTP handlers.
+//
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
+// trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
+// own Host is rejected with 403. This option WIDENS that allowlist to permit additional hosts.
+// Supply hosts WITHOUT scheme, e.g. "app.example.com". To turn the check off entirely, use
+// WithInsecureNoOriginCheck. See the identity/tokens handlers for the same behavior.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -102,11 +137,36 @@ func WithOnVerified(f func(w http.ResponseWriter, r *http.Request, subjectID uui
 	return func(h *handlerConfig) { h.onVerified = f }
 }
 
+// WithMaxConcurrentDeliveries caps the number of in-flight off-response-path deliveries
+// (mail/SMS) a handler instance runs concurrently (default DefaultDeliveryConcurrency).
+// IssueHandler dispatches delivery on a detached goroutine; this bound stops an unauthenticated
+// flood from spawning unbounded goroutines or amplifying into unbounded outbound mail/SMS
+// (toll fraud). When the cap is reached, further deliveries are DROPPED (not queued) rather
+// than blocking the caller. A non-positive value disables the bound (deliveries fan out
+// unbounded again) — do so only if an upstream layer already bounds the fan-out.
+func WithMaxConcurrentDeliveries(n int) HandlerOption {
+	return func(h *handlerConfig) { h.deliveryConcurrency = n }
+}
+
+// WithDeliveryTimeout sets the per-delivery timeout applied to the detached delivery context
+// (default DefaultDeliveryTimeout), so a slow or hung Mailer/SMSSender cannot pin a delivery
+// slot indefinitely. The timeout bounds delivery independently of the request lifetime: the
+// context is detached (context.WithoutCancel) so the request finishing does not cancel delivery,
+// but the timeout still abandons a delivery that runs too long. A non-positive value disables
+// the timeout.
+func WithDeliveryTimeout(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) { h.deliveryTimeout = d }
+}
+
 // IssueHandler builds an HTTP handler that mints an OTP for the resolved subject and hands the
 // Challenge (including the plaintext code) to deliver for out-of-band delivery (email/SMS).
 // It ALWAYS responds uniformly (204 / success redirect) — whether or not a subject was
 // resolved or delivery succeeded — so it leaks no account-existence signal, and dispatches
 // delivery off the response path to avoid a timing oracle.
+//
+// Delivery is BOUNDED: the handler instance holds a shared semaphore (see WithMaxConcurrentDeliveries)
+// that caps concurrent in-flight goroutines and a per-delivery timeout (see WithDeliveryTimeout)
+// that prevents a hung backend from pinning a slot indefinitely.
 func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) error, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -129,11 +189,12 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 
 		if subjectID, ok := cfg.subjectResolver(r); ok {
 			if ch, err := svc.Issue(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r)); err == nil && deliver != nil {
-				ctx := context.WithoutCancel(r.Context())
-				go func() { _ = deliver(ctx, ch) }()
+				cfg.dispatchDelivery(r, func(ctx context.Context) error {
+					return deliver(ctx, ch)
+				})
 			}
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -178,8 +239,51 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.onVerified(w, r, subjectID)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
+}
+
+// dispatchDelivery hands a freshly minted OTP challenge to the deliver callback off the
+// response path (a detached context, so the request finishing does not cancel delivery, and so
+// the callback's latency is not a timing side channel). Delivery failures are swallowed so the
+// response stays enumeration-safe.
+//
+// The fan-out is BOUNDED. IssueHandler is often unauthenticated, so an attacker can flood it
+// for valid/guessable subjects; an unbounded goroutine-per-call would spawn unbounded concurrent
+// goroutines and amplify into unbounded outbound mail/SMS (toll fraud). A buffered channel
+// semaphore (cfg.deliverySem, created ONCE per handler instance and shared across all of its
+// concurrent requests) caps in-flight deliveries at cfg.deliveryConcurrency. A slot is acquired
+// NON-BLOCKING: when the semaphore is full the delivery is DROPPED (never queued, never blocks
+// the caller). The slot is released when the delivery goroutine finishes.
+//
+// Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
+// DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
+// delivery durable across the request finishing.
+func (cfg handlerConfig) dispatchDelivery(r *http.Request, send func(ctx context.Context) error) {
+	base := context.WithoutCancel(r.Context())
+
+	if cfg.deliverySem != nil {
+		select {
+		case cfg.deliverySem <- struct{}{}:
+			// Slot acquired; released by the goroutine below.
+		default:
+			// Semaphore full: drop the delivery rather than block the caller goroutine.
+			return
+		}
+	}
+
+	go func() {
+		if cfg.deliverySem != nil {
+			defer func() { <-cfg.deliverySem }()
+		}
+		ctx := base
+		if cfg.deliveryTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(base, cfg.deliveryTimeout)
+			defer cancel()
+		}
+		_ = send(ctx)
+	}()
 }
 
 func (cfg handlerConfig) purposeOf(r *http.Request) string {
@@ -199,70 +303,38 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
-	if cfg.maxBodyBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
-	}
-	if err := r.ParseForm(); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
-		} else {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
-		}
-		return false
-	}
-	return true
+	return httputil.ParseLimitedForm(w, r, cfg.maxBodyBytes, cfg.fail)
 }
 
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
+// by default — even with an empty trustedOrigins allowlist — to match the tokens/identity handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed only
+// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host;
+// a POST carrying neither header is treated as untrusted. WithInsecureNoOriginCheck restores the
+// pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
+	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := requestOriginHost(r)
+	host := httputil.RequestOriginHost(r)
 	if host == "" {
 		return false
 	}
 	return host == r.Host || cfg.trustedOrigins[host]
 }
 
-func requestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
-}
-
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
-	if url != "" {
-		http.Redirect(w, r, url, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on the OTP handlers.
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins).
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer or in trusted test setups. Prefer WithTrustedOrigins to extend, rather than
+// remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

@@ -105,11 +105,21 @@ type Config[C any] struct {
 	// validation on the verify path (it is wired into the JWT parser too). Its primary use is
 	// deterministic testing. The zero value defaults to time.Now.
 	Clock func() time.Time
+	// InsecureAllowWeakKey suppresses the MinSecretKeyLength enforcement inside New. It must
+	// only be set in test code that intentionally uses short keys (e.g. to exercise edge-case
+	// paths without needing a 32-byte secret). Production callers must never set this field —
+	// doing so removes the brute-force resistance guarantee for HS256.
+	InsecureAllowWeakKey bool
 }
 
 // MinSecretKeyLength is the recommended minimum HS256 signing-key length (bytes). A key
 // shorter than the HMAC-SHA-256 output weakens the signature. Config.Validate enforces it.
 const MinSecretKeyLength = 32
+
+// MinTokenLength is the minimum allowed length for opaque tokens (refresh tokens and API
+// keys). Values shorter than this produce tokens with insufficient entropy and are
+// online-brute-forceable. Config.Validate and New both enforce this limit.
+const MinTokenLength = 16
 
 // Validate reports configuration that would make the issuer insecure or non-functional: an
 // empty/too-short signing key (or keyset), an empty Issuer, or a non-positive Access/Refresh
@@ -118,6 +128,14 @@ const MinSecretKeyLength = 32
 // still construct an issuer with, e.g., a deliberately negative AccessTTL to exercise expiry.
 func (cfg Config[C]) Validate() error {
 	var errs []error
+
+	// Fail fast on missing mandatory dependencies.
+	if cfg.Store == nil {
+		errs = append(errs, errors.New("jwt: Store must not be nil"))
+	}
+	if cfg.ClaimsProvider == nil {
+		errs = append(errs, errors.New("jwt: ClaimsProvider must not be nil"))
+	}
 
 	if len(cfg.SigningKeys) == 0 {
 		switch {
@@ -162,6 +180,14 @@ func (cfg Config[C]) Validate() error {
 	if cfg.RefreshTTL <= 0 {
 		errs = append(errs, errors.New("jwt: RefreshTTL must be positive"))
 	}
+	// A non-zero RefreshLength or APIKeyLength below MinTokenLength yields guessable tokens.
+	// Zero means "use the default (32)" and is accepted here; New substitutes the safe default.
+	if cfg.RefreshLength != 0 && cfg.RefreshLength < MinTokenLength {
+		errs = append(errs, fmt.Errorf("jwt: RefreshLength must be 0 (use default) or at least %d bytes", MinTokenLength))
+	}
+	if cfg.APIKeyLength != 0 && cfg.APIKeyLength < MinTokenLength {
+		errs = append(errs, fmt.Errorf("jwt: APIKeyLength must be 0 (use default) or at least %d bytes", MinTokenLength))
+	}
 	return errors.Join(errs...)
 }
 
@@ -179,6 +205,12 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 		if cfg.SecretKey == "" {
 			return nil, "", nil, nil, errors.New("no signing key configured (set SecretKey or SigningKeys)")
 		}
+		if !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
+			return nil, "", nil, nil, fmt.Errorf(
+				"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+				len(cfg.SecretKey), MinSecretKeyLength,
+			)
+		}
 		return legacy, "", verify, legacy, nil
 	}
 
@@ -194,8 +226,22 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 		if k.Secret == "" {
 			return nil, "", nil, nil, fmt.Errorf("SigningKeys[%q] has an empty Secret", k.KeyID)
 		}
+		if !cfg.InsecureAllowWeakKey && len(k.Secret) < MinSecretKeyLength {
+			return nil, "", nil, nil, fmt.Errorf(
+				"SigningKeys[%q].Secret is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+				k.KeyID, len(k.Secret), MinSecretKeyLength,
+			)
+		}
 		seen[k.KeyID] = true
 		verify[k.KeyID] = []byte(k.Secret)
+	}
+
+	// Also check the legacy SecretKey if present alongside SigningKeys.
+	if cfg.SecretKey != "" && !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
+		return nil, "", nil, nil, fmt.Errorf(
+			"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
+			len(cfg.SecretKey), MinSecretKeyLength,
+		)
 	}
 
 	activeID := cfg.ActiveKeyID
@@ -213,9 +259,18 @@ func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, veri
 }
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
-// be built (no signing key, or a malformed keyset) to fail fast instead of silently signing with
-// an unusable key. For comprehensive startup validation call Config.Validate before New.
+// be built: no signing key, a malformed keyset, any key shorter than MinSecretKeyLength, or a
+// RefreshLength/APIKeyLength below MinTokenLength.
+// The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
+// exists exclusively for test code that needs short keys; production callers must never set it.
+// For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
+	// Fail fast at startup rather than with a nil-pointer panic deep in a request,
+	// matching the convention of identity.NewService, sessions.NewService, otp.NewService
+	// and mfa.NewService.
+	if cfg.Store == nil {
+		panic("jwt: New requires a non-nil Store")
+	}
 	signKey, signKeyID, verifyKeys, legacyKey, err := resolveKeyset(cfg)
 	if err != nil {
 		panic("jwt: New: " + err.Error() + " (call Config.Validate to check configuration)")
@@ -225,6 +280,14 @@ func New[C any](cfg Config[C]) *Service[C] {
 	}
 	if cfg.APIKeyLength == 0 {
 		cfg.APIKeyLength = 32
+	}
+	// Reject sub-minimum token lengths after the zero-means-default substitution above,
+	// so any explicitly low positive value is caught here (not silently accepted).
+	if cfg.RefreshLength < MinTokenLength {
+		panic(fmt.Sprintf("jwt: New: RefreshLength %d is below MinTokenLength %d — tokens would be guessable (call Config.Validate to check configuration)", cfg.RefreshLength, MinTokenLength))
+	}
+	if cfg.APIKeyLength < MinTokenLength {
+		panic(fmt.Sprintf("jwt: New: APIKeyLength %d is below MinTokenLength %d — tokens would be guessable (call Config.Validate to check configuration)", cfg.APIKeyLength, MinTokenLength))
 	}
 	if cfg.ReuseGracePeriod == 0 {
 		cfg.ReuseGracePeriod = DefaultReuseGracePeriod
@@ -390,7 +453,7 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 // or single-key mode) is verified with the legacy SecretKey. An unknown kid — or a present but
 // malformed kid (non-string, or empty) — is rejected outright rather than falling back to the
 // legacy key, so a present kid header can never be passed off as "kid-less".
-func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
+func (s *Service[C]) verificationKey(token *jwt.Token) (any, error) {
 	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 		return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 	}
@@ -412,8 +475,11 @@ func (s *Service[C]) verificationKey(token *jwt.Token) (interface{}, error) {
 	return nil, errors.New("token has no kid and no legacy key is configured")
 }
 
-// VerifyAccessToken parses and validates an access token, returning its claims.
-func (s *Service[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
+// verifyAccessToken runs the full signature/expiry/issuer/audience validation of an access
+// token and returns its claims WITHOUT any tenant binding. It is the shared core used by the
+// public VerifyAccessToken (single-tenant) and VerifyAccessTokenForTenant (which adds the tenant
+// comparison). It is unexported precisely so the tenant binding cannot be bypassed by callers.
+func (s *Service[C]) verifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
 	// WithTimeFunc routes the library's exp/nbf validation through the same injected clock the
@@ -562,6 +628,11 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
 		} else {
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
+			// Benign concurrency: the legitimate client raced itself and the winning request
+			// already minted a fresh pair. Surface the distinct ErrRefreshConcurrent sentinel
+			// (which still wraps ErrRefreshTokenReused) so cookie-clearing callers preserve the
+			// winner's freshly issued refresh cookie instead of logging the user out.
+			return nil, tokens.ErrRefreshConcurrent
 		}
 		return nil, tokens.ErrRefreshTokenReused
 	}
@@ -576,12 +647,26 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// request WITHOUT revoking the family. A genuine replay is still caught above on the
 	// next presentation, once ConsumedAt has been set by the completed rotation.
 	if err := s.store.ConsumeRefreshToken(ctx, tenantID, hash); err != nil {
+		// Losing the consume race returns ErrRefreshTokenReused from the store: a parallel
+		// request consumed the SAME not-yet-consumed token first. That is benign concurrency,
+		// not theft — report it as ErrRefreshConcurrent so the winner's freshly minted cookies
+		// are preserved rather than cleared. Any other store error propagates unchanged.
+		if errors.Is(err, tokens.ErrRefreshTokenReused) {
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
+			return nil, tokens.ErrRefreshConcurrent
+		}
 		return nil, err
 	}
 
 	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
 	// trusting values frozen at login.
-	claims, err := s.claimsProvider.ClaimsForUser(ctx, rt.UserID, rt.TenantID)
+	// Surface which family is being rotated (plus its preserved auth_time) so the provider can
+	// re-evaluate per-session assurance (AMR/scopes) for this exact session rather than guessing
+	// from the user alone. Without this a provider can neither preserve a legitimately elevated
+	// session's AMR across a silent refresh nor avoid blanket-elevating every session of an
+	// MFA-enrolled user, so the documented "AMR re-evaluated, not frozen" semantics are impossible.
+	rotationCtx := tokens.WithRotationContext(ctx, tokens.RotationContext{FamilyID: rt.FamilyID, AuthTime: rt.AuthTime})
+	claims, err := s.claimsProvider.ClaimsForUser(rotationCtx, rt.UserID, rt.TenantID)
 	if err != nil {
 		return nil, err
 	}
@@ -602,4 +687,23 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
 	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
 	return s.issuePair(ctx, claims, rt.FamilyID, false)
+}
+
+// VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring
+// the fail-closed tenant scoping of VerifyRefreshToken / VerifyAPIKey. It first runs the full
+// signature/expiry/issuer/audience validation of VerifyAccessToken, then rejects the token with
+// ErrTenantMismatch unless its signed tenant_id claim equals tenantID. Multi-tenant callers
+// served by a single shared signing key MUST use this entry point (or perform the equivalent
+// comparison themselves): a token minted for tenant A is otherwise cryptographically valid in
+// tenant B's context, since the signing key is shared. Single-tenant callers issue under the
+// empty tenant and pass "".
+func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
+	claims, err := s.verifyAccessToken(ctx, tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if claims.TenantID != tenantID {
+		return nil, tokens.ErrTenantMismatch
+	}
+	return claims, nil
 }

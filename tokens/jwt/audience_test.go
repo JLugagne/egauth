@@ -17,15 +17,17 @@ import (
 // sharedKeyService builds a Service that signs/verifies with a single shared HS256 key but
 // scopes itself to a given issuer and set of expected audiences. Two such services sharing the
 // key model two distinct services sitting behind one symmetric secret.
+// InsecureAllowWeakKey is set so callers may pass test-only secrets of any length.
 func sharedKeyService(t *testing.T, secret, issuer string, expectedAud []string) *jwt.Service[struct{}] {
 	t.Helper()
 	return jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:            memory.NewStore[struct{}](),
-		SecretKey:        secret,
-		Issuer:           issuer,
-		ExpectedAudience: expectedAud,
-		AccessTTL:        5 * time.Minute,
-		RefreshTTL:       24 * time.Hour,
+		Store:                memory.NewStore[struct{}](),
+		SecretKey:            secret,
+		Issuer:               issuer,
+		ExpectedAudience:     expectedAud,
+		AccessTTL:            5 * time.Minute,
+		RefreshTTL:           24 * time.Hour,
+		InsecureAllowWeakKey: true,
 	})
 }
 
@@ -47,7 +49,7 @@ func TestVerifyAccessToken_RejectsForeignIssuer(t *testing.T) {
 
 	tok := mintAccess(t, svcA, nil)
 
-	_, err := svcB.VerifyAccessToken(context.Background(), tok)
+	_, err := svcB.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	assert.NotErrorIs(t, err, tokens.ErrTokenExpired)
@@ -60,7 +62,7 @@ func TestVerifyAccessToken_RejectsForeignAudience(t *testing.T) {
 
 	tok := mintAccess(t, svcA, []string{"aud-a"})
 
-	_, err := svcB.VerifyAccessToken(context.Background(), tok)
+	_, err := svcB.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	assert.NotErrorIs(t, err, tokens.ErrTokenExpired)
@@ -72,7 +74,7 @@ func TestVerifyAccessToken_AcceptsOwnIssuerAndAudience(t *testing.T) {
 
 	tok := mintAccess(t, svcA, []string{"aud-a"})
 
-	claims, err := svcA.VerifyAccessToken(context.Background(), tok)
+	claims, err := svcA.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 	assert.Contains(t, claims.Audiences, "aud-a")
@@ -86,7 +88,7 @@ func TestVerifyAccessToken_AnyOfExpectedAudienceMatches(t *testing.T) {
 
 	tok := mintAccess(t, issuer, []string{"aud-y"})
 
-	claims, err := verifier.VerifyAccessToken(context.Background(), tok)
+	claims, err := verifier.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 }
@@ -99,7 +101,7 @@ func TestVerifyAccessToken_BackwardCompatNoIssuerNoAudience(t *testing.T) {
 
 	tok := mintAccess(t, issuer, []string{"whatever"})
 
-	claims, err := verifier.VerifyAccessToken(context.Background(), tok)
+	claims, err := verifier.VerifyAccessTokenForTenant(context.Background(), "tenant-a", tok)
 	require.NoError(t, err)
 	require.NotNil(t, claims)
 }
@@ -111,11 +113,12 @@ func TestVerifyAccessToken_ExpiredStillReportsExpired(t *testing.T) {
 	now := time.Now()
 	clock := now
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:     store,
-		SecretKey: secret,
-		Issuer:    "service-a",
-		AccessTTL: time.Minute,
-		Clock:     func() time.Time { return clock },
+		Store:                store,
+		SecretKey:            secret,
+		Issuer:               "service-a",
+		AccessTTL:            time.Minute,
+		Clock:                func() time.Time { return clock },
+		InsecureAllowWeakKey: true,
 	})
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
 		Subject:  uuid.New(),
@@ -124,7 +127,7 @@ func TestVerifyAccessToken_ExpiredStillReportsExpired(t *testing.T) {
 	require.NoError(t, err)
 
 	clock = now.Add(2 * time.Minute)
-	_, err = svc.VerifyAccessToken(context.Background(), pair.AccessToken)
+	_, err = svc.VerifyAccessTokenForTenant(context.Background(), "t", pair.AccessToken)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, tokens.ErrTokenExpired))
 }

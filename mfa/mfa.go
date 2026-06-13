@@ -28,6 +28,12 @@ const (
 	// online-brute-forceable without it (≈3 of 1,000,000 codes are valid per window), so
 	// limiting is ON by default; disable it explicitly with WithNoAttemptLimit.
 	DefaultMaxAttempts = 5
+	// DefaultLockoutDuration is the time window after which a locked-out second factor
+	// automatically resets its attempt counter, allowing the user to try again. The window
+	// is measured from the last failed attempt. Override via WithLockoutDuration; 0 disables
+	// time-based decay (the lockout is permanent until an admin calls UnlockMFA or the factor
+	// is disabled and re-enrolled).
+	DefaultLockoutDuration = 15 * time.Minute
 )
 
 // TOTPEnrollment is a user's TOTP factor. The shared Secret must be stored in a recoverable
@@ -48,7 +54,12 @@ type TOTPEnrollment struct {
 	// code) since the last success or (re-)enrollment. Once it exceeds the service's
 	// MaxAttempts the factor is locked; a successful verification resets it to zero.
 	FailedAttempts int
-	CreatedAt      time.Time
+	// LastAttemptAt records when the most recent failed second-factor verification was made.
+	// The service uses this to implement time-based lockout decay: if the elapsed time since
+	// the last failed attempt exceeds LockoutDuration, the counter is automatically reset and
+	// the attempt is treated as a fresh budget.
+	LastAttemptAt time.Time
+	CreatedAt     time.Time
 }
 
 // Confirmed reports whether the enrollment has been confirmed.

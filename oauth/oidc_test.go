@@ -522,7 +522,7 @@ func TestParseJWKS_TooManyKeysRejected(t *testing.T) {
 	e := big.NewInt(int64(rsaKey.E))
 
 	entries := make([]string, 0, maxJWKSKeys+1)
-	for i := 0; i < maxJWKSKeys+1; i++ {
+	for i := range maxJWKSKeys + 1 {
 		entries = append(entries, rsaJWKEntry(fmt.Sprintf("k%d", i), n, e))
 	}
 	doc := fmt.Sprintf(`{"keys":[%s]}`, strings.Join(entries, ","))
@@ -539,7 +539,7 @@ func TestParseJWKS_KeyCountAtCapAccepted(t *testing.T) {
 	e := big.NewInt(int64(rsaKey.E))
 
 	entries := make([]string, 0, maxJWKSKeys)
-	for i := 0; i < maxJWKSKeys; i++ {
+	for i := range maxJWKSKeys {
 		entries = append(entries, rsaJWKEntry(fmt.Sprintf("k%d", i), n, e))
 	}
 	doc := fmt.Sprintf(`{"keys":[%s]}`, strings.Join(entries, ","))

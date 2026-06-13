@@ -26,6 +26,26 @@ func TestNewService_Validation(t *testing.T) {
 	t.Run("nil clock panics", func(t *testing.T) {
 		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithClock(nil)) })
 	})
+	// RFC 6238 digit range: only 6–8 digits are valid.
+	t.Run("digits=1 panics (below RFC minimum)", func(t *testing.T) {
+		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(1)) })
+	})
+	t.Run("digits=5 panics (below RFC minimum)", func(t *testing.T) {
+		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(5)) })
+	})
+	t.Run("digits=9 panics (above RFC maximum)", func(t *testing.T) {
+		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(9)) })
+	})
+	t.Run("digits=6 succeeds", func(t *testing.T) {
+		require.NotPanics(t, func() {
+			mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(6))
+		})
+	})
+	t.Run("digits=7 succeeds", func(t *testing.T) {
+		require.NotPanics(t, func() {
+			mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(7))
+		})
+	})
 	t.Run("valid config", func(t *testing.T) {
 		require.NotPanics(t, func() {
 			mfa.NewService(mfamemory.NewStore(), mfa.WithDigits(8), mfa.WithPeriod(30*time.Second), mfa.WithSkew(1))

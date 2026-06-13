@@ -19,6 +19,10 @@ import (
 func mfaPost(form url.Values) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin by default so business-logic tests pass the strict-by-default CSRF check
+	// (httptest.NewRequest sets Host to "example.com"). CSRF tests override this header to
+	// exercise the cross-origin path explicitly.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -99,4 +103,74 @@ func TestHandlers_RejectGET(t *testing.T) {
 		return uuid.New(), "t1", true
 	}))(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
+}
+
+// TestHandlers_TrustedOrigins verifies CSRF origin enforcement: when WithTrustedOrigins is
+// configured, every state-changing handler must reject a request whose Origin header does not
+// match the trusted set with 403 "cross_site_blocked", and must accept a request from a
+// trusted origin.
+func TestHandlers_TrustedOrigins(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	store := memory.NewStore()
+	svc := mfa.NewService(store, mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.New()
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+	trusted := mfa.WithTrustedOrigins("app.example.com")
+
+	// mfaPostOrigin creates a POST with the given Origin header value.
+	mfaPostOrigin := func(form url.Values, origin string) *http.Request {
+		req := mfaPost(form)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		return req
+	}
+
+	// handlers under test: each maps to a handler constructor and the minimal form values needed.
+	type tc struct {
+		name    string
+		handler http.HandlerFunc
+		form    url.Values
+	}
+	handlers := []tc{
+		{"EnrollHandler", mfa.EnrollHandler(svc, resolver, trusted), url.Values{"account": {"user@example.com"}}},
+		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
+		{"VerifyHandler", mfa.VerifyHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
+		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver, trusted), url.Values{"code": {"abc"}}},
+		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted), url.Values{}},
+		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted), url.Values{}},
+	}
+
+	for _, h := range handlers {
+		t.Run(h.name+"/untrusted_origin_blocked", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.handler(rec, mfaPostOrigin(h.form, "https://evil.attacker.com"))
+			assert.Equal(t, http.StatusForbidden, rec.Code,
+				"expected 403 from untrusted origin; handler performed the action without checking origin")
+		})
+		t.Run(h.name+"/trusted_origin_allowed", func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			h.handler(rec, mfaPostOrigin(h.form, "https://app.example.com"))
+			// The service call may fail (e.g. not enrolled), but the origin check must not block it.
+			assert.NotEqual(t, http.StatusForbidden, rec.Code,
+				"expected handler to pass origin check for trusted origin")
+		})
+	}
+
+	t.Run("no_trusted_origins_still_blocks_cross_origin", func(t *testing.T) {
+		// Strict by default (TASK-025 parity with tokens/identity): with NO WithTrustedOrigins,
+		// a cross-origin POST must still be rejected.
+		handlerDefault := mfa.EnrollHandler(svc, resolver)
+		rec := httptest.NewRecorder()
+		handlerDefault(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+	})
+
+	t.Run("with_insecure_no_origin_check_passes_any_origin", func(t *testing.T) {
+		// The loud opt-out restores the pre-v1 accept-all behavior.
+		handlerInsecure := mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoOriginCheck())
+		rec := httptest.NewRecorder()
+		handlerInsecure(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
+		assert.NotEqual(t, http.StatusForbidden, rec.Code)
+	})
 }

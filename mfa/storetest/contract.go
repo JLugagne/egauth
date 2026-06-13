@@ -89,48 +89,88 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 
 	t.Run("failed-attempt counter increments, persists and resets on success", func(t *testing.T) {
 		uid := uuid.New()
+		now := time.Now()
 
 		// Incrementing a missing factor reports not-enrolled.
-		_, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		_, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, now)
 		assert.ErrorIs(t, err, mfa.ErrNotEnrolled)
 
-		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}))
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: now}))
 
 		got, err := store.GetTOTP(ctx, tenantA, uid)
 		require.NoError(t, err)
 		assert.Equal(t, 0, got.FailedAttempts, "a fresh enrollment starts at zero")
 
-		// Increments return the new count and persist.
-		n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		// Increments return the new count, persist FailedAttempts, and record LastAttemptAt.
+		t1 := now.Add(time.Second)
+		n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
 		require.NoError(t, err)
 		assert.Equal(t, 1, n)
-		n, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		t2 := t1.Add(time.Second)
+		n, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t2)
 		require.NoError(t, err)
 		assert.Equal(t, 2, n)
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
 		assert.Equal(t, 2, got.FailedAttempts)
+		// Truncate to microsecond precision: SQL stores (e.g. PostgreSQL) have µs resolution,
+		// not nanosecond, so comparing the stored-and-retrieved value against the original
+		// nanosecond timestamp would spuriously fail on a pgx store.
+		assert.Equal(t, t2.Truncate(time.Microsecond).UTC(), got.LastAttemptAt.Truncate(time.Microsecond).UTC(), "LastAttemptAt must reflect the most recent increment's now")
 
-		// A successful TOTP step (MarkTOTPUsed) resets the counter to zero.
+		// A successful TOTP step (MarkTOTPUsed) resets the counter and LastAttemptAt to zero.
 		applied, err := store.MarkTOTPUsed(ctx, tenantA, uid, 1)
 		require.NoError(t, err)
 		require.True(t, applied)
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
 		assert.Equal(t, 0, got.FailedAttempts, "an accepted code clears the lock-out budget")
+		assert.True(t, got.LastAttemptAt.IsZero(), "MarkTOTPUsed must clear LastAttemptAt")
 
-		// A consumed recovery code also resets the counter to zero.
+		// A consumed recovery code also resets the counter and LastAttemptAt.
 		require.NoError(t, store.ReplaceRecoveryCodes(ctx, tenantA, uid, []string{"rc1"}))
-		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
 		require.NoError(t, err)
 		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "rc1"))
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
 		assert.Equal(t, 0, got.FailedAttempts, "a valid recovery code clears the lock-out budget")
+		assert.True(t, got.LastAttemptAt.IsZero(), "ConsumeRecoveryCode must clear LastAttemptAt")
 
 		// Re-saving (re-enroll) resets the counter via the upsert.
-		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid)
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
 		require.NoError(t, err)
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S2", CreatedAt: time.Now()}))
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
 		assert.Equal(t, 0, got.FailedAttempts, "re-enrolling must reset the counter")
+
+		require.NoError(t, store.DeleteTOTP(ctx, tenantA, uid))
+	})
+
+	t.Run("ResetTOTPAttempts clears the counter and LastAttemptAt", func(t *testing.T) {
+		uid := uuid.New()
+		now := time.Now()
+
+		// ResetTOTPAttempts on a missing factor must return ErrNotEnrolled.
+		err := store.ResetTOTPAttempts(ctx, tenantA, uid)
+		assert.ErrorIs(t, err, mfa.ErrNotEnrolled, "reset on missing enrollment must return ErrNotEnrolled")
+
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: now}))
+
+		// Increment a few times to set a non-zero counter and LastAttemptAt.
+		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(time.Second))
+		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(2*time.Second))
+		got, err := store.GetTOTP(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, 2, got.FailedAttempts)
+		assert.False(t, got.LastAttemptAt.IsZero())
+
+		// ResetTOTPAttempts must zero both fields.
+		require.NoError(t, store.ResetTOTPAttempts(ctx, tenantA, uid))
+		got, err = store.GetTOTP(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Equal(t, 0, got.FailedAttempts, "ResetTOTPAttempts must zero FailedAttempts")
+		assert.True(t, got.LastAttemptAt.IsZero(), "ResetTOTPAttempts must zero LastAttemptAt")
+
+		// Calling ResetTOTPAttempts on an already-zero counter must succeed (idempotent).
+		require.NoError(t, store.ResetTOTPAttempts(ctx, tenantA, uid))
 
 		require.NoError(t, store.DeleteTOTP(ctx, tenantA, uid))
 	})
@@ -143,16 +183,14 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		seen := make([]int64, goroutines+1) // count occurrences of each returned value
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for i := 0; i < goroutines; i++ {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+		for range goroutines {
+			wg.Go(func() {
 				<-start
-				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid)
+				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, time.Now())
 				if err == nil && n >= 1 && n <= goroutines {
 					atomic.AddInt64(&seen[n], 1)
 				}
-			}()
+			})
 		}
 		close(start)
 		wg.Wait()

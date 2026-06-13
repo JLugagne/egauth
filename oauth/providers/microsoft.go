@@ -65,6 +65,9 @@ func fetchMicrosoftUser(ctx context.Context, c *http.Client, accessToken string)
 	if err := oauth.GetJSON(ctx, c, microsoftUserInfoURL, accessToken, &u); err != nil {
 		return nil, err
 	}
+	if u.Sub == "" {
+		return nil, fmt.Errorf("%w: provider returned no subject id", oauth.ErrUserInfoFailed)
+	}
 	// The Graph userinfo endpoint does not return an email_verified claim, so it is left false;
 	// callers who need a verified signal should enable oauth.WithOIDC and read the id_token.
 	return &oauth.UserInfo{

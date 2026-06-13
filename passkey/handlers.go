@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JLugagne/egauth/internal/httputil"
+
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
@@ -38,16 +40,17 @@ type UserResolver func(r *http.Request) (userID uuid.UUID, name, displayName, te
 type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID)
 
 type handlerConfig struct {
-	resolve         UserResolver
-	onLoginSuccess  LoginSuccessFunc
-	sessionCookie   string
-	sessionTTL      time.Duration
-	cookieDomain    string
-	cookieSameSite  http.SameSite
-	insecureCookies bool
-	cookieKey       []byte
-	challenges      ChallengeStore
-	maxBodyBytes    int64
+	resolve            UserResolver
+	onLoginSuccess     LoginSuccessFunc
+	sessionCookie      string
+	sessionTTL         time.Duration
+	cookieDomain       string
+	cookieSameSite     http.SameSite
+	insecureCookies    bool
+	cookieKey          []byte
+	challenges         ChallengeStore
+	discoverableTenant TenantExtractor
+	maxBodyBytes       int64
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -140,7 +143,7 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 		if !cfg.storeSession(w, session) {
 			return
 		}
-		writeJSON(w, http.StatusOK, creation)
+		httputil.WriteJSON(w, http.StatusOK, creation)
 	}
 }
 
@@ -195,7 +198,7 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		if !cfg.storeSession(w, session) {
 			return
 		}
-		writeJSON(w, http.StatusOK, assertion)
+		httputil.WriteJSON(w, http.StatusOK, assertion)
 	}
 }
 
@@ -359,12 +362,6 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 // WithChallengeStore overrides, for a single handler, the ChallengeStore that provides
 // server-side, single-use replay protection for the ceremony challenge (SEC-05). On Begin the
 // issued challenge is recorded; on Finish it is atomically consumed before the assertion is
@@ -422,4 +419,138 @@ func (cfg handlerConfig) consumeChallenge(w http.ResponseWriter, ctx context.Con
 // body, since the go-webauthn decoder buffers and base64-decodes the body unbounded otherwise.
 func WithMaxBodyBytes(n int64) HandlerOption {
 	return func(h *handlerConfig) { h.maxBodyBytes = n }
+}
+
+// TenantExtractor derives the tenant identifier from the request for discoverable-login
+// handlers, where no UserResolver is available (the user is not known until after the
+// ceremony completes). Return an empty string for single-tenant deployments.
+type TenantExtractor func(r *http.Request) string
+
+// WithDiscoverableTenant supplies the tenant extractor used by BeginDiscoverableLoginHandler
+// and FinishDiscoverableLoginHandler. In single-tenant deployments this option is unnecessary
+// (the default extractor returns ""). In multi-tenant deployments derive the tenant from the
+// request (e.g. host header, subdomain, or path prefix) and return it here; the same value is
+// used to scope the challenge-store key so Begin and Finish must agree on the tenant.
+func WithDiscoverableTenant(fn TenantExtractor) HandlerOption {
+	return func(h *handlerConfig) { h.discoverableTenant = fn }
+}
+
+// BeginDiscoverableLoginHandler returns the credential-request options (for
+// navigator.credentials.get) as JSON and stores the ceremony SessionData in a secure cookie.
+// Unlike BeginLoginHandler no user needs to be identified in advance; the authenticator
+// reveals the account via the credential's user handle at FinishDiscoverableLoginHandler.
+// The challenge is recorded in the ChallengeStore (SEC-05) so the matching Finish handler
+// can atomically consume it, blocking sign-count-0 replays that the clone-counter check alone
+// would not catch.
+func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(svc, opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		tenant := ""
+		if cfg.discoverableTenant != nil {
+			tenant = cfg.discoverableTenant(r)
+		}
+		assertion, session, err := svc.BeginDiscoverableLogin()
+		if err != nil {
+			cfg.fail(w, err)
+			return
+		}
+		if err := cfg.recordChallenge(r.Context(), tenant, session); err != nil {
+			cfg.fail(w, err)
+			return
+		}
+		if !cfg.storeSession(w, session) {
+			return
+		}
+		httputil.WriteJSON(w, http.StatusOK, assertion)
+	}
+}
+
+// FinishDiscoverableLoginHandler verifies the usernameless assertion response (POST body)
+// against the cookie's SessionData. It atomically consumes the challenge before verification
+// (SEC-05 replay defence) and applies the maxBodyBytes cap (DOS-01). On success it calls
+// the configured LoginSuccess callback (or replies 204) with the resolved user ID.
+func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(svc, opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		tenant := ""
+		if cfg.discoverableTenant != nil {
+			tenant = cfg.discoverableTenant(r)
+		}
+		session, ok := cfg.loadSession(w, r)
+		if !ok {
+			return
+		}
+		// Consume the challenge before verifying: a replayed Finish (identical cookie + body)
+		// fails here on the second attempt, even for a sign-count-0 authenticator whose clone
+		// counter never advances.
+		if !cfg.consumeChallenge(w, r.Context(), tenant, session) {
+			return
+		}
+		// Cap the ceremony body before the go-webauthn decoder reads it (DOS-01): the assertion
+		// response is small, so an oversized body is an abuse attempt, not a legitimate request.
+		if cfg.maxBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+		}
+		cred, uid, err := svc.FinishDiscoverableLogin(r.Context(), tenant, session, r)
+		if err != nil {
+			cfg.fail(w, err)
+			return
+		}
+		_ = cred
+		if cfg.onLoginSuccess != nil {
+			cfg.onLoginSuccess(w, r, uid)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// RenameCredentialHandler sets a human-friendly nickname on one of the authenticated user's
+// credentials. It is POST-only and requires the user resolver (cfg.subject preamble), caps the
+// request body via http.MaxBytesReader, and decodes a JSON body of the shape:
+//
+//	{"credentialId": "<base64url, no padding>", "nickname": "..."}
+//
+// On success it replies 204 No Content; errors are routed through cfg.fail (ErrCredentialNotFound
+// -> 404). It does not touch the ceremony cookie/challenge machinery — rename is not a WebAuthn
+// ceremony.
+func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(svc, opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		uid, _, _, tenant, ok := cfg.subject(w, r)
+		if !ok {
+			return
+		}
+		if cfg.maxBodyBytes > 0 {
+			r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+		}
+		var body struct {
+			CredentialID string `json:"credentialId"`
+			Nickname     string `json:"nickname"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid_request", http.StatusBadRequest)
+			return
+		}
+		credID, err := base64.RawURLEncoding.DecodeString(body.CredentialID)
+		if err != nil {
+			http.Error(w, "invalid_request", http.StatusBadRequest)
+			return
+		}
+		if err := svc.RenameCredential(r.Context(), tenant, uid, credID, body.Nickname); err != nil {
+			cfg.fail(w, err)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

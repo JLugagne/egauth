@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
 )
 
@@ -117,7 +117,13 @@ func WithPersistentRefresh() HandlerOption {
 }
 
 // WithTenantResolver derives the tenant from the request to scope identity store operations
-// in multi-tenant deployments.
+// in multi-tenant deployments. The resolver MUST be a pure, deterministic function of the
+// request: given the same *http.Request it must always return the same string. DynamicBeginHandler
+// and DynamicCallbackHandler resolve the tenant exactly once per request and thread that single
+// value through all subsequent operations (provider lookup, CSRF gate, identity link), so a
+// resolver that consults mutable external state and returns different values on successive calls
+// would violate that guarantee and could cause the token-exchange, security gate, and identity
+// partition to operate on different tenants within the same request.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
@@ -224,6 +230,13 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusBadRequest, "email_missing")
 			return
 		}
+		if info.ProviderID == "" {
+			// Defense-in-depth: fetchers already reject an empty subject, but guard here
+			// too so a future custom fetcher cannot accidentally open a ProviderID=""
+			// identity-collision window (see TASK-062).
+			cfg.fail(w, r, http.StatusBadGateway, "provider_id_missing")
+			return
+		}
 		if !info.EmailVerified && !cfg.allowUnverifiedEmail {
 			// Refuse to provision/log in from an email the provider has not verified — it
 			// could be an arbitrary address the OAuth principal merely typed in (account
@@ -246,7 +259,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		}
 		cfg.cookies.SetAccess(w, pair.AccessToken)
 		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -322,36 +335,18 @@ func mapLinkError(err error) (int, string) {
 		// An account with this email already exists via another identity. The app should
 		// drive explicit linking from an authenticated session rather than auto-merging.
 		return http.StatusConflict, "account_exists"
+	case errors.Is(err, identity.ErrAccountDisabled):
+		// The already-linked account has been administratively suspended. Refuse the social
+		// login with a clean 403 instead of issuing a fresh session, matching the password
+		// and token-gated login paths.
+		return http.StatusForbidden, "account_disabled"
 	default:
 		return http.StatusInternalServerError, "link_failed"
 	}
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
-}
-
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, rawURL string, okStatus int) {
-	if rawURL != "" {
-		http.Redirect(w, r, rawURL, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 // DynamicBeginHandler is like BeginHandler but resolves the Provider dynamically using a
@@ -372,6 +367,9 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 }
 
 // DynamicCallbackHandler is like CallbackHandler but resolves the Provider dynamically.
+// The tenant is resolved exactly once at the start of each request; that single value is
+// threaded through the CSRF/tenant gate check and the identity link so all operations are
+// consistent even if the supplied resolver is not perfectly pure (see WithTenantResolver).
 func DynamicCallbackHandler[C any](store ProviderStore, providerName string, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -381,7 +379,13 @@ func DynamicCallbackHandler[C any](store ProviderStore, providerName string, lin
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
 			return
 		}
-		// Delegate to the static handler
-		CallbackHandler(p, linker, issuer, claimsOf, opts...)(w, r)
+		// Thread the pre-resolved tenant into the delegated handler as a constant resolver
+		// so that the cookieTenant binding check and LinkOrCreateIdentity operate on the
+		// same value that was used to look up the provider above. Without this, an impure
+		// resolver could return a different tenant on later calls inside CallbackHandler,
+		// causing the identity to be linked into a different partition than the one whose
+		// provider minted the token (TASK-092 / 2026-06 audit INFO).
+		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
+		CallbackHandler(p, linker, issuer, claimsOf, append(opts, fixedTenantOpt)...)(w, r)
 	}
 }

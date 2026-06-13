@@ -4,13 +4,14 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
 // ClaimsBuilder maps an authenticated user to the claims embedded in their issued tokens.
@@ -37,6 +38,12 @@ const DefaultDeliveryConcurrency = 64
 // Override with WithDeliveryTimeout.
 const DefaultDeliveryTimeout = 30 * time.Second
 
+// DefaultInterimTokenTTL is the lifetime of the short-lived INTERIM access token issued by an
+// MFA-gated LoginHandler to an enrolled user after a correct password but before the second
+// factor is verified. It must be just long enough for the user to complete the TOTP/recovery
+// step, never long enough to be a usable session. Override with WithInterimTokenTTL.
+const DefaultInterimTokenTTL = 5 * time.Minute
+
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
 	provider             string
@@ -55,15 +62,24 @@ type handlerConfig struct {
 	recoveryEmailField   string
 	userResolver         func(*http.Request) (*User, bool)
 	trustedOrigins       map[string]bool
-	maxBodyBytes         int64
-	events               event.Sink
-	deliveryConcurrency  int
-	deliveryTimeout      time.Duration
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
+	maxBodyBytes          int64
+	events                event.Sink
+	deliveryConcurrency   int
+	deliveryTimeout       time.Duration
 	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
 	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
 	// served by a given handler instance — a per-request channel would make the cap meaningless)
 	// with capacity deliveryConcurrency; a non-positive cap leaves it nil, disabling the bound.
 	deliverySem chan struct{}
+	// mfaGate, when non-nil, turns LoginHandler into an MFA-gated handler: after a correct
+	// password it checks whether the user has a confirmed second factor and, if so, issues a
+	// short-lived INTERIM access token (AMR=[pwd], no refresh cookie) instead of the full pair,
+	// forcing a step-up (see mfa.StepUpHandler) before a refreshable session is granted.
+	mfaGate MFAEnrollmentChecker
+	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
+	interimTTL time.Duration
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -85,6 +101,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		maxBodyBytes:         DefaultMaxBodyBytes,
 		deliveryConcurrency:  DefaultDeliveryConcurrency,
 		deliveryTimeout:      DefaultDeliveryTimeout,
+		interimTTL:           DefaultInterimTokenTTL,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -98,7 +115,13 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	return c
 }
 
-// WithProvider sets the identity provider used for authentication (default "password").
+// WithProvider sets the identity provider used by the credential (form) login path
+// (default "password"). Only "password" carries a verifiable secret on this path:
+// Service.Authenticate compares the submitted password against the stored hash. Any other
+// provider (e.g. "google"/"github") has no password to compare, so the credential path now
+// rejects it with ErrInvalidCredentials rather than authenticating on identifier alone —
+// setting it here does NOT turn the login form into a passwordless bypass. External
+// identities must be established through their own OAuth/OIDC flow, not this handler.
 func WithProvider(provider string) HandlerOption {
 	return func(h *handlerConfig) { h.provider = provider }
 }
@@ -185,15 +208,19 @@ func WithHandlerEventSink(sink event.Sink) HandlerOption {
 	return func(h *handlerConfig) { h.events = sink }
 }
 
-// WithTrustedOrigins enables CSRF origin checking on the form handlers (login/register).
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for the form handlers
+// (login/register and the authenticated mutations).
 //
-// Login and registration are state-changing endpoints driven purely by the request body,
-// so SameSite=Lax cookies alone do not prevent login-CSRF / session fixation (the attack
-// needs no pre-existing cookie). When trusted origins are configured, a request whose
-// Origin — or, failing that, Referer — host is neither the request's own Host nor one of
-// the supplied hosts is rejected with 403. Supply hosts WITHOUT scheme, e.g.
-// "app.example.com". When left unset the check is disabled and CSRF protection becomes the
-// consumer's responsibility (see SECURITY.md).
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with
+// no trusted origins configured, a request whose Origin — or, failing that, Referer — host is
+// not the request's own Host is rejected with 403. This option WIDENS that allowlist to permit
+// additional hosts (e.g. a separate front-end origin on another subdomain). Supply hosts WITHOUT
+// scheme, e.g. "app.example.com". To turn the check off entirely, use WithInsecureNoOriginCheck.
+//
+// Login and registration are state-changing endpoints driven purely by the request body, so
+// SameSite=Lax cookies alone do not prevent login-CSRF / session fixation (the attack needs no
+// pre-existing cookie) — which is why the default is now strict rather than the consumer's
+// responsibility (see SECURITY.md).
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -263,19 +290,7 @@ func WithDeliveryTimeout(d time.Duration) HandlerOption {
 // writes the error response (413 when the body is too large, 400 when malformed) and returns
 // false.
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
-	if cfg.maxBodyBytes > 0 {
-		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
-	}
-	if err := r.ParseForm(); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
-		} else {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
-		}
-		return false
-	}
-	return true
+	return httputil.ParseLimitedForm(w, r, cfg.maxBodyBytes, cfg.fail)
 }
 
 // LoginHandler builds an HTTP handler that authenticates form credentials and, on success,
@@ -310,11 +325,31 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			return
 		}
 
+		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
+		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
+		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
+		// the full pair. Users without an enrolled factor fall through to the full pair below.
+		if cfg.mfaGate != nil {
+			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
+			if err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				return
+			}
+		}
+
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -351,7 +386,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -430,51 +465,43 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send f
 	}()
 }
 
-// originAllowed reports whether the request passes the CSRF origin check. When no trusted
-// origins are configured the check is disabled (CSRF protection is then the consumer's
-// responsibility, per SECURITY.md). A configured check rejects any request whose Origin
-// (or Referer fallback) host is neither the request's own Host nor an allowlisted host;
-// a browser-driven POST that carries neither header is treated as untrusted.
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is
+// ON by default — even with an empty trustedOrigins allowlist — to match the tokens handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed
+// only when its Origin (or Referer fallback) host equals the request's own Host or an explicitly
+// allowlisted host; a browser-driven POST that carries neither header is treated as untrusted.
+// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. The strict allow/deny
+// policy is enforced here — NOT httputil.OriginAllowed, whose empty-allowlist default is permissive.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
+	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := requestOriginHost(r)
+	host := httputil.RequestOriginHost(r)
 	if host == "" {
 		return false
 	}
 	return host == r.Host || cfg.trustedOrigins[host]
 }
 
-func requestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
-}
-
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 // mapAuthError maps authentication errors to an HTTP status and a stable error code.
 // Note: per the PRD, ErrAccountLocked is intentionally surfaced (429) even though it
 // reveals that the account exists; lockout is meant to be observable.
+// ErrAccountDisabled is folded into the same 429 "account_locked" response to avoid
+// leaking whether an existing account is suspended versus locked (enumeration defence).
 func mapAuthError(err error) (int, string) {
 	switch {
 	case errors.Is(err, ErrAccountLocked):
+		return http.StatusTooManyRequests, "account_locked"
+	case errors.Is(err, ErrAccountDisabled):
+		// Fold disabled into the same response as locked so that callers cannot
+		// distinguish a suspended (disabled) account from a locked one: both yield
+		// 429 "account_locked". This prevents account-state enumeration while still
+		// avoiding the misleading 500 "login_failed" that the default branch would
+		// otherwise return.
 		return http.StatusTooManyRequests, "account_locked"
 	case errors.Is(err, ErrInvalidCredentials):
 		return http.StatusUnauthorized, "invalid_credentials"
@@ -521,7 +548,7 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 				return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -551,7 +578,7 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -588,7 +615,7 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 				return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -614,7 +641,7 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -646,7 +673,7 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 				return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -685,7 +712,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -738,7 +765,7 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 			}
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -802,7 +829,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 				return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -833,7 +860,7 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -844,7 +871,9 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 // cookies (the account is gone) and responds 204 (or redirects). Deletion is sensitive and
 // irreversible: you SHOULD gate it behind a re-authentication / step-up check (fresh proof of
 // presence) in front of this handler in addition to the session, and configure WithTrustedOrigins
-// so the CSRF origin check is active. A first-class enforceable step-up primitive is planned.
+// so the CSRF origin check is active. For a first-class enforceable step-up, gate the route with
+// tokens.WithRequiredAMR(tokens.AMRMFA) and produce MFA-bearing tokens via identity.WithMFAGate +
+// mfa.StepUpHandler.
 func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -879,7 +908,7 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 		// The account no longer exists; clear this session's auth cookies client-side. Revoking
 		// the server-side session/refresh artifacts is handled by the Service's AccountErasers.
 		cfg.cookies.Clear(w)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -952,25 +981,6 @@ func parseFormBool(v string) bool {
 	}
 }
 
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
-	if url != "" {
-		http.Redirect(w, r, url, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
-}
-
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
-}
-
 // RequestPhoneVerificationHandler builds an authenticated HTTP handler that starts the
 // phone-verification flow for the signed-in user. The current user is obtained via
 // WithUserResolver (typically reading whatever the application's auth middleware stashed on the
@@ -1032,7 +1042,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 				return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1064,7 +1074,7 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1124,7 +1134,7 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 				return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
 			})
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1154,7 +1164,7 @@ func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.Handle
 			cfg.fail(w, r, status, code)
 			return
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -1182,11 +1192,11 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		}
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
-		token, user, channels, err := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
-		if err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
-			return
-		}
+		// Swallow the service error: the client-visible response must be identical whether or
+		// not the email maps to an account, so a backend error must NOT be surfaced as a
+		// distinct status — a 500 reachable only for existing accounts would itself be an
+		// enumeration oracle. Errors are observable via the store/event instrumentation.
+		token, user, channels, _ := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
 		// Uniform response regardless of account existence or recovery-channel availability; deliver
 		// off the response path to the verified channels only (token/user are empty otherwise).
 		if token != "" && user != nil {
@@ -1205,6 +1215,82 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 				})
 			}
 		}
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
+}
+
+// MFAEnrollmentChecker reports whether a user has a confirmed second factor enrolled. It is
+// the minimal slice of mfa.Service that the MFA login gate needs; mfa.Service satisfies it
+// directly. It is consumed by WithMFAGate so the identity package does not import the mfa
+// package (which would create an import cycle: mfa already depends on tokens, not identity).
+type MFAEnrollmentChecker interface {
+	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+}
+
+// WithMFAGate turns LoginHandler into an MFA-gated handler. After a correct password it asks
+// the checker whether the user has a confirmed second factor enrolled. An enrolled user is NOT
+// granted the full access+refresh pair; instead they receive a short-lived INTERIM access token
+// stamped AMR=[tokens.AMRPassword] (never the MFA marker) and NO refresh cookie, so the pre-MFA
+// state is not an indefinitely renewable session. The application then drives the second factor
+// (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR including tokens.AMRMFA. Users
+// without an enrolled factor are unaffected and still receive the full pair.
+//
+// This is the producing half of the AMR/step-up model whose enforcing half is
+// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly.
+func WithMFAGate(checker MFAEnrollmentChecker) HandlerOption {
+	return func(h *handlerConfig) { h.mfaGate = checker }
+}
+
+// WithInterimTokenTTL overrides the lifetime of the INTERIM access token issued by an
+// MFA-gated LoginHandler (default DefaultInterimTokenTTL). A non-positive value falls back to
+// the default rather than minting a non-expiring token.
+func WithInterimTokenTTL(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) {
+		if d > 0 {
+			h.interimTTL = d
+		}
+	}
+}
+
+// issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
+// who has passed the password step but not yet the second factor, and writes ONLY the access
+// cookie. The interim token carries AMR=[tokens.AMRPassword] (so tokens.WithRequiredAMR with the
+// MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
+// pre-step-up state is not a renewable session. The application completes the flow with
+// mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User) error {
+	claims := claimsOf(user)
+	// Stamp the password factor only and force a short explicit access-token expiry, overriding
+	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
+	claims.AMR = []string{tokens.AMRPassword}
+	ttl := cfg.interimTTL
+	if ttl <= 0 {
+		ttl = DefaultInterimTokenTTL
+	}
+	claims.ExpiresAt = time.Now().Add(ttl)
+	pair, err := issuer.IssueTokenPair(r.Context(), claims)
+	if err != nil {
+		return err
+	}
+	// Deliberately set ONLY the access cookie: the refresh token (minted by the issuer) is not
+	// surfaced to the client, so the interim state cannot be renewed via /refresh.
+	cfg.cookies.SetAccess(w, pair.AccessToken)
+	return nil
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on the identity form handlers
+// (login, register, and the authenticated mutations: change-password, change-email,
+// delete-account, recovery, phone/email verification).
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins),
+// because login/register are driven purely by the request body and SameSite=Lax alone does not
+// prevent login-CSRF / session fixation.
+//
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer (e.g. a synchronizer-token middleware) or in trusted test setups. Prefer
+// WithTrustedOrigins to extend, rather than remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

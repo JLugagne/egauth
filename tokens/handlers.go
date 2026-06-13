@@ -3,8 +3,13 @@ package tokens
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
-	"net/url"
+	"strings"
+	"sync"
+
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/internal/httputil"
 
 	"github.com/google/uuid"
 )
@@ -18,19 +23,22 @@ type FamilyRevoker interface {
 
 // handlerConfig holds the configurable behavior of the tokens HTTP handlers.
 type handlerConfig struct {
-	cookies        Cookies
-	tenantResolver func(*http.Request) string
-	successURL     string
-	failureURL     string
-	persistRefresh bool
-	trustedOrigins map[string]bool
+	cookies               Cookies
+	tenantResolver        func(*http.Request) string
+	successURL            string
+	failureURL            string
+	persistRefresh        bool
+	trustedOrigins        map[string]bool
+	insecureNoOriginCheck bool
+	events                event.Sink
+	insecureWarnedOnce    *sync.Once
 }
 
 // HandlerOption configures the tokens HTTP handlers (RefreshHandler, LogoutHandler).
 type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
-	c := handlerConfig{cookies: DefaultCookies()}
+	c := handlerConfig{cookies: DefaultCookies(), insecureWarnedOnce: &sync.Once{}}
 	for _, opt := range opts {
 		opt(&c)
 	}
@@ -64,6 +72,16 @@ func WithRefreshCookiePath(path string) HandlerOption {
 }
 
 // WithInsecureCookies disables the Secure attribute. Use only for local HTTP development.
+//
+// Guard against production misuse: because there is no host at construction time, the handlers
+// inspect each request and, when insecure cookies are served to a host that is not
+// localhost/loopback over a plaintext (non-TLS) connection, emit a single WARN-level
+// event.InsecureCookieMisuse to the sink registered with WithHandlerEventSink. This is a
+// warning, not a refusal — a reverse proxy that terminates TLS and forwards plaintext to the
+// app legitimately presents a non-loopback Host with no r.TLS, and refusing would brick it. The
+// warning fires at most once per handler instance (it is not per-request spam). To silence it
+// for legitimate non-loopback HTTP dev, omit WithHandlerEventSink (a nil sink is a no-op),
+// serve over a loopback host, or terminate TLS so r.TLS is set.
 func WithInsecureCookies() HandlerOption {
 	return func(h *handlerConfig) { h.cookies.Insecure = true }
 }
@@ -115,10 +133,13 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 // RefreshHandler builds an HTTP handler that rotates the refresh token carried in the
 // refresh cookie: it consumes the old token, issues a fresh access+refresh pair within the
 // same family, and rewrites both cookies. A replayed token causes family revocation and a
-// rejection. On any failure the cookies are cleared.
+// rejection. On failure the cookies are cleared, except for the benign concurrency case
+// (ErrRefreshConcurrent: a parallel request won the rotation race within the reuse grace),
+// where only the stale access cookie is cleared so the winner's fresh refresh cookie survives.
 func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		cfg.warnIfInsecureMisuse(r)
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -138,8 +159,18 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 
 		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
 		if err != nil {
-			// Including the reuse case: Rotate already revoked the family; we only need to
-			// clear the client's now-useless cookies.
+			// ErrRefreshConcurrent is benign concurrency: a parallel request won the rotation
+			// race and already minted a fresh, valid refresh cookie for this client (the family
+			// is NOT poisoned). Clearing the refresh cookie would wipe the winner's freshly
+			// issued cookie and log the user out — the lockout the reuse grace prevents. Drop
+			// only the stale access cookie and reject; the client retries with the live cookie.
+			if errors.Is(err, ErrRefreshConcurrent) {
+				cfg.cookies.ClearAccess(w)
+				cfg.fail(w, r, http.StatusUnauthorized, refreshErrorCode(err))
+				return
+			}
+			// Any other failure (after-grace reuse already revoked the family, expired, not
+			// found): clear the client's now-useless cookies.
 			cfg.cookies.Clear(w)
 			cfg.fail(w, r, http.StatusUnauthorized, refreshErrorCode(err))
 			return
@@ -147,17 +178,26 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 
 		cfg.cookies.SetAccess(w, pair.AccessToken)
 		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
 // LogoutHandler builds an HTTP handler that revokes the entire rotation family of the
-// presented refresh token (global logout) and clears the auth cookies. It is best-effort:
-// the cookies are always cleared and a success response is returned even if the token is
-// absent or already gone, so logout is idempotent.
+// presented refresh token (global logout) and clears the auth cookies.
+//
+// Idempotency: if the token is absent or already gone (ErrRefreshTokenNotFound) the
+// handler clears the cookies and returns success (204 / success redirect), so a
+// client-side double-logout does not fail.
+//
+// Store errors are surfaced: if FindRefreshToken returns any error other than
+// ErrRefreshTokenNotFound, or if RevokeFamily returns an error, the cookies are still
+// cleared (the local session ends) but the handler responds with 500 (or with a
+// failure redirect carrying error=logout_incomplete when WithFailureRedirect is set).
+// This lets clients retry and lets monitoring catch un-revoked families.
 func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		cfg.warnIfInsecureMisuse(r)
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -171,13 +211,28 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
 			tenantID := cfg.tenant(r)
 			hash := HashToken(refreshToken)
-			if rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash); err == nil {
-				_ = revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID)
+			rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash)
+			switch {
+			case err == nil:
+				// Token found: revoke the whole rotation family.
+				if err := revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID); err != nil {
+					cfg.cookies.Clear(w)
+					cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
+					return
+				}
+			case errors.Is(err, ErrRefreshTokenNotFound):
+				// Token already gone: idempotent success — fall through.
+			default:
+				// Unexpected store error: clear cookies but report failure so the
+				// client knows the server-side revocation did not happen.
+				cfg.cookies.Clear(w)
+				cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
+				return
 			}
 		}
 
 		cfg.cookies.Clear(w)
-		redirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
@@ -187,29 +242,19 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 // host is neither the request's own Host nor an allowlisted host; a POST carrying neither
 // header is treated as untrusted.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	if len(cfg.trustedOrigins) == 0 {
+	// Secure-by-default CSRF check (TASK-025): allowed only when the Origin/Referer host matches
+	// the request Host or an explicitly trusted origin; a missing origin host is rejected.
+	// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. Origin-host parsing is
+	// shared via httputil (TASK-024), but the strict allow/deny policy is enforced here — NOT
+	// httputil.OriginAllowed, whose empty-allowlist default is permissive.
+	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := requestOriginHost(r)
+	host := httputil.RequestOriginHost(r)
 	if host == "" {
 		return false
 	}
 	return host == r.Host || cfg.trustedOrigins[host]
-}
-
-func requestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
-		}
-		return ""
-	}
-	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
-		}
-	}
-	return ""
 }
 
 // tenant returns the tenant derived from the request's resolver, or "" when no resolver is
@@ -224,15 +269,16 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 // fail emits a failure response: a 303 redirect to the configured failure URL (carrying an
 // ?error=<code> param) when set, otherwise an HTTP error with the given status.
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
-	}
-	http.Error(w, code, status)
+	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
 func refreshErrorCode(err error) string {
 	switch {
+	case errors.Is(err, ErrRefreshConcurrent):
+		// Benign concurrency, not theft: a parallel request already rotated the token. Distinct
+		// from token_reuse_detected so clients can retry with the winner's fresh cookie. Checked
+		// before ErrRefreshTokenReused since ErrRefreshConcurrent wraps it.
+		return "concurrent_refresh"
 	case errors.Is(err, ErrRefreshTokenReused):
 		return "token_reuse_detected"
 	case errors.Is(err, ErrTokenExpired):
@@ -244,23 +290,83 @@ func refreshErrorCode(err error) string {
 	}
 }
 
-// redirectOrStatus replies with a 303 redirect to url when non-empty, otherwise writes
-// okStatus.
-func redirectOrStatus(w http.ResponseWriter, r *http.Request, url string, okStatus int) {
-	if url != "" {
-		http.Redirect(w, r, url, http.StatusSeeOther)
-		return
-	}
-	w.WriteHeader(okStatus)
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on the cookie-driven token
+// endpoints (RefreshHandler, LogoutHandler).
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins),
+// because they are authenticated purely by the refresh cookie and SameSite=Lax alone does not
+// fully prevent a forged cross-site refresh/logout.
+//
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer (e.g. a synchronizer-token middleware) or in trusted test setups. Prefer
+// WithTrustedOrigins to extend, rather than remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }
 
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
+// WithHandlerEventSink registers a security-event sink (see the event package) for the tokens
+// handlers. Its main purpose is the WithInsecureCookies guard: when insecure cookies are served
+// to a host that is not localhost/loopback over a non-TLS request — a likely production
+// misconfiguration — the handler emits a WARN-level event.InsecureCookieMisuse (once per handler)
+// so the otherwise-silent mistake becomes observable. A nil sink (the default) makes this a no-op.
+func WithHandlerEventSink(sink event.Sink) HandlerOption {
+	return func(h *handlerConfig) { h.events = sink }
+}
+
+// warnIfInsecureMisuse emits a one-shot WARN event when the handler is configured with insecure
+// (non-Secure) cookies yet is serving a request that looks like production: a non-loopback Host
+// over a plaintext (non-TLS) connection. It is the honest "is this prod?" signal — there is no
+// host at construction time, only at request time (r.Host / r.TLS). It deliberately WARNs rather
+// than refusing: a legitimate reverse proxy that terminates TLS and forwards plaintext to the app
+// presents a non-loopback Host with r.TLS == nil, and refusing would brick that setup. The
+// warning fires at most once per handler instance (sync.Once), so it never spams per request.
+func (cfg handlerConfig) warnIfInsecureMisuse(r *http.Request) {
+	if !cfg.cookies.Insecure {
+		return
 	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+	// A TLS request is genuinely encrypted; insecure cookies there are not the misuse we guard.
+	if r.TLS != nil {
+		return
+	}
+	if isLoopbackHost(r.Host) {
+		return
+	}
+	once := cfg.insecureWarnedOnce
+	if once == nil {
+		// Defensive: a handler built without newHandlerConfig still must not panic; emit every
+		// time rather than crash (the supported path always has a non-nil Once).
+		once = &sync.Once{}
+	}
+	once.Do(func() {
+		event.Emit(r.Context(), cfg.events, event.Event{
+			Type:     event.InsecureCookieMisuse,
+			TenantID: cfg.tenant(r),
+			Reason:   "non_loopback_plaintext_host",
+			Attrs:    map[string]any{"host": r.Host},
+		})
+	})
+}
+
+// isLoopbackHost reports whether host (an HTTP Host header value, optionally with a port) refers
+// to the local machine — localhost or a loopback IP literal. These are the legitimate local-HTTP
+// development targets for WithInsecureCookies, so they must never trigger the misuse warning.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		// No Host at all is not a host we can call "production"; stay quiet.
+		return true
+	}
+	h := host
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		h = hostOnly
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

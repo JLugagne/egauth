@@ -35,7 +35,6 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 - [README.md](README.md): human overview + quickstart
 - [SECURITY.md](SECURITY.md): full threat model, explicit trade-offs, consumer responsibilities
 - [doc.go](doc.go): root package godoc
-- [SECURITY-FINDINGS.md](SECURITY-FINDINGS.md), [AUDIT.md](AUDIT.md): audit logs
 - [CHANGELOG.md](CHANGELOG.md), [CONTRIBUTING.md](CONTRIBUTING.md), [RELEASING.md](RELEASING.md)
 
 ## Conventions for LLMs using egauth

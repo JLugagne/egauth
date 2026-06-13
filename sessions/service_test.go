@@ -28,6 +28,7 @@ func TestService(t *testing.T) {
 					TenantID:  tenantID,
 					UserID:    userID,
 					ExpiresAt: time.Now().Add(time.Hour),
+					CreatedAt: time.Now(),
 				}, nil
 			},
 		}

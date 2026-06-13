@@ -118,6 +118,57 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 		assert.ErrorIs(t, err, passkey.ErrTenantMismatch, "SaveCredential with mismatched TenantID must return ErrTenantMismatch")
 	})
 
+	t.Run("management metadata round-trips", func(t *testing.T) {
+		uid := uuid.New()
+		lastUsed := time.Date(2026, 6, 11, 8, 30, 0, 0, time.UTC)
+		cred := &passkey.Credential{
+			UserID:         uid,
+			ID:             []byte{0xa1, 0xa2},
+			PublicKey:      []byte{0x01},
+			Data:           []byte(`{}`),
+			CreatedAt:      time.Now(),
+			Nickname:       "laptop",
+			LastUsedAt:     &lastUsed,
+			Transports:     []string{"internal", "hybrid"},
+			BackupEligible: true,
+			BackupState:    true,
+		}
+		require.NoError(t, store.SaveCredential(ctx, tenantA, cred))
+
+		got, err := store.GetCredentials(ctx, tenantA, uid)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "laptop", got[0].Nickname)
+		require.NotNil(t, got[0].LastUsedAt)
+		// Compare by instant, not by struct: a timestamptz backend (pgx) round-trips the
+		// value in a different *time.Location (e.g. time.Local) for the same moment, which
+		// assert.Equal would reject. The contract guarantees the instant, not the zone.
+		assert.True(t, lastUsed.Equal(*got[0].LastUsedAt), "LastUsedAt instant must round-trip")
+		assert.Equal(t, []string{"internal", "hybrid"}, got[0].Transports)
+		assert.True(t, got[0].BackupEligible)
+		assert.True(t, got[0].BackupState)
+
+		// Mutate all five via Update and re-assert via Get.
+		newLastUsed := time.Date(2026, 6, 12, 9, 0, 0, 0, time.UTC)
+		cred.Nickname = "work laptop"
+		cred.LastUsedAt = &newLastUsed
+		cred.Transports = []string{"usb"}
+		cred.BackupEligible = false
+		cred.BackupState = false
+		require.NoError(t, store.UpdateCredential(ctx, tenantA, cred))
+
+		got, err = store.GetCredentials(ctx, tenantA, uid)
+		require.NoError(t, err)
+		require.Len(t, got, 1)
+		assert.Equal(t, "work laptop", got[0].Nickname)
+		require.NotNil(t, got[0].LastUsedAt)
+		assert.True(t, newLastUsed.Equal(*got[0].LastUsedAt), "updated LastUsedAt instant must round-trip")
+		assert.Equal(t, []string{"usb"}, got[0].Transports)
+		assert.False(t, got[0].BackupEligible)
+		assert.False(t, got[0].BackupState)
+
+		require.NoError(t, store.DeleteCredential(ctx, tenantA, uid, cred.ID))
+	})
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
 			uid := uuid.New()

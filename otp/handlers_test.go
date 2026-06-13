@@ -20,6 +20,8 @@ func codeForm(code string) *http.Request {
 	form.Set("code", code)
 	req := httptest.NewRequest(http.MethodPost, "/otp/verify", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Same-origin by default so business-logic tests pass the strict-by-default CSRF check.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 
@@ -39,7 +41,7 @@ func TestIssueHandler_DeliversAndAlwaysSucceeds(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/otp/issue", nil))
+	h.ServeHTTP(rec, issuePost())
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	<-done
@@ -55,7 +57,7 @@ func TestIssueHandler_UnknownSubjectStillReturns204(t *testing.T) {
 	}))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/otp/issue", nil))
+	h.ServeHTTP(rec, issuePost())
 	assert.Equal(t, http.StatusNoContent, rec.Code, "must not leak whether the subject exists")
 }
 
@@ -102,4 +104,51 @@ func TestVerifyHandler_RequiresSubjectResolver(t *testing.T) {
 	rec := httptest.NewRecorder()
 	otp.VerifyHandler(svc).ServeHTTP(rec, codeForm("123456"))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// issuePost builds a POST to /otp/issue carrying a same-origin Origin so the strict-by-default
+// CSRF check passes. These tests exercise issue/delivery behavior, not the origin path.
+func issuePost() *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/otp/issue", nil)
+	req.Header.Set("Origin", "https://"+req.Host)
+	return req
+}
+
+// TestIssueHandler_CSRFBlocksCrossOriginByDefault proves the secure-by-default CSRF behavior:
+// with NO WithTrustedOrigins configured, a cross-origin POST must still be rejected, matching the
+// tokens/identity handlers.
+func TestIssueHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
+	svc := otp.NewService(memory.NewStore())
+	subject := uuid.New()
+	delivered := false
+	deliver := func(context.Context, *otp.Challenge) error { delivered = true; return nil }
+	h := otp.IssueHandler(svc, deliver, otp.WithSubjectResolver(func(*http.Request) (uuid.UUID, bool) {
+		return subject, true
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/otp/issue", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.False(t, delivered, "delivery must not run for a cross-site request with default config")
+}
+
+// TestIssueHandler_WithInsecureNoOriginCheck proves the loud opt-out restores accept-all behavior.
+func TestIssueHandler_WithInsecureNoOriginCheck(t *testing.T) {
+	svc := otp.NewService(memory.NewStore())
+	subject := uuid.New()
+	h := otp.IssueHandler(svc, nil, otp.WithSubjectResolver(func(*http.Request) (uuid.UUID, bool) {
+		return subject, true
+	}), otp.WithInsecureNoOriginCheck())
+
+	req := httptest.NewRequest(http.MethodPost, "/otp/issue", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://evil.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code, "the origin check is disabled by the insecure opt-out")
 }

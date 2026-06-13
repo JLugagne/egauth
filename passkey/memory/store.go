@@ -32,6 +32,16 @@ func clone(c *passkey.Credential) *passkey.Credential {
 	cp.ID = append([]byte(nil), c.ID...)
 	cp.PublicKey = append([]byte(nil), c.PublicKey...)
 	cp.Data = append([]byte(nil), c.Data...)
+	// Deep-copy the reference-type management metadata so the store never aliases
+	// caller-owned data (a later mutation of the caller's slice/pointer must not
+	// leak into the stored record, and vice versa). nil stays nil.
+	if c.Transports != nil {
+		cp.Transports = append([]string(nil), c.Transports...)
+	}
+	if c.LastUsedAt != nil {
+		t := *c.LastUsedAt
+		cp.LastUsedAt = &t
+	}
 	return &cp
 }
 

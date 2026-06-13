@@ -29,10 +29,36 @@ func newAutoRefreshFixture(t *testing.T) autoRefreshFixture {
 	store := memory.NewStore[struct{}]()
 	cfg := jwt.Config[struct{}]{
 		Store:      store,
-		SecretKey:  "mw-secret",
+		SecretKey:  "mw-secret-aaaaaaaaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
+		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
+			return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
+		}),
+	}
+	expiredCfg := cfg
+	expiredCfg.AccessTTL = -time.Minute
+	return autoRefreshFixture{
+		svc:           jwt.New[struct{}](cfg),
+		expiredMinter: jwt.New[struct{}](expiredCfg),
+		cookies:       tokens.DefaultCookies(),
+	}
+}
+
+// newStrictAutoRefreshFixture builds a fixture whose service runs in strict reuse mode
+// (negative ReuseGracePeriod): any replay of a consumed refresh token is treated as theft
+// and revokes the family, with no benign within-grace concurrency window.
+func newStrictAutoRefreshFixture(t *testing.T) autoRefreshFixture {
+	t.Helper()
+	store := memory.NewStore[struct{}]()
+	cfg := jwt.Config[struct{}]{
+		Store:            store,
+		SecretKey:        "mw-secret-aaaaaaaaaaaaaaaaaaaaa!", // 32 bytes
+		Issuer:           "egauth-test",
+		AccessTTL:        5 * time.Minute,
+		RefreshTTL:       24 * time.Hour,
+		ReuseGracePeriod: -time.Nanosecond, // strict: no grace window
 		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
 			return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
 		}),
@@ -150,7 +176,10 @@ func TestRequireAuth_InvalidAccessNotEligibleForRefresh(t *testing.T) {
 
 func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 	ctx := context.Background()
-	f := newAutoRefreshFixture(t)
+	// Strict-mode service (negative grace): any replay of a consumed token is treated as
+	// theft, so the poisoned-family clear path is exercised — distinct from the benign
+	// within-grace concurrency case, which must preserve the cookies (covered separately).
+	f := newStrictAutoRefreshFixture(t)
 	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
 	require.NoError(t, err)
 
@@ -165,7 +194,7 @@ func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
 
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, f.request("", pair.RefreshToken)) // replay the consumed refresh token
+	h.ServeHTTP(rec, f.request("", pair.RefreshToken)) // replay the consumed refresh token (theft)
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, called)

@@ -29,6 +29,6 @@ func FuzzVerifyAccessToken(f *testing.F) {
 	f.Add("not-base64.@@@.$$$")
 
 	f.Fuzz(func(_ *testing.T, token string) {
-		_, _ = svc.VerifyAccessToken(context.Background(), token)
+		_, _ = svc.VerifyAccessTokenForTenant(context.Background(), "", token)
 	})
 }

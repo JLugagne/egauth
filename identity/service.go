@@ -10,20 +10,48 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/google/uuid"
+	"golang.org/x/net/idna"
+	"golang.org/x/text/unicode/norm"
 )
 
-// normalizeEmail validates an email against RFC 5322 and returns its canonical form (trimmed,
-// lowercased). Because account uniqueness is byte-exact at the store, normalizing here means
-// "User@Example.com" and "user@example.com" resolve to a single account — closing both a
-// duplicate-account hazard and a pre-registration takeover of a victim's case-variant. The
-// local part is lowercased too: although RFC 5321 permits case-sensitive local parts, virtually
-// all providers treat them case-insensitively, so this is the safe, expected behavior.
+// normalizeEmail validates an email against RFC 5322 and returns its canonical form. The local
+// part is trimmed, NFC-normalized (golang.org/x/text/unicode/norm) and lowercased; the domain is
+// lowercased and folded to its IDN A-label (punycode) via golang.org/x/net/idna. Because account
+// uniqueness is byte-exact at the store, this canonicalization means "User@Example.com" and
+// "user@example.com", the NFC and NFD forms of an accented local part, and a Unicode domain and
+// its punycode equivalent all resolve to a single account — closing both a duplicate-account
+// hazard and a pre-registration takeover of a victim's case-variant or Unicode-variant address.
+// The local part is lowercased too: although RFC 5321 permits case-sensitive local parts,
+// virtually all providers treat them case-insensitively, so this is the safe, expected behavior.
 func normalizeEmail(email string) (string, error) {
 	addr, err := mail.ParseAddress(strings.TrimSpace(email))
 	if err != nil {
 		return "", ErrInvalidEmail
 	}
-	return strings.ToLower(addr.Address), nil
+
+	// Split into local part and domain on the last '@'. RFC 5322 allows '@'
+	// inside a quoted local part, so we cannot split on the first one.
+	at := strings.LastIndex(addr.Address, "@")
+	if at <= 0 || at == len(addr.Address)-1 {
+		return "", ErrInvalidEmail
+	}
+	local := addr.Address[:at]
+	domain := addr.Address[at+1:]
+
+	// NFC-normalize the local part so precomposed and decomposed Unicode forms
+	// of the same address (e.g. "josé" precomposed vs "e"+combining acute)
+	// collapse to one key, then lowercase for case-insensitive matching.
+	local = strings.ToLower(norm.NFC.String(local))
+
+	// Fold the domain to its IDN A-label (punycode) so a Unicode (U-label)
+	// domain and its punycode equivalent map to one key. ToASCII also
+	// lowercases and applies the IDNA mapping; it rejects malformed domains.
+	asciiDomain, err := idna.Lookup.ToASCII(domain)
+	if err != nil {
+		return "", ErrInvalidEmail
+	}
+
+	return local + "@" + asciiDomain, nil
 }
 
 // Default lockout configuration values.
@@ -63,7 +91,13 @@ type Service interface {
 	// is returned too, so the caller can deliver the token (e.g. via a Mailer).
 	RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 	// ResetPassword validates newPassword against the policy, then consumes the reset token
-	// (single-use) and sets the new password, clearing any lockout.
+	// (single-use), sets the new password (clearing any lockout), and runs the registered
+	// AccountErasers to revoke the user's existing sessions and refresh-token families.
+	// Password reset is the canonical account-recovery flow when a user believes they are
+	// compromised; the erasers provide the same cross-module revocation seam used by
+	// DeleteAccount, so an attacker who holds a live session is evicted immediately. The
+	// caller SHOULD also revoke any additional cross-module state not covered by their
+	// registered erasers (e.g. trusted-device records).
 	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
 	// RequestEmailVerification mints an email-verification token for the given user.
 	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
@@ -210,12 +244,28 @@ type service struct {
 // ServiceOption configures optional behavior of the identity Service.
 type ServiceOption func(*service)
 
-// WithLockout overrides the default account-lockout threshold and duration.
+// WithLockout overrides the account-lockout threshold and duration.
+//
+// A non-positive threshold or duration is treated as "use the safe default" (DefaultLockThreshold /
+// DefaultLockDuration), matching the convention of mfa.WithMaxAttempts. This means
+// WithLockout(0, 0) is a safe no-op that keeps the default lockout active — it does NOT disable
+// lockout. To explicitly opt out of lockout (e.g. because an external rate-limiter enforces the
+// budget), use WithNoLockout instead.
 func WithLockout(threshold int, duration time.Duration) ServiceOption {
 	return func(s *service) {
 		s.lockThreshold = threshold
 		s.lockDuration = duration
 	}
+}
+
+// WithNoLockout DISABLES brute-force account lockout. This is insecure unless an external
+// rate-limiter or WAF fronts the authentication endpoint — without it the password login path
+// is online-brute-forceable. Lockout is ON by default; only use this option when you
+// knowingly enforce the attempt budget elsewhere.
+func WithNoLockout() ServiceOption {
+	// A negative sentinel is normalized to zero (the internal "disabled" value) inside
+	// NewService after all options have been applied, so the verify path only tests > 0.
+	return func(s *service) { s.lockThreshold = -1 }
 }
 
 // WithPasswordResetTTL overrides how long a password-reset token stays valid.
@@ -310,11 +360,25 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 	for _, opt := range opts {
 		opt(s)
 	}
+	// Lockout is secure-by-default: a non-positive threshold (e.g. from WithLockout(0, ...))
+	// means "use the safe default ceiling", not "disable". The negative sentinel written by
+	// WithNoLockout() is normalized to zero (the internal "disabled" value) so the downstream
+	// paths only need to test lockThreshold > 0.
+	switch {
+	case s.lockThreshold == 0:
+		s.lockThreshold = DefaultLockThreshold
+	case s.lockThreshold < 0:
+		s.lockThreshold = 0 // explicitly disabled via WithNoLockout
+	}
+	// Similarly, a non-positive duration is treated as "use the safe default".
+	// Zero duration would produce a LockedUntil at/before now, so the lock would never bite.
+	if s.lockDuration <= 0 {
+		s.lockDuration = DefaultLockDuration
+	}
 	if s.now == nil {
 		s.now = time.Now
 	}
 	return s
-
 }
 
 func (s *service) Register(ctx context.Context, tenantID string, email, password string) (*User, error) {
@@ -465,27 +529,17 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 		return user, nil
 	}
 
-	// Fallback for other providers (if any)
-	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
-	if err != nil {
-		loginFailed("", "invalid_credentials")
-		return nil, ErrInvalidCredentials
-	}
-
-	user, err := s.store.FindUserByID(ctx, tenantID, ident.UserID)
-	if err != nil {
-		loginFailed("", "invalid_credentials")
-		return nil, ErrInvalidCredentials
-	}
-
-	// A disabled account cannot authenticate via any provider.
-	if user.DisabledAt != nil {
-		loginFailed(user.ID.String(), "account_disabled")
-		return nil, ErrAccountDisabled
-	}
-
-	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
-	return user, nil
+	// Credential (form) login is only defined for the "password" provider. Any other provider
+	// (e.g. "google"/"github") carries no verifiable secret on this path: the supplied password
+	// cannot be compared against anything. Authenticating such an identity here would turn the
+	// login form into a passwordless bypass — anyone who knows an external identifier (an OAuth
+	// sub) plus any/empty password would be issued a session. External identities must be
+	// established through their own (OAuth/OIDC) flow, never through credential login. Reject
+	// uniformly with ErrInvalidCredentials, after a decoy hash so the rejection is
+	// indistinguishable by timing from a wrong-password failure on the password path.
+	s.decoyHash(ctx, password)
+	loginFailed("", "invalid_credentials")
+	return nil, ErrInvalidCredentials
 }
 
 // RequestPasswordReset mints a password-reset token for the account owning email.
@@ -562,7 +616,9 @@ func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token
 	return user, metadata, nil
 }
 
-// ResetPassword validates the new password, consumes the token and sets the password.
+// ResetPassword validates the new password, consumes the token and sets the password,
+// then runs every registered AccountEraser to revoke the user's existing sessions and
+// refresh-token families.
 func (s *service) ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error {
 	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
 	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
@@ -587,6 +643,27 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash); err != nil {
 		return err
 	}
+
+	// Run the cross-module erasers to evict any attacker-held sessions or refresh-token families.
+	// Password reset is the canonical account-recovery flow when a user believes they are
+	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
+	// intact. Collect every eraser error so one failure does not mask another.
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := erase(ctx, tenantID, user.ID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
 	s.emit(ctx, event.Event{Type: event.PasswordReset, UserID: user.ID.String(), TenantID: user.TenantID})
 	return nil
 }
@@ -791,7 +868,23 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 	// 1. Already linked? Return the owning user.
 	ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 	if err == nil {
-		return s.store.FindUserByID(ctx, tenantID, ident.UserID)
+		user, err := s.store.FindUserByID(ctx, tenantID, ident.UserID)
+		if err != nil {
+			return nil, err
+		}
+		// Gate on account state before handing the user back: the OAuth callback turns this
+		// user into a fresh access+refresh session, so a soft-deleted or administratively
+		// suspended account must be refused here exactly as the password path (Authenticate)
+		// and the token-gated paths (consumeForLiveUser) do. FindUserByID deliberately still
+		// returns disabled/soft-deleted users, so this is the single chokepoint that covers
+		// every consumer of LinkOrCreateIdentity, not just the shipped OAuth handler.
+		if user.DeletedAt != nil {
+			return nil, ErrUserNotFound
+		}
+		if user.DisabledAt != nil {
+			return nil, ErrAccountDisabled
+		}
+		return user, nil
 	}
 	if !errors.Is(err, ErrIdentityNotFound) {
 		return nil, err
@@ -991,7 +1084,16 @@ func (s *service) RequestRecoveryEmail(ctx context.Context, tenantID string, use
 	if user.DeletedAt != nil {
 		return "", ErrUserNotFound
 	}
-	if recoveryEmail == user.Email {
+	// Compare against the primary in the SAME fully-canonicalized form (NFC + IDN A-label)
+	// that normalizeEmail produced for the candidate. The stored primary may not have been
+	// normalized (e.g. an externally provisioned account), so a byte-exact comparison would
+	// let a Unicode/IDN-equivalent of the primary slip past as an "independent" channel.
+	// If the stored primary cannot be canonicalized, fall back to the raw stored value.
+	primary := user.Email
+	if canonical, normErr := normalizeEmail(primary); normErr == nil {
+		primary = canonical
+	}
+	if recoveryEmail == primary {
 		return "", ErrRecoveryEmailIsPrimary
 	}
 

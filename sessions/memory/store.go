@@ -101,15 +101,22 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	sCopy := *session
 	sCopy.TenantID = tenantID
 
+	key := hashKey(sCopy.TenantID, sCopy.TokenHash)
+	if _, exists := s.byHash[key]; exists {
+		return sessions.ErrDuplicateToken
+	}
+
 	s.sessions[sCopy.ID] = &sCopy
-	s.byHash[hashKey(sCopy.TenantID, sCopy.TokenHash)] = sCopy.ID
+	s.byHash[key] = sCopy.ID
 
 	return nil
 }
 
 // UpdateSession updates the mutable fields of an existing session (token hash, expiry,
-// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID
-// and tenant are immutable.
+// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID,
+// tenant, UserID and CreatedAt are immutable: any change to UserID or CreatedAt in the passed
+// session is ignored, matching the pgx store. Re-binding a session to a different user is the job
+// of BindSession.
 func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -121,17 +128,52 @@ func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *ses
 		return sessions.ErrSessionNotFound
 	}
 
-	sCopy := *session
-	sCopy.TenantID = existing.TenantID // tenant is immutable
-	s.sessions[session.ID] = &sCopy
+	// Copy only the mutable fields onto the existing record. UserID, CreatedAt, ID and tenant are
+	// pinned from the stored row so a caller cannot re-bind the user or reset the absolute-lifetime
+	// anchor through this method.
+	updated := *existing
+	updated.TokenHash = session.TokenHash
+	updated.ExpiresAt = session.ExpiresAt
+	updated.UserAgent = session.UserAgent
+	updated.IP = session.IP
+	s.sessions[updated.ID] = &updated
 
 	// Keep the hash index in lockstep with the rotation: the old hash key (equal to
 	// expectedTokenHash, since the compare-and-set above succeeded) is removed and the
 	// new hash is added. Both keys are tenant-scoped on the immutable tenant.
-	if sCopy.TokenHash != existing.TokenHash {
+	if updated.TokenHash != existing.TokenHash {
 		delete(s.byHash, hashKey(existing.TenantID, existing.TokenHash))
 	}
-	s.byHash[hashKey(sCopy.TenantID, sCopy.TokenHash)] = sCopy.ID
+	s.byHash[hashKey(updated.TenantID, updated.TokenHash)] = updated.ID
+	return nil
+}
+
+// BindSession atomically re-binds an existing session to a new UserID while rotating its token,
+// identified by session.ID and gated by a compare-and-set on expectedTokenHash. It is the
+// anonymous-to-authenticated upgrade primitive. It copies UserID, TokenHash, ExpiresAt, UserAgent
+// and IP onto the stored record; the ID, tenant and CreatedAt are immutable.
+func (s *Store) BindSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	existing, ok := s.sessions[session.ID]
+	if !ok || existing.TenantID != tenantID || existing.TokenHash != expectedTokenHash {
+		return sessions.ErrSessionNotFound
+	}
+
+	// Copy the mutable fields plus UserID. CreatedAt, ID and tenant stay pinned to the stored row.
+	updated := *existing
+	updated.UserID = session.UserID
+	updated.TokenHash = session.TokenHash
+	updated.ExpiresAt = session.ExpiresAt
+	updated.UserAgent = session.UserAgent
+	updated.IP = session.IP
+	s.sessions[updated.ID] = &updated
+
+	if updated.TokenHash != existing.TokenHash {
+		delete(s.byHash, hashKey(existing.TenantID, existing.TokenHash))
+	}
+	s.byHash[hashKey(updated.TenantID, updated.TokenHash)] = updated.ID
 	return nil
 }
 

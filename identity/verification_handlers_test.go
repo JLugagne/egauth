@@ -93,6 +93,10 @@ func requireNoMail(t *testing.T, ch chan deliveredMail) {
 func postForm(values url.Values) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(values.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	// Stamp a same-origin Origin so the now-strict-by-default CSRF check passes; these tests
+	// exercise handler business logic, not the origin path (httptest.NewRequest sets Host to
+	// "example.com"). CSRF behavior itself is covered by the dedicated *CSRF* tests.
+	req.Header.Set("Origin", "https://"+req.Host)
 	return req
 }
 

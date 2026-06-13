@@ -1,13 +1,19 @@
 package mfa
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"net/http"
-	"net/url"
 
+	"github.com/JLugagne/egauth/internal/httputil"
+
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 )
+
+// DefaultMaxBodyBytes bounds the request body of the MFA handlers before form parsing (4 KiB),
+// matching the same cap applied by the otp package.
+const DefaultMaxBodyBytes int64 = 4 << 10 // 4 KiB
 
 // UserResolver extracts the authenticated user (and its tenant) from the request — typically
 // from whatever the application's auth middleware stored on the request context. All MFA
@@ -20,13 +26,27 @@ type handlerConfig struct {
 	codeField    string
 	successURL   string
 	failureURL   string
+	// cookies controls how StepUpHandler writes the re-issued access+refresh pair. The other
+	// handlers do not mint tokens and ignore it. It defaults to tokens.DefaultCookies().
+	cookies tokens.Cookies
+	// trustedOrigins, when non-empty, enables CSRF Origin/Referer enforcement (see WithTrustedOrigins).
+	trustedOrigins map[string]bool
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
+	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
+	maxBodyBytes int64
 }
 
 // HandlerOption configures the MFA HTTP handlers.
 type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
-	c := handlerConfig{accountField: "account", codeField: "code"}
+	c := handlerConfig{
+		accountField: "account",
+		codeField:    "code",
+		cookies:      tokens.DefaultCookies(),
+		maxBodyBytes: DefaultMaxBodyBytes,
+	}
 	for _, opt := range opts {
 		opt(&c)
 	}
@@ -61,6 +81,37 @@ func WithFailureRedirect(rawURL string) HandlerOption {
 	return func(h *handlerConfig) { h.failureURL = rawURL }
 }
 
+// WithCookies configures how StepUpHandler writes the re-issued access+refresh pair. It must
+// match the cookie configuration of the identity LoginHandler that issued the interim token so
+// the step-up cookies overwrite the interim ones. Defaults to tokens.DefaultCookies().
+func WithCookies(c tokens.Cookies) HandlerOption {
+	return func(h *handlerConfig) { h.cookies = c }
+}
+
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for all state-changing
+// MFA handlers.
+//
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
+// trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
+// own Host is rejected with 403 "cross_site_blocked". This option WIDENS that allowlist to permit
+// additional hosts. Supply hosts WITHOUT scheme, e.g. "app.example.com". Use it whenever the MFA
+// endpoints are reachable from a browser session on another origin (e.g. cross-subdomain or
+// embedded apps). To turn the check off entirely, use WithInsecureNoOriginCheck.
+func WithTrustedOrigins(origins ...string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.trustedOrigins = make(map[string]bool, len(origins))
+		for _, o := range origins {
+			h.trustedOrigins[o] = true
+		}
+	}
+}
+
+// WithMaxBodyBytes overrides the request-body cap applied in guarded() before form parsing
+// (default DefaultMaxBodyBytes = 4 KiB). A non-positive value disables the cap.
+func WithMaxBodyBytes(n int64) HandlerOption {
+	return func(h *handlerConfig) { h.maxBodyBytes = n }
+}
+
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
 // for the client to render (e.g. as a QR code). The factor is not active until confirmed.
 func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
@@ -75,7 +126,7 @@ func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]string{"secret": enrollment.Secret, "uri": enrollment.URI})
+		httputil.WriteJSON(w, http.StatusOK, map[string]string{"secret": enrollment.Secret, "uri": enrollment.URI})
 	})
 }
 
@@ -89,7 +140,7 @@ func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
+		httputil.WriteJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
 	})
 }
 
@@ -133,7 +184,7 @@ func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.Han
 			cfg.failErr(w, r, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
+		httputil.WriteJSON(w, http.StatusOK, map[string][]string{"recovery_codes": codes})
 	})
 }
 
@@ -149,13 +200,18 @@ func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	})
 }
 
-// guarded wraps the common preamble: POST-only, form parse, user resolution and tenant
-// derivation, then invokes fn with the resolved user ID and tenant string.
+// guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
+// user resolution and tenant derivation, body-size cap (DefaultMaxBodyBytes, overridable via
+// WithMaxBodyBytes), then invokes fn with the resolved user ID and tenant string.
 func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
 		if cfg.resolve == nil {
@@ -167,12 +223,29 @@ func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uui
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
 		}
-		if err := r.ParseForm(); err != nil {
-			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 		fn(w, r, uid, tenant)
 	}
+}
+
+// parseLimitedForm wraps r.Body with http.MaxBytesReader (when maxBodyBytes > 0), parses the
+// form, and writes the appropriate error response on failure. It returns true on success.
+func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.maxBodyBytes > 0 {
+		r.Body = http.MaxBytesReader(w, r.Body, cfg.maxBodyBytes)
+	}
+	if err := r.ParseForm(); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			cfg.fail(w, r, http.StatusRequestEntityTooLarge, "request_too_large")
+		} else {
+			cfg.fail(w, r, http.StatusBadRequest, "invalid_request")
+		}
+		return false
+	}
+	return true
 }
 
 func (cfg handlerConfig) ok(w http.ResponseWriter, r *http.Request) {
@@ -189,11 +262,24 @@ func (cfg handlerConfig) failErr(w http.ResponseWriter, r *http.Request, err err
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {
-	if cfg.failureURL != "" {
-		http.Redirect(w, r, withErrorParam(cfg.failureURL, code), http.StatusSeeOther)
-		return
+	httputil.Fail(w, r, cfg.failureURL, status, code)
+}
+
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
+// by default — even with an empty trustedOrigins allowlist — to match the tokens/identity handlers
+// and make "CSRF-by-default" mean the same thing across handler families. A request is allowed only
+// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host;
+// a POST carrying neither header is treated as untrusted. WithInsecureNoOriginCheck restores the
+// pre-v1 accept-all behavior.
+func (cfg handlerConfig) originAllowed(r *http.Request) bool {
+	if cfg.insecureNoOriginCheck {
+		return true
 	}
-	http.Error(w, code, status)
+	host := httputil.RequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
 }
 
 func mapMFAError(err error) (int, string) {
@@ -213,19 +299,54 @@ func mapMFAError(err error) (int, string) {
 	}
 }
 
-func writeJSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
+// StepUpClaimsBuilder maps the stepped-up user (resolved from the interim session) to the claims
+// embedded in the full token pair StepUpHandler re-issues. The handler overwrites the returned
+// AMR with [pwd, otp, mfa]; the builder supplies the rest (subject, tenant, scopes, custom).
+// Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
+// applies to the full session.
+type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[C]
+
+// StepUpHandler is the completion half of the AMR/step-up model whose pre-step-up half is
+// identity.WithMFAGate. It is mounted behind the interim session (the access cookie set by an
+// MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code it verifies the
+// second factor, then re-issues the FULL access+refresh pair with AMR=[tokens.AMRPassword,
+// tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the interim access cookie.
+// A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new token but never the
+// interim one. On an incorrect/expired code it fails (like VerifyHandler) and mints nothing, so
+// the interim session is never upgraded.
+//
+// Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
+func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.VerifyTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
+			cfg.failErr(w, r, err)
+			return
+		}
+		claims := claimsOf(r.Context(), uid, tenant)
+		// The factor set is now password + a verified TOTP, so the token reaches the MFA
+		// assurance level. AMR is set here (not by the builder) so it is authoritative.
+		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
+		pair, err := issuer.IssueTokenPair(r.Context(), claims)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+			return
+		}
+		cfg.cookies.SetAccess(w, pair.AccessToken)
+		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		cfg.ok(w, r)
+	})
 }
 
-func withErrorParam(rawURL, code string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	q := u.Query()
-	q.Set("error", code)
-	u.RawQuery = q.Encode()
-	return u.String()
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on all state-changing MFA
+// handlers.
+//
+// By default these handlers reject any state-changing POST whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see WithTrustedOrigins).
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer or in trusted test setups. Prefer WithTrustedOrigins to extend, rather than
+// remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }

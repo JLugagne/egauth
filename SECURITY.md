@@ -9,12 +9,54 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   never persisted in clear text. Only their SHA-256 hash is stored (`tokens.HashToken`),
   so a database leak does not expose usable credentials. Lookups are performed on the
   hash, which is what makes a plain index/equality lookup safe for high-entropy tokens.
-- **Constant-time password comparison.** Password verification uses
-  `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong password cannot
-  be recovered byte-by-byte through timing.
-- **Constant-time authentication paths.** The password authentication path applies an
-  equivalent hashing cost even when the user, identity, or password hash is absent, so
-  account existence cannot be inferred from response timing (user-enumeration defence).
+  The library enforces a minimum token byte length (`jwt.MinTokenLength = 16`) for
+  `RefreshLength` and `APIKeyLength`: `Config.Validate` returns an error and `New` panics
+  if either is set to a positive value below the minimum, preventing low-entropy tokens
+  from being issued accidentally.
+- **Constant-time password comparison (by construction).** Password verification compares
+  the derived key with `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong
+  password cannot be recovered byte-by-byte through timing. The guarantee is *structural*:
+  `Compare` always reaches the constant-time comparison for any well-formed stored hash and
+  never branches on the byte-wise outcome of the secret comparison. (A *malformed* stored hash
+  is rejected before the KDF — but that depends only on the shape of the untrusted stored hash,
+  not on the candidate password, so it leaks nothing about the password.) This is not provable
+  by a boolean unit test; the supporting *evidence* is a pair of benchmarks
+  (`BenchmarkCompare_CorrectPassword` vs `BenchmarkCompare_WrongPassword` in
+  `passwords/argon2`) whose measured per-op timings land within benchmark noise of each other.
+- **Constant-time authentication paths (by construction).** The password authentication path
+  applies an equivalent hashing cost (a full Argon2id pass via the decoy-hash path) even when
+  the user, identity, or password hash is absent, or the provider is non-password, so account
+  existence cannot be inferred from response timing (user-enumeration defence). Again the
+  guarantee is structural — every enumeration-safe branch in `Authenticate` calls `decoyHash`.
+  The supporting evidence is `BenchmarkAuthenticate_ValidUser_WrongPassword` (real `Compare`)
+  vs `BenchmarkAuthenticate_UnknownUser` / `BenchmarkAuthenticate_NonPasswordProvider`
+  (decoy hash) in `identity`, whose measured deltas are within benchmark noise.
+
+  **Running the timing-evidence benchmarks.** These are evidence to inspect manually, not CI
+  pass/fail gates (a wall-clock threshold on a shared runner is too flaky to gate a build):
+
+  ```sh
+  go test -run=^$ -bench=BenchmarkCompare      -benchmem ./passwords/argon2
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem ./identity
+  # For a noise-aware comparison across a change, capture multiple runs and use benchstat:
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity | tee old.txt
+  # ...make the change...
+  go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity | tee new.txt
+  benchstat old.txt new.txt   # go install golang.org/x/perf/cmd/benchstat@latest
+  ```
+
+  A benchstat-significant gap between the correct/valid and wrong/unknown variants would signal
+  a regression in the constant-time guarantee (e.g. a path that skips the decoy or short-circuits
+  the comparison) and should be investigated. Note the benchmark fixture disables lockout
+  (`WithNoLockout`) so the valid-user path keeps exercising `Compare` every iteration instead of
+  short-circuiting on `ErrAccountLocked`; lockout remains on by default in production.
+- **Brute-force lockout (identity).** After `DefaultLockThreshold` (5) consecutive
+  password failures the identity is locked for `DefaultLockDuration` (15 min). Lockout is
+  **on by default** and hardened against misconfiguration: `identity.WithLockout(0, 0)` does
+  NOT disable it — a non-positive argument falls back to the safe default, matching the
+  convention of `mfa.WithMaxAttempts`. To explicitly opt out (e.g. when an external
+  WAF or rate-limiter enforces the budget), use `identity.WithNoLockout()`, which makes the
+  intent auditable and greppable.
 - **Single-use refresh-token rotation with theft detection.** Refresh tokens are
   single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
   and mints a new one in the same family; the access-token lifetime is always
@@ -27,8 +69,16 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   token grants no access regardless.) To avoid logging
   users out on ordinary request concurrency (parallel tabs, prefetch, concurrent
   sub-resource loads racing the same cookie), a replay within `ReuseGracePeriod`
-  (default 10s) of consumption is treated as benign and rejected *without* revoking the
-  family — set a negative `ReuseGracePeriod` for strict mode where any replay revokes.
+  (default 10s) of consumption — and the lost-race case where two requests rotate the
+  *same not-yet-consumed* token in parallel — is treated as benign and rejected *without*
+  revoking the family. These benign cases surface the distinct `tokens.ErrRefreshConcurrent`
+  sentinel (which wraps `ErrRefreshTokenReused` for compatibility), so the cookie-clearing
+  callers (`RequireAuth` auto-refresh and `RefreshHandler`) clear **only the stale access
+  cookie** and leave the refresh cookie intact: the winning request already minted a fresh,
+  valid refresh cookie for this client, and clearing it would wipe that and force a full
+  re-login — the very lockout the grace window exists to prevent. After-grace reuse, expiry
+  and not-found still clear all cookies. Set a negative `ReuseGracePeriod` for strict mode
+  where any replay revokes.
 - **Single-use verification tokens (selector/verifier).** Password-reset and email-verification
   tokens follow a selector/verifier scheme: a 128-bit random `selector` indexes the row, and only
   the SHA-256 of the secret `verifier` half is stored. Consumption compares the verifier in
@@ -50,11 +100,24 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **TOTP & recovery codes.** The `mfa` module implements RFC 6238 TOTP (authenticator apps only,
   no SMS) with a ±skew window and **replay protection** via a monotonic last-used time-step (a
   code, including the enrolling one, cannot be reused). Recovery codes are single-use and stored
-  only as SHA-256 hashes. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
+  only as SHA-256 hashes. `NewService` panics at construction if `WithDigits` is called with a
+  value outside the RFC 6238 range **6–8** — values below 6 produce a trivially guessable code
+  space and values above 8 cause uint32 truncation in the HOTP truncation step, neither of which
+  will be accepted by any compliant authenticator app. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
   server recomputes codes from it), so — unlike passwords/opaque tokens — it is NOT hashed. Per the
   PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
   deployments that need defense against a database leak should encrypt the `secret` column at the
   storage/DB layer (envelope encryption).
+  **Failed-attempt lockout is time-bound.** Once `FailedAttempts` exceeds `MaxAttempts` (default 5)
+  the factor is locked and `ConfirmTOTP`, `VerifyTOTP`, and `VerifyRecoveryCode` all return
+  `ErrTooManyAttempts`. When `ConfirmTOTP` exhausts the budget the pending enrollment is deleted
+  so an attacker cannot continue guessing; the user must restart from `EnrollTOTP`.
+  The lockout automatically resets after `LockoutDuration` (default 15 min, measured from the last
+  failed attempt), giving legitimate users a self-service recovery path without operator action.
+  Operators can also unblock a user immediately via `Service.UnlockMFA(ctx, tenantID, userID)`,
+  which wraps `Store.ResetTOTPAttempts`. The window is configurable via
+  `mfa.WithLockoutDuration(d)`; passing `0` makes the lockout permanent until `UnlockMFA` is
+  called or the factor is disabled.
 - **Passkeys (WebAuthn).** The `passkey` module wraps go-webauthn. Credentials are scoped to the
   configured Relying Party ID; the ceremony challenge and user-verification requirement
   (`SessionData`) are carried between Begin and Finish in a short-lived, **HMAC-signed**
@@ -92,9 +155,31 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   recovery-code / passkey attempts is the consumer's responsibility; egauth exposes the errors
   and propagates `context.Context` so an external limiter can be attached in front of the handlers.
 - **Step-up / AAL enforcement.** Tokens carry an `AMR` claim (RFC 8176) recording the factors used
-  to obtain them; `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
-  `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. On refresh the AMR is
-  re-evaluated by the `ClaimsProvider`, not frozen at login.
+  to obtain them. The model has two halves and **both ship in egauth**:
+  - *Enforcement.* `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
+    `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. It fails **closed**: a
+    token that does not carry the required AMR value never passes, so a password-only session can
+    never satisfy `WithRequiredAMR(AMRMFA)`.
+  - *Production.* `identity.WithMFAGate(mfaSvc)` makes `LoginHandler` check `IsEnrolled` after a
+    correct password; an enrolled user receives a **short-lived interim access token**
+    (`AMR=[AMRPassword]`, default 5 min, configurable via `WithInterimTokenTTL`) and **no refresh
+    cookie**, so the pre-MFA state is not an indefinitely renewable session. The second factor is
+    then driven by `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full**
+    access+refresh pair with `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the
+    interim access cookie. Users with no enrolled factor are unaffected and receive the full pair.
+
+  Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
+  application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
+  pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the
+  password alone. On refresh the AMR is re-evaluated by the `ClaimsProvider`, not frozen at login.
+  To make that re-evaluation per-session rather than per-user, `Rotate` attaches a
+  `tokens.RotationContext` (the rotation family ID and the family's preserved `auth_time`) to the
+  context passed to `ClaimsProvider.ClaimsForUser`; recover it with `tokens.RotationContextFromContext`.
+  This lets a provider keyed by family ID preserve (or deliberately downgrade) the assurance the
+  family originally proved, instead of being forced to either silently decay a legitimately
+  MFA-elevated session after one access-token TTL or blanket-elevate every session of an
+  MFA-enrolled user — the latter being a step-up bypass where a password-only family would gain
+  `AMRMFA` on its first silent refresh.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
@@ -110,16 +195,31 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
   account, an OAuth-only account, and a known account with no recovery channel all produce the
   same empty, no-error response.
-- **Deactivation revokes pending tokens.** Magic-link, password-reset and email-verification all
-  reject a token whose account has since been soft-deleted (`DeleteUser`): the consume path
-  re-checks `DeletedAt` and returns "not found", so suspending an account reliably invalidates its
-  outstanding passwordless logins and reset links (a token minted while live cannot resurrect it).
+- **Deactivation revokes pending tokens and blocks re-authentication.** Magic-link,
+  password-reset and email-verification all reject a token whose account has since been
+  soft-deleted (`DeleteUser`): the consume path re-checks `DeletedAt` and returns "not found",
+  so deleting an account reliably invalidates its outstanding passwordless logins and reset links.
+  `LinkOrCreateIdentity`'s already-linked branch likewise re-checks `DeletedAt` and returns
+  "not found", so a deleted account cannot regain a session through its previously-linked OAuth
+  identity. To make this gate reachable, `DeleteUser` only anonymizes the `provider_id` of
+  **password-provider** identity rows (the `provider_id` for password identities is the user's
+  email address, which is PII); non-password (OAuth/OIDC) identity `provider_id` values are
+  opaque external subject identifiers and are preserved intact so that `FindIdentityByProvider`
+  can still locate the identity after deletion, allowing the `DeletedAt` check to fire.
 - **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — egauth never
   sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
   is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).
   Both guarantees hold under concurrency: success consumes the code through an atomic guarded
-  delete (only one of N parallel correct-code verifications wins), and an attempt slot is reserved
-  atomically *before* the code is compared, so concurrent wrong guesses cannot exceed the limit.
+  delete keyed on the exact hash that was compared (only one of N parallel correct-code
+  verifications wins), and an attempt slot is reserved atomically *before* the code is compared,
+  so concurrent wrong guesses cannot exceed the limit. The hash guard also covers the Issue/Verify
+  interleave: if the code is reissued between a verifier's read and its consume, the stored row
+  now carries a different hash, so the stale verification deletes nothing and fails — a superseded
+  code can neither be accepted nor burn its freshly issued replacement.
+  `NewService` panics at construction if `WithDigits` is called with a value outside **[6, 10]**:
+  values below 6 produce a trivially guessable code space (a 5-digit code has only 100 000
+  candidates, giving a 50 % win rate with 5 attempts); values above 10 cause big.Int allocations
+  with no security benefit. Most authenticator apps support only 6 and 8 digits.
   Because numeric OTPs are intentionally low-entropy, the at-rest SHA-256 hash is not a barrier
   against an attacker who already has the database; the real defenses are the short TTL,
   single-use consumption and the attempt limit — and, as always, the consumer's own rate limiting
@@ -138,6 +238,14 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   not interruptible mid-hash, so the guard is a pre-call check, not a kill switch for an in-flight
   pass; in-memory map lookups in the reference stores are not individually cancellable but complete
   in microseconds.
+- **Argon2id cost parameters from stored hashes are bounds-checked on both sides.** `Compare`
+  parses the `m`/`t`/`p` cost fields from the stored PHC string and validates them before invoking
+  `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads) prevent library panics.
+  An upper bound (`MaxMemoryKiB` = 512 MiB = 524 288 KiB) prevents an OOM DoS: `argon2.IDKey`
+  allocates `memory × 1 024` bytes, so a tampered or corrupt stored hash row carrying e.g.
+  `m=4000000000` would attempt a multi-TiB allocation on the victim's next login. Any stored hash
+  whose memory parameter exceeds `MaxMemoryKiB` is rejected as `ErrInvalidPassword` (same opaque
+  mismatch signal as all other validation failures) before the KDF is invoked.
 - **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
@@ -177,23 +285,83 @@ redaction is in any case only a backstop. Therefore the consumer must:
   serialize the config or persist the key in plaintext.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
+- **Access-token tenant binding (fail-closed when multi-tenant).** When one `tokens/jwt.Service`
+  signs for every tenant under a shared key, a token minted for tenant A is cryptographically
+  valid in tenant B's context. The tenant-unaware `VerifyAccessToken` performs **no** tenant
+  comparison and is **deprecated**. Set `tokens/jwt.Config.MultiTenant = true` so that
+  `VerifyAccessToken` fails closed with `tokens.ErrTenantBindingRequired`, and call
+  `Service.VerifyAccessTokenForTenant(ctx, tenantID, token)` — it binds the signed `tenant_id`
+  claim to the request tenant and rejects a mismatch with `tokens.ErrTenantMismatch`. The HTTP
+  middleware exposes the same guarantee: `tokens.RequireAuth` with `tokens.WithAuthTenantResolver`
+  resolves the request's tenant and verifies through `VerifyAccessTokenForTenant`. The resolver is
+  fail-closed — returning `""` (tenant could not be resolved) rejects the request with `401` and
+  never falls back to the tenant-unaware path, so a multi-tenant verifier is never reached
+  unbound. Genuinely single-tenant deployments leave `MultiTenant` false (every token is issued
+  under the empty tenant), configure no resolver, and may keep using `VerifyAccessToken` or the
+  `SingleTenant` wrapper.
+- **`__Host-` cookie name prefix** — the tokens package defaults to `__Host-access_token`
+  and `__Host-refresh_token` (`DefaultAccessCookieName` / `DefaultRefreshCookieName`).
+  Browsers enforce that a `__Host-` cookie is host-locked: `Secure`, no `Domain` attribute,
+  and `Path=/`. This defeats subdomain/sibling-host cookie-tossing / refresh-token fixation,
+  where an attacker on `evil.example.com` plants a `Domain=.example.com refresh_token` cookie
+  containing the attacker's own token — the victim's auto-refresh then rotates the attacker's
+  family and silently signs the victim into the attacker's session. `tokens.Cookies.Validate()`
+  rejects any configuration that pairs a `__Host-` cookie name with `Domain != ""`, `Path != "/"`,
+  or `Insecure == true`; `withDefaults` (called by every Set*/Clear*/Access/Refresh method)
+  panics on such a mismatch, surfacing the programmer error at development time.
+  For the `sessions` package: `sessions.RequireSession` now reads the session token from
+  `sessions.DefaultSessionCookieName` (`"__Host-session_token"`) **by default** — the hardened
+  host-locked name is automatic and you no longer opt in. `sessions.WithCookieName` is an escape
+  hatch for deployments that genuinely cannot satisfy the `__Host-` requirements (e.g. a
+  path-scoped cookie or local plain-HTTP development); overriding to a name without the prefix
+  forfeits the host-lock hardening and is the consumer's explicit choice.
+- **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
+  lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
+  timeout). Regardless of how recently `Touch` was called, a session is rejected once
+  `now > CreatedAt + 30d`. Use `sessions.WithMaxLifetime(d)` to shorten or lengthen this
+  cap. Use `sessions.WithNoMaxLifetime()` to disable it entirely — this is insecure: an
+  attacker who keeps a stolen token warm with periodic requests can extend the session
+  forever, and should only be used in explicitly documented, low-risk contexts.
+  `WithMaxLifetime(0)` is treated as "keep the default" (not "disable"), so callers that
+  pass a configurable duration do not silently opt out of the cap when the user configures
+  zero.
 
-## CSRF on the form handlers (consumer responsibility)
+## CSRF on the form handlers (strict same-origin by default)
 
-`LoginHandler`, `RegisterHandler`, `RefreshHandler` and `LogoutHandler` are
-state-changing endpoints driven by the request (form body / cookies). egauth applies two
-partial defences but does **not** ship a full CSRF-token system (per the PRD, rate limiting
-and general CSRF are left to the application layer):
+`LoginHandler`, `RegisterHandler`, the authenticated identity mutations
+(`ChangePasswordHandler`, change-email, delete-account, recovery, phone/email
+verification), `RefreshHandler`, `LogoutHandler`, the `mfa` handlers and the `otp`
+handlers are all state-changing endpoints driven by the request (form body / cookies).
+egauth does **not** ship a full CSRF-token system (per the PRD, that is left to the
+application layer), but it now applies a **strict same-origin check on every one of these
+handler families by default**:
 
-- **`SameSite=Lax` cookies** (default) stop a cross-site request from *sending* the
-  refresh/session cookie, which protects `RefreshHandler`/`LogoutHandler` against classic
-  CSRF acting on an existing session.
-- **`identity.WithTrustedOrigins(...)`** (opt-in) rejects a login/register POST whose
-  `Origin`/`Referer` host is not allow-listed. This closes the **login-CSRF / session
-  fixation** gap, where `SameSite` does *not* help because the attack needs no
-  pre-existing cookie (it forces the victim's browser to log into the *attacker's*
-  account). Enable it, or add your own synchronizer/double-submit CSRF token middleware
-  in front of these endpoints.
+- **Same-origin is enforced even with no configuration.** A state-changing POST is allowed
+  only when its `Origin` (or `Referer` fallback) host equals the request's own `Host` or an
+  explicitly allow-listed host. A browser-driven POST carrying **neither** `Origin` nor
+  `Referer` is treated as untrusted and rejected with `403 cross_site_blocked`. This closes
+  the **login-CSRF / session-fixation** gap (where `SameSite` does *not* help, because the
+  attack needs no pre-existing cookie) and the MFA/OTP downgrade gaps (a cross-site POST to
+  `DisableHandler`/`RegenerateRecoveryCodesHandler` stripping a victim's second factor)
+  *out of the box* — the previous behavior, where an empty allowlist disabled the check, is
+  gone.
+- **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
+  from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
+  against classic CSRF on an existing session.
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`) **widens** the
+  same-origin allowlist to additional hosts — e.g. a front-end served from another subdomain.
+  Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`) is the explicit,
+  loudly-named opt-out: it disables the same-origin check entirely, restoring the pre-v1
+  accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g. a
+  synchronizer/double-submit token middleware) or in trusted test setups.
+
+The **`webapp` v1 preset** (`webapp.NewWebApp`) carries this guarantee across both handler
+families it mounts: it **refuses to build** when `Config.TrustedOrigins` is empty unless you
+explicitly set `Config.InsecureNoOriginCheck`, in which case the opt-out is wired into *both*
+the identity and tokens handlers so the preset is consistently insecure rather than protecting
+only one half. This makes "CSRF-by-default" mean the same thing across every endpoint the
+preset exposes.
 
 ## Observability and idempotency (consumer responsibility)
 
@@ -244,7 +412,9 @@ persistence or horizontal scaling should use the `pgx` backends instead of the i
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,
 not a bug:
 
-- **`ErrAccountLocked` → 429** on login: lockout is meant to be observable (PRD §105–106).
+- **`ErrAccountLocked` / `ErrAccountDisabled` → 429** on login: lockout and administrative
+  suspension are both meant to be observable (PRD §105–106). Both map to the same 429 response
+  so suspended accounts are indistinguishable from locked ones to an external observer.
 - **`email_taken` → 409** on registration: standard registration UX. If your threat model
   requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
   `400` (note that `Register` already hashes before the uniqueness check, so the timing
@@ -257,9 +427,44 @@ not a bug:
   conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
   time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
   the interim).
+- **`no_credentials` → 400** on `BeginLoginHandler`: when the resolved user has no registered
+  passkeys, `BeginLogin` returns `ErrNoCredentials`, which `BeginLoginHandler` maps to HTTP 400
+  `no_credentials`. A user with at least one passkey receives HTTP 200 plus a challenge. A
+  caller that can drive the begin-login endpoint with a chosen/identified userID can therefore
+  distinguish "account has passkeys" from "account has none" — a passkey-enrolment enumeration
+  oracle. This is an accepted trade-off: WebAuthn UX fundamentally requires the server to
+  know whether the account has any credential before issuing a challenge, and a silent generic
+  error would break the client flow. **Consumer guidance:** gate `BeginLoginHandler` behind
+  per-IP or per-subject rate limiting (egauth does not throttle ceremony attempts — see the
+  hardening checklist above). If your threat model forbids passkey-enrolment enumeration,
+  change your `UserResolver` to return `ok=false` (→ 401) for unenrolled subjects before the
+  handler reaches `BeginLogin`, or handle `ErrNoCredentials` yourself and return a generic 400
+  without the `no_credentials` body.
 
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
-decoy hashing); the three disclosures above are the only intentional exceptions.
+decoy hashing); the four disclosures above are the only intentional exceptions.
+
+### Residual enumeration timing after raising Argon2id cost (rehash-on-login)
+
+The decoy-hashing defence is not perfectly uniform across a cost upgrade. The decoy path
+(the hash run for an **unknown** account) always uses the hasher's **current** configured
+cost — `Hash` bakes in `m`/`t`/`p` from the live `Hasher`. The real verify path (`Compare`)
+runs Argon2id at the cost recorded **in the stored hash**, which for a not-yet-rehashed
+account is the **old, lower** cost. So immediately after an operator raises the cost
+parameters (the documented rehash-on-login upgrade), every existing account whose hash has
+not yet been rehashed verifies at the old (faster) cost, while an unknown account is
+decoy-hashed at the new (slower) cost. The measurable timing gap is a **partial enumeration
+oracle**: it can distinguish "registered account that last logged in before the cost bump"
+from "unknown". The gap closes for each account the moment it next authenticates and its hash
+is transparently rehashed at the new cost, and it disappears entirely once the population has
+refreshed.
+
+**Operator guidance.** When you raise Argon2id cost, treat enumeration-resistance as
+**degraded until the fleet is rehashed**. Either proactively re-hash all stored passwords to
+the new cost (so no account verifies at the old cost), or accept the degraded
+enumeration-resistance during the natural rehash-on-login refresh window. As with all residual
+in-process timing in `egauth`, the standing mitigation is the consumer's own rate limiting on
+the login endpoint (per the non-objectives), which covers the remainder.
 
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an

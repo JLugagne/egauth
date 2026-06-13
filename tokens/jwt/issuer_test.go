@@ -51,7 +51,7 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 
 	cfg := jwt.Config[MyCustomClaims]{
 		Store:      mockStore,
-		SecretKey:  "super-secret-key-for-testing",
+		SecretKey:  "super-secret-key-for-testing----", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
@@ -69,12 +69,15 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 		},
 	}
 
+	// InsecureAllowWeakKey is set because this test intentionally uses a short key
+	// to exercise expiry/signature-mismatch edge cases, not key-strength behaviour.
 	cfg := jwt.Config[MyCustomClaims]{
-		Store:      mockStore,
-		SecretKey:  "secret",
-		Issuer:     "test",
-		AccessTTL:  -1 * time.Minute, // Expired immediately
-		RefreshTTL: 24 * time.Hour,
+		Store:                mockStore,
+		SecretKey:            "secret",
+		Issuer:               "test",
+		AccessTTL:            -1 * time.Minute, // Expired immediately
+		RefreshTTL:           24 * time.Hour,
+		InsecureAllowWeakKey: true,
 	}
 	svc := jwt.New[MyCustomClaims](cfg)
 
@@ -86,22 +89,23 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 		pair, err := svc.IssueTokenPair(ctx, claims)
 		require.NoError(t, err)
 
-		_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+		_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 		assert.ErrorIs(t, err, tokens.ErrTokenExpired)
 	})
 
 	t.Run("Invalid signature returns ErrInvalidToken", func(t *testing.T) {
-		// Create a token with a different secret
+		// Create a token with a different secret; InsecureAllowWeakKey bypasses length check.
 		otherSvc := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
-			Store:     mockStore,
-			SecretKey: "different-secret",
-			AccessTTL: 1 * time.Hour,
+			Store:                mockStore,
+			SecretKey:            "different-secret",
+			AccessTTL:            1 * time.Hour,
+			InsecureAllowWeakKey: true,
 		})
 
 		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: uuid.New()})
 		require.NoError(t, err)
 
-		_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+		_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 		assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	})
 }

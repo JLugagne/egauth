@@ -73,3 +73,19 @@ func (s *SingleTenant) ListCredentials(ctx context.Context, userID uuid.UUID) ([
 func (s *SingleTenant) DeleteCredential(ctx context.Context, userID uuid.UUID, credentialID []byte) error {
 	return s.svc.DeleteCredential(ctx, "", userID, credentialID)
 }
+
+// RenameCredential calls Service.RenameCredential on the empty tenant.
+func (s *SingleTenant) RenameCredential(ctx context.Context, userID uuid.UUID, credentialID []byte, nickname string) error {
+	return s.svc.RenameCredential(ctx, "", userID, credentialID, nickname)
+}
+
+// SignalAllAcceptedCredentials calls Service.SignalAllAcceptedCredentials on the empty tenant.
+func (s *SingleTenant) SignalAllAcceptedCredentials(ctx context.Context, userID uuid.UUID) (*protocol.SignalAllAcceptedCredentials, error) {
+	return s.svc.SignalAllAcceptedCredentials(ctx, "", userID)
+}
+
+// SignalUnknownCredential calls Service.SignalUnknownCredential. It takes no tenant argument
+// because it is a pure builder over the credential ID, so the call forwards verbatim.
+func (s *SingleTenant) SignalUnknownCredential(credentialID []byte) *protocol.SignalUnknownCredential {
+	return s.svc.SignalUnknownCredential(credentialID)
+}

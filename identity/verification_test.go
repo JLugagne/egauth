@@ -298,3 +298,38 @@ func TestRegister_CompensatesOrphanWhenAddIdentityFails(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, deleted, "a failed AddIdentity must compensate by deleting the orphan user")
 }
+
+// TestResetPassword_RunsAccountErasers is a regression test for TASK-071: ResetPassword
+// must invoke registered AccountErasers after a successful reset so that an attacker who
+// holds a live session or refresh-token family is evicted when the owner resets their
+// password. Without the fix the erasers are never called and the test fails.
+func TestResetPassword_RunsAccountErasers(t *testing.T) {
+	ctx := context.Background()
+
+	var sessionsErased, tokensErased uuid.UUID
+	sessionsEraser := func(_ context.Context, _ string, userID uuid.UUID) error {
+		sessionsErased = userID
+		return nil
+	}
+	tokensEraser := func(_ context.Context, _ string, userID uuid.UUID) error {
+		tokensErased = userID
+		return nil
+	}
+
+	svc, _ := newVerificationService(t, identity.WithAccountErasers(sessionsEraser, tokensEraser))
+
+	const email = "reset-erasers@example.com"
+	user, err := svc.Register(ctx, "", email, "OldPassw0rd!")
+	require.NoError(t, err)
+
+	token, _, err := svc.RequestPasswordReset(ctx, "", email)
+	require.NoError(t, err)
+	require.NotEmpty(t, token)
+
+	require.NoError(t, svc.ResetPassword(ctx, "", token, "NewPassw0rd!"))
+
+	// Both registered erasers must have been invoked with the reset user's ID so that
+	// existing sessions and refresh-token families are revoked on a recovery reset.
+	assert.Equal(t, user.ID, sessionsErased, "sessions eraser must be called after ResetPassword")
+	assert.Equal(t, user.ID, tokensErased, "tokens eraser must be called after ResetPassword")
+}

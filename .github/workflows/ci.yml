@@ -78,7 +78,58 @@ jobs:
         # The adapter module owns the Docker-dependent pgx conformance/integration tests.
         # ubuntu-latest ships the Docker engine, so testcontainers-go works out of the box.
         # The committed go.work (at the repo root) resolves the core module from local disk.
+        # NOTE: this runs the DEFAULT (untagged) build. The `integration`-tagged real-Postgres
+        # contract suite (adapters/pgx/sessions/integration_test.go) is exercised by the dedicated
+        # test-adapters-pgx-integration job below.
         run: go test -race -failfast ./...
+
+  test-adapters-pgx-integration:
+    name: adapters/pgx — Integration contract suite (real Postgres service)
+    runs-on: ubuntu-latest
+    # Runs the `integration`-tagged sessions.Store contract suite against a REAL Postgres, proving
+    # the pgx store at runtime — not just via the in-memory contract mock. We use a Postgres
+    # SERVICE container and point the suite at it through TEST_DATABASE_URL (the test honours that
+    # env var and skips testcontainers when it is set), so this job needs no Docker-in-Docker.
+    # The build tag keeps this suite out of the default `go test ./...`, so the unit-test jobs stay
+    # DB-free.
+    defaults:
+      run:
+        working-directory: adapters/pgx
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: testuser
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_DB: testdb
+        ports:
+          - 5432:5432
+        # Wait until Postgres is accepting connections before the steps run.
+        options: >-
+          --health-cmd "pg_isready -U testuser -d testdb"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_DATABASE_URL: "postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: 'adapters/pgx/go.mod'
+          cache: true
+
+      - name: Run go vet (integration tag)
+        run: go vet -tags=integration ./...
+
+      - name: Run integration contract suite against the Postgres service
+        # The suite applies the embedded migrations to the service DB, then runs the shared
+        # storetest.StoreContractTesting suite plus the explicit FindSessionByHash expiry-boundary
+        # check. -tags=integration is what pulls integration_test.go into the build.
+        run: go test -race -failfast -tags=integration ./sessions/...
 
   test-short:
     name: Docker-less unit tests (go test -short)

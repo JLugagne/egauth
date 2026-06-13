@@ -18,7 +18,7 @@ func TestRequireAuth(t *testing.T) {
 	tenantID := "tenant-123"
 
 	mockVerifier := &issuertest.MockVerifier[any]{
-		VerifyAccessTokenFunc: func(ctx context.Context, token string) (*tokens.Claims[any], error) {
+		VerifyAccessTokenForTenantFunc: func(ctx context.Context, _, token string) (*tokens.Claims[any], error) {
 			if token == "valid-token" {
 				return &tokens.Claims[any]{
 					Subject:  subject,

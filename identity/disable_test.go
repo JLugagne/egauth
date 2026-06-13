@@ -111,3 +111,64 @@ func TestDisableEnableUser_EmitsEvents(t *testing.T) {
 	assert.Contains(t, got, event.AccountDisabled)
 	assert.Contains(t, got, event.AccountEnabled)
 }
+
+// TestDisableUser_BlocksOAuthRelink is the bug-confirming test for TASK-056: an account that
+// has been administratively disabled must not be able to re-complete the social-login flow
+// through its already-linked OAuth identity. LinkOrCreateIdentity's already-linked branch must
+// gate on DisabledAt and return ErrAccountDisabled rather than handing back the suspended user
+// (which the OAuth callback would turn into a fresh access+refresh session).
+func TestDisableUser_BlocksOAuthRelink(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newVerificationService(t)
+
+	// JIT-provision a user with a linked OAuth identity (google, sub-disabled).
+	user, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	// Sanity: the already-linked path resolves the same user while the account is active.
+	again, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	require.NoError(t, err)
+	require.Equal(t, user.ID, again.ID)
+
+	// Administratively suspend the account.
+	require.NoError(t, svc.DisableUser(ctx, "", user.ID))
+
+	// Re-completing the social login through the already-linked identity must now be refused
+	// with ErrAccountDisabled, not silently return the suspended user.
+	_, err = svc.LinkOrCreateIdentity(ctx, "", "google", "sub-disabled", "relink@example.com", true)
+	assert.ErrorIs(t, err, identity.ErrAccountDisabled,
+		"a disabled account must not regain a session via its linked OAuth identity")
+}
+
+// TestDeletedAccount_BlocksOAuthRelink is the regression test for TASK-069: a soft-deleted
+// account must not be able to re-complete the social-login flow through its already-linked OAuth
+// identity. LinkOrCreateIdentity's already-linked branch calls FindUserByID, which intentionally
+// still returns soft-deleted users (inspection contract), so the liveness gate after that call
+// must be present and effective. Without the DeletedAt check the deleted user would be returned,
+// allowing an OAuth callback to issue a fresh session for a non-existent account.
+func TestDeletedAccount_BlocksOAuthRelink(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newVerificationService(t)
+
+	// JIT-provision a user with a linked OAuth identity.
+	user, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-deleted", "deleted-relink@example.com", true)
+	require.NoError(t, err)
+	require.NotNil(t, user)
+
+	// Sanity: the already-linked path resolves the same user while the account is active.
+	again, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-deleted", "deleted-relink@example.com", true)
+	require.NoError(t, err)
+	require.Equal(t, user.ID, again.ID)
+
+	// Soft-delete the account (GDPR erasure / account deletion).
+	require.NoError(t, svc.DeleteAccount(ctx, "", user.ID))
+
+	// Re-completing the social login through the already-linked identity must be refused with
+	// ErrUserNotFound: a soft-deleted account must not produce a session. FindUserByID still
+	// returns the row (store inspection contract), so the service-layer liveness gate is the
+	// sole barrier — this test pins it against silent regression.
+	_, err = svc.LinkOrCreateIdentity(ctx, "", "google", "sub-deleted", "deleted-relink@example.com", true)
+	assert.ErrorIs(t, err, identity.ErrUserNotFound,
+		"a soft-deleted account must not regain a session via its linked OAuth identity")
+}

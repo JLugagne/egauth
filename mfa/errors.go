@@ -22,8 +22,10 @@ var (
 	ErrRecoveryCodeNotFound = errors.New("mfa: recovery code not found")
 
 	// ErrTooManyAttempts is returned when the second factor has been guessed wrong too many
-	// times; the factor is locked and the user must re-authenticate / re-enroll (or an
-	// operator must reset it) before further attempts are accepted.
+	// times. The lockout automatically expires after LockoutDuration (default 15 min) from the
+	// last failed attempt, at which point the next attempt is treated as a fresh budget.
+	// Operators can also unblock a user immediately via Service.UnlockMFA. If LockoutDuration
+	// is set to 0 the lockout is permanent until UnlockMFA is called or the factor is disabled.
 	ErrTooManyAttempts = errors.New("mfa: too many attempts")
 
 	// ErrTenantMismatch is returned when a Save* call is given a tenantID that conflicts with

@@ -53,19 +53,25 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	query := `
 		INSERT INTO sessions (id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT (tenant_id, token_hash) DO UPDATE
-		SET id = EXCLUDED.id, user_id = EXCLUDED.user_id, user_agent = EXCLUDED.user_agent, ip = EXCLUDED.ip, expires_at = EXCLUDED.expires_at
 	`
 	_, err := s.db.Exec(ctx, query, session.ID, session.TenantID, session.UserID, session.TokenHash, session.UserAgent, session.IP, session.ExpiresAt, session.CreatedAt)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+			return sessions.ErrDuplicateToken
+		}
+	}
 	return err
 }
 
-// FindSessionByHash retrieves a session by its token hash, scoped to tenantID.
+// FindSessionByHash retrieves a non-expired session by its token hash, scoped to tenantID.
+// Expired sessions are treated as not found (expires_at >= NOW()), matching the memory
+// store's opportunistic-eviction behaviour so both backends present a consistent contract.
 func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHash string) (*sessions.Session, error) {
 	query := `
 		SELECT id, tenant_id, user_id, token_hash, user_agent, ip, expires_at, created_at
 		FROM sessions
-		WHERE token_hash = $1 AND tenant_id = $2
+		WHERE token_hash = $1 AND tenant_id = $2 AND expires_at >= NOW()
 	`
 
 	row := s.db.QueryRow(ctx, query, tokenHash, tenantID)
@@ -83,8 +89,9 @@ func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHas
 }
 
 // UpdateSession updates the mutable fields of an existing session (token hash, expiry,
-// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID
-// and tenant are immutable.
+// user-agent, IP) identified by session.ID, as a compare-and-set on expectedTokenHash. The ID,
+// tenant, UserID and CreatedAt are immutable — the UPDATE never writes those columns. Re-binding a
+// session to a different user is the job of BindSession.
 func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
 	query := `
 		UPDATE sessions
@@ -92,6 +99,27 @@ func (s *Store) UpdateSession(ctx context.Context, tenantID string, session *ses
 		WHERE id = $5 AND tenant_id = $6 AND token_hash = $7
 	`
 	tag, err := s.db.Exec(ctx, query, session.TokenHash, session.UserAgent, session.IP, session.ExpiresAt, session.ID, tenantID, expectedTokenHash)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// Unknown id/tenant, or the token was already rotated away by a concurrent request.
+		return sessions.ErrSessionNotFound
+	}
+	return nil
+}
+
+// BindSession atomically re-binds an existing session to a new UserID while rotating its token,
+// identified by session.ID and gated by a compare-and-set on expectedTokenHash. It is the
+// anonymous-to-authenticated upgrade primitive. The UPDATE writes user_id alongside the mutable
+// fields; id, tenant_id and created_at are never written.
+func (s *Store) BindSession(ctx context.Context, tenantID string, session *sessions.Session, expectedTokenHash string) error {
+	query := `
+		UPDATE sessions
+		SET user_id = $1, token_hash = $2, user_agent = $3, ip = $4, expires_at = $5
+		WHERE id = $6 AND tenant_id = $7 AND token_hash = $8
+	`
+	tag, err := s.db.Exec(ctx, query, session.UserID, session.TokenHash, session.UserAgent, session.IP, session.ExpiresAt, session.ID, tenantID, expectedTokenHash)
 	if err != nil {
 		return err
 	}

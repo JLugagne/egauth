@@ -34,6 +34,10 @@ type service struct {
 type ServiceOption func(*service)
 
 // WithDigits sets the number of digits in generated codes (default 6).
+// The value must be in the range [6, 10]: NewService panics if it falls outside
+// this range. Values below 6 produce a trivially guessable code space (a 5-digit
+// code has only 100 000 candidates); values above 10 cause big.Int allocations
+// with no security benefit. Most authenticator apps support only 6 and 8 digits.
 func WithDigits(n int) ServiceOption { return func(s *service) { s.digits = n } }
 
 // WithTTL sets how long an issued code stays valid (default 10m).
@@ -62,10 +66,14 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	for _, opt := range opts {
 		opt(s)
 	}
-	// Clamp to safe minimums so a misconfiguration cannot produce predictable/never-expiring
-	// codes or an unbounded attempt count.
-	if s.digits <= 0 {
-		s.digits = DefaultDigits
+	// Enforce safe bounds on digits so a misconfiguration cannot produce
+	// predictable codes (too few digits) or an allocation footgun (too many).
+	// Minimum 6: a 6-digit code has 1,000,000 possible values, making brute
+	// force impractical even with generous attempt limits.
+	// Maximum 10: beyond this the big.Int arithmetic and zero-padded Sprintf
+	// allocate proportionally with no security benefit.
+	if s.digits < 6 || s.digits > 10 {
+		panic("otp: NewService requires digits in the range [6, 10]")
 	}
 	if s.ttl <= 0 {
 		s.ttl = DefaultTTL
@@ -140,10 +148,13 @@ func (s *service) Verify(ctx context.Context, tenantID string, subjectID uuid.UU
 		return ErrInvalidCode
 	}
 
-	// Correct code: consume atomically. Only the caller that actually removes the row wins, so
-	// a single code can never authorize more than one verification (single-use under
-	// concurrency).
-	consumed, err := s.store.ConsumeOTP(ctx, tenantID, subjectID, purpose)
+	// Correct code: consume atomically, guarded on the exact hash we just compared against. Only
+	// the caller that removes THAT row wins, so a single code can never authorize more than one
+	// verification (single-use under concurrency). The hash guard also closes the TOCTOU window:
+	// if the code was reissued between the GetOTP read above and here, the row now carries a
+	// different hash, ConsumeOTP removes nothing, and this stale verification fails instead of
+	// burning the fresh replacement.
+	consumed, err := s.store.ConsumeOTP(ctx, tenantID, subjectID, purpose, record.CodeHash)
 	if err != nil {
 		return err
 	}

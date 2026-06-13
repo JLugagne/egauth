@@ -7,6 +7,7 @@ package providers
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	"github.com/JLugagne/egauth/oauth"
@@ -35,6 +36,9 @@ func fetchDiscordUser(ctx context.Context, c *http.Client, accessToken string) (
 	}
 	if err := oauth.GetJSON(ctx, c, discordUserInfoURL, accessToken, &u); err != nil {
 		return nil, err
+	}
+	if u.ID == "" {
+		return nil, fmt.Errorf("%w: provider returned no subject id", oauth.ErrUserInfoFailed)
 	}
 	return &oauth.UserInfo{
 		ProviderID:    u.ID,

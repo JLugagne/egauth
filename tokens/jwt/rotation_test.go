@@ -28,7 +28,7 @@ func newRotatingService(t *testing.T, provider tokens.ClaimsProvider[struct{}], 
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          store,
-		SecretKey:      "rotation-secret",
+		SecretKey:      "rotation-secret-aaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:         "egauth-test",
 		AccessTTL:      5 * time.Minute,
 		RefreshTTL:     refreshTTL,
@@ -53,7 +53,7 @@ func TestRotate_HappyPath(t *testing.T) {
 	assert.Equal(t, userID, newPair.Claims.Subject, "subject preserved via claims provider")
 
 	// The rotated token must verify and the new access token must be valid.
-	claims, err := svc.VerifyAccessToken(ctx, newPair.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(ctx, "", newPair.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, userID, claims.Subject)
 }
@@ -64,7 +64,7 @@ func TestRotate_ReuseDetectionRevokesFamily(t *testing.T) {
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:            store,
-		SecretKey:        "rotation-secret",
+		SecretKey:        "rotation-secret-aaaaaaaaaaaaaaa!", // 32 bytes
 		Issuer:           "egauth-test",
 		AccessTTL:        5 * time.Minute,
 		RefreshTTL:       24 * time.Hour,
@@ -131,12 +131,14 @@ func TestRotate_NotFound(t *testing.T) {
 func TestRotate_NoClaimsProvider(t *testing.T) {
 	ctx := context.Background()
 	// Build a service WITHOUT a ClaimsProvider.
+	// InsecureAllowWeakKey is set because the key length is not the subject of this test.
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:      store,
-		SecretKey:  "s",
-		AccessTTL:  time.Minute,
-		RefreshTTL: time.Hour,
+		Store:                store,
+		SecretKey:            "s",
+		AccessTTL:            time.Minute,
+		RefreshTTL:           time.Hour,
+		InsecureAllowWeakKey: true,
 	})
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
@@ -198,7 +200,7 @@ func TestRotate_ConcurrentBenignKeepsFamily(t *testing.T) {
 	results := make(chan *tokens.TokenPair[struct{}], n)
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			np, err := svc.Rotate(ctx, "", pair.RefreshToken)
@@ -279,7 +281,7 @@ func TestRotate_ConcurrentSingleUse(t *testing.T) {
 	var success int32
 	var wg sync.WaitGroup
 	wg.Add(n)
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer wg.Done()
 			if _, err := svc.Rotate(ctx, "", pair.RefreshToken); err == nil {
@@ -290,4 +292,41 @@ func TestRotate_ConcurrentSingleUse(t *testing.T) {
 	wg.Wait()
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&success), "exactly one concurrent rotation of the same token may succeed")
+}
+
+// TestRotate_ClaimsProviderReceivesRotationContext is the regression test for TASK-068:
+// during refresh rotation the ClaimsProvider received only (userID, tenantID) and had no
+// way to identify the refresh family/session being rotated. Without that context a provider
+// cannot preserve per-session AMR (the documented "re-evaluated, not frozen" semantics are
+// impossible to implement correctly): it can neither know which family it is rotating nor
+// what assurance that family originally proved. The issuer must surface the rotation context
+// (at minimum the family ID and the family's preserved AuthTime) to the provider.
+func TestRotate_ClaimsProviderReceivesRotationContext(t *testing.T) {
+	ctx := context.Background()
+
+	authTime := time.Now().Add(-2 * time.Hour).UTC()
+
+	var gotRC tokens.RotationContext
+	var gotOK bool
+	provider := tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
+		gotRC, gotOK = tokens.RotationContextFromContext(ctx)
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
+	})
+	svc, store := newRotatingService(t, provider, 24*time.Hour)
+
+	userID := uuid.New()
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID, AuthTime: authTime})
+	require.NoError(t, err)
+
+	// Recover the family ID the issuer recorded for this initial pair so we can assert the
+	// provider was told which family it is rotating.
+	rt, err := store.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
+	require.NoError(t, err)
+
+	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
+	require.NoError(t, err)
+
+	require.True(t, gotOK, "ClaimsForUser must receive a rotation context identifying the family/session being rotated")
+	assert.Equal(t, rt.FamilyID, gotRC.FamilyID, "rotation context must carry the refresh family ID being rotated")
+	assert.WithinDuration(t, authTime, gotRC.AuthTime, time.Second, "rotation context must carry the family's preserved auth_time")
 }

@@ -27,7 +27,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	// Instantiate the JWT service
 	cfg := jwt.Config[IntegrationCustomClaims]{
 		Store:      store,
-		SecretKey:  "integration-secret-key",
+		SecretKey:  "integration-secret-key----------", // 32 bytes
 		Issuer:     "egauth-integration",
 		AccessTTL:  5 * time.Minute,
 		RefreshTTL: 24 * time.Hour,
@@ -36,7 +36,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 
 	t.Run("Scenario: Valid token issuance and explicit extraction via handler", func(t *testing.T) {
 		subject := uuid.New()
-		tenantID := "tenant-xyz"
+		tenantID := "" // single-tenant middleware (no resolver) authenticates only empty-tenant tokens
 		custom := IntegrationCustomClaims{Subscription: "premium"}
 
 		// 1. Issue Token
@@ -101,10 +101,12 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	})
 
 	t.Run("Scenario: Token with different signature is rejected", func(t *testing.T) {
+		// InsecureAllowWeakKey is set because key-length is not the subject of this test.
 		otherSvc := jwt.New[IntegrationCustomClaims](jwt.Config[IntegrationCustomClaims]{
-			Store:     store,
-			SecretKey: "different-secret-key",
-			AccessTTL: 5 * time.Minute,
+			Store:                store,
+			SecretKey:            "different-secret-key",
+			AccessTTL:            5 * time.Minute,
+			InsecureAllowWeakKey: true,
 		})
 
 		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{
@@ -124,4 +126,50 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
+}
+
+// TestRequireAuthRejectsTenantTokenWithoutResolver locks in the fail-closed
+// behavior of single-tenant middleware: a token minted for a real (non-empty)
+// tenant must NOT authenticate through the no-resolver RequireAuth path. The
+// middleware calls VerifyAccessTokenForTenant(ctx, "", token), which returns
+// ErrTenantMismatch when the token's signed TenantID is not "", yielding 401
+// and never invoking the protected handler.
+func TestRequireAuthRejectsTenantTokenWithoutResolver(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[IntegrationCustomClaims]()
+
+	cfg := jwt.Config[IntegrationCustomClaims]{
+		Store:      store,
+		SecretKey:  "integration-secret-key----------", // 32 bytes
+		Issuer:     "egauth-integration",
+		AccessTTL:  5 * time.Minute,
+		RefreshTTL: 24 * time.Hour,
+	}
+	svc := jwt.New[IntegrationCustomClaims](cfg)
+
+	// Issue a token under a NON-EMPTY tenant.
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{
+		Subject:  uuid.New(),
+		TenantID: "tenant-xyz",
+		Custom:   IntegrationCustomClaims{Subscription: "premium"},
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, pair.AccessToken)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/protected", nil)
+	req.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+	rec := httptest.NewRecorder()
+
+	var called bool
+	// No tenant resolver configured -> single-tenant middleware path.
+	handler := tokens.RequireAuth[IntegrationCustomClaims](svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom IntegrationCustomClaims) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	handler.ServeHTTP(rec, req)
+
+	// Fail closed: tenant-scoped token rejected, handler never reached.
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, called)
 }

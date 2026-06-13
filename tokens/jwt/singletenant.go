@@ -42,11 +42,6 @@ func (s *SingleTenant[C]) IssueAPIKey(ctx context.Context, prefix string, claims
 	return s.svc.IssueAPIKey(ctx, prefix, claims)
 }
 
-// VerifyAccessToken calls Service.VerifyAccessToken.
-func (s *SingleTenant[C]) VerifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
-	return s.svc.VerifyAccessToken(ctx, tokenStr)
-}
-
 // VerifyRefreshToken calls Service.VerifyRefreshToken on the empty tenant. Its signature
 // keeps the single-tenant convenience contract (no tenantID): the underlying lookup is
 // scoped to the default partition ("").
@@ -64,4 +59,9 @@ func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens
 // Rotate calls Service.Rotate on the empty tenant.
 func (s *SingleTenant[C]) Rotate(ctx context.Context, refreshToken string) (*tokens.TokenPair[C], error) {
 	return s.svc.Rotate(ctx, "", refreshToken)
+}
+
+// VerifyAccessTokenForTenant calls Service.VerifyAccessTokenForTenant.
+func (s *SingleTenant[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
+	return s.svc.VerifyAccessTokenForTenant(ctx, tenantID, tokenStr)
 }

@@ -75,7 +75,7 @@ func Example() {
 		}))
 
 	// The rotated access token verifies and carries the same subject.
-	claims, err := issuer.VerifyAccessToken(ctx, refreshed.AccessToken)
+	claims, err := issuer.VerifyAccessTokenForTenant(ctx, "", refreshed.AccessToken)
 	if err != nil {
 		log.Fatal(err)
 	}

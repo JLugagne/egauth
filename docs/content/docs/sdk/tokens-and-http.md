@@ -51,7 +51,9 @@ fmt.Println("Access Token:", pair.AccessToken)
 
 > **Security Note:** Refresh tokens are opaque strings. Only their SHA-256 hash (via `tokens.HashToken`) is stored in the database.
 
-`Issuer` and `ExpectedAudience` are verified on `VerifyAccessToken`: when `Issuer` is set the `iss` claim is checked, and when `ExpectedAudience` is set the token's `aud` must contain at least one of the listed values. See [Security Hardening]({{< ref "security-hardening" >}}) for the full rationale.
+`Issuer` and `ExpectedAudience` are verified on the access path: when `Issuer` is set the `iss` claim is checked, and when `ExpectedAudience` is set the token's `aud` must contain at least one of the listed values. See [Security Hardening]({{< ref "security-hardening" >}}) for the full rationale.
+
+> **Multi-tenant:** the bare `VerifyAccessToken` is **deprecated** — it does no tenant binding. Set `Config.MultiTenant = true` (so `VerifyAccessToken` fails closed with `tokens.ErrTenantBindingRequired`) and call `VerifyAccessTokenForTenant(ctx, tenantID, token)`, which rejects a cross-tenant token with `tokens.ErrTenantMismatch`. Single-tenant apps leave `MultiTenant` false.
 
 ## Refresh Token Rotation & Theft Detection
 
@@ -87,4 +89,29 @@ mux.Handle("/api/private", handler)
 
 By default `RequireAuth` reads a Bearer token from the `Authorization` header. Use `tokens.WithCookieAuth` to read from a cookie and `tokens.WithAutoRefresh` for opt-in transparent rotation.
 
+**Multi-tenant routes.** By default `RequireAuth` verifies the token without tenant binding — correct for single-tenant apps, where every token is issued under the empty tenant. For a multi-tenant deployment served by a single shared signing key, add `tokens.WithAuthTenantResolver`, which makes the middleware resolve each request's tenant and verify through `VerifyAccessTokenForTenant`, so a token minted for tenant A cannot be replayed against tenant B:
+
+```go
+handler := tokens.RequireAuth(
+	tokenService, // a verifier built with jwt.Config{MultiTenant: true}
+	myHandler,
+	// Map the request to its tenant (Host, path segment, upstream-set context...).
+	// Returning "" means "tenant could not be resolved" → the request is rejected
+	// 401 (fail-closed); the middleware never falls back to the tenant-unaware path.
+	tokens.WithAuthTenantResolver[MyClaims](func(r *http.Request) string {
+		return tenantFromHost(r.Host)
+	}),
+)
+```
+
+A resolved token whose signed `tenant_id` does not match the request tenant is rejected (`tokens.ErrTenantMismatch` → 401). The same resolver scopes any auto-refresh rotation. `tokens.WithRefreshTenantResolver` is retained as a deprecated alias.
+
 The `tokens` package also provides ready-made HTTP handlers for the refresh and logout endpoints: `tokens.RefreshHandler` and `tokens.LogoutHandler`, both configurable with options such as `tokens.WithCookies`, `tokens.WithTrustedOrigins`, and `tokens.WithTenantResolver`.
+
+### CSRF same-origin check (on by default)
+
+These endpoints are state-changing `POST`s authenticated purely by the refresh cookie, so `SameSite=Lax` alone does not fully prevent a forged cross-site refresh/logout. Both handlers therefore apply a **same-origin check by default**: a request whose `Origin` (or, failing that, `Referer`) host is neither the request's own `Host` nor an explicitly trusted origin is rejected with `403` and the code `cross_site_blocked`, and a `POST` carrying neither header is treated as untrusted.
+
+- For a single-origin app this is zero-config: a same-origin browser `POST` just works.
+- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")` — supply hosts without scheme.
+- To turn the check off entirely (restoring the pre-v1 accept-every-origin behavior), pass `tokens.WithInsecureNoOriginCheck()`. Only do this when CSRF is handled by a separate layer; the name is deliberately loud.

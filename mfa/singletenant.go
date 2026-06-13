@@ -64,3 +64,8 @@ func (s *SingleTenant) DisableTOTP(ctx context.Context, userID uuid.UUID) error 
 func (s *SingleTenant) IsEnrolled(ctx context.Context, userID uuid.UUID) (bool, error) {
 	return s.svc.IsEnrolled(ctx, "", userID)
 }
+
+// UnlockMFA calls Service.UnlockMFA on the empty tenant.
+func (s *SingleTenant) UnlockMFA(ctx context.Context, userID uuid.UUID) error {
+	return s.svc.UnlockMFA(ctx, "", userID)
+}

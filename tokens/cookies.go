@@ -1,15 +1,27 @@
 package tokens
 
 import (
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 )
 
 // Default cookie names used by egauth handlers and middleware.
+// Both names carry the __Host- prefix so browsers enforce host-lock semantics:
+// the cookie must be Secure, must not have a Domain attribute, and must have Path=/.
+// This defeats subdomain cookie-tossing / refresh-token fixation attacks where a
+// sibling subdomain (evil.example.com) plants a same-named cookie with Domain=.example.com
+// that the browser sends ahead of the legitimate cookie.
 const (
-	DefaultAccessCookieName  = "access_token"
-	DefaultRefreshCookieName = "refresh_token"
+	DefaultAccessCookieName  = "__Host-access_token"
+	DefaultRefreshCookieName = "__Host-refresh_token"
 )
+
+// hostPrefix is the browser-enforced cookie name prefix that requires Secure, no Domain,
+// and Path=/.
+const hostPrefix = "__Host-"
 
 // Cookies describes how authentication cookies are written and read. It is the single
 // source of truth for cookie behavior, shared by the tokens handlers/middleware and the
@@ -24,13 +36,16 @@ type Cookies struct {
 	// RefreshName is the name of the long-lived refresh-token cookie.
 	RefreshName string
 	// Domain optionally scopes the cookies to a domain (empty = host-only).
+	// Must be empty when AccessName or RefreshName carries the __Host- prefix.
 	Domain string
 	// Path scopes the access-token cookie (default "/").
+	// Must be "/" when AccessName carries the __Host- prefix.
 	Path string
 	// RefreshPath scopes the refresh-token cookie (default "/"). When the auto-refresh
 	// middleware is mounted on protected routes, this must remain "/" so the refresh
 	// cookie is sent with every request; scope it down only for a dedicated refresh
 	// endpoint model.
+	// Must be "/" when RefreshName carries the __Host- prefix.
 	RefreshPath string
 	// SameSite controls the SameSite attribute (default http.SameSiteLaxMode).
 	SameSite http.SameSite
@@ -38,6 +53,7 @@ type Cookies struct {
 	// only for local HTTP development. It is modeled as an opt-out so that the Go bool
 	// zero value (false) is the SECURE default — even for a partially-initialized Cookies
 	// or one built without DefaultCookies.
+	// Must be false when AccessName or RefreshName carries the __Host- prefix.
 	Insecure bool
 }
 
@@ -53,8 +69,53 @@ func DefaultCookies() Cookies {
 	}
 }
 
+// Validate checks that the Cookies configuration is self-consistent.
+// It returns an error when a cookie name carries the __Host- prefix but the accompanying
+// attributes violate the browser-enforced requirements: the cookie must be Secure
+// (Insecure==false), must have no Domain, and must have Path="/".
+//
+// Validate is called automatically by withDefaults (and therefore by all Set*/Clear*/
+// Access/Refresh methods). It is exported so callers can surface configuration mistakes
+// early, e.g. in a server startup check.
+func (c Cookies) Validate() error {
+	var errs []error
+	if strings.HasPrefix(c.AccessName, hostPrefix) {
+		if c.Domain != "" {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Domain to be empty, got %q", c.AccessName, c.Domain))
+		}
+		path := c.Path
+		if path == "" {
+			path = "/"
+		}
+		if path != "/" {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Path=\"/\", got %q", c.AccessName, c.Path))
+		}
+		if c.Insecure {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Secure (Insecure must be false)", c.AccessName))
+		}
+	}
+	if strings.HasPrefix(c.RefreshName, hostPrefix) {
+		if c.Domain != "" {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Domain to be empty, got %q", c.RefreshName, c.Domain))
+		}
+		refreshPath := c.RefreshPath
+		if refreshPath == "" {
+			refreshPath = "/"
+		}
+		if refreshPath != "/" {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Path=\"/\", got %q", c.RefreshName, c.RefreshPath))
+		}
+		if c.Insecure {
+			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Secure (Insecure must be false)", c.RefreshName))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // withDefaults returns a copy of c with any zero-valued fields filled from DefaultCookies,
 // so that a partially-initialized Cookies (or its zero value) still behaves securely.
+// It panics if Validate detects a __Host- prefix constraint violation, because such a
+// mismatch is a programmer error that must be caught at development time.
 func (c Cookies) withDefaults() Cookies {
 	d := DefaultCookies()
 	if c.AccessName == "" {
@@ -71,6 +132,9 @@ func (c Cookies) withDefaults() Cookies {
 	}
 	if c.SameSite == 0 {
 		c.SameSite = d.SameSite
+	}
+	if err := c.Validate(); err != nil {
+		panic("tokens.Cookies: invalid __Host- cookie configuration: " + err.Error())
 	}
 	return c
 }
@@ -108,10 +172,7 @@ func (c Cookies) SetRefresh(w http.ResponseWriter, refreshToken string, expiresA
 		SameSite: c.SameSite,
 	}
 	if persistent {
-		maxAge := int(time.Until(expiresAt).Seconds())
-		if maxAge < 1 {
-			maxAge = 1
-		}
+		maxAge := max(int(time.Until(expiresAt).Seconds()), 1)
 		cookie.MaxAge = maxAge
 		cookie.Expires = expiresAt
 	}

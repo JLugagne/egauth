@@ -19,7 +19,13 @@ type Issuer[C any] interface {
 }
 
 type Verifier[C any] interface {
+    // DEPRECATED, no tenant binding. With jwt.Config.MultiTenant=true it fails closed
+    // (ErrTenantBindingRequired); use VerifyAccessTokenForTenant instead.
     VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
+    // Tenant-bound access-token verification; rejects ErrTenantMismatch unless the signed
+    // tenant_id == tenantID. tenantID="" for single-tenant. RequireAuth uses this when a
+    // tenant resolver is configured (WithAuthTenantResolver).
+    VerifyAccessTokenForTenant(ctx context.Context, tenantID string, token string) (*Claims[C], error)
     // tenantID="" for single-tenant
     VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*Claims[C], error)
     VerifyAPIKey(ctx context.Context, tenantID string, key string) (*Claims[C], error)
@@ -218,8 +224,14 @@ func DefaultCookies() Cookies
 // SingleTenant variant drops tenantID:
 (*jwt.SingleTenant[C]).Rotate(ctx context.Context, refreshToken string) (*TokenPair[C], error)
 
-// Validate JWT access token (HS256, alg-pinned, exp/nbf/iss/aud checked).
+// DEPRECATED: validate JWT access token (HS256, alg-pinned, exp/nbf/iss/aud checked) WITHOUT
+// tenant binding. With Config.MultiTenant=true it fails closed (ErrTenantBindingRequired).
+// Single-tenant only.
 (*jwt.Service[C]).VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
+
+// Validate JWT access token AND bind it to tenantID (signed tenant_id claim must equal tenantID,
+// else ErrTenantMismatch). Use this in multi-tenant deployments under a shared signing key.
+(*jwt.Service[C]).VerifyAccessTokenForTenant(ctx context.Context, tenantID string, token string) (*Claims[C], error)
 
 // Validate opaque refresh token against store (tenant-scoped).
 (*jwt.Service[C]).VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*Claims[C], error)
@@ -265,6 +277,7 @@ func basic.LogoutHandler(revoker tokens.FamilyRevoker, opts ...tokens.HandlerOpt
 - On success: calls `next(w, r, egauth.Actor{UserID, TenantID}, customClaims C)`.
 - On failure: `401 unauthorized`.
 - Step-up gates: `403 step_up_required` (AMR or auth age not satisfied).
+- Tenant-aware when `WithAuthTenantResolver` is set: resolves the request tenant and verifies via `VerifyAccessTokenForTenant` (fail-closed). A resolver returning `""` → `401` (never falls back to the tenant-unaware path); a token whose `tenant_id` mismatches → `401`. With no resolver the middleware stays single-tenant (verifies via `VerifyAccessToken`), so single-tenant callers are unchanged.
 
 ```go
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc
@@ -289,7 +302,8 @@ type egauth.Actor struct {
 | `WithoutHeaderAuth[C]()` | Disable Authorization header read |
 | `WithAutoRefresh[C](rotator, cookies)` | Transparent rotation on expired/missing access token (implies cookie read) |
 | `WithPersistentAutoRefresh[C]()` | Auto-refresh writes persistent (Max-Age) refresh cookie |
-| `WithRefreshTenantResolver[C](func(*http.Request) string)` | Resolve tenantID for auto-refresh in multi-tenant |
+| `WithAuthTenantResolver[C](func(*http.Request) string)` | Tenant-aware mode: resolve tenantID per request; verify via `VerifyAccessTokenForTenant` and scope auto-refresh. `""` return → 401 (fail-closed) |
+| `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
 

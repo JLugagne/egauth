@@ -20,13 +20,22 @@ type Service interface {
 	// updated session. It is the idle-timeout primitive: call it on activity to keep an active
 	// session alive. An unknown or already-expired session yields ErrSessionNotFound.
 	Touch(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, error)
-	// Rotate issues a fresh token for the SAME logical session (same session ID and metadata),
-	// invalidating the old token, and resets the lifetime to now+duration. It returns the updated
-	// session and the new plaintext token. Call it after any privilege change — login over an
-	// existing anonymous session, MFA/step-up, a role grant — to defeat session fixation: a token
-	// an attacker may have fixed stops working the moment the victim authenticates. An unknown or
-	// already-expired session yields ErrSessionNotFound.
+	// Rotate issues a fresh token for the SAME logical session (same session ID, UserID and
+	// metadata), invalidating the old token, and resets the lifetime to now+duration. It returns
+	// the updated session and the new plaintext token. Rotate does NOT change the session's
+	// UserID — call it after a privilege change that keeps the same identity (MFA/step-up, a role
+	// grant) to defeat session fixation: a token an attacker may have fixed stops working the
+	// moment the victim re-authenticates. To promote an anonymous session to an authenticated one
+	// (a change of UserID), use BindUser instead. An unknown or already-expired session yields
+	// ErrSessionNotFound.
 	Rotate(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, string, error)
+	// BindUser promotes a session to a new user identity, atomically re-binding its UserID and
+	// rotating its token (the old token stops validating) and resetting the lifetime to
+	// now+duration. It returns the updated session and the new plaintext token. This is the
+	// anonymous-to-authenticated upgrade primitive: log a user in over their existing pre-auth
+	// session without minting a new session row, while defeating session fixation. The session ID
+	// and CreatedAt are preserved. An unknown or already-expired session yields ErrSessionNotFound.
+	BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error)
 	RevokeSession(ctx context.Context, tenantID string, token string) error
 	// RevokeAllForUser deletes every session belonging to userID within tenantID — the
 	// "log out everywhere" primitive. Call it after a password reset or account compromise to
@@ -36,21 +45,28 @@ type Service interface {
 }
 
 type service struct {
-	store       Store
-	now         func() time.Time
-	maxLifetime time.Duration
-	events      event.Sink
+	store         Store
+	now           func() time.Time
+	maxLifetime   time.Duration
+	noMaxLifetime bool
+	events        event.Sink
 }
 
 // NewService creates a new sessions Service. It panics on a nil store (never valid; fail fast at
 // startup rather than with a nil-pointer panic deep in a request).
+//
+// By default an absolute session lifetime of 30 days is enforced (SEC-08): regardless of how
+// recently Touch was called a session is rejected once now exceeds CreatedAt+30d. Use
+// WithMaxLifetime to override the cap duration or WithNoMaxLifetime to disable it entirely
+// (disabling is documented as insecure — prefer a longer cap over no cap).
 func NewService(store Store, opts ...ServiceOption) Service {
 	if store == nil {
 		panic("sessions: NewService requires a non-nil Store")
 	}
 	s := &service{
-		store: store,
-		now:   time.Now,
+		store:       store,
+		now:         time.Now,
+		maxLifetime: 30 * 24 * time.Hour, // secure-by-default: 30-day absolute cap (SEC-08)
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -166,6 +182,32 @@ func (s *service) Rotate(ctx context.Context, tenantID string, token string, dur
 	return session, newToken, nil
 }
 
+// BindUser re-binds a session to a new user identity while rotating its token, the
+// anonymous-to-authenticated upgrade primitive.
+func (s *service) BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error) {
+	session, err := s.ValidateSession(ctx, tenantID, token)
+	if err != nil {
+		return nil, "", err
+	}
+
+	newToken, err := generateToken()
+	if err != nil {
+		return nil, "", err
+	}
+	// Compare-and-set on the old hash (same concurrency contract as Rotate): a racing caller that
+	// already rotated this token makes the loser observe ErrSessionNotFound. The new UserID is
+	// written through BindSession; CreatedAt stays pinned so the absolute-lifetime cap still
+	// measures from the original session start.
+	oldHash := session.TokenHash
+	session.UserID = userID
+	session.TokenHash = s.hashToken(newToken)
+	session.ExpiresAt = s.clampExpiry(session, s.now().Add(duration))
+	if err := s.store.BindSession(ctx, tenantID, session, oldHash); err != nil {
+		return nil, "", err
+	}
+	return session, newToken, nil
+}
+
 func (s *service) RevokeSession(ctx context.Context, tenantID string, token string) error {
 	hash := s.hashToken(token)
 
@@ -191,17 +233,37 @@ func (s *service) hashToken(token string) string {
 // Once now is past CreatedAt+d the session stops validating and can no longer be touched or
 // rotated, regardless of how recently it was active — an idle-timeout slide can never keep a
 // stolen-but-kept-warm token alive indefinitely. Touch and Rotate additionally clamp the new
-// ExpiresAt so it never slides past the absolute deadline. The zero value disables the cap
-// (idle timeout only), preserving the previous behaviour.
+// ExpiresAt so it never slides past the absolute deadline.
+//
+// NewService already applies a 30-day default cap (SEC-08). Pass WithMaxLifetime to shorten or
+// lengthen that cap. A zero duration is treated as "keep the default" (same as not calling
+// WithMaxLifetime at all). To disable the cap entirely use WithNoMaxLifetime (insecure).
 func WithMaxLifetime(d time.Duration) ServiceOption {
-	return func(s *service) { s.maxLifetime = d }
+	return func(s *service) {
+		if d > 0 {
+			s.maxLifetime = d
+		}
+		// zero → keep the default set in NewService; callers that want no cap must use WithNoMaxLifetime.
+	}
+}
+
+// WithNoMaxLifetime disables the absolute session lifetime cap entirely, relying on the idle
+// timeout alone. This is insecure: an attacker who keeps a stolen token warm with periodic
+// requests can extend the session forever. Prefer a longer WithMaxLifetime over this option.
+// If you call both WithMaxLifetime and WithNoMaxLifetime the last option wins (standard
+// ServiceOption ordering applies).
+func WithNoMaxLifetime() ServiceOption {
+	return func(s *service) {
+		s.noMaxLifetime = true
+		s.maxLifetime = 0
+	}
 }
 
 // absoluteDeadline returns the absolute expiry deadline (CreatedAt+maxLifetime) for a session
-// and whether an absolute cap is configured. When maxLifetime is zero the cap is disabled and
-// ok is false.
+// and whether an absolute cap is active. The cap is disabled only when WithNoMaxLifetime was
+// explicitly called; a positive maxLifetime always enforces the cap.
 func (s *service) absoluteDeadline(session *Session) (time.Time, bool) {
-	if s.maxLifetime <= 0 {
+	if s.noMaxLifetime || s.maxLifetime <= 0 {
 		return time.Time{}, false
 	}
 	return session.CreatedAt.Add(s.maxLifetime), true

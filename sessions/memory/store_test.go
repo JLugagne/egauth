@@ -37,7 +37,7 @@ func TestIndexConsistency(t *testing.T) {
 
 	// Create many sessions to ensure lookups don't depend on iteration.
 	var created []*sessions.Session
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		sess := newSession("tenantA", "hash-"+strconv.Itoa(i), future)
 		if err := store.CreateSession(ctx, "tenantA", sess); err != nil {
 			t.Fatalf("CreateSession: %v", err)
@@ -110,6 +110,92 @@ func TestIndexConsistency(t *testing.T) {
 	}
 	if len(store.sessions) != len(store.byHash) {
 		t.Fatalf("index drift after DeleteSessionsByUserID: sessions=%d byHash=%d", len(store.sessions), len(store.byHash))
+	}
+}
+
+// TestUpdateSessionPinsUserIDAndCreatedAt proves that UpdateSession is a token/expiry/last-seen
+// mutator only: it must NOT re-bind the session to a different UserID, nor reset CreatedAt (which
+// feeds the absolute-lifetime cap). This matches the pgx store, whose UPDATE never writes those
+// columns. Regression for TASK-083.
+func TestUpdateSessionPinsUserIDAndCreatedAt(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore()
+
+	originalUser := uuid.New()
+	originalCreatedAt := time.Now().Add(-time.Hour)
+	sess := &sessions.Session{
+		ID:        uuid.New(),
+		TenantID:  "tenantA",
+		UserID:    originalUser,
+		TokenHash: "h1",
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: originalCreatedAt,
+	}
+	if err := store.CreateSession(ctx, "tenantA", sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	// A caller attempts to re-bind the user and reset CreatedAt through UpdateSession.
+	tampered := *sess
+	tampered.UserID = uuid.New()
+	tampered.CreatedAt = time.Now()
+	tampered.TokenHash = "h2"
+	if err := store.UpdateSession(ctx, "tenantA", &tampered, "h1"); err != nil {
+		t.Fatalf("UpdateSession: %v", err)
+	}
+
+	found, err := store.FindSessionByHash(ctx, "tenantA", "h2")
+	if err != nil {
+		t.Fatalf("FindSessionByHash: %v", err)
+	}
+	if found.UserID != originalUser {
+		t.Fatalf("UpdateSession must not change UserID: got %v want %v", found.UserID, originalUser)
+	}
+	if !found.CreatedAt.Equal(originalCreatedAt) {
+		t.Fatalf("UpdateSession must not change CreatedAt: got %v want %v", found.CreatedAt, originalCreatedAt)
+	}
+}
+
+// TestBindSessionChangesUserID proves the explicit anonymous-to-authenticated upgrade primitive:
+// BindSession re-binds the session to a new UserID (and rotates its token), which UpdateSession
+// must not do. Regression for TASK-083.
+func TestBindSessionChangesUserID(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore()
+
+	anonUser := uuid.New()
+	sess := &sessions.Session{
+		ID:        uuid.New(),
+		TenantID:  "tenantA",
+		UserID:    anonUser,
+		TokenHash: "anon-h",
+		ExpiresAt: time.Now().Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	if err := store.CreateSession(ctx, "tenantA", sess); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	authUser := uuid.New()
+	rebound := *sess
+	rebound.UserID = authUser
+	rebound.TokenHash = "auth-h"
+	if err := store.BindSession(ctx, "tenantA", &rebound, "anon-h"); err != nil {
+		t.Fatalf("BindSession: %v", err)
+	}
+
+	if _, err := store.FindSessionByHash(ctx, "tenantA", "anon-h"); err != sessions.ErrSessionNotFound {
+		t.Fatalf("old token after BindSession: got %v want ErrSessionNotFound", err)
+	}
+	found, err := store.FindSessionByHash(ctx, "tenantA", "auth-h")
+	if err != nil {
+		t.Fatalf("FindSessionByHash: %v", err)
+	}
+	if found.UserID != authUser {
+		t.Fatalf("BindSession must change UserID: got %v want %v", found.UserID, authUser)
+	}
+	if found.ID != sess.ID {
+		t.Fatalf("BindSession must keep the same logical session: got %v want %v", found.ID, sess.ID)
 	}
 }
 

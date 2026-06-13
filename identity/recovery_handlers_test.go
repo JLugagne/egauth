@@ -175,3 +175,28 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 		assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
 	})
 }
+
+// TestRequestPasswordResetViaRecoveryHandler_BackendErrorIsUniform is a regression
+// test for the enumeration oracle introduced by surfacing service errors as HTTP 500.
+// When the service returns an error (reachable only for existing accounts), the handler
+// MUST still reply 204 — not 500 — to preserve the documented enumeration-uniform behaviour.
+func TestRequestPasswordResetViaRecoveryHandler_BackendErrorIsUniform(t *testing.T) {
+	svc := &servicetest.MockService{
+		RequestPasswordResetViaRecoveryFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, identity.RecoveryChannels, error) {
+			// Simulate a transient backend error reachable only for existing accounts
+			// (e.g. FindIdentitiesByUserID or CreateVerificationToken failing).
+			return "", nil, identity.RecoveryChannels{}, context.DeadlineExceeded
+		},
+	}
+	mailer := newMockMailer()
+	sms := newMockSMSSender()
+	h := identity.RequestPasswordResetViaRecoveryHandler(svc, mailer.asMailer(), sms.asSMSSender())
+	w := httptest.NewRecorder()
+	h(w, postForm(url.Values{"email": {"victim@example.com"}}))
+
+	// Must be 204, not 500 — a 500 only reachable for existing accounts is an enumeration oracle.
+	assert.Equal(t, http.StatusNoContent, w.Code,
+		"backend error must not surface as 500; handler must always reply 204 to be enumeration-uniform")
+	requireNoMail(t, mailer.resetCh)
+	requireNoSMS(t, sms.ch)
+}

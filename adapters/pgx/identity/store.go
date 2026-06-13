@@ -184,10 +184,14 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 }
 
 // DeleteUser soft-deletes and anonymizes a live user in one atomic statement: it anonymizes the
-// users row (deleted_at + random email), anonymizes the user's identity provider_ids, and purges
-// any pending verification tokens (which would otherwise outlive the account carrying its user_id
-// and, for change-email tokens, a plaintext target email — residual PII the soft delete is meant
-// to erase). All three run as data-modifying CTEs gated on the user actually being live, so they
+// users row (deleted_at + random email), anonymizes the user's password-provider identity
+// provider_ids (which hold the email address as PII), and purges any pending verification tokens
+// (which would otherwise outlive the account carrying its user_id and, for change-email tokens, a
+// plaintext target email — residual PII the soft delete is meant to erase). Non-password
+// (OAuth/OIDC) identity ProviderIDs are intentionally preserved so that the already-linked branch
+// of LinkOrCreateIdentity can still resolve the identity and reach the service-layer DeletedAt
+// gate, rather than silently JIT-provisioning a new account for the deleted user's OAuth
+// credentials. All three run as data-modifying CTEs gated on the user actually being live, so they
 // commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
 func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	now := time.Now().UTC()
@@ -204,6 +208,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 			UPDATE identities
 			SET provider_id = $2, updated_at = $1
 			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
+			  AND provider = 'password'
 		),
 		toks AS (
 			DELETE FROM verification_tokens

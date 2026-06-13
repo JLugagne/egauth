@@ -25,6 +25,8 @@ explicitly so you can decide deliberately rather than inherit a silent default.
 |------|---------|---------|--------|
 | Passwords | Argon2 cost + rehash-on-login | safe defaults, no auto-rehash | Tune cost; call `NeedsRehash` after login |
 | Tokens (JWT) | `iss` / `aud` validation | `iss` checked if set; `aud` **off** | Set `Issuer` + `ExpectedAudience` |
+| Tokens (JWT) | Access-token tenant binding | fail-closed when `MultiTenant` set | Set `MultiTenant: true`; call `VerifyAccessTokenForTenant` |
+| Sessions | Cookie name (`__Host-` prefix) | **secure by default** (`__Host-session_token`) | Leave it; `WithCookieName` only as an escape hatch |
 | Sessions | Absolute lifetime | **off** (idle only) | `WithMaxLifetime` |
 | Sessions | Log-out-everywhere | available | Call `RevokeAllForUser` on reset/compromise |
 | Passkeys | User Verification | **preferred** (not enforced) | `UserVerification: protocol.VerificationRequired` |
@@ -110,6 +112,33 @@ svc := jwtissuer.New(jwtissuer.Config[MyClaims]{
   least one configured value. Empty disables the `aud` check. **Set it whenever a signing key is
   shared across more than one audience/service.**
 
+### Tenant binding on the access path (fail-closed when multi-tenant)
+
+When one `Service` signs for every tenant under a shared key, a token minted for tenant A is
+cryptographically valid in tenant B's context. The tenant-unaware `VerifyAccessToken` does **no**
+tenant comparison and is **deprecated**. Multi-tenant deployments must declare themselves so the
+unsafe path fails closed:
+
+```go
+svc := jwtissuer.New(jwtissuer.Config[MyClaims]{
+	Store:       tokenStore,
+	Issuer:      "https://auth.example.com",
+	SecretKey:   secret,
+	AccessTTL:   15 * time.Minute,
+	MultiTenant: true, // VerifyAccessToken now returns ErrTenantBindingRequired
+	// ...
+})
+
+// Always bind the token to the request's resolved tenant:
+claims, err := svc.VerifyAccessTokenForTenant(ctx, requestTenantID, token)
+```
+
+- With `MultiTenant: true`, the deprecated `VerifyAccessToken` returns
+  `tokens.ErrTenantBindingRequired` instead of silently verifying cross-tenant — use
+  `VerifyAccessTokenForTenant`, which rejects a mismatch with `tokens.ErrTenantMismatch`.
+- Genuinely single-tenant apps leave `MultiTenant` false (every token is issued under the empty
+  tenant) and may keep calling `VerifyAccessToken`, or use the `SingleTenant` wrapper.
+
 Prefer the **rotation keyset** (`SigningKeys` + `ActiveKeyID`) over a single `SecretKey` so you
 can roll keys with overlapping validity, and wire an `EventSink` to capture refresh-token
 reuse / family-revocation events for auditing.
@@ -117,6 +146,27 @@ reuse / family-revocation events for auditing.
 ---
 
 ## Sessions
+
+### Hardened cookie name (secure by default)
+
+`sessions.RequireSession` reads the session token from `sessions.DefaultSessionCookieName`
+(`"__Host-session_token"`) by default. The browser-enforced `__Host-` prefix host-locks the
+cookie — it must be `Secure`, carry no `Domain`, and use `Path=/` — which defeats
+subdomain/sibling-host cookie-tossing session fixation. This is the default; you no longer opt in.
+
+```go
+// Secure by default — no option needed:
+mux.Handle("/app", sessions.RequireSession(sessionSvc, handler))
+
+// Escape hatch ONLY when the deployment genuinely cannot use a __Host- cookie
+// (e.g. a path-scoped cookie, or local plain-HTTP development):
+mux.Handle("/app", sessions.RequireSession(sessionSvc, handler,
+	sessions.WithCookieName("session_token")))
+```
+
+Overriding to a name without the `__Host-` prefix forfeits the host-lock hardening; that is a
+deliberate consumer choice. Whatever name you read with must match the name your login handler
+writes the session cookie with.
 
 ### Absolute lifetime (off by default)
 

@@ -361,27 +361,25 @@ func TestService_Authenticate(t *testing.T) {
 		assert.Nil(t, user)
 	})
 
-	t.Run("other provider success", func(t *testing.T) {
-		expectedUser := &identity.User{
-			ID: uuid.New(),
-		}
+	t.Run("non-password provider is rejected without resolving an identity", func(t *testing.T) {
+		// Credential login must never authenticate an external (non-password) provider: doing so
+		// would be a passwordless bypass (TASK-060). The store lookups must not even be reached.
 		store := &storetest.MockStore{
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
-				assert.Equal(t, "google", p)
-				assert.Equal(t, "sub123", pid)
-				return &identity.Identity{UserID: expectedUser.ID}, nil
+				t.Fatalf("FindIdentityByProvider must not be reached for a non-password provider")
+				return nil, nil
 			},
 			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
-				assert.Equal(t, expectedUser.ID, id)
-				return expectedUser, nil
+				t.Fatalf("FindUserByID must not be reached for a non-password provider")
+				return nil, nil
 			},
 		}
 
 		svc := identity.NewService(store, nil, nil)
 		user, err := svc.Authenticate(ctx, "", "google", "sub123", "")
 
-		require.NoError(t, err)
-		assert.Equal(t, expectedUser, user)
+		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.Nil(t, user)
 	})
 
 	t.Run("create user fails", func(t *testing.T) {
@@ -454,39 +452,78 @@ func TestService_Authenticate(t *testing.T) {
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
 	})
 
-	t.Run("other provider identity not found", func(t *testing.T) {
+	t.Run("non-password provider with a known identity is still rejected", func(t *testing.T) {
+		// Even if the external identity and its user exist, the credential path must not
+		// authenticate them: the password argument is never verifiable here (TASK-060).
 		mockStore := &storetest.MockStore{
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
-				return nil, identity.ErrIdentityNotFound
-			},
-		}
-		service := identity.NewService(mockStore, nil, nil)
-		_, err := service.Authenticate(context.Background(), "", "google", "12345", "")
-		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
-	})
-
-	t.Run("other provider user not found", func(t *testing.T) {
-		mockStore := &storetest.MockStore{
-			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
-				return &identity.Identity{UserID: uuid.New()}, nil
+				t.Fatalf("FindIdentityByProvider must not be reached for a non-password provider")
+				return nil, nil
 			},
 			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
-				return nil, identity.ErrUserNotFound
+				t.Fatalf("FindUserByID must not be reached for a non-password provider")
+				return nil, nil
 			},
 		}
 		service := identity.NewService(mockStore, nil, nil)
-		_, err := service.Authenticate(context.Background(), "", "google", "12345", "")
+		user, err := service.Authenticate(context.Background(), "", "google", "12345", "")
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.Nil(t, user)
 	})
+}
+
+// TestService_Authenticate_NonPasswordProviderRejected pins the fix for the auth-bypass
+// finding (TASK-060): the credential (form) login path must NOT authenticate a non-password
+// provider. Previously, Authenticate looked up the identity by (provider, providerID), loaded
+// the user, and returned it WITHOUT ever comparing the supplied password — so a consumer that
+// set WithProvider("google") turned the login form into a passwordless bypass: any known
+// external sub plus any/empty password yielded a valid user and a token pair. After the fix
+// the path must reject any provider != "password" with ErrInvalidCredentials and never resolve
+// a user.
+func TestService_Authenticate_NonPasswordProviderRejected(t *testing.T) {
+	ctx := context.Background()
+	knownOAuthSub := "known-google-sub-123"
+
+	// The store would happily resolve the external identity and user; the guard must run
+	// before any of these are reached so a known sub cannot be turned into a session.
+	store := &storetest.MockStore{
+		FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
+			t.Fatalf("FindIdentityByProvider must not be reached for a non-password provider (provider=%q id=%q)", p, pid)
+			return nil, nil
+		},
+		FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+			t.Fatalf("FindUserByID must not be reached for a non-password provider")
+			return nil, nil
+		},
+	}
+
+	// A hasher is wired so the decoy-hash timing-equalization path is exercised on rejection.
+	hasher := &hashertest.MockHasher{
+		HashFunc: func(ctx context.Context, p string) (string, error) {
+			return "decoy", nil
+		},
+	}
+
+	svc := identity.NewService(store, hasher, nil)
+
+	user, err := svc.Authenticate(ctx, "tenant", "google", knownOAuthSub, "anypassword")
+
+	assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
+	assert.Nil(t, user, "a non-password provider must never resolve a user via the credential login path")
 }
 
 func TestService_Authenticate_ConstantTime(t *testing.T) {
 	ctx := context.Background()
 
-	// These tests pin the PRD requirement (§108): the password authentication path
-	// must apply an equivalent hashing cost even when no real password hash is
-	// available, so an attacker cannot distinguish "user does not exist" from
-	// "wrong password" by measuring response time (user enumeration via timing).
+	// These tests pin the STRUCTURAL half of the PRD requirement (§108): the password
+	// authentication path must apply an equivalent hashing cost even when no real password
+	// hash is available, so an attacker cannot distinguish "user does not exist" from
+	// "wrong password". They assert the decoy hash is *invoked* on each enumeration-safe
+	// path — they do NOT (and cannot) prove timing uniformity, since a passing boolean
+	// assertion says nothing about the wall-clock delta. The timing *evidence* lives in the
+	// BenchmarkAuthenticate_* benchmarks (authenticate_bench_test.go): run them with
+	//   go test -run=^$ -bench=BenchmarkAuthenticate -benchmem -count=10 ./identity
+	// and compare the valid-user vs unknown-user variants with benchstat (see SECURITY.md).
 
 	t.Run("user not found still performs a hashing cost", func(t *testing.T) {
 		var hashed bool

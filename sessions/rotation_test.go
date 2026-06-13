@@ -59,6 +59,37 @@ func TestRotate_ChangesTokenAndInvalidatesOld(t *testing.T) {
 	assert.Equal(t, sess.UserID, got.UserID)
 }
 
+func TestBindUser_RebindsUserAndRotatesToken(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+
+	anonUser := uuid.New()
+	sess, oldToken, err := svc.CreateSession(ctx, "tenant-x", anonUser, "UA", "1.1.1.1", time.Minute)
+	require.NoError(t, err)
+
+	authUser := uuid.New()
+	bound, newToken, err := svc.BindUser(ctx, "tenant-x", oldToken, authUser, time.Hour)
+	require.NoError(t, err)
+	assert.NotEqual(t, oldToken, newToken, "BindUser must mint a new token (fixation defense)")
+	assert.Equal(t, sess.ID, bound.ID, "BindUser keeps the same logical session")
+	assert.Equal(t, authUser, bound.UserID, "BindUser must re-bind the session to the new user")
+
+	// The pre-auth token must stop working.
+	_, err = svc.ValidateSession(ctx, "tenant-x", oldToken)
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "the pre-auth token must stop working")
+
+	// The new token validates and resolves to the same session bound to the authenticated user.
+	got, err := svc.ValidateSession(ctx, "tenant-x", newToken)
+	require.NoError(t, err)
+	assert.Equal(t, sess.ID, got.ID)
+	assert.Equal(t, authUser, got.UserID)
+}
+
+func TestBindUser_UnknownToken(t *testing.T) {
+	_, _, err := newService().BindUser(context.Background(), "", "nope", uuid.New(), time.Hour)
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
+}
+
 func TestTouch_UnknownToken(t *testing.T) {
 	_, err := newService().Touch(context.Background(), "", "nope", time.Hour)
 	assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
@@ -83,7 +114,7 @@ func TestTouchAndRotate_RejectExpiredSession(t *testing.T) {
 // store's compare-and-set fails (the token was already swapped by the winner), so Rotate must
 // return ErrSessionNotFound rather than a fresh token that would never validate.
 func TestRotate_ConcurrentLoserGetsHonestError(t *testing.T) {
-	sess := &sessions.Session{ID: uuid.New(), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour)}
+	sess := &sessions.Session{ID: uuid.New(), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
 	store := &storetest.MockStore{
 		FindSessionByHashFunc: func(_ context.Context, _ string, _ string) (*sessions.Session, error) {
 			c := *sess

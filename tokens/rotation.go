@@ -2,6 +2,7 @@ package tokens
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -41,3 +42,44 @@ type Rotator[C any] interface {
 }
 
 var _ ClaimsProvider[any] = (ClaimsProviderFunc[any])(nil)
+
+// RotationContext describes the refresh-token family being rotated. It is attached to the
+// context passed to ClaimsProvider.ClaimsForUser during Rotate so a provider can identify the
+// specific session/family it is re-evaluating rather than seeing only the user and tenant.
+//
+// This is what makes the documented "on refresh the AMR is re-evaluated, not frozen at login"
+// semantics implementable: the provider can look up per-family state (e.g. the AMR/assurance
+// the family originally proved) keyed by FamilyID, and can preserve or DOWNGRADE it, but it can
+// no longer be forced to either silently decay a legitimately elevated session or blindly
+// elevate every session of an MFA-enrolled user — both of which break the step-up gate.
+//
+// AuthTime mirrors the family's preserved authentication time (set on the initial pair and
+// carried unchanged onto every rotated descendant); it is provided here so the provider sees
+// the same freshness value the issuer will stamp on the rotated claims.
+type RotationContext struct {
+	// FamilyID is the rotation family the presented refresh token belongs to. It is stable
+	// across every rotation within a single login session.
+	FamilyID uuid.UUID
+	// AuthTime is the family's preserved authentication time (may be zero for a legacy token).
+	AuthTime time.Time
+}
+
+// rotationContextKey is the unexported context key under which the issuer stores the
+// RotationContext for the duration of a single ClaimsForUser call.
+type rotationContextKey struct{}
+
+// WithRotationContext returns a copy of ctx carrying rc. The Rotator implementation calls this
+// to inform the ClaimsProvider which refresh family is being rotated; application code does not
+// normally need it.
+func WithRotationContext(ctx context.Context, rc RotationContext) context.Context {
+	return context.WithValue(ctx, rotationContextKey{}, rc)
+}
+
+// RotationContextFromContext extracts the RotationContext attached by the Rotator during refresh
+// rotation. ok is false when ctx carries none (e.g. claims are being resolved outside of a
+// rotation, or by an older issuer). Providers should treat a missing rotation context as "not a
+// rotation" rather than failing.
+func RotationContextFromContext(ctx context.Context) (rc RotationContext, ok bool) {
+	rc, ok = ctx.Value(rotationContextKey{}).(RotationContext)
+	return rc, ok
+}

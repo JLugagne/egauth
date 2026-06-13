@@ -90,7 +90,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 	t.Run("ConsumeOTP is a guarded single-use delete", func(t *testing.T) {
 		sub := uuid.New()
 		// Consuming a non-existent code reports not-removed (no error).
-		ok, err := store.ConsumeOTP(ctx, tenantA, sub, "login")
+		ok, err := store.ConsumeOTP(ctx, tenantA, sub, "login", "h")
 		require.NoError(t, err)
 		assert.False(t, ok)
 
@@ -98,11 +98,19 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 			SubjectID: sub, Purpose: "login", CodeHash: "h", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
 		}))
 
-		// Exactly one consume wins; a second reports not-removed.
-		ok, err = store.ConsumeOTP(ctx, tenantA, sub, "login")
+		// Identity guard: a mismatched expected hash must NOT consume the row.
+		ok, err = store.ConsumeOTP(ctx, tenantA, sub, "login", "stale-hash")
+		require.NoError(t, err)
+		assert.False(t, ok, "a superseded hash must not consume the current code")
+		got, err := store.GetOTP(ctx, tenantA, sub, "login")
+		require.NoError(t, err)
+		assert.Equal(t, "h", got.CodeHash, "the code must survive a mismatched consume")
+
+		// Exactly one consume with the matching hash wins; a second reports not-removed.
+		ok, err = store.ConsumeOTP(ctx, tenantA, sub, "login", "h")
 		require.NoError(t, err)
 		assert.True(t, ok)
-		ok, err = store.ConsumeOTP(ctx, tenantA, sub, "login")
+		ok, err = store.ConsumeOTP(ctx, tenantA, sub, "login", "h")
 		require.NoError(t, err)
 		assert.False(t, ok, "the code may be consumed only once")
 	})

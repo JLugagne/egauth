@@ -70,7 +70,7 @@ func TestKeyset_RetiredKeyStillVerifiesDuringOverlap(t *testing.T) {
 	}, "k-new")
 
 	// The token signed by the retired key still verifies.
-	claims, err := svcNew.VerifyAccessToken(ctx, oldPair.AccessToken)
+	claims, err := svcNew.VerifyAccessTokenForTenant(ctx, "", oldPair.AccessToken)
 	require.NoError(t, err, "a live token signed by the retired key must still verify during overlap")
 	assert.Equal(t, userID, claims.Subject)
 
@@ -78,7 +78,7 @@ func TestKeyset_RetiredKeyStillVerifiesDuringOverlap(t *testing.T) {
 	freshPair, err := svcNew.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 	assert.Equal(t, "k-new", kidOf(t, freshPair.AccessToken))
-	_, err = svcNew.VerifyAccessToken(ctx, freshPair.AccessToken)
+	_, err = svcNew.VerifyAccessTokenForTenant(ctx, "", freshPair.AccessToken)
 	require.NoError(t, err)
 }
 
@@ -90,7 +90,7 @@ func TestKeyset_DroppingOldKeyRejectsItsTokens(t *testing.T) {
 
 	// After the overlap window, "k-old" is dropped from the set entirely.
 	svcNewOnly := keysetService(t, []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, "k-new")
-	_, err = svcNewOnly.VerifyAccessToken(ctx, oldPair.AccessToken)
+	_, err = svcNewOnly.VerifyAccessTokenForTenant(ctx, "", oldPair.AccessToken)
 	require.ErrorIs(t, err, tokens.ErrInvalidToken, "a token whose kid was retired must be rejected")
 }
 
@@ -102,7 +102,7 @@ func TestKeyset_UnknownKidRejected(t *testing.T) {
 	require.NoError(t, err)
 
 	svc := keysetService(t, []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, "k-new")
-	_, err = svc.VerifyAccessToken(ctx, pair.AccessToken)
+	_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.ErrorIs(t, err, tokens.ErrInvalidToken)
 }
 
@@ -136,7 +136,7 @@ func TestKeyset_LegacyTokenVerifiesAfterEnablingRotation(t *testing.T) {
 	})
 
 	// The kid-less legacy token still verifies via the legacy key.
-	claims, err := svcRotated.VerifyAccessToken(ctx, legacyPair.AccessToken)
+	claims, err := svcRotated.VerifyAccessTokenForTenant(ctx, "", legacyPair.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, userID, claims.Subject)
 
@@ -158,7 +158,7 @@ func TestKeyset_KidlessTokenRejectedWithoutLegacyKey(t *testing.T) {
 
 	// Pure keyset, no legacy SecretKey: a kid-less token has no key to verify against.
 	svcKeyset := keysetService(t, []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, "k-new")
-	_, err = svcKeyset.VerifyAccessToken(ctx, legacyPair.AccessToken)
+	_, err = svcKeyset.VerifyAccessTokenForTenant(ctx, "", legacyPair.AccessToken)
 	require.ErrorIs(t, err, tokens.ErrInvalidToken)
 }
 
@@ -186,7 +186,7 @@ func TestKeyset_RotateRefreshAcrossKeyChange(t *testing.T) {
 	rotated, err := svcNew.Rotate(ctx, "", pair.RefreshToken)
 	require.NoError(t, err)
 	assert.Equal(t, "k-new", kidOf(t, rotated.AccessToken))
-	_, err = svcNew.VerifyAccessToken(ctx, rotated.AccessToken)
+	_, err = svcNew.VerifyAccessTokenForTenant(ctx, "", rotated.AccessToken)
 	require.NoError(t, err)
 }
 
@@ -222,11 +222,11 @@ func TestKeyset_MalformedKidRejected(t *testing.T) {
 	}
 
 	t.Run("numeric kid", func(t *testing.T) {
-		_, err := svc.VerifyAccessToken(ctx, makeToken(12345))
+		_, err := svc.VerifyAccessTokenForTenant(ctx, "", makeToken(12345))
 		require.ErrorIs(t, err, tokens.ErrInvalidToken)
 	})
 	t.Run("empty-string kid", func(t *testing.T) {
-		_, err := svc.VerifyAccessToken(ctx, makeToken(""))
+		_, err := svc.VerifyAccessTokenForTenant(ctx, "", makeToken(""))
 		require.ErrorIs(t, err, tokens.ErrInvalidToken)
 	})
 }
@@ -258,7 +258,9 @@ func TestNew_PanicsOnMalformedKeyset(t *testing.T) {
 
 func TestValidate_Keyset(t *testing.T) {
 	good := jwt.Config[struct{}]{
-		Issuer: "egauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
+		Store:          memory.NewStore[struct{}](),
+		ClaimsProvider: okProvider(t),
+		Issuer:         "egauth-test", AccessTTL: time.Minute, RefreshTTL: time.Hour,
 		SigningKeys: []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, ActiveKeyID: "k-new",
 	}
 	require.NoError(t, good.Validate())

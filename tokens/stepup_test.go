@@ -19,7 +19,7 @@ import (
 func stepUpService() *jwt.Service[struct{}] {
 	return jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      memory.NewStore[struct{}](),
-		SecretKey:  "step-up-secret",
+		SecretKey:  "step-up-secret-aaaaaaaaaaaaaaaaa", // 32 bytes
 		Issuer:     "egauth-test",
 		AccessTTL:  time.Hour,
 		RefreshTTL: time.Hour,
@@ -77,7 +77,7 @@ func TestVerifyAccessToken_AMRRoundTrip(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	claims, err := svc.VerifyAccessToken(context.Background(), pair.AccessToken)
+	claims, err := svc.VerifyAccessTokenForTenant(context.Background(), "", pair.AccessToken)
 	require.NoError(t, err)
 	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMRWebAuthn}, claims.AMR)
 }
