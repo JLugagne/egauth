@@ -183,6 +183,19 @@ request-level idempotency layer. Wire your metrics/audit pipeline to `event.Sink
 use the propagated `context.Context` for span injection. Request-level idempotency is the application
 layer's responsibility. See [SECURITY.md § Observability and idempotency](SECURITY.md#observability-and-idempotency-consumer-responsibility).
 
+## Reference application
+
+[`examples/fullstack`](examples/fullstack) is a self-contained runnable application that wires
+the full egauth stack — identity + tokens with custom claims + MFA (TOTP) + passkey + admin
+operations + audit events — over HTTP using only in-memory backends and the standard library
+mux. It builds from the module proxy with no local `go.work` workspace:
+
+```sh
+go run github.com/JLugagne/egauth/examples/fullstack@latest
+```
+
+A smoke test (`go test ./examples/fullstack`) exercises all six concerns end-to-end.
+
 ## Documentation
 
 Full API reference: [pkg.go.dev/github.com/JLugagne/egauth](https://pkg.go.dev/github.com/JLugagne/egauth)
