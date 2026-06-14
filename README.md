@@ -7,11 +7,14 @@
 A complete, composable, non-opinionated authentication toolkit for Go.
 
 > **About this project — please read.** egauth was built mostly through "vibe coding"
-> (AI-assisted development), and its security review to date is an **AI-driven audit, not an
-> external human one**. I wrote it because I wanted a library like this for my own projects. The
-> code is engineered carefully and secure-by-default — an adversarial pass found no high/critical
-> issue — but it has **not yet had an independent third-party security audit**, so weigh the
-> status accordingly before using it for anything sensitive.
+> (AI-assisted development). egauth's security review to date is an AI-driven audit only; it has
+> not had an independent third-party human security audit, and that risk is accepted for v1.0 —
+> pin a reviewed commit, commission your own audit, or wait if that trade-off is unacceptable. I
+> wrote it because I wanted a library like this for my own projects. The code is engineered
+> carefully and secure-by-default — an adversarial pass found no high/critical issue — but
+> "AI-audited" is **not** a synonym for "audited", so weigh the status accordingly before using
+> it for anything sensitive. The full audit status, scope, and escape hatch live in
+> [AUDIT.md](AUDIT.md).
 >
 > **Comments, reviews, issues, and security audits are genuinely welcome.** If you spot something —
 > a bug, a design smell, a crypto/protocol concern — please open an issue or PR; for anything

@@ -63,4 +63,10 @@
 // The full threat model is in SECURITY.md; the module overview and a copy-pasteable quickstart are
 // in README.md. The API is pre-1.0 and still settling; pin a commit or tag in go.mod for
 // reproducible builds (see the Stability section of README.md).
+//
+// Audit status: egauth's security review to date is an AI-driven audit only; it has not had an
+// independent third-party human security audit, and that risk is accepted for v1.0 — pin a
+// reviewed commit, commission your own audit, or wait if that trade-off is unacceptable.
+// "AI-audited" is not a synonym for "audited". See AUDIT.md for the full review scope and the
+// cautious-user escape hatch.
 package egauth
