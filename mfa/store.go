@@ -9,10 +9,23 @@ import (
 
 // Store persists TOTP enrollments and recovery codes.
 //
+// It is the composition of two capability interfaces — TOTPStore (the authenticator-app factor)
+// and RecoveryCodeStore (the single-use backup codes). Segmenting the contract this way means a
+// future v1.x capability can ship as a NEW optional interface rather than a method on this one,
+// which would break every external Store. Both the in-memory and pgx stores implement the whole
+// Store.
+//
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
 // string is a legal tenant key (the single-tenant default partition); it must still be
 // passed explicitly.
 type Store interface {
+	TOTPStore
+	RecoveryCodeStore
+}
+
+// TOTPStore is the TOTP-enrollment capability of an mfa backend: persisting, reading,
+// replay-guarding and lockout-accounting a user's authenticator-app factor.
+type TOTPStore interface {
 	// SaveTOTP upserts the user's TOTP enrollment (one per user/tenant). If the enrollment
 	// already carries a non-empty TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	SaveTOTP(ctx context.Context, tenantID string, e *TOTPEnrollment) error
@@ -37,7 +50,11 @@ type Store interface {
 	// values for the given enrollment. It is used by the service for time-based lockout decay
 	// and by the admin UnlockMFA primitive. Returns ErrNotEnrolled if the enrollment is absent.
 	ResetTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
 
+// RecoveryCodeStore is the recovery-code capability of an mfa backend: the single-use backup
+// codes a user falls back to when their authenticator is unavailable.
+type RecoveryCodeStore interface {
 	// ReplaceRecoveryCodes atomically discards any existing recovery codes for the user and
 	// stores the given hashes (in any order).
 	ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error

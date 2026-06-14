@@ -9,13 +9,12 @@ import (
 
 // Store is the persistence boundary for the identity package.
 //
-// STABILITY: Store is intentionally monolithic for v0.x — it will NOT be split into a
-// core+capability set of interfaces before v1. Methods MAY be added in minor releases
-// without a major version bump. External implementers MUST run the conformance suite at
-// github.com/JLugagne/egauth/identity/storetest on every upgrade to catch newly-required
-// methods before they silently break an auth flow. (A core+capability split is deferred
-// to v1, when the surface has stabilised and external adoption makes the churn cost worth
-// weighing.)
+// It is the composition of four capability interfaces — UserStore (user records),
+// IdentityStore (per-provider login bindings), VerificationTokenStore (single-use
+// selector/verifier tokens) and LockoutStore (brute-force counters). Segmenting the contract
+// this way means a future v1.x capability can ship as a NEW optional interface rather than a
+// method on this one, which would break every external Store. Both the in-memory and pgx stores
+// implement the whole Store.
 //
 // It defines the operations needed to manage users and their authentication identities
 // within a tenant, along with the verification-token, lockout and account-state primitives
@@ -24,8 +23,15 @@ import (
 // Implementations are responsible for enforcing per-tenant isolation; a Postgres-backed
 // implementation is provided in the identity/pgx subpackage.
 type Store interface {
-	// User operations
+	UserStore
+	IdentityStore
+	VerificationTokenStore
+	LockoutStore
+}
 
+// UserStore is the user-record capability of the identity backend: creating, finding, updating,
+// soft-deleting, disabling and enabling user rows.
+type UserStore interface {
 	// CreateUser persists a new user in the given tenant. The created user's TenantID is set
 	// to tenantID.
 	CreateUser(ctx context.Context, tenantID string, email string) (*User, error)
@@ -79,9 +85,11 @@ type Store interface {
 	// Enabling an account that is not disabled is a no-op that succeeds (idempotent). It returns
 	// ErrUserNotFound when no live (non-soft-deleted), same-tenant user matches.
 	EnableUser(ctx context.Context, tenantID string, id uuid.UUID) error
+}
 
-	// Identity operations
-
+// IdentityStore is the identity-record capability of the identity backend: the per-provider login
+// bindings (password, OAuth, ...) attached to a user.
+type IdentityStore interface {
 	// AddIdentity persists a new identity in the given tenant. If the identity record carries a
 	// non-empty TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	AddIdentity(ctx context.Context, tenantID string, identity *Identity) error
@@ -93,9 +101,12 @@ type Store interface {
 	// of the reset channel re-establishes trust. Returns ErrIdentityNotFound when the user
 	// has no password identity.
 	UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
+}
 
-	// Verification token operations (selector/verifier scheme).
-
+// VerificationTokenStore is the verification-token capability of the identity backend: the
+// single-use selector/verifier tokens that back email/phone verification and password reset, plus
+// their schedulable GC.
+type VerificationTokenStore interface {
 	// CreateVerificationToken mints, persists and returns a single-use plaintext token bound
 	// to the user, kind and TTL. Only the selector and the verifier hash are stored. The
 	// returned string (selector.verifier) is a credential handed to the user exactly once.
@@ -112,9 +123,11 @@ type Store interface {
 	// (selector/verifier) token table. It scopes to a single tenant; a background job sweeping
 	// every tenant must loop over them.
 	DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error)
+}
 
-	// Lockout operations
-
+// LockoutStore is the failed-attempt/lockout capability of the identity backend: the counter that
+// gates brute-force attempts against an identity.
+type LockoutStore interface {
 	// IncrementFailedAttempts increments the failed-attempt counter for an identity.
 	// When the counter reaches/exceeds lockThreshold, LockedUntil is set to now + lockDuration.
 	IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
