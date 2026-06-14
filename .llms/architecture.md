@@ -73,10 +73,25 @@ See [recipes.md](recipes.md) for concrete wiring of each stack.
 
 ## Storage backends
 
-- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, unbounded —
-  must schedule eviction via `janitor`).
+- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, self-bounding
+  or janitor-evicted — see below).
 - `adapters/pgx` is a separate go.mod so core consumers never pull pgx/testcontainers/Docker.
   `Migrate(ctx, pool)` once at startup (forward-only, versioned, idempotent). [storage-pgx.md](storage-pgx.md).
+
+### In-memory store growth control
+
+All three in-process stores that can grow without bound ship a **bounded variant** alongside the
+original unbounded constructor:
+
+| Package | Unbounded (original) | Bounded (new) | Cap policy |
+|---|---|---|---|
+| `sessions/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `otp/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `ratelimit` | `NewTokenBucket(…)` | `NewTokenBucket(…, WithMaxKeys(n))` | evicts most-refilled (least-pressure) bucket |
+
+The unbounded constructors remain available for callers that prefer to schedule periodic eviction
+via `janitor`. Both models are safe for concurrent use. The bounded variants require no external
+scheduler and are recommended for Internet-facing deployments where key cardinality is unbounded.
 
 ## Security posture (summary)
 

@@ -11,27 +11,26 @@ import (
 // when none are available it is rejected with the time until the next token. It is safe for
 // concurrent use.
 //
-// # Production requirement: periodic eviction is MANDATORY
+// # Bounding memory growth
 //
-// A new per-key bucket is allocated on the first Allow call for that key and is only freed by
-// Cleanup. Without periodic eviction a flood of unique keys (IPs, user IDs, request paths) grows
-// the internal map without bound — a trivial denial-of-service vector in any Internet-facing
-// deployment.
+// Without eviction, a flood of unique keys (IPs, user IDs) grows the internal map without
+// bound. Two complementary strategies are available:
 //
-// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
+//   - [WithMaxKeys] sets a hard cap on the number of tracked keys. When a new key arrives
+//     and the cap is reached, the bucket that is closest to full (least under pressure) is
+//     evicted. This makes the limiter self-contained with no external scheduler required.
 //
-//	tb := ratelimit.NewTokenBucket(10, time.Second)
-//	j := janitor.Start(ctx, time.Minute, func() {
-//	    tb.Cleanup()
-//	})
-//	defer j.Stop()
+//   - Periodic [Cleanup] via [github.com/JLugagne/egauth/janitor] (the original model):
+//     Cleanup drops only fully-refilled buckets, so it does not reset any key that is still
+//     under pressure.
 //
-// Cleanup drops only fully-refilled buckets (those indistinguishable from a fresh one), so it
-// does not reset the limit for any key that is still under pressure.
+// You can use either strategy or both. WithMaxKeys is recommended for Internet-facing
+// deployments where key cardinality is unbounded.
 type TokenBucket struct {
 	mu      sync.Mutex
 	burst   float64
 	refill  time.Duration // duration to accrue one token
+	maxKeys int           // 0 = unbounded
 	buckets map[string]*bucketState
 	now     func() time.Time
 }
@@ -74,7 +73,9 @@ func NewTokenBucket(burst int, refillInterval time.Duration, opts ...Option) *To
 	return tb
 }
 
-// Allow consumes one token for key, refilling first based on elapsed time.
+// Allow consumes one token for key, refilling first based on elapsed time. When the bucket
+// was created with [WithMaxKeys] and the cap is reached, the least-pressured bucket is
+// evicted before inserting the new key.
 func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Duration) {
 	tb.mu.Lock()
 	defer tb.mu.Unlock()
@@ -82,6 +83,11 @@ func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Durati
 	now := tb.now()
 	b, ok := tb.buckets[key]
 	if !ok {
+		// Enforce the maxKeys cap: evict the bucket that has refilled the most
+		// (least under pressure) to make room for the new key.
+		if tb.maxKeys > 0 && len(tb.buckets) >= tb.maxKeys {
+			tb.evictOne(now)
+		}
 		b = &bucketState{tokens: tb.burst, last: now}
 		tb.buckets[key] = b
 	} else {
@@ -120,3 +126,53 @@ func (tb *TokenBucket) Cleanup() int {
 }
 
 var _ Limiter = (*TokenBucket)(nil)
+
+// WithMaxKeys sets a hard cap on the number of distinct keys the TokenBucket
+// tracks simultaneously. When [TokenBucket.Allow] is called with a new key and
+// the cap is already reached, the bucket that has refilled the most (i.e. is
+// least under pressure — closest to burst capacity) is evicted to make room.
+// Fully-refilled buckets are always preferred for eviction.
+//
+// n must be >= 1; values below 1 are silently floored to 1.
+// If WithMaxKeys is not called (or n == 0), the bucket map is unbounded and
+// callers must schedule periodic [TokenBucket.Cleanup] calls.
+func WithMaxKeys(n int) Option {
+	return func(tb *TokenBucket) {
+		if n < 1 {
+			n = 1
+		}
+		tb.maxKeys = n
+	}
+}
+
+// KeyCount returns the current number of tracked keys. Useful in tests and
+// monitoring to verify the bounded-store invariant.
+func (tb *TokenBucket) KeyCount() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return len(tb.buckets)
+}
+
+// evictOne removes the single bucket that is least under pressure (closest to
+// fully-refilled). Fully-refilled buckets are preferred; among partially-refilled
+// ones the one with the most tokens (accounting for elapsed time) is chosen.
+// Must be called with tb.mu held.
+func (tb *TokenBucket) evictOne(now time.Time) {
+	var (
+		evictKey  string
+		evictToks float64 = -1
+	)
+	for k, b := range tb.buckets {
+		toks := b.tokens + float64(now.Sub(b.last))/float64(tb.refill)
+		if toks > tb.burst {
+			toks = tb.burst
+		}
+		if toks > evictToks {
+			evictToks = toks
+			evictKey = k
+		}
+	}
+	if evictKey != "" {
+		delete(tb.buckets, evictKey)
+	}
+}
