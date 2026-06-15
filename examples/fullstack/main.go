@@ -361,7 +361,7 @@ func BuildServer() (http.Handler, error) {
 	// -- protected demo route ---------------------------------------------
 	mux.Handle("GET /me", tokens.RequireAuth[AppClaims](issuer,
 		func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, c AppClaims) {
-			fmt.Fprintf(w, "userID=%s role=%s\n", actor.UserID, c.Role)
+			_, _ = fmt.Fprintf(w, "userID=%s role=%s\n", actor.UserID, c.Role)
 		},
 		tokens.WithCookieAuth[AppClaims](cookies),
 	))
