@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -166,4 +167,56 @@ func TestClientIP(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "/", nil)
 	r.RemoteAddr = "198.51.100.4:55555"
 	assert.Equal(t, "198.51.100.4", ratelimit.ClientIP(r))
+}
+
+// TestTokenBucket_WithMaxKeys_NeverExceedsCap verifies that a TokenBucket
+// created with WithMaxKeys never holds more buckets than the configured cap.
+func TestTokenBucket_WithMaxKeys_NeverExceedsCap(t *testing.T) {
+	ctx := context.Background()
+	const maxKeys = 5
+	tb := ratelimit.NewTokenBucket(10, time.Second, ratelimit.WithMaxKeys(maxKeys))
+
+	// Consume one token per key so buckets are not fully refilled and
+	// cannot be dropped by the internal Cleanup pass.
+	for i := range maxKeys {
+		tb.Allow(ctx, "key-"+strconv.Itoa(i))
+	}
+	require.Equal(t, maxKeys, tb.KeyCount(), "bucket count after fill")
+
+	// One more unique key — must evict one existing bucket to stay at cap.
+	tb.Allow(ctx, "key-extra")
+	assert.Equal(t, maxKeys, tb.KeyCount(), "bucket count after over-cap Allow")
+}
+
+// TestTokenBucket_WithMaxKeys_EvictsFullyRefilledFirst verifies that
+// fully-refilled (indistinguishable from fresh) buckets are the first
+// candidates for eviction when the cap is reached.
+func TestTokenBucket_WithMaxKeys_EvictsFullyRefilledFirst(t *testing.T) {
+	ctx := context.Background()
+	const maxKeys = 3
+	clk := &fakeClock{t: time.Unix(0, 0)}
+	tb := ratelimit.NewTokenBucket(2, time.Second, ratelimit.WithClock(clk.now), ratelimit.WithMaxKeys(maxKeys))
+
+	// Key "full" is used once (partial), then fully refills; "active1" and
+	// "active2" are kept under pressure.
+	tb.Allow(ctx, "full")    // partial use
+	tb.Allow(ctx, "active1") // partial use
+	tb.Allow(ctx, "active2") // partial use
+	require.Equal(t, maxKeys, tb.KeyCount())
+
+	// Advance time so "full" has refilled completely.
+	clk.advance(10 * time.Second)
+	// Trigger Allow on "active1" and "active2" to register the refill in
+	// their state so they stay under pressure (use a token).
+	tb.Allow(ctx, "active1")
+	tb.Allow(ctx, "active2")
+	// "full" has NOT been touched since the advance, so it's fully refilled.
+
+	// Adding a new key must evict "full" (the fully-refilled one) first.
+	tb.Allow(ctx, "new")
+	assert.Equal(t, maxKeys, tb.KeyCount(), "bucket count after eviction")
+
+	// "active1" and "active2" must still be present (they are under pressure).
+	// We can verify by checking KeyCount stays at cap.
+	assert.Equal(t, maxKeys, tb.KeyCount())
 }

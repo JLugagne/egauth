@@ -1,24 +1,7 @@
 // Package memory provides an in-memory sessions.Store, primarily for tests and
 // single-process use.
 //
-// # Production requirement: periodic eviction is MANDATORY
-//
-// The Store grows without bound unless DeleteExpired is called periodically.
-// Every expired session row remains in the in-memory map until explicitly
-// purged; under load a production deployment that skips periodic eviction will
-// exhaust available memory, creating a trivial denial-of-service vector.
-//
-// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
-//
-//	store := memory.NewStore()
-//	j := janitor.Start(ctx, 5*time.Minute, func() {
-//	    store.DeleteExpired(context.Background(), tenantID)
-//	})
-//	defer j.Stop()
-//
-// This in-memory backend is suitable for tests and single-binary deployments
-// where controlled restart bounds the total session count. For persistent or
-// horizontally-scaled deployments, use the sessions/pgx backend instead.
+
 package memory
 
 import (
@@ -64,8 +47,16 @@ func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHas
 }
 
 // Store is an in-memory implementation of sessions.Store.
+//
+// By default the store is unbounded; session growth is controlled by periodic
+// calls to DeleteExpired (e.g. via [github.com/JLugagne/egauth/janitor]).
+// Use [NewBoundedStore] for a store that enforces a hard cap and self-evicts
+// on insertion: it first removes already-expired sessions, then the session
+// with the soonest ExpiresAt, so live sessions are preserved as long as
+// possible.
 type Store struct {
 	mu       sync.RWMutex
+	maxSize  int // 0 means unbounded
 	sessions map[uuid.UUID]*sessions.Session
 	// byHash is a secondary index mapping a tenant-scoped token-hash key to the owning
 	// session ID, so FindSessionByHash is O(1) instead of scanning the whole map. It is
@@ -89,7 +80,9 @@ func hashKey(tenantID, tokenHash string) string {
 }
 
 // CreateSession persists a new session. If the record carries a non-empty TenantID that
-// differs from tenantID, it returns ErrTenantMismatch.
+// differs from tenantID, it returns ErrTenantMismatch. When the store was created with
+// [NewBoundedStore] and the cap is already reached, one session is evicted before
+// inserting the new one.
 func (s *Store) CreateSession(ctx context.Context, tenantID string, session *sessions.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -104,6 +97,12 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	key := hashKey(sCopy.TenantID, sCopy.TokenHash)
 	if _, exists := s.byHash[key]; exists {
 		return sessions.ErrDuplicateToken
+	}
+
+	// Enforce the bounded cap: first evict already-expired sessions, then
+	// fall back to evicting the soonest-expiring live session.
+	if s.maxSize > 0 && len(s.sessions) >= s.maxSize {
+		s.evictOne()
 	}
 
 	s.sessions[sCopy.ID] = &sCopy
@@ -230,3 +229,66 @@ func (s *Store) DeleteSessionsByUserID(ctx context.Context, tenantID string, use
 
 // Verify interface compliance.
 var _ sessions.Store = (*Store)(nil)
+
+// evictOne removes a single session to make room for a new insertion.
+// Strategy: evict all already-expired sessions first; if none are expired,
+// evict the one with the soonest ExpiresAt.
+// Must be called with s.mu held for writing.
+func (s *Store) evictOne() {
+	now := time.Now()
+
+	// Pass 1: evict any expired session.
+	for id, sess := range s.sessions {
+		if sess.ExpiresAt.Before(now) {
+			delete(s.sessions, id)
+			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
+			return
+		}
+	}
+
+	// Pass 2: no expired session found — evict the soonest-expiring live one.
+	var (
+		evictID   uuid.UUID
+		evictTime time.Time
+		evictSet  bool
+	)
+	for id, sess := range s.sessions {
+		if !evictSet || sess.ExpiresAt.Before(evictTime) {
+			evictID = id
+			evictTime = sess.ExpiresAt
+			evictSet = true
+		}
+	}
+	if evictSet {
+		sess := s.sessions[evictID]
+		delete(s.sessions, evictID)
+		delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
+	}
+}
+
+// NewBoundedStore creates a bounded in-memory sessions Store that never holds
+// more than maxSize sessions. When a CreateSession call would exceed the cap,
+// the store first evicts already-expired sessions; if the cap is still reached
+// it evicts the session with the soonest ExpiresAt (the one most likely to
+// become irrelevant soon). maxSize must be >= 1; values below 1 are floored to 1.
+//
+// The existing [NewStore] constructor remains available for callers who prefer
+// the unbounded model and control growth via periodic [Store.DeleteExpired] calls.
+func NewBoundedStore(maxSize int) *Store {
+	if maxSize < 1 {
+		maxSize = 1
+	}
+	return &Store{
+		maxSize:  maxSize,
+		sessions: make(map[uuid.UUID]*sessions.Session),
+		byHash:   make(map[string]uuid.UUID),
+	}
+}
+
+// Len returns the current number of sessions in the store. Useful in tests
+// and monitoring to verify the bounded-store invariant.
+func (s *Store) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return len(s.sessions)
+}

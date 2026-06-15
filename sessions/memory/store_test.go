@@ -256,3 +256,86 @@ func TestEvictExpiredOnRead(t *testing.T) {
 		t.Fatalf("live session lookup after eviction: %v", err)
 	}
 }
+
+// TestBoundedStore_NeverExceedsCap verifies that a bounded store never holds
+// more than maxSize sessions. When the cap is reached, the oldest session
+// (by ExpiresAt) must be evicted before the new one is inserted.
+func TestBoundedStore_NeverExceedsCap(t *testing.T) {
+	ctx := context.Background()
+	const cap = 5
+	store := NewBoundedStore(cap)
+	future := time.Now().Add(time.Hour)
+
+	// Fill the store to the cap.
+	for i := range cap {
+		sess := newSession("t1", "hash-"+strconv.Itoa(i), future.Add(time.Duration(i)*time.Second))
+		if err := store.CreateSession(ctx, "t1", sess); err != nil {
+			t.Fatalf("CreateSession %d: %v", i, err)
+		}
+	}
+	if got := store.Len(); got != cap {
+		t.Fatalf("Len() after fill: got %d want %d", got, cap)
+	}
+
+	// Adding one more must evict the oldest (hash-0, earliest ExpiresAt) and keep Len == cap.
+	extra := newSession("t1", "hash-extra", future.Add(time.Hour))
+	if err := store.CreateSession(ctx, "t1", extra); err != nil {
+		t.Fatalf("CreateSession extra: %v", err)
+	}
+	if got := store.Len(); got != cap {
+		t.Fatalf("Len() after over-cap insert: got %d want %d", got, cap)
+	}
+
+	// The extra session must be findable.
+	if _, err := store.FindSessionByHash(ctx, "t1", "hash-extra"); err != nil {
+		t.Fatalf("FindSessionByHash extra: %v", err)
+	}
+}
+
+// TestBoundedStore_EvictsExpiredFirst verifies that already-expired sessions
+// are evicted before live ones when the cap is reached.
+func TestBoundedStore_EvictsExpiredFirst(t *testing.T) {
+	ctx := context.Background()
+	const cap = 3
+	store := NewBoundedStore(cap)
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Minute)
+
+	// Insert one expired and two live sessions.
+	expired := newSession("t1", "expired", past)
+	live1 := newSession("t1", "live1", future)
+	live2 := newSession("t1", "live2", future.Add(time.Second))
+	for _, s := range []*sessions.Session{expired, live1, live2} {
+		if err := store.CreateSession(ctx, "t1", s); err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+	}
+
+	// Adding a 4th session must evict the expired one, not the live ones.
+	extra := newSession("t1", "extra", future.Add(2*time.Second))
+	if err := store.CreateSession(ctx, "t1", extra); err != nil {
+		t.Fatalf("CreateSession extra: %v", err)
+	}
+	if store.Len() != cap {
+		t.Fatalf("Len() after eviction: got %d want %d", store.Len(), cap)
+	}
+	// The expired session must be gone.
+	if _, err := store.FindSessionByHash(ctx, "t1", "expired"); err != sessions.ErrSessionNotFound {
+		t.Fatalf("expired session survived eviction: err=%v", err)
+	}
+	// Live sessions must still be present.
+	for _, h := range []string{"live1", "live2", "extra"} {
+		if _, err := store.FindSessionByHash(ctx, "t1", h); err != nil {
+			t.Fatalf("live session %q missing after eviction: %v", h, err)
+		}
+	}
+}
+
+// TestNewStore_Unbounded confirms the existing NewStore constructor
+// creates an unbounded store (zero maxSize = no cap).
+func TestNewStore_Unbounded(t *testing.T) {
+	store := NewStore()
+	if store.maxSize != 0 {
+		t.Fatalf("NewStore maxSize: got %d want 0 (unbounded)", store.maxSize)
+	}
+}
