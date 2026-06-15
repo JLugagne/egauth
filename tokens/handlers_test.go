@@ -69,7 +69,7 @@ func TestRefreshHandler_CSRFBlocksCrossOrigin(t *testing.T) {
 
 func TestRefreshHandler_CSRFAllowsSameOrigin(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc, tokens.WithTrustedOrigins("app.example.com"))
@@ -99,7 +99,7 @@ func TestLogoutHandler_CSRFBlocksCrossOrigin(t *testing.T) {
 
 func TestRefreshHandler_Success(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc)
@@ -118,7 +118,7 @@ func TestRefreshHandler_Success(t *testing.T) {
 
 func TestRefreshHandler_SuccessRedirect(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc, tokens.WithSuccessRedirect("/dashboard"))
@@ -131,7 +131,7 @@ func TestRefreshHandler_SuccessRedirect(t *testing.T) {
 
 func TestRefreshHandler_PersistentRefreshOption(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc, tokens.WithPersistentRefresh())
@@ -198,7 +198,7 @@ func TestRefreshHandler_MethodNotAllowed(t *testing.T) {
 func TestLogoutHandler_RevokesFamilyAndClears(t *testing.T) {
 	ctx := context.Background()
 	svc, store := newRotator(t)
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// store (*memory.Store) satisfies tokens.FamilyRevoker.
@@ -284,7 +284,7 @@ func TestLogoutHandler_FindStoreErrorIndicatesFailure(t *testing.T) {
 // returns an error, the handler clears cookies but reports failure (not 204 success).
 func TestLogoutHandler_RevokeFamilyErrorIndicatesFailure(t *testing.T) {
 	storeErr := errors.New("db: connection refused")
-	familyID := uuid.New()
+	familyID := uuid.Must(uuid.NewV7())
 	rev := &mockRevoker{
 		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
 			return &tokens.RefreshToken{FamilyID: familyID}, nil
@@ -312,7 +312,7 @@ func TestLogoutHandler_RevokeFamilyErrorIndicatesFailure(t *testing.T) {
 // failure URL with error=logout_incomplete.
 func TestLogoutHandler_RevokeFamilyErrorWithFailureRedirect(t *testing.T) {
 	storeErr := errors.New("db: connection refused")
-	familyID := uuid.New()
+	familyID := uuid.Must(uuid.NewV7())
 	rev := &mockRevoker{
 		findFunc: func(_ context.Context, _ string, _ string) (*tokens.RefreshToken, error) {
 			return &tokens.RefreshToken{FamilyID: familyID}, nil
@@ -385,7 +385,7 @@ func TestRefreshHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 // produce a false positive: a same-origin POST with no WithTrustedOrigins still succeeds.
 func TestRefreshHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc)
@@ -403,7 +403,7 @@ func TestRefreshHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {
 // POST is accepted (and reaches the rotator).
 func TestRefreshHandler_WithInsecureNoOriginCheck(t *testing.T) {
 	svc, _ := newRotator(t)
-	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RefreshHandler[struct{}](svc, tokens.WithInsecureNoOriginCheck())

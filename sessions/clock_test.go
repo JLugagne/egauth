@@ -17,7 +17,7 @@ import (
 
 func TestWithClock_DeterministicExpiry(t *testing.T) {
 	ctx := context.Background()
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-clock"
 
 	// A frozen clock the test advances by hand.

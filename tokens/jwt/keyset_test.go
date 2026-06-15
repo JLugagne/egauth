@@ -48,14 +48,14 @@ func TestKeyset_TokenTaggedWithActiveKid(t *testing.T) {
 		{KeyID: "k-new", Secret: newSecret},
 	}, "k-new")
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 	assert.Equal(t, "k-new", kidOf(t, pair.AccessToken), "new tokens must carry the active kid")
 }
 
 func TestKeyset_RetiredKeyStillVerifiesDuringOverlap(t *testing.T) {
 	ctx := context.Background()
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	// 1. Issue a token while "k-old" is the active key.
 	svcOld := keysetService(t, []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}}, "k-old")
@@ -85,7 +85,7 @@ func TestKeyset_RetiredKeyStillVerifiesDuringOverlap(t *testing.T) {
 func TestKeyset_DroppingOldKeyRejectsItsTokens(t *testing.T) {
 	ctx := context.Background()
 	svcOld := keysetService(t, []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}}, "k-old")
-	oldPair, err := svcOld.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	oldPair, err := svcOld.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// After the overlap window, "k-old" is dropped from the set entirely.
@@ -98,7 +98,7 @@ func TestKeyset_UnknownKidRejected(t *testing.T) {
 	ctx := context.Background()
 	// Sign a token with a key id that the verifier does not know.
 	stranger := keysetService(t, []jwt.SigningKey{{KeyID: "k-stranger", Secret: oldSecret}}, "k-stranger")
-	pair, err := stranger.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := stranger.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	svc := keysetService(t, []jwt.SigningKey{{KeyID: "k-new", Secret: newSecret}}, "k-new")
@@ -108,7 +108,7 @@ func TestKeyset_UnknownKidRejected(t *testing.T) {
 
 func TestKeyset_LegacyTokenVerifiesAfterEnablingRotation(t *testing.T) {
 	ctx := context.Background()
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	// 1. A token minted in single-key (legacy) mode carries no kid.
 	svcLegacy := jwt.New[struct{}](jwt.Config[struct{}]{
@@ -153,7 +153,7 @@ func TestKeyset_KidlessTokenRejectedWithoutLegacyKey(t *testing.T) {
 		Store: memory.NewStore[struct{}](), SecretKey: oldSecret, Issuer: "egauth-test",
 		AccessTTL: 5 * time.Minute, RefreshTTL: 24 * time.Hour, ClaimsProvider: okProvider(t),
 	})
-	legacyPair, err := svcLegacy.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	legacyPair, err := svcLegacy.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// Pure keyset, no legacy SecretKey: a kid-less token has no key to verify against.
@@ -172,7 +172,7 @@ func TestKeyset_RotateRefreshAcrossKeyChange(t *testing.T) {
 		ClaimsProvider: okProvider(t),
 		SigningKeys:    []jwt.SigningKey{{KeyID: "k-old", Secret: oldSecret}}, ActiveKeyID: "k-old",
 	})
-	pair, err := svcOld.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svcOld.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// Same store, key rolled to new. Rotating the (opaque) refresh token yields a pair signed
@@ -209,7 +209,7 @@ func TestKeyset_MalformedKidRejected(t *testing.T) {
 	// the legacy key — a present kid header always selects the kid path.
 	makeToken := func(kid any) string {
 		claims := gojwt.MapClaims{
-			"sub": uuid.New().String(),
+			"sub": uuid.Must(uuid.NewV7()).String(),
 			"iss": "egauth-test",
 			"exp": float64(time.Now().Add(time.Hour).Unix()),
 			"iat": float64(time.Now().Add(-time.Minute).Unix()),

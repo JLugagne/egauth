@@ -114,7 +114,7 @@ func TestDeleteAccount_UnknownUserDoesNotRunErasers(t *testing.T) {
 	}
 	svc, _ := newVerificationService(t, identity.WithAccountErasers(eraser))
 
-	err := svc.DeleteAccount(ctx, "", uuid.New())
+	err := svc.DeleteAccount(ctx, "", uuid.Must(uuid.NewV7()))
 	assert.ErrorIs(t, err, identity.ErrUserNotFound)
 	assert.False(t, called, "erasers must not run for a non-existent user")
 }

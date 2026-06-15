@@ -41,7 +41,7 @@ func TestRotate_HappyPath(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 
@@ -72,7 +72,7 @@ func TestRotate_ReuseDetectionRevokesFamily(t *testing.T) {
 		ReuseGracePeriod: -1, // strict: no benign-concurrency leeway
 	})
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// Legitimate rotation: A -> B.
@@ -93,7 +93,7 @@ func TestRotate_ReuseWithinGraceKeepsFamily(t *testing.T) {
 	// Default grace (10s): an immediate replay is benign concurrency, not theft.
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	newPair, err := svc.Rotate(ctx, "", pair.RefreshToken)
@@ -113,7 +113,7 @@ func TestRotate_ExpiredRefresh(t *testing.T) {
 	// Negative TTL => the issued refresh token is already expired.
 	svc, _ := newRotatingService(t, okProvider(t), -time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
@@ -141,7 +141,7 @@ func TestRotate_NoClaimsProvider(t *testing.T) {
 		InsecureAllowWeakKey: true,
 	})
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
@@ -161,7 +161,7 @@ func TestRotate_ClaimsProviderErrorFailsClosed(t *testing.T) {
 	})
 	svc, _ := newRotatingService(t, disabled, time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
@@ -176,7 +176,7 @@ func TestRotate_MultiTenantIsolation(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), TenantID: "t1"})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7()), TenantID: "t1"})
 	require.NoError(t, err)
 
 	// Rotating under the wrong tenant must not find the token.
@@ -193,7 +193,7 @@ func TestRotate_ConcurrentBenignKeepsFamily(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	const n = 8
@@ -238,7 +238,7 @@ func TestRotate_ProviderTenantCannotRelocateFamily(t *testing.T) {
 	})
 	svc, _ := newRotatingService(t, provider, 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), TenantID: "t1"})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7()), TenantID: "t1"})
 	require.NoError(t, err)
 
 	newPair, err := svc.Rotate(ctx, "t1", pair.RefreshToken)
@@ -261,7 +261,7 @@ func TestRotate_AccessTTLNotExtendedByProvider(t *testing.T) {
 	})
 	svc, _ := newRotatingService(t, provider, 24*time.Hour) // AccessTTL is 5m (see helper)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	newPair, err := svc.Rotate(ctx, "", pair.RefreshToken)
@@ -274,7 +274,7 @@ func TestRotate_ConcurrentSingleUse(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	const n = 16
@@ -314,7 +314,7 @@ func TestRotate_ClaimsProviderReceivesRotationContext(t *testing.T) {
 	})
 	svc, store := newRotatingService(t, provider, 24*time.Hour)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID, AuthTime: authTime})
 	require.NoError(t, err)
 

@@ -31,9 +31,9 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 
 	t.Run("Contract: Session CRUD", func(t *testing.T) {
 		tokenHash := "session_token_hash"
-		userID := uuid.New()
+		userID := uuid.Must(uuid.NewV7())
 		sess := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    userID,
 			TokenHash: tokenHash,
@@ -61,9 +61,9 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 	})
 
 	t.Run("Contract: Update Session (Touch/Rotate)", func(t *testing.T) {
-		userID := uuid.New()
+		userID := uuid.Must(uuid.NewV7())
 		sess := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    userID,
 			TokenHash: "update-h1",
@@ -93,15 +93,15 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 		err = store.UpdateSession(ctx, tenantA, &stale, "update-h1")
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "stale compare-and-set must be rejected")
 
-		err = store.UpdateSession(ctx, tenantA, &sessions.Session{ID: uuid.New(), TenantID: tenantA, TokenHash: "x", ExpiresAt: newExpiry}, "whatever")
+		err = store.UpdateSession(ctx, tenantA, &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, TokenHash: "x", ExpiresAt: newExpiry}, "whatever")
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 	})
 
 	t.Run("Contract: UpdateSession pins UserID and CreatedAt", func(t *testing.T) {
-		originalUser := uuid.New()
+		originalUser := uuid.Must(uuid.NewV7())
 		originalCreatedAt := time.Now().Add(-2 * time.Hour)
 		sess := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    originalUser,
 			TokenHash: "pin-h1",
@@ -113,7 +113,7 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
 
 		tampered := *sess
-		tampered.UserID = uuid.New()
+		tampered.UserID = uuid.Must(uuid.NewV7())
 		tampered.CreatedAt = time.Now()
 		tampered.TokenHash = "pin-h2"
 		require.NoError(t, store.UpdateSession(ctx, tenantA, &tampered, "pin-h1"))
@@ -125,10 +125,10 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 	})
 
 	t.Run("Contract: BindSession re-binds the user", func(t *testing.T) {
-		anonUser := uuid.New()
+		anonUser := uuid.Must(uuid.NewV7())
 		originalCreatedAt := time.Now().Add(-3 * time.Hour)
 		sess := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    anonUser,
 			TokenHash: "bind-anon",
@@ -139,7 +139,7 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 		}
 		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
 
-		authUser := uuid.New()
+		authUser := uuid.Must(uuid.NewV7())
 		rebound := *sess
 		rebound.UserID = authUser
 		rebound.TokenHash = "bind-auth"
@@ -160,14 +160,14 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 		err = store.BindSession(ctx, tenantA, stale, "bind-anon")
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "stale compare-and-set must be rejected")
 
-		err = store.BindSession(ctx, tenantA, &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: uuid.New(), TokenHash: "y", ExpiresAt: time.Now().Add(time.Hour)}, "whatever")
+		err = store.BindSession(ctx, tenantA, &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, UserID: uuid.Must(uuid.NewV7()), TokenHash: "y", ExpiresAt: time.Now().Add(time.Hour)}, "whatever")
 		assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 	})
 
 	t.Run("Contract: Delete by UserID", func(t *testing.T) {
-		userID := uuid.New()
-		sess1 := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "h1", ExpiresAt: time.Now().Add(time.Hour)}
-		sess2 := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "h2", ExpiresAt: time.Now().Add(time.Hour)}
+		userID := uuid.Must(uuid.NewV7())
+		sess1 := &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, UserID: userID, TokenHash: "h1", ExpiresAt: time.Now().Add(time.Hour)}
+		sess2 := &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, UserID: userID, TokenHash: "h2", ExpiresAt: time.Now().Add(time.Hour)}
 
 		_ = store.CreateSession(ctx, tenantA, sess1)
 		_ = store.CreateSession(ctx, tenantA, sess2)
@@ -180,10 +180,10 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 	})
 
 	t.Run("Contract: CreateSession duplicate token hash is rejected", func(t *testing.T) {
-		userA := uuid.New()
-		userB := uuid.New()
+		userA := uuid.Must(uuid.NewV7())
+		userB := uuid.Must(uuid.NewV7())
 		sess := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    userA,
 			TokenHash: "dup-hash-contract",
@@ -195,7 +195,7 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 		require.NoError(t, store.CreateSession(ctx, tenantA, sess))
 
 		duplicate := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    userB,
 			TokenHash: "dup-hash-contract",
@@ -213,9 +213,9 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 	})
 
 	t.Run("Contract: FindSessionByHash returns ErrSessionNotFound for expired session", func(t *testing.T) {
-		userID := uuid.New()
+		userID := uuid.Must(uuid.NewV7())
 		expired := &sessions.Session{
-			ID:        uuid.New(),
+			ID:        uuid.Must(uuid.NewV7()),
 			TenantID:  tenantA,
 			UserID:    userID,
 			TokenHash: "expired-lookup-h",
@@ -233,10 +233,10 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_session_hash"
-			userID := uuid.New()
+			userID := uuid.Must(uuid.NewV7())
 
 			sessA := &sessions.Session{
-				ID:        uuid.New(),
+				ID:        uuid.Must(uuid.NewV7()),
 				TenantID:  tenantA,
 				UserID:    userID,
 				TokenHash: sharedHash,
@@ -254,9 +254,9 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 
 		t.Run("Contract: ErrTenantMismatch on record-vs-arg conflict", func(t *testing.T) {
 			sess := &sessions.Session{
-				ID:        uuid.New(),
+				ID:        uuid.Must(uuid.NewV7()),
 				TenantID:  tenantA,
-				UserID:    uuid.New(),
+				UserID:    uuid.Must(uuid.NewV7()),
 				TokenHash: "mismatch-h",
 				ExpiresAt: time.Now().Add(time.Hour),
 			}
@@ -284,9 +284,9 @@ func SessionReaperContract(t *testing.T, store interface {
 	}
 
 	t.Run("Contract: DeleteExpired purges only expired sessions", func(t *testing.T) {
-		userID := uuid.New()
-		expired := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "exp-h", ExpiresAt: time.Now().Add(-time.Hour)}
-		live := &sessions.Session{ID: uuid.New(), TenantID: tenantA, UserID: userID, TokenHash: "live-h", ExpiresAt: time.Now().Add(time.Hour)}
+		userID := uuid.Must(uuid.NewV7())
+		expired := &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, UserID: userID, TokenHash: "exp-h", ExpiresAt: time.Now().Add(-time.Hour)}
+		live := &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, UserID: userID, TokenHash: "live-h", ExpiresAt: time.Now().Add(time.Hour)}
 		require.NoError(t, store.CreateSession(ctx, tenantA, expired))
 		require.NoError(t, store.CreateSession(ctx, tenantA, live))
 

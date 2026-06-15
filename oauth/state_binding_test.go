@@ -76,7 +76,7 @@ func TestCallbackHandler_ProviderConfusionRejected(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, recB.Code, "cross-provider state replay must be rejected")
 
 	// Sanity: replaying against provider A's own callback still works.
-	linker := &stubLinker{user: &identity.User{ID: uuid.New(), Email: "u@example.com"}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}}
 	recA := runCallback(t, pA, linker, issuer, stateCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
@@ -102,7 +102,7 @@ func TestCallbackHandler_TenantConfusionRejected(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, recY.Code, "cross-tenant state replay must be rejected")
 
 	// Same tenant still succeeds.
-	linker := &stubLinker{user: &identity.User{ID: uuid.New(), Email: "u@example.com"}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}}
 	recX := runCallback(t, p, linker, issuer, stateCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),

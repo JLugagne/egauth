@@ -14,7 +14,7 @@ import (
 
 func TestService(t *testing.T) {
 	ctx := context.Background()
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-1"
 
 	t.Run("Create and Validate", func(t *testing.T) {
@@ -24,7 +24,7 @@ func TestService(t *testing.T) {
 			},
 			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 				return &sessions.Session{
-					ID:        uuid.New(),
+					ID:        uuid.Must(uuid.NewV7()),
 					TenantID:  tenantID,
 					UserID:    userID,
 					ExpiresAt: time.Now().Add(time.Hour),
@@ -59,7 +59,7 @@ func TestService(t *testing.T) {
 	})
 
 	t.Run("Revoke Session", func(t *testing.T) {
-		sessionID := uuid.New()
+		sessionID := uuid.Must(uuid.NewV7())
 		mockStore := &storetest.MockStore{
 			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
 				return &sessions.Session{

@@ -23,7 +23,7 @@ func newServiceFixture(t *testing.T) (mfa.Service, *clock, uuid.UUID) {
 	t.Helper()
 	c := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(c.now), mfa.WithIssuer("Acme"))
-	return svc, c, uuid.New()
+	return svc, c, uuid.Must(uuid.NewV7())
 }
 
 // code returns a valid TOTP for the given secret at the fixture's current time.
@@ -141,7 +141,7 @@ func TestVerifyTOTPAttemptLimit(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	const maxAttempts = 3
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	// Advance one period so a fresh (un-replayed) code would otherwise be accepted.
@@ -160,7 +160,7 @@ func TestVerifyTOTP_SuccessResetsAttemptCounter(t *testing.T) {
 	ctx := context.Background()
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(3))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
@@ -181,7 +181,7 @@ func TestVerifyRecoveryCodeAttemptLimit(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	const maxAttempts = 3
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	_, recovery := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	// Wrong recovery codes share the second-factor budget and lock the factor.
@@ -200,7 +200,7 @@ func TestVerifyRecoveryCode_SuccessResetsAttemptCounter(t *testing.T) {
 	ctx := context.Background()
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(3))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	_, recovery := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	// Two wrong guesses, then a valid recovery code resets the shared budget.
@@ -217,7 +217,7 @@ func TestVerifyTOTP_NoAttemptLimit(t *testing.T) {
 	ctx := context.Background()
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithNoAttemptLimit())
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
@@ -236,7 +236,7 @@ func TestVerifyTOTP_ConcurrentAttemptLimit(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	const maxAttempts = 5
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	enrollAndConfirm(t, ctx, svc, clk, uid)
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 

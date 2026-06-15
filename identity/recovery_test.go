@@ -112,10 +112,10 @@ func TestRecoveryEmail_KindIsolation(t *testing.T) {
 func TestRecoveryEmail_RejectsUnknownUser(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newVerificationService(t)
-	_, err := svc.RequestRecoveryEmail(ctx, "", uuid.New(), "rec@elsewhere.example")
+	_, err := svc.RequestRecoveryEmail(ctx, "", uuid.Must(uuid.NewV7()), "rec@elsewhere.example")
 	assert.ErrorIs(t, err, identity.ErrUserNotFound)
 
-	_, err = svc.RecoveryChannels(ctx, "", uuid.New())
+	_, err = svc.RecoveryChannels(ctx, "", uuid.Must(uuid.NewV7()))
 	assert.ErrorIs(t, err, identity.ErrUserNotFound)
 }
 

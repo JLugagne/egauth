@@ -20,7 +20,7 @@ import (
 // TestRequireAuthTenantAware covers the tenant-aware verification path of RequireAuth, added so
 // multi-tenant consumers can bind access tokens to a per-request tenant via the HTTP middleware.
 func TestRequireAuthTenantAware(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	const tenantA = "tenant-a"
 	const tenantB = "tenant-b"
 
@@ -129,7 +129,7 @@ func TestRequireAuthTenantAware(t *testing.T) {
 		}
 		svc := jwt.New[struct{}](cfg)
 
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
 			Subject:   uid,
 			TenantID:  tenantA,

@@ -22,7 +22,7 @@ func TestRequestEmailChangeHandler_RequiresResolvedUser(t *testing.T) {
 	})
 
 	t.Run("resolved user -> token delivered to the new address", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "old@example.com"}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "old@example.com"}
 		svc := &servicetest.MockService{
 			RequestEmailChangeFunc: func(_ context.Context, _ string, userID uuid.UUID, newEmail string) (string, error) {
 				assert.Equal(t, user.ID, userID)
@@ -44,7 +44,7 @@ func TestRequestEmailChangeHandler_RequiresResolvedUser(t *testing.T) {
 }
 
 func TestRequestEmailChangeHandler_ErrorMapping(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "old@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "old@example.com"}
 	cases := []struct {
 		name     string
 		err      error
@@ -84,7 +84,7 @@ func TestConfirmEmailChangeHandler(t *testing.T) {
 		svc := &servicetest.MockService{
 			ConfirmEmailChangeFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
-				return &identity.User{ID: uuid.New(), Email: "new@example.com"}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "new@example.com"}, nil
 			},
 		}
 		h := identity.ConfirmEmailChangeHandler(svc)

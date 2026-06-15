@@ -39,7 +39,7 @@ func TestDispatchDeliveryBounded(t *testing.T) {
 		cap     = 8
 		nBursts = 200
 	)
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	svc := &servicetest.MockService{
 		RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 			return "sel.ver", user, nil
@@ -98,7 +98,7 @@ func TestDispatchDeliveryBounded(t *testing.T) {
 // TestDispatchDeliveryDropEmitsEvent asserts the dropped delivery carries the documented
 // ErrDeliveryDropped sentinel so consumers can distinguish a cap-drop from a backend outage.
 func TestDispatchDeliveryDropEmitsEvent(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	svc := &servicetest.MockService{
 		RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 			return "sel.ver", user, nil
@@ -147,7 +147,7 @@ func TestDispatchDeliveryDropEmitsEvent(t *testing.T) {
 // TestDispatchDeliveryTimeout asserts that a delivery exceeding its per-delivery timeout is
 // abandoned (the delivery context is cancelled) and surfaces a DeliveryFailed event.
 func TestDispatchDeliveryTimeout(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	svc := &servicetest.MockService{
 		RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 			return "sel.ver", user, nil
@@ -194,7 +194,7 @@ func TestDispatchDeliveryTimeout(t *testing.T) {
 // from the request: the request finishing must NOT cancel an in-flight delivery (durability), only
 // the per-delivery timeout bounds it.
 func TestDispatchDeliveryTimeoutDoesNotCancelOnRequestEnd(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	svc := &servicetest.MockService{
 		RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 			return "sel.ver", user, nil
@@ -243,7 +243,7 @@ func TestDeliveryConcurrencyDefault(t *testing.T) {
 	assert.Equal(t, 64, identity.DefaultDeliveryConcurrency, "documented default delivery concurrency")
 	assert.Equal(t, 30*time.Second, identity.DefaultDeliveryTimeout, "documented default delivery timeout")
 
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	svc := &servicetest.MockService{
 		RequestPasswordResetFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, error) {
 			return "sel.ver", user, nil

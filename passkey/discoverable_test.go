@@ -66,7 +66,7 @@ func TestFinishDiscoverableLogin_ResolvesUserFromUserHandle(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	// Usernameless login: the service is given no userID up front.
@@ -86,7 +86,7 @@ func TestFinishDiscoverableLogin_UnknownUserHandleRejected(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginDiscoverableLogin()
@@ -94,6 +94,6 @@ func TestFinishDiscoverableLogin_UnknownUserHandleRejected(t *testing.T) {
 
 	// Present a user handle for an account with no credentials: verification must fail.
 	_, _, err = svc.FinishDiscoverableLogin(ctx, "", *session,
-		auth.loginRequest(t, session.Challenge, userHandleOf(uuid.New())))
+		auth.loginRequest(t, session.Challenge, userHandleOf(uuid.Must(uuid.NewV7()))))
 	require.Error(t, err)
 }

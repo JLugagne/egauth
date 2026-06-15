@@ -44,7 +44,7 @@ func beginDiscoverableAndCaptureFinish(t *testing.T, svc *passkey.Service, uid u
 // same body bytes) must be rejected with 400 once the challenge has been consumed.
 func TestDiscoverableLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 	svc := newPasskeyService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	// Register under tenant "t1" so the user handle resolves correctly during discoverable login.
 	auth := registerTenant(t, svc, "t1", uid)
 

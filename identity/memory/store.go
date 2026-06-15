@@ -39,7 +39,7 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 
 	now := time.Now()
 	user := &identity.User{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenantID,
 		Email:     email,
 		CreatedAt: now,
@@ -174,7 +174,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 
 	now := time.Now()
 	existing.DeletedAt = &now
-	existing.Email = uuid.New().String()
+	existing.Email = uuid.Must(uuid.NewV7()).String()
 	existing.UpdatedAt = now
 
 	for _, ident := range s.identities {
@@ -185,7 +185,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 			// branch of LinkOrCreateIdentity detect the deleted account and refuse it (via the
 			// DeletedAt gate in the service) rather than silently provisioning a new account.
 			if ident.Provider == "password" {
-				ident.ProviderID = uuid.New().String()
+				ident.ProviderID = uuid.Must(uuid.NewV7()).String()
 			}
 		}
 	}
@@ -223,7 +223,7 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 	}
 
 	now := time.Now()
-	ident.ID = uuid.New()
+	ident.ID = uuid.Must(uuid.NewV7())
 	ident.TenantID = tenantID
 	ident.CreatedAt = now
 	ident.UpdatedAt = now

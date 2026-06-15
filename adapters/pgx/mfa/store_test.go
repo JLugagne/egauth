@@ -62,7 +62,7 @@ func TestPgxStore_Contract(t *testing.T) {
 func TestPgxStore_ReplaceRecoveryCodesAtomic(t *testing.T) {
 	ctx := context.Background()
 	store := newStore(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 
 	require.NoError(t, store.ReplaceRecoveryCodes(ctx, "t1", uid, []string{"keepA", "keepB"}))
 

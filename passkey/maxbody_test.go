@@ -18,7 +18,7 @@ import (
 // read in full and parsed, so the handler would not reject it on size.
 func TestFinishLogin_OversizedBodyRejected(t *testing.T) {
 	svc := newPasskeyService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	auth := registerTenant(t, svc, "t1", uid)
 
 	baseOpts := []passkey.HandlerOption{
@@ -51,7 +51,7 @@ func TestFinishLogin_OversizedBodyRejected(t *testing.T) {
 // body still succeeds under the default cap.
 func TestFinishLogin_NormalBodyAccepted(t *testing.T) {
 	svc := newPasskeyService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	auth := registerTenant(t, svc, "t1", uid)
 
 	opts := []passkey.HandlerOption{

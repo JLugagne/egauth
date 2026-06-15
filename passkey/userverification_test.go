@@ -51,7 +51,7 @@ func newUVPreferredService(t *testing.T) *passkey.Service {
 func TestUserVerificationRequired_PropagatedIntoCeremonies(t *testing.T) {
 	ctx := context.Background()
 	svc := newUVRequiredService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	cc, regSession, err := svc.BeginRegistration(ctx, "", userID, "user@example.com", "User")
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestUserVerificationRequired_PropagatedIntoCeremonies(t *testing.T) {
 func TestUserVerificationRequired_RejectsUVUnsetLogin(t *testing.T) {
 	ctx := context.Background()
 	svc := newUVRequiredService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	// A login presenting only the User Present bit (UV cleared) must be rejected.
@@ -103,7 +103,7 @@ func TestUserVerificationRequired_RejectsUVUnsetLogin(t *testing.T) {
 func TestUserVerificationRequired_RejectsUVUnsetDiscoverableLogin(t *testing.T) {
 	ctx := context.Background()
 	svc := newUVRequiredService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginDiscoverableLogin()
@@ -122,7 +122,7 @@ func TestUserVerificationRequired_RejectsUVUnsetDiscoverableLogin(t *testing.T) 
 func TestUserVerificationDefault_RequiresUV(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t) // zero-value UserVerification
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)
@@ -141,7 +141,7 @@ func TestUserVerificationDefault_RequiresUV(t *testing.T) {
 func TestUserVerificationPreferred_AcceptsUVUnset(t *testing.T) {
 	ctx := context.Background()
 	svc := newUVPreferredService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)

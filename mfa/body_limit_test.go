@@ -16,7 +16,7 @@ import (
 
 // okResolver returns a valid user so the handler proceeds past the auth guard into body parsing.
 func okResolver() mfa.HandlerOption {
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	return mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) {
 		return uid, "t1", true
 	})

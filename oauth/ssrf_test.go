@@ -16,6 +16,8 @@ func TestIsBlockedIP(t *testing.T) {
 	}{
 		{"ipv4 loopback", "127.0.0.1", true},
 		{"ipv4 loopback range", "127.5.6.7", true},
+		{"ipv4-mapped ipv6 loopback", "::ffff:127.0.0.1", true},
+		{"ipv4-mapped ipv6 loopback hex", "::ffff:7f00:1", true},
 		{"ipv6 loopback", "::1", true},
 		{"cloud metadata", "169.254.169.254", true},
 		{"ipv4 link-local", "169.254.0.1", true},
@@ -59,6 +61,8 @@ func TestSafeDialControlBlocksInternal(t *testing.T) {
 	blocked := []string{
 		"127.0.0.1:80",
 		"[::1]:443",
+		"[::ffff:127.0.0.1]:80",
+		"[::ffff:7f00:1]:443",
 		"169.254.169.254:80",
 		"10.0.0.1:443",
 		"192.168.1.1:80",

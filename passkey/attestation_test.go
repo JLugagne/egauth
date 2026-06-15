@@ -63,7 +63,7 @@ func TestAttestation_NoConfig_BehavesAsToday(t *testing.T) {
 	// Zero AttestationConfig: a registration from any AAGUID must succeed and be stored,
 	// exactly as before this feature existed.
 	svc, store, _ := newAttestationService(t, passkey.AttestationConfig{})
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	err := attemptRegister(t, svc, userID, fixedAAGUID(0xAB))
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestAttestation_AllowList_RejectsForeignAAGUID(t *testing.T) {
 	svc, store, sink := newAttestationService(t, passkey.AttestationConfig{
 		PermittedAAGUIDs: []uuid.UUID{permitted},
 	})
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	// The authenticator reports a DIFFERENT, non-zero AAGUID, so it is outside the allow-list.
 	foreign := uuid.MustParse("22222222-2222-2222-2222-222222222222")
@@ -106,7 +106,7 @@ func TestAttestation_AllowList_AcceptsPermittedAAGUID(t *testing.T) {
 	svc, store, _ := newAttestationService(t, passkey.AttestationConfig{
 		PermittedAAGUIDs: []uuid.UUID{permitted},
 	})
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	permittedBytes, err := permitted.MarshalBinary()
 	require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestAttestation_DenyList_RejectsProhibitedAAGUID(t *testing.T) {
 	svc, store, sink := newAttestationService(t, passkey.AttestationConfig{
 		ProhibitedAAGUIDs: []uuid.UUID{prohibited},
 	})
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	prohibitedBytes, err := prohibited.MarshalBinary()
 	require.NoError(t, err)
@@ -146,7 +146,7 @@ func TestAttestation_ConveyancePropagatedIntoCeremony(t *testing.T) {
 	svc, _, _ := newAttestationService(t, passkey.AttestationConfig{
 		ConveyancePreference: protocol.PreferDirectAttestation,
 	})
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	cc, _, err := svc.BeginRegistration(ctx, "", userID, "user@example.com", "User")
 	require.NoError(t, err)

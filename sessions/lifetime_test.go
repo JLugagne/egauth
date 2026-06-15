@@ -31,7 +31,7 @@ func TestMaxLifetime_TouchCannotExtendPastAbsoluteDeadline(t *testing.T) {
 		sessions.WithMaxLifetime(maxLifetime),
 	)
 
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
 	require.NoError(t, err)
 
 	// Touch every 30s (well within the idle window) until we cross the absolute deadline.
@@ -67,7 +67,7 @@ func TestMaxLifetime_TouchClampsExpiryToDeadline(t *testing.T) {
 		sessions.WithMaxLifetime(maxLifetime),
 	)
 
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
 	require.NoError(t, err)
 
 	// Keep the session warm with periodic Touches so it never idle-expires, until we are 30s
@@ -103,7 +103,7 @@ func TestMaxLifetime_RotateClampsExpiryToDeadline(t *testing.T) {
 		sessions.WithMaxLifetime(maxLifetime),
 	)
 
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
 	require.NoError(t, err)
 
 	// Keep the session warm so it never idle-expires, until 30s before the absolute deadline.
@@ -139,7 +139,7 @@ func TestNoMaxLifetime_TouchCanExtendIndefinitely(t *testing.T) {
 		sessions.WithNoMaxLifetime(), // explicit insecure opt-out
 	)
 
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", time.Minute)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 
 	// Far past any plausible absolute deadline, but each Touch is within idle: must stay valid.
@@ -167,7 +167,7 @@ func TestWithMaxLifetime_ZeroKeepsDefault(t *testing.T) {
 	)
 
 	const idle = time.Hour
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
 	require.NoError(t, err)
 
 	// Advance 31 days touching every hour: the session must be rejected around the 30-day mark.
@@ -193,8 +193,8 @@ func TestRevokeAllForUser(t *testing.T) {
 	svc := sessions.NewService(memory.NewStore())
 
 	tenantID := "tenant-1"
-	victim := uuid.New()
-	other := uuid.New()
+	victim := uuid.Must(uuid.NewV7())
+	other := uuid.Must(uuid.NewV7())
 
 	var victimTokens []string
 	for range 3 {
@@ -230,8 +230,8 @@ func TestSingleTenant_RevokeAllForUser(t *testing.T) {
 	ctx := context.Background()
 	st := sessions.NewSingleTenant(sessions.NewService(memory.NewStore()))
 
-	victim := uuid.New()
-	other := uuid.New()
+	victim := uuid.Must(uuid.NewV7())
+	other := uuid.Must(uuid.NewV7())
 
 	_, victimToken, err := st.CreateSession(ctx, victim, "UA", "1.1.1.1", time.Hour)
 	require.NoError(t, err)
@@ -266,7 +266,7 @@ func TestDefaultMaxLifetime_TouchCannotExtendPastDefaultDeadline(t *testing.T) {
 		sessions.WithClock(clock),
 	)
 
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", idle)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
 	require.NoError(t, err)
 
 	// Advance 31 days in 1-hour steps, Touching on every step to keep the idle window alive.

@@ -69,8 +69,8 @@ func TestBeginLoginHandler_NoCredentialsOracleDocumented(t *testing.T) {
 func TestBeginLoginOracle_BehaviorBaseline(t *testing.T) {
 	svc, store := testService(t)
 
-	uidNone := uuid.New()
-	uidWith := uuid.New()
+	uidNone := uuid.Must(uuid.NewV7())
+	uidWith := uuid.Must(uuid.NewV7())
 	saveTestCredential(t, store, uidWith, []byte{0x10, 0x20, 0x30, 0x40})
 
 	t.Run("user_without_passkey_gets_400", func(t *testing.T) {

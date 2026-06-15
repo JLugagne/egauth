@@ -50,7 +50,7 @@ func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
 
 func TestBeginRegistrationHandler(t *testing.T) {
 	svc, _ := testService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	h := passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))
 
 	rec := httptest.NewRecorder()
@@ -75,7 +75,7 @@ func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T
 	svc, _ := testService(t)
 	// The Service carries a validated cookie key, but a per-handler override that clears it must
 	// still fail closed (defense in depth) rather than emit an unauthenticated cookie.
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.New()), passkey.WithCookieKey(nil))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(nil))
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -84,7 +84,7 @@ func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T
 
 func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	svc, _ := testService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 
 	// Begin to obtain a validly-signed ceremony cookie.
 	beginRec := httptest.NewRecorder()
@@ -122,14 +122,14 @@ func TestPasskeyHandlers_AuthAndMethodGuards(t *testing.T) {
 
 	t.Run("GET -> 405", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		passkey.BeginLoginHandler(svc, resolver(uuid.New()))(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())))(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 		assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 	})
 }
 
 func TestFinishRegistrationHandler_MissingSessionCookie(t *testing.T) {
 	svc, _ := testService(t)
-	h := passkey.FinishRegistrationHandler(svc, resolver(uuid.New()), passkey.WithCookieKey(testCookieKey))
+	h := passkey.FinishRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey))
 
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/register/finish", nil))
@@ -147,7 +147,7 @@ func TestPasskeyHandlers_StoreErrorIs500(t *testing.T) {
 
 	// BeginLogin loads credentials first; a store failure must surface as 5xx, not a 400
 	// "bad attestation".
-	h := passkey.BeginLoginHandler(svc, resolver(uuid.New()), passkey.WithCookieKey(testCookieKey))
+	h := passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey))
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -155,7 +155,7 @@ func TestPasskeyHandlers_StoreErrorIs500(t *testing.T) {
 
 func TestBeginLoginHandler_NoCredentials(t *testing.T) {
 	svc, _ := testService(t)
-	h := passkey.BeginLoginHandler(svc, resolver(uuid.New()))
+	h := passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())))
 
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/login/begin", nil))

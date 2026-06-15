@@ -21,7 +21,7 @@ func TestConfirmTOTP_AttemptLimit(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	const maxAttempts = 3
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 
 	// Enroll but do NOT confirm — we want a pending, unconfirmed enrollment.
 	_, err := svc.EnrollTOTP(ctx, "", uid, "user@example.com")

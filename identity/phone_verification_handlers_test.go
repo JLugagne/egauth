@@ -68,7 +68,7 @@ func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 	})
 
 	t.Run("resolved user -> token delivered by SMS to the number", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 		svc := &servicetest.MockService{
 			RequestPhoneVerificationFunc: func(_ context.Context, _ string, userID uuid.UUID, phone string) (string, error) {
 				assert.Equal(t, user.ID, userID)
@@ -89,7 +89,7 @@ func TestRequestPhoneVerificationHandler_RequiresResolvedUser(t *testing.T) {
 	})
 
 	t.Run("number normalized before delivery", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 		svc := &servicetest.MockService{
 			RequestPhoneVerificationFunc: func(_ context.Context, _ string, _ uuid.UUID, _ string) (string, error) {
 				return "sel.ver", nil
@@ -115,7 +115,7 @@ func TestRequestPhoneVerificationHandler_RejectsGET(t *testing.T) {
 }
 
 func TestRequestPhoneVerificationHandler_ErrorMapping(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 	cases := []struct {
 		name     string
 		err      error
@@ -157,7 +157,7 @@ func TestConfirmPhoneVerificationHandler(t *testing.T) {
 		svc := &servicetest.MockService{
 			ConfirmPhoneVerificationFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
-				return &identity.User{ID: uuid.New(), Phone: &phone}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), Phone: &phone}, nil
 			},
 		}
 		h := identity.ConfirmPhoneVerificationHandler(svc)

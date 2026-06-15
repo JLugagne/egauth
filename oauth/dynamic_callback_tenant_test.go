@@ -71,7 +71,7 @@ func TestDynamicCallbackHandler_ImpureResolverUsesPreResolvedTenant(t *testing.T
 	}
 
 	linker := &tenantCapturingLinker{
-		stubLinker: stubLinker{user: &identity.User{ID: uuid.New(), Email: "u@example.com"}},
+		stubLinker: stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}},
 	}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
 		AccessToken:           "access",

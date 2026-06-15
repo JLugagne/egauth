@@ -1,47 +1,44 @@
-// Package pgx provides a PostgreSQL-backed mfa.Store using jackc/pgx.
 package pgx
 
 import (
 	"context"
-	"embed"
-	"errors"
+	"fmt"
 	"time"
 
-	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/keystore"
 	"github.com/JLugagne/egauth/mfa"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 )
 
-// MigrationsFS embeds the SQL migration files for the mfa module's Postgres schema,
-// applied via Migrate (which runs them through pgxmigrate).
-//
-//go:embed migrations/*.sql
-var MigrationsFS embed.FS
-
-// Migrate applies the embedded SQL migrations against db, skipping any already recorded in the
-// schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
-// migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
-func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+// NewStore creates a new PostgreSQL mfa store. The KEK is REQUIRED: it envelope-encrypts the
+// TOTP shared secret at rest. NewStore panics on a nil KEK so a misconfigured deployment cannot
+// start in a mode that would persist the second-factor seed in plaintext.
+func NewStore(db DBQuerier, kek *keystore.KEK) *Store {
+	if kek == nil {
+		panic("pgx mfa: a non-nil KEK is required (TOTP secret-at-rest encryption is mandatory)")
+	}
+	return &Store{db: db, kek: kek}
 }
 
-// DBQuerier matches both *pgxpool.Pool and pgx.Tx.
-type DBQuerier interface {
-	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+// ErrSecretCorrupt is returned by GetTOTP when the stored TOTP secret cannot be decrypted with
+// the configured KEK — it was sealed under a different KEK, the column was tampered with, or it
+// is a legacy plaintext row predating secret-at-rest encryption. The store fails CLOSED: it
+// never hands back a wrong or unverifiable secret. It wraps keystore.ErrCiphertextCorrupt so
+// callers can match either sentinel.
+var ErrSecretCorrupt = fmt.Errorf("pgx mfa: stored TOTP secret could not be decrypted: %w", keystore.ErrCiphertextCorrupt)
+
+// sealSecret envelope-encrypts the base32 TOTP seed for storage.
+func (s *Store) sealSecret(secret string) ([]byte, error) {
+	return s.kek.Seal([]byte(secret))
 }
 
-// Store implements mfa.Store for PostgreSQL.
-type Store struct {
-	db DBQuerier
-}
-
-// NewStore creates a new PostgreSQL mfa store.
-func NewStore(db DBQuerier) *Store {
-	return &Store{db: db}
+// openSecret reverses sealSecret. It fails closed (ErrSecretCorrupt) on any decryption failure,
+// never returning a wrong or partial secret.
+func (s *Store) openSecret(sealed []byte) (string, error) {
+	pt, err := s.kek.Open(sealed)
+	if err != nil {
+		return "", ErrSecretCorrupt
+	}
+	return string(pt), nil
 }
 
 func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment) error {
@@ -51,6 +48,12 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 	e.TenantID = tenantID
 	if e.CreatedAt.IsZero() {
 		e.CreatedAt = time.Now().UTC()
+	}
+
+	// Envelope-encrypt the base32 seed so a database dump never yields a usable second factor.
+	sealedSecret, err := s.sealSecret(e.Secret)
+	if err != nil {
+		return err
 	}
 
 	const query = `
@@ -68,176 +71,16 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 		t := e.LastAttemptAt.UTC()
 		lastAttemptAt = &t
 	}
-	_, err := s.db.Exec(ctx, query, tenantID, e.UserID, e.Secret, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
+	_, err = s.db.Exec(ctx, query, tenantID, e.UserID, sealedSecret, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
 	return err
 }
 
-func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*mfa.TOTPEnrollment, error) {
-	const query = `
-		SELECT secret, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at
-		FROM mfa_totp
-		WHERE tenant_id = $1 AND user_id = $2
-	`
-	e := &mfa.TOTPEnrollment{UserID: userID, TenantID: tenantID}
-	var lastAttemptAt *time.Time
-	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(
-		&e.Secret, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &lastAttemptAt, &e.CreatedAt,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, mfa.ErrNotEnrolled
-		}
-		return nil, err
-	}
-	if lastAttemptAt != nil {
-		e.LastAttemptAt = *lastAttemptAt
-	}
-	return e, nil
-}
-
-func (s *Store) DeleteTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM mfa_totp WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID)
-	return err
-}
-
-func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error) {
-	// A fresh accepted step also clears the failed-attempt budget and decay timestamp (reset on success).
-	const query = `
-		UPDATE mfa_totp SET last_used_step = $3, failed_attempts = 0, last_attempt_at = NULL
-		WHERE tenant_id = $1 AND user_id = $2 AND last_used_step < $3
-	`
-	tag, err := s.db.Exec(ctx, query, tenantID, userID, step)
-	if err != nil {
-		return false, err
-	}
-	return tag.RowsAffected() > 0, nil
-}
-
-func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time) (int, error) {
-	const query = `
-		UPDATE mfa_totp SET failed_attempts = failed_attempts + 1, last_attempt_at = $3
-		WHERE tenant_id = $1 AND user_id = $2
-		RETURNING failed_attempts
-	`
-	var attempts int
-	err := s.db.QueryRow(ctx, query, tenantID, userID, now.UTC()).Scan(&attempts)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, mfa.ErrNotEnrolled
-		}
-		return 0, err
-	}
-	return attempts, nil
-}
-
-func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error {
-	now := time.Now().UTC()
-	const insert = `
-		INSERT INTO mfa_recovery_codes (tenant_id, user_id, code_hash, used_at, created_at)
-		VALUES ($1, $2, $3, NULL, $4)
-	`
-	// The replace MUST be all-or-nothing (documented atomicity): otherwise a failed INSERT
-	// after the DELETE auto-commits would wipe the user's existing recovery codes and leave a
-	// partial/empty set. Run DELETE + INSERTs in one transaction.
-	replace := func(q DBQuerier) error {
-		if _, err := q.Exec(ctx, `DELETE FROM mfa_recovery_codes WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
-			return err
-		}
-		for _, h := range codeHashes {
-			if _, err := q.Exec(ctx, insert, tenantID, userID, h, now); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-
-	// When db is a pool/conn it can begin a transaction; when it is already a pgx.Tx, Begin
-	// opens a savepoint, so this is correct either way.
-	beginner, ok := s.db.(interface {
-		Begin(context.Context) (pgx.Tx, error)
-	})
-	if !ok {
-		return replace(s.db)
-	}
-	tx, err := beginner.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	if err := replace(tx); err != nil {
-		_ = tx.Rollback(ctx)
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error {
-	const consume = `
-		UPDATE mfa_recovery_codes SET used_at = now()
-		WHERE tenant_id = $1 AND user_id = $2 AND code_hash = $3 AND used_at IS NULL
-	`
-	// Resetting the TOTP lock-out budget on a successful consume must commit together with the
-	// consume itself; the recovery code (already marked used) is a successful second-factor
-	// verification. Run both in one transaction so the budget cannot leak a half-applied state.
-	const resetBudget = `
-		UPDATE mfa_totp SET failed_attempts = 0, last_attempt_at = NULL
-		WHERE tenant_id = $1 AND user_id = $2
-	`
-	consumeAndReset := func(q DBQuerier) error {
-		tag, err := q.Exec(ctx, consume, tenantID, userID, codeHash)
-		if err != nil {
-			return err
-		}
-		if tag.RowsAffected() == 0 {
-			return mfa.ErrRecoveryCodeNotFound
-		}
-		// Best-effort reset; no-op when the user has recovery codes but no TOTP enrollment.
-		_, err = q.Exec(ctx, resetBudget, tenantID, userID)
-		return err
-	}
-
-	beginner, ok := s.db.(interface {
-		Begin(context.Context) (pgx.Tx, error)
-	})
-	if !ok {
-		return consumeAndReset(s.db)
-	}
-	tx, err := beginner.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	if err := consumeAndReset(tx); err != nil {
-		_ = tx.Rollback(ctx)
-		return err
-	}
-	return tx.Commit(ctx)
-}
-
-func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM mfa_recovery_codes WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID)
-	return err
-}
-
-var _ mfa.Store = (*Store)(nil)
-
-// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
-// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
-// backend is unreachable and honors ctx for cancellation/deadline.
-func (s *Store) Ping(ctx context.Context) error {
-	var ok int
-	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
-}
-
-func (s *Store) ResetTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error {
-	const query = `
-		UPDATE mfa_totp SET failed_attempts = 0, last_attempt_at = NULL
-		WHERE tenant_id = $1 AND user_id = $2
-	`
-	tag, err := s.db.Exec(ctx, query, tenantID, userID)
-	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return mfa.ErrNotEnrolled
-	}
-	return nil
+// Store implements mfa.Store for PostgreSQL.
+//
+// The TOTP shared secret is envelope-encrypted at rest: SaveTOTP seals the base32 seed with the
+// deployment KEK (AES-256-GCM) before insert and GetTOTP opens it after read, so a database dump
+// alone never yields a usable second factor. The KEK is REQUIRED — NewStore panics on a nil KEK.
+type Store struct {
+	db  DBQuerier
+	kek *keystore.KEK
 }

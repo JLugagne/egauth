@@ -83,7 +83,7 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 
 	t.Run("Expired token returns ErrTokenExpired", func(t *testing.T) {
 		claims := tokens.Claims[MyCustomClaims]{
-			Subject: uuid.New(),
+			Subject: uuid.Must(uuid.NewV7()),
 		}
 
 		pair, err := svc.IssueTokenPair(ctx, claims)
@@ -102,7 +102,7 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 			InsecureAllowWeakKey: true,
 		})
 
-		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: uuid.New()})
+		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: uuid.Must(uuid.NewV7())})
 		require.NoError(t, err)
 
 		_, err = svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)

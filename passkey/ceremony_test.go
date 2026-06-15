@@ -13,7 +13,7 @@ import (
 func TestFinishRegistration_StoresCredential(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	auth := register(t, svc, userID)
 
@@ -28,7 +28,7 @@ func TestFinishRegistration_StoresCredential(t *testing.T) {
 func TestFinishLogin_VerifiesAssertionAndAdvancesCounter(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)
@@ -49,7 +49,7 @@ func TestFinishLogin_VerifiesAssertionAndAdvancesCounter(t *testing.T) {
 func TestFinishLogin_SignCountPersistsAcrossLogins(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	for want := uint32(1); want <= 3; want++ {
@@ -64,7 +64,7 @@ func TestFinishLogin_SignCountPersistsAcrossLogins(t *testing.T) {
 func TestFinishLogin_CloneDetection(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	// One legitimate login moves the stored counter to 1.
@@ -84,7 +84,7 @@ func TestFinishLogin_CloneDetection(t *testing.T) {
 func TestFinishLogin_WrongChallengeRejected(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)

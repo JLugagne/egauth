@@ -44,7 +44,7 @@ func newTestService(t *testing.T) *passkey.Service {
 func TestSoftAuthenticator_RegistrationAndLogin(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	const tenant = ""
 
 	auth := passkeytest.NewSoftAuthenticator(t, testRPID, testOrigin)
@@ -83,7 +83,7 @@ func TestSoftAuthenticator_RegistrationAndLogin(t *testing.T) {
 func TestSoftAuthenticator_MultipleLogins(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	const tenant = ""
 
 	auth := passkeytest.NewSoftAuthenticator(t, testRPID, testOrigin)
@@ -120,7 +120,7 @@ func TestSoftAuthenticator_MultipleLogins(t *testing.T) {
 func TestSoftAuthenticator_BackupFlags(t *testing.T) {
 	ctx := context.Background()
 	svc := newTestService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	const tenant = ""
 
 	auth := passkeytest.NewSoftAuthenticator(t, testRPID, testOrigin)

@@ -39,7 +39,7 @@ func (h *hookStore) ConsumeOTP(ctx context.Context, tenantID string, subjectID u
 func TestService_VerifyTOCTOU_DoesNotConsumeReplacement(t *testing.T) {
 	ctx := context.Background()
 	backing := memory.NewStore()
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	// Issue code A.
 	chA, err := otp.NewService(backing).Issue(ctx, "t1", sub, "login")

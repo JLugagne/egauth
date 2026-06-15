@@ -21,7 +21,7 @@ import (
 func TestRotate_WithinGraceReplayReturnsConcurrent(t *testing.T) {
 	ctx := context.Background()
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// First rotation wins and consumes the token.
@@ -43,7 +43,7 @@ func TestRotate_WithinGraceReplayReturnsConcurrent(t *testing.T) {
 func TestRequireAuth_ConcurrentRefreshPreservesCookies(t *testing.T) {
 	ctx := context.Background()
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// Simulate the winning request having already rotated the token.
@@ -77,7 +77,7 @@ func TestRequireAuth_ConcurrentRefreshPreservesCookies(t *testing.T) {
 func TestRefreshHandler_ConcurrentRefreshPreservesCookies(t *testing.T) {
 	ctx := context.Background()
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	_, err = f.svc.Rotate(ctx, "", pair.RefreshToken)

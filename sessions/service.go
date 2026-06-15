@@ -102,7 +102,7 @@ func (s *service) CreateSession(ctx context.Context, tenantID string, userID uui
 	now := s.now()
 
 	session := &Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenantID,
 		UserID:    userID,
 		TokenHash: hash,

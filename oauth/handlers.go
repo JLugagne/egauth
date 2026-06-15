@@ -361,8 +361,11 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
 			return
 		}
-		// Delegate to the static handler
-		BeginHandler(p, opts...)(w, r)
+		// Thread the pre-resolved tenant into the delegated handler as a constant resolver
+		// so that the state cookie binding operates on the same value that was used to look
+		// up the provider above.
+		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
+		BeginHandler(p, append(opts, fixedTenantOpt)...)(w, r)
 	}
 }
 

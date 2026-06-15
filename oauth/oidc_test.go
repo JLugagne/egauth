@@ -460,7 +460,7 @@ func TestCallbackHandler_OIDCSuccess(t *testing.T) {
 	idToken := ti.sign(t, baseIDClaims(ti.iss, "cid", nonce))
 	ti.tokenBody = fmt.Sprintf(`{"access_token":"at","token_type":"bearer","id_token":%q}`, idToken)
 
-	linker := &stubLinker{user: &identity.User{ID: uuid.New(), Email: "u@example.com"}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}}
 
 	rec := runCallback(t, p, linker, issuer, cookie,
@@ -482,7 +482,7 @@ func TestCallbackHandler_OIDCNonceMismatchRejected(t *testing.T) {
 	idToken := ti.sign(t, baseIDClaims(ti.iss, "cid", "attacker-nonce"))
 	ti.tokenBody = fmt.Sprintf(`{"access_token":"at","token_type":"bearer","id_token":%q}`, idToken)
 
-	linker := &stubLinker{user: &identity.User{ID: uuid.New()}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7())}}
 	rec := runCallback(t, p, linker, &stubIssuer{}, cookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
 		WithRedirectURL(testRedirect))

@@ -29,7 +29,7 @@ func mfaPost(form url.Values) *http.Request {
 func TestHandlers_FullFlow(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	// Enroll → JSON secret + uri.
@@ -100,7 +100,7 @@ func TestHandlers_RejectGET(t *testing.T) {
 	svc := mfa.NewService(memory.NewStore())
 	rec := httptest.NewRecorder()
 	mfa.EnrollHandler(svc, mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) {
-		return uuid.New(), "t1", true
+		return uuid.Must(uuid.NewV7()), "t1", true
 	}))(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	assert.Equal(t, http.StatusMethodNotAllowed, rec.Code)
 }
@@ -113,7 +113,7 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	store := memory.NewStore()
 	svc := mfa.NewService(store, mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 	trusted := mfa.WithTrustedOrigins("app.example.com")
 

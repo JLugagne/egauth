@@ -92,20 +92,20 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 	}
 
 	t.Run("Contract: DeleteExpired purges only expired records", func(t *testing.T) {
-		userID := uuid.New()
+		userID := uuid.Must(uuid.NewV7())
 		// An expired refresh token and a live one.
 		expired := &tokens.RefreshToken{
-			Hash: "reaper-expired", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			Hash: "reaper-expired", FamilyID: uuid.Must(uuid.NewV7()), UserID: userID, TenantID: tenantA,
 			ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-2 * time.Hour),
 		}
 		live := &tokens.RefreshToken{
-			Hash: "reaper-live", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			Hash: "reaper-live", FamilyID: uuid.Must(uuid.NewV7()), UserID: userID, TenantID: tenantA,
 			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
 		}
 		// A consumed-but-not-yet-expired token must be KEPT (needed for reuse detection).
 		consumedAt := time.Now().Add(-time.Minute)
 		consumedLive := &tokens.RefreshToken{
-			Hash: "reaper-consumed-live", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			Hash: "reaper-consumed-live", FamilyID: uuid.Must(uuid.NewV7()), UserID: userID, TenantID: tenantA,
 			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now().Add(-time.Hour), ConsumedAt: &consumedAt,
 		}
 		require.NoError(t, store.SaveRefreshToken(ctx, tenantA, expired))
@@ -131,7 +131,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		// DeleteExpired doc). This keeps the GC bounded for long-lived rotating sessions.
 		consumedExpiredAt := time.Now().Add(-30 * time.Minute)
 		consumedExpired := &tokens.RefreshToken{
-			Hash: "reaper-consumed-expired", FamilyID: uuid.New(), UserID: userID, TenantID: tenantA,
+			Hash: "reaper-consumed-expired", FamilyID: uuid.Must(uuid.NewV7()), UserID: userID, TenantID: tenantA,
 			ExpiresAt: time.Now().Add(-time.Hour), CreatedAt: time.Now().Add(-2 * time.Hour), ConsumedAt: &consumedExpiredAt,
 		}
 		require.NoError(t, store.SaveRefreshToken(ctx, tenantA, consumedExpired))
@@ -143,8 +143,8 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 
 	t.Run("Contract: Refresh Tokens save/find/consume/revoke", func(t *testing.T) {
 		tokenHash := "refresh_token_hash"
-		userID := uuid.New()
-		familyID := uuid.New()
+		userID := uuid.Must(uuid.NewV7())
+		familyID := uuid.Must(uuid.NewV7())
 		expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
 		authTime := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 
@@ -200,24 +200,24 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 
 	t.Run("Contract: SaveRefreshToken rejects a record whose tenant differs from the argument", func(t *testing.T) {
 		rt := &tokens.RefreshToken{
-			Hash: "mismatch-rt", FamilyID: uuid.New(), UserID: uuid.New(), TenantID: "tenant-on-record",
+			Hash: "mismatch-rt", FamilyID: uuid.Must(uuid.NewV7()), UserID: uuid.Must(uuid.NewV7()), TenantID: "tenant-on-record",
 			ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now(),
 		}
 		err := store.SaveRefreshToken(ctx, "different-tenant", rt)
 		assert.ErrorIs(t, err, tokens.ErrTenantMismatch, "record tenant != argument must be rejected")
 
 		key := &tokens.APIKey[C]{
-			ID: uuid.New(), TenantID: "tenant-on-record", Hash: "mismatch-key",
-			Claims: tokens.Claims[C]{Subject: uuid.New(), Custom: customClaim},
+			ID: uuid.Must(uuid.NewV7()), TenantID: "tenant-on-record", Hash: "mismatch-key",
+			Claims: tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
 		}
 		err = store.SaveAPIKey(ctx, "different-tenant", key)
 		assert.ErrorIs(t, err, tokens.ErrTenantMismatch, "API key record tenant != argument must be rejected")
 	})
 
 	t.Run("Contract: RevokeFamily", func(t *testing.T) {
-		familyID := uuid.New()
-		otherFamilyID := uuid.New()
-		userID := uuid.New()
+		familyID := uuid.Must(uuid.NewV7())
+		otherFamilyID := uuid.Must(uuid.NewV7())
+		userID := uuid.Must(uuid.NewV7())
 		expiresAt := time.Now().Add(time.Hour)
 
 		// Two tokens in the target family.
@@ -258,19 +258,19 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.NoError(t, err)
 
 		// Revoking an empty family is not an error.
-		err = store.RevokeFamily(ctx, tenantA, uuid.New())
+		err = store.RevokeFamily(ctx, tenantA, uuid.Must(uuid.NewV7()))
 		assert.NoError(t, err)
 	})
 
 	t.Run("Contract: API Keys", func(t *testing.T) {
 		tokenHash := "api_key_hash"
 		key := &tokens.APIKey[C]{
-			ID:       uuid.New(),
+			ID:       uuid.Must(uuid.NewV7()),
 			TenantID: tenantA,
 			Prefix:   "pk_",
 			Hash:     tokenHash,
 			Claims: tokens.Claims[C]{
-				Subject: uuid.New(),
+				Subject: uuid.Must(uuid.NewV7()),
 				Custom:  customClaim,
 			},
 		}
@@ -293,8 +293,8 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_hash"
-			userID := uuid.New()
-			familyID := uuid.New()
+			userID := uuid.Must(uuid.NewV7())
+			familyID := uuid.Must(uuid.NewV7())
 			expiresAt := time.Now().Add(time.Hour)
 
 			rt := &tokens.RefreshToken{
@@ -327,7 +327,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 
 			// API key isolation.
 			keyA := &tokens.APIKey[C]{
-				ID:       uuid.New(),
+				ID:       uuid.Must(uuid.NewV7()),
 				TenantID: tenantA,
 				Hash:     "api_shared",
 			}

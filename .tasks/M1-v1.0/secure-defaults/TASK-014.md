@@ -4,7 +4,7 @@ title: Bounded / self-evicting in-memory stores (sessions, otp, ratelimit)
 description: Make the in-memory unbounded-growth footgun harder to hit. Ship a bounded variant or self-evict on a configurable cap by default for sessions/memory, otp/memory, and ratelimit.TokenBucket. Split off from TASK-005 (#23), whose CSRF + insecure-cookie [BLOCK] items are already done.
 milestone: M1-v1.0
 epic: secure-defaults
-status: in_progress
+status: done
 priority: normal
 type: feature
 blocked_by: []

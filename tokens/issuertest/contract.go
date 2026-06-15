@@ -70,7 +70,7 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 
 	t.Run("Contract: Issue and Verify TokenPair", func(t *testing.T) {
 		claims := tokens.Claims[C]{
-			Subject:   uuid.New(),
+			Subject:   uuid.Must(uuid.NewV7()),
 			TenantID:  "tenant-123",
 			IssuedAt:  time.Now(),
 			ExpiresAt: time.Now().Add(1 * time.Hour),
@@ -99,7 +99,7 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 
 	t.Run("Contract: Issue and Verify API Key", func(t *testing.T) {
 		claims := tokens.Claims[C]{
-			Subject:  uuid.New(),
+			Subject:  uuid.Must(uuid.NewV7()),
 			TenantID: "tenant-123",
 			Custom:   customClaim,
 		}

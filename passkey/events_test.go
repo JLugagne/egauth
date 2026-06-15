@@ -54,7 +54,7 @@ func TestPasskeyEvents_LoginSucceeded(t *testing.T) {
 	sink := &captureSink{}
 	svc := newPasskeyServiceWithSink(t, sink)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)
@@ -74,7 +74,7 @@ func TestPasskeyEvents_NilSinkSafe(t *testing.T) {
 	ctx := context.Background()
 	// Config.Events left nil: the ceremony must complete without panicking.
 	svc := newPasskeyServiceWithSink(t, nil)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginLogin(ctx, "", userID)

@@ -32,7 +32,7 @@ func TestDeleteAccountHandler_RequiresResolvedUser(t *testing.T) {
 }
 
 func TestDeleteAccountHandler_SuccessClearsCookies(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "gone@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "gone@example.com"}
 	var deleted uuid.UUID
 	svc := &servicetest.MockService{
 		DeleteAccountFunc: func(_ context.Context, _ string, userID uuid.UUID) error {
@@ -58,7 +58,7 @@ func TestDeleteAccountHandler_SuccessClearsCookies(t *testing.T) {
 }
 
 func TestDeleteAccountHandler_ErrorMapping(t *testing.T) {
-	user := &identity.User{ID: uuid.New()}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7())}
 	cases := []struct {
 		name     string
 		err      error

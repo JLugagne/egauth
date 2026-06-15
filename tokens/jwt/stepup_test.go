@@ -32,7 +32,7 @@ func TestAuthTime_SetOnIssueAndPreservedAcrossRotate(t *testing.T) {
 
 	// Issue with an explicit past authentication time.
 	past := time.Now().Add(-30 * time.Minute).Truncate(time.Second)
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), AuthTime: past})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7()), AuthTime: past})
 	require.NoError(t, err)
 
 	c1, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
@@ -52,7 +52,7 @@ func TestAuthTime_DefaultsToIssueTimeForInitialPair(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 	c, err := svc.VerifyAccessTokenForTenant(ctx, "", pair.AccessToken)
 	require.NoError(t, err)
@@ -70,8 +70,8 @@ func TestAuthTime_RotationOfLegacyTokenDoesNotManufactureFreshness(t *testing.T)
 	plaintext := "legacy-refresh-token-plaintext-value"
 	require.NoError(t, store.SaveRefreshToken(ctx, "", &tokens.RefreshToken{
 		Hash:      tokens.HashToken(plaintext),
-		FamilyID:  uuid.New(),
-		UserID:    uuid.New(),
+		FamilyID:  uuid.Must(uuid.NewV7()),
+		UserID:    uuid.Must(uuid.NewV7()),
 		ExpiresAt: time.Now().Add(24 * time.Hour),
 		CreatedAt: time.Now(),
 		// AuthTime intentionally zero.
@@ -90,9 +90,9 @@ func TestWithMaxAuthAge_StepUpGate(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
-	stalePair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), AuthTime: time.Now().Add(-time.Hour)})
+	stalePair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7()), AuthTime: time.Now().Add(-time.Hour)})
 	require.NoError(t, err)
-	freshPair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	freshPair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	handler := tokens.RequireAuth[struct{}](svc,
@@ -120,7 +120,7 @@ func TestWithMaxAuthAge_DisabledByDefault(t *testing.T) {
 	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
 
 	// Even an old authentication passes when no max-auth-age is configured.
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New(), AuthTime: time.Now().Add(-100 * time.Hour)})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7()), AuthTime: time.Now().Add(-100 * time.Hour)})
 	require.NoError(t, err)
 
 	handler := tokens.RequireAuth[struct{}](svc,

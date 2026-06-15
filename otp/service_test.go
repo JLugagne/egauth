@@ -26,7 +26,7 @@ func wrongCode(code string) string {
 func TestService_IssueVerify_SingleUse(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore())
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -43,7 +43,7 @@ func TestService_IssueVerify_SingleUse(t *testing.T) {
 func TestService_WrongCodeIsAttemptLimited(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(3))
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -61,7 +61,7 @@ func TestService_Expired(t *testing.T) {
 	ctx := context.Background()
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := otp.NewService(memory.NewStore(), otp.WithClock(clk.now), otp.WithTTL(time.Minute))
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func TestService_Expired(t *testing.T) {
 func TestService_ReissueReplacesAndResetsAttempts(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(3))
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch1, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -93,7 +93,7 @@ func TestService_ReissueReplacesAndResetsAttempts(t *testing.T) {
 func TestService_Invalidate(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore())
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -104,7 +104,7 @@ func TestService_Invalidate(t *testing.T) {
 func TestService_PurposesAreIndependent(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore())
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	login, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)

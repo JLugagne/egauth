@@ -65,7 +65,7 @@ func mapError(err error) error {
 
 func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (*identity.User, error) {
 	user := &identity.User{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenantID,
 		Email:     email,
 		CreatedAt: time.Now().UTC(),
@@ -195,7 +195,7 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 // commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
 func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	now := time.Now().UTC()
-	anonymizedEmail := "deleted_" + uuid.New().String() + "@deleted.local"
+	anonymizedEmail := "deleted_" + uuid.Must(uuid.NewV7()).String() + "@deleted.local"
 
 	const query = `
 		WITH del AS (
@@ -233,7 +233,7 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 		return identity.ErrTenantMismatch
 	}
 
-	ident.ID = uuid.New()
+	ident.ID = uuid.Must(uuid.NewV7())
 	ident.TenantID = tenantID
 	ident.CreatedAt = time.Now().UTC()
 	ident.UpdatedAt = time.Now().UTC()

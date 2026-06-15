@@ -16,7 +16,7 @@ func TestSingleTenant_IssueVerify_UsesEmptyTenant(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore())
 	st := otp.NewSingleTenant(svc)
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 
 	ch, err := st.Issue(ctx, subject, "login")
 	require.NoError(t, err)
@@ -32,7 +32,7 @@ func TestSingleTenant_Issue_NotVisibleToOtherTenant(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore())
 	st := otp.NewSingleTenant(svc)
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 
 	ch, err := st.Issue(ctx, subject, "login")
 	require.NoError(t, err)

@@ -22,7 +22,7 @@ func TestRequestRecoveryEmailHandler_RequiresResolvedUser(t *testing.T) {
 	})
 
 	t.Run("resolved user -> token delivered to the recovery address", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "primary@example.com"}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "primary@example.com"}
 		svc := &servicetest.MockService{
 			RequestRecoveryEmailFunc: func(_ context.Context, _ string, userID uuid.UUID, rec string) (string, error) {
 				assert.Equal(t, user.ID, userID)
@@ -44,7 +44,7 @@ func TestRequestRecoveryEmailHandler_RequiresResolvedUser(t *testing.T) {
 }
 
 func TestRequestRecoveryEmailHandler_ErrorMapping(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "primary@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "primary@example.com"}
 	cases := []struct {
 		name     string
 		err      error
@@ -86,7 +86,7 @@ func TestConfirmRecoveryEmailHandler(t *testing.T) {
 		svc := &servicetest.MockService{
 			ConfirmRecoveryEmailFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
-				return &identity.User{ID: uuid.New(), RecoveryEmail: &rec}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), RecoveryEmail: &rec}, nil
 			},
 		}
 		h := identity.ConfirmRecoveryEmailHandler(svc)
@@ -130,7 +130,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 	})
 
 	t.Run("recovery email channel: delivers reset to the recovery address", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "primary@example.com", RecoveryEmail: &recEmail}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "primary@example.com", RecoveryEmail: &recEmail}
 		svc := &servicetest.MockService{
 			RequestPasswordResetViaRecoveryFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, identity.RecoveryChannels, error) {
 				return "sel.ver", user, identity.RecoveryChannels{RecoveryEmail: true}, nil
@@ -150,7 +150,7 @@ func TestRequestPasswordResetViaRecoveryHandler_UniformAndDelivers(t *testing.T)
 	})
 
 	t.Run("phone channel: delivers reset by SMS", func(t *testing.T) {
-		user := &identity.User{ID: uuid.New(), Email: "primary@example.com", Phone: &phone}
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "primary@example.com", Phone: &phone}
 		svc := &servicetest.MockService{
 			RequestPasswordResetViaRecoveryFunc: func(_ context.Context, _ string, _ string) (string, *identity.User, identity.RecoveryChannels, error) {
 				return "sel.ver", user, identity.RecoveryChannels{Phone: true}, nil

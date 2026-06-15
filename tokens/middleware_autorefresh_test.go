@@ -85,7 +85,7 @@ func (f autoRefreshFixture) request(accessVal, refreshVal string) *http.Request 
 
 func TestRequireAuth_ValidAccessCookie(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid})
 	require.NoError(t, err)
 
@@ -107,7 +107,7 @@ func TestRequireAuth_ValidAccessCookie(t *testing.T) {
 
 func TestRequireAuth_ExpiredAccessAutoRefreshes(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	// Expired access token, but a valid refresh token persisted in the shared store.
 	pair, err := f.expiredMinter.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid})
 	require.NoError(t, err)
@@ -138,7 +138,7 @@ func TestRequireAuth_ExpiredAccessAutoRefreshes(t *testing.T) {
 
 func TestRequireAuth_MissingAccessAutoRefreshes(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid})
 	require.NoError(t, err)
 
@@ -157,7 +157,7 @@ func TestRequireAuth_MissingAccessAutoRefreshes(t *testing.T) {
 
 func TestRequireAuth_InvalidAccessNotEligibleForRefresh(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	called := false
@@ -180,7 +180,7 @@ func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 	// theft, so the poisoned-family clear path is exercised — distinct from the benign
 	// within-grace concurrency case, which must preserve the cookies (covered separately).
 	f := newStrictAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// Consume the refresh token once so presenting it again is a replay.
@@ -208,7 +208,7 @@ func TestRequireAuth_RotationFailureClearsCookies(t *testing.T) {
 
 func TestRequireAuth_AutoRefreshDefaultsToSessionCookie(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ struct{}) {
@@ -226,7 +226,7 @@ func TestRequireAuth_AutoRefreshDefaultsToSessionCookie(t *testing.T) {
 
 func TestRequireAuth_PersistentAutoRefreshOption(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ struct{}) {
@@ -244,7 +244,7 @@ func TestRequireAuth_PersistentAutoRefreshOption(t *testing.T) {
 
 func TestRequireAuth_ExpiredWithoutAutoRefreshRejected(t *testing.T) {
 	f := newAutoRefreshFixture(t)
-	pair, err := f.expiredMinter.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := f.expiredMinter.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	called := false

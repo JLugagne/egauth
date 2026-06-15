@@ -119,9 +119,9 @@ func TestFindSessionByHash_ExpiredExclusion_Integration(t *testing.T) {
 
 	// Row 1: already expired one hour ago -> must be excluded.
 	expired := &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenant,
-		UserID:    uuid.New(),
+		UserID:    uuid.Must(uuid.NewV7()),
 		TokenHash: "expiry-already-gone",
 		ExpiresAt: time.Now().Add(-time.Hour),
 		CreatedAt: time.Now().Add(-2 * time.Hour),
@@ -130,9 +130,9 @@ func TestFindSessionByHash_ExpiredExclusion_Integration(t *testing.T) {
 
 	// Row 2: clearly live -> must be returned.
 	live := &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenant,
-		UserID:    uuid.New(),
+		UserID:    uuid.Must(uuid.NewV7()),
 		TokenHash: "expiry-still-live",
 		ExpiresAt: time.Now().Add(time.Hour),
 		CreatedAt: time.Now(),
@@ -152,9 +152,9 @@ func TestFindSessionByHash_ExpiredExclusion_Integration(t *testing.T) {
 	// Row 3: expires very soon. It is found while live, then excluded once its expiry lapses,
 	// proving the predicate uses the database clock at query time (not the insert-time value).
 	soon := &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenant,
-		UserID:    uuid.New(),
+		UserID:    uuid.Must(uuid.NewV7()),
 		TokenHash: "expiry-boundary",
 		ExpiresAt: time.Now().Add(750 * time.Millisecond),
 		CreatedAt: time.Now(),

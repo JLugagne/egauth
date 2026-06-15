@@ -156,7 +156,7 @@ func TestPhoneVerification_RejectsUnknownUser(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newVerificationService(t)
 
-	_, err := svc.RequestPhoneVerification(ctx, "", uuid.New(), "+15558889999")
+	_, err := svc.RequestPhoneVerification(ctx, "", uuid.Must(uuid.NewV7()), "+15558889999")
 	assert.ErrorIs(t, err, identity.ErrUserNotFound)
 }
 

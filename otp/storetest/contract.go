@@ -22,7 +22,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 	}
 
 	t.Run("DeleteExpired purges only expired codes", func(t *testing.T) {
-		expiredSub, liveSub := uuid.New(), uuid.New()
+		expiredSub, liveSub := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		require.NoError(t, store.SaveOTP(ctx, tenantA, &otp.OTP{
 			SubjectID: expiredSub, Purpose: "login", CodeHash: "exp", ExpiresAt: time.Now().Add(-time.Minute), CreatedAt: time.Now().Add(-time.Hour),
 		}))
@@ -41,7 +41,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 	})
 
 	t.Run("save / get / attempts / delete", func(t *testing.T) {
-		sub := uuid.New()
+		sub := uuid.Must(uuid.NewV7())
 		_, err := store.GetOTP(ctx, tenantA, sub, "login")
 		assert.ErrorIs(t, err, otp.ErrCodeNotFound)
 
@@ -88,7 +88,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 	})
 
 	t.Run("ConsumeOTP is a guarded single-use delete", func(t *testing.T) {
-		sub := uuid.New()
+		sub := uuid.Must(uuid.NewV7())
 		// Consuming a non-existent code reports not-removed (no error).
 		ok, err := store.ConsumeOTP(ctx, tenantA, sub, "login", "h")
 		require.NoError(t, err)
@@ -116,7 +116,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 	})
 
 	t.Run("SaveOTP rejects a record whose tenant differs from the argument", func(t *testing.T) {
-		sub := uuid.New()
+		sub := uuid.Must(uuid.NewV7())
 		err := store.SaveOTP(ctx, "different-tenant", &otp.OTP{
 			SubjectID: sub, Purpose: "login", CodeHash: "h", TenantID: "tenant-on-record",
 			ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
@@ -126,7 +126,7 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
-			sub := uuid.New()
+			sub := uuid.Must(uuid.NewV7())
 			require.NoError(t, store.SaveOTP(ctx, tenantA, &otp.OTP{
 				SubjectID: sub, Purpose: "login", CodeHash: "hA", ExpiresAt: time.Now().Add(time.Minute), CreatedAt: time.Now(),
 			}))

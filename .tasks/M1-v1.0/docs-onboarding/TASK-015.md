@@ -4,7 +4,7 @@ title: Runnable reference application (identity+tokens+mfa+passkey+admin+audit o
 description: One runnable reference application wiring a real multi-module stack — identity + tokens(custom claims) + mfa + passkey + admin + audit — over HTTP, building from the proxy with no local workspace. Split off from TASK-007 (#25), whose go-get/Example-test items are already done.
 milestone: M1-v1.0
 epic: docs-onboarding
-status: in_progress
+status: done
 priority: normal
 type: feature
 blocked_by: []

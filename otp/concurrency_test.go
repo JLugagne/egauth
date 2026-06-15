@@ -18,7 +18,7 @@ import (
 func TestService_ConcurrentVerify_SingleUse(t *testing.T) {
 	ctx := context.Background()
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(100))
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)
@@ -47,7 +47,7 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 	ctx := context.Background()
 	const maxAttempts = 5
 	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(maxAttempts))
-	sub := uuid.New()
+	sub := uuid.Must(uuid.NewV7())
 
 	ch, err := svc.Issue(ctx, "t1", sub, "login")
 	require.NoError(t, err)

@@ -25,7 +25,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 
 	t.Run("empty tenant is the default partition", func(t *testing.T) {
 		// An empty tenantID is a legal key (the single-tenant default partition).
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		require.NoError(t, store.SaveTOTP(ctx, "", &mfa.TOTPEnrollment{UserID: uid, Secret: "DEF", CreatedAt: time.Now()}),
 			"empty tenant must be the valid default partition, not rejected")
 		got, err := store.GetTOTP(ctx, "", uid)
@@ -38,7 +38,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("TOTP save/get/delete", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		_, err := store.GetTOTP(ctx, tenantA, uid)
 		assert.ErrorIs(t, err, mfa.ErrNotEnrolled, "unknown user must report not-enrolled")
 
@@ -67,7 +67,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("TOTP replay guard is monotonic", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}))
 
 		applied, err := store.MarkTOTPUsed(ctx, tenantA, uid, 100)
@@ -88,7 +88,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("failed-attempt counter increments, persists and resets on success", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		now := time.Now()
 
 		// Incrementing a missing factor reports not-enrolled.
@@ -145,7 +145,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("ResetTOTPAttempts clears the counter and LastAttemptAt", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		now := time.Now()
 
 		// ResetTOTPAttempts on a missing factor must return ErrNotEnrolled.
@@ -176,7 +176,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("IncrementTOTPAttempts is atomic under concurrency", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: time.Now()}))
 
 		const goroutines = 64
@@ -208,7 +208,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("recovery codes are single-use and replaceable", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		require.NoError(t, store.ReplaceRecoveryCodes(ctx, tenantA, uid, []string{"h1", "h2", "h3"}))
 
 		// Unknown hash.
@@ -229,7 +229,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 	})
 
 	t.Run("SaveTOTP ErrTenantMismatch", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		e := &mfa.TOTPEnrollment{UserID: uid, TenantID: "other-tenant", Secret: "S", CreatedAt: time.Now()}
 		err := store.SaveTOTP(ctx, tenantA, e)
 		assert.ErrorIs(t, err, mfa.ErrTenantMismatch,
@@ -238,7 +238,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
-			uid := uuid.New()
+			uid := uuid.Must(uuid.NewV7())
 			require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "A", CreatedAt: time.Now()}))
 
 			_, err := store.GetTOTP(ctx, tenantB, uid)

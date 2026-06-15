@@ -35,7 +35,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 	svc := jwt.New[IntegrationCustomClaims](cfg)
 
 	t.Run("Scenario: Valid token issuance and explicit extraction via handler", func(t *testing.T) {
-		subject := uuid.New()
+		subject := uuid.Must(uuid.NewV7())
 		tenantID := "" // single-tenant middleware (no resolver) authenticates only empty-tenant tokens
 		custom := IntegrationCustomClaims{Subscription: "premium"}
 
@@ -83,7 +83,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		expiredSvc := jwt.New[IntegrationCustomClaims](expiredCfg)
 
 		pair, err := expiredSvc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{
-			Subject: uuid.New(),
+			Subject: uuid.Must(uuid.NewV7()),
 		})
 		require.NoError(t, err)
 
@@ -110,7 +110,7 @@ func TestTokenLifecycleIntegration(t *testing.T) {
 		})
 
 		pair, err := otherSvc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{
-			Subject: uuid.New(),
+			Subject: uuid.Must(uuid.NewV7()),
 		})
 		require.NoError(t, err)
 
@@ -149,7 +149,7 @@ func TestRequireAuthRejectsTenantTokenWithoutResolver(t *testing.T) {
 
 	// Issue a token under a NON-EMPTY tenant.
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[IntegrationCustomClaims]{
-		Subject:  uuid.New(),
+		Subject:  uuid.Must(uuid.NewV7()),
 		TenantID: "tenant-xyz",
 		Custom:   IntegrationCustomClaims{Subscription: "premium"},
 	})

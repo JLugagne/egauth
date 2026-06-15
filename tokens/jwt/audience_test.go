@@ -34,7 +34,7 @@ func sharedKeyService(t *testing.T, secret, issuer string, expectedAud []string)
 func mintAccess(t *testing.T, svc *jwt.Service[struct{}], audiences []string) string {
 	t.Helper()
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
-		Subject:   uuid.New(),
+		Subject:   uuid.Must(uuid.NewV7()),
 		TenantID:  "tenant-a",
 		Audiences: audiences,
 	})
@@ -121,7 +121,7 @@ func TestVerifyAccessToken_ExpiredStillReportsExpired(t *testing.T) {
 		InsecureAllowWeakKey: true,
 	})
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
-		Subject:  uuid.New(),
+		Subject:  uuid.Must(uuid.NewV7()),
 		TenantID: "t",
 	})
 	require.NoError(t, err)

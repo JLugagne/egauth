@@ -51,7 +51,7 @@ func TestJWTEvents_ReuseDetectedAndFamilyRevoked(t *testing.T) {
 		EventSink:        sink,
 	})
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 
 	// First rotation consumes the token.

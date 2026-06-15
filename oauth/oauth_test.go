@@ -172,7 +172,7 @@ func TestCallbackHandler_Success(t *testing.T) {
 
 	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
 
-	linker := &stubLinker{user: &identity.User{ID: uuid.New(), Email: "u@example.com"}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
 		AccessToken:           "access",
 		RefreshToken:          "refresh",
@@ -248,7 +248,7 @@ func TestCallbackHandler_EmailMissingRejected(t *testing.T) {
 	p, _ := stubProviderServer(t, &body)
 	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
 
-	rec := runCallback(t, p, &stubLinker{user: &identity.User{ID: uuid.New()}}, &stubIssuer{}, stateCookie,
+	rec := runCallback(t, p, &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7())}}, &stubIssuer{}, stateCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
 		WithRedirectURL(testRedirect))
 
@@ -260,7 +260,7 @@ func TestCallbackHandler_UnverifiedEmailRejectedByDefault(t *testing.T) {
 	p, _ := stubProviderServer(t, &body)
 	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
 
-	linker := &stubLinker{user: &identity.User{ID: uuid.New()}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7())}}
 	rec := runCallback(t, p, linker, &stubIssuer{}, stateCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
 		WithRedirectURL(testRedirect))
@@ -274,7 +274,7 @@ func TestCallbackHandler_UnverifiedEmailAllowedWithOptIn(t *testing.T) {
 	p, _ := stubProviderServer(t, &body)
 	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
 
-	linker := &stubLinker{user: &identity.User{ID: uuid.New(), Email: "squat@example.com"}}
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "squat@example.com"}}
 	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}}
 	rec := runCallback(t, p, linker, issuer, stateCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),

@@ -36,7 +36,7 @@ func newJWTServiceWithKeyStore(t *testing.T) (*jwt.Service[struct{}], *keystore.
 func issueFor(t *testing.T, svc *jwt.Service[struct{}], tenantID string) string {
 	t.Helper()
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
-		Subject:  uuid.New(),
+		Subject:  uuid.Must(uuid.NewV7()),
 		TenantID: tenantID,
 	})
 	if err != nil {
@@ -146,7 +146,7 @@ func TestJWT_ZeroConfigSingleTenantStillWorks(t *testing.T) {
 		AccessTTL:  time.Hour,
 		RefreshTTL: 24 * time.Hour,
 	})
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	if err != nil {
 		t.Fatalf("issue: %v", err)
 	}
@@ -165,7 +165,7 @@ func TestJWT_KeyStoreStaticPartitionFallback(t *testing.T) {
 	// Without lazy provisioning the KeyStore returns ErrTenantNotFound for "", which the Service
 	// surfaces — so this asserts the documented behavior: provision "" (or use lazy) for the
 	// single-tenant partition under a KeyStore.
-	_, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	_, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	if !errors.Is(err, keystore.ErrTenantNotFound) {
 		t.Fatalf("unprovisioned \"\" under a strict KeyStore should report ErrTenantNotFound, got %v", err)
 	}

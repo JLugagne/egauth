@@ -261,7 +261,7 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		// not a silent no-op success — both backends must agree.
 		err = store.DeleteUser(ctx, tenantA, user.ID)
 		assert.ErrorIs(t, err, identity.ErrUserNotFound, "re-deleting a soft-deleted user must report not found")
-		err = store.DeleteUser(ctx, tenantA, uuid.New())
+		err = store.DeleteUser(ctx, tenantA, uuid.Must(uuid.NewV7()))
 		assert.ErrorIs(t, err, identity.ErrUserNotFound, "deleting an unknown user must report not found")
 	})
 
@@ -437,7 +437,7 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
 
 		// An unknown user is reported as not found.
-		err = store.UpdateUserEmail(ctx, tenantA, uuid.New(), "nobody_new@example.com", time.Now())
+		err = store.UpdateUserEmail(ctx, tenantA, uuid.Must(uuid.NewV7()), "nobody_new@example.com", time.Now())
 		assert.ErrorIs(t, err, identity.ErrUserNotFound)
 
 		// An account with no password identity (e.g. OAuth-only) can still change its email; only
@@ -496,7 +496,7 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.ErrorIs(t, err, identity.ErrPhoneAlreadyExists)
 
 		// An unknown user is reported as not found.
-		err = store.UpdateUserPhone(ctx, tenantA, uuid.New(), "+15557770999", time.Now())
+		err = store.UpdateUserPhone(ctx, tenantA, uuid.Must(uuid.NewV7()), "+15557770999", time.Now())
 		assert.ErrorIs(t, err, identity.ErrUserNotFound)
 	})
 
@@ -523,7 +523,7 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 			"a recovery email need not be unique across accounts")
 
 		// An unknown user is reported as not found.
-		err = store.UpdateUserRecoveryEmail(ctx, tenantA, uuid.New(), "x@elsewhere.example", time.Now())
+		err = store.UpdateUserRecoveryEmail(ctx, tenantA, uuid.Must(uuid.NewV7()), "x@elsewhere.example", time.Now())
 		assert.ErrorIs(t, err, identity.ErrUserNotFound)
 	})
 
@@ -722,8 +722,8 @@ func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant strin
 	require.NoError(t, store.EnableUser(ctx, tenant, user.ID))
 
 	// Unknown users are reported as not found on both operations.
-	assert.ErrorIs(t, store.DisableUser(ctx, tenant, uuid.New(), time.Now()), identity.ErrUserNotFound)
-	assert.ErrorIs(t, store.EnableUser(ctx, tenant, uuid.New()), identity.ErrUserNotFound)
+	assert.ErrorIs(t, store.DisableUser(ctx, tenant, uuid.Must(uuid.NewV7()), time.Now()), identity.ErrUserNotFound)
+	assert.ErrorIs(t, store.EnableUser(ctx, tenant, uuid.Must(uuid.NewV7())), identity.ErrUserNotFound)
 
 	// A soft-deleted user cannot be disabled or enabled: it is not a live account.
 	gone, err := store.CreateUser(ctx, tenant, "disable_gone@example.com")

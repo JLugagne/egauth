@@ -62,7 +62,7 @@ func TestService_RequestEmailVerification_EnumerationSafe(t *testing.T) {
 	}
 	svc := identity.NewService(store, &hashertest.MockHasher{}, &mockPolicy{})
 
-	token, err := svc.RequestEmailVerification(ctx, "", uuid.New())
+	token, err := svc.RequestEmailVerification(ctx, "", uuid.Must(uuid.NewV7()))
 	// Must NOT surface a distinct error: a 500-vs-204 difference for a live/same-tenant account
 	// is an account-enumeration oracle, unlike the other Request* flows.
 	assert.NoError(t, err)
@@ -71,12 +71,12 @@ func TestService_RequestEmailVerification_EnumerationSafe(t *testing.T) {
 
 func TestService_ChangePassword(t *testing.T) {
 	ctx := context.Background()
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	const storedHash = "stored-hash"
 
 	passwordIdent := func() []*identity.Identity {
 		h := storedHash
-		return []*identity.Identity{{ID: uuid.New(), UserID: userID, Provider: "password", PasswordHash: &h}}
+		return []*identity.Identity{{ID: uuid.Must(uuid.NewV7()), UserID: userID, Provider: "password", PasswordHash: &h}}
 	}
 
 	t.Run("wrong current password is rejected and nothing is written", func(t *testing.T) {
@@ -181,7 +181,7 @@ func TestService_Register(t *testing.T) {
 		password := "ValidPassword123!"
 		expectedHash := "hashed_password"
 		expectedUser := &identity.User{
-			ID:    uuid.New(),
+			ID:    uuid.Must(uuid.NewV7()),
 			Email: email,
 		}
 
@@ -265,7 +265,7 @@ func TestService_Authenticate(t *testing.T) {
 		password := "password123"
 		hash := "hashed"
 		expectedUser := &identity.User{
-			ID:    uuid.New(),
+			ID:    uuid.Must(uuid.NewV7()),
 			Email: email,
 		}
 
@@ -409,7 +409,7 @@ func TestService_Authenticate(t *testing.T) {
 		compensated := false
 		store := &storetest.MockStore{
 			CreateUserFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			AddIdentityFunc: func(ctx context.Context, tenantID string, ident *identity.Identity) error {
 				return errors.New("db error")
@@ -441,7 +441,7 @@ func TestService_Authenticate(t *testing.T) {
 	t.Run("missing password hash", func(t *testing.T) {
 		mockStore := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
 				return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
@@ -545,7 +545,7 @@ func TestService_Authenticate_ConstantTime(t *testing.T) {
 		var hashed bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return nil, identity.ErrIdentityNotFound
@@ -564,7 +564,7 @@ func TestService_Authenticate_ConstantTime(t *testing.T) {
 		var hashed bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return &identity.Identity{Provider: "password", PasswordHash: nil}, nil
@@ -586,11 +586,11 @@ func TestService_Lockout(t *testing.T) {
 	hash := "hashed"
 
 	t.Run("password mismatch increments failed attempts", func(t *testing.T) {
-		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash}
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash}
 		var incremented bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return ident, nil
@@ -612,11 +612,11 @@ func TestService_Lockout(t *testing.T) {
 
 	t.Run("locked account returns ErrAccountLocked without comparing password", func(t *testing.T) {
 		future := time.Now().Add(10 * time.Minute)
-		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &future}
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &future}
 		var compared bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return ident, nil
@@ -633,8 +633,8 @@ func TestService_Lockout(t *testing.T) {
 
 	t.Run("expired lock allows authentication and resets", func(t *testing.T) {
 		past := time.Now().Add(-10 * time.Minute)
-		uid := uuid.New()
-		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &past, FailedAttempts: 5}
+		uid := uuid.Must(uuid.NewV7())
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &past, FailedAttempts: 5}
 		var reset bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
@@ -659,8 +659,8 @@ func TestService_Lockout(t *testing.T) {
 	})
 
 	t.Run("successful auth resets counter when attempts exist", func(t *testing.T) {
-		uid := uuid.New()
-		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 2}
+		uid := uuid.Must(uuid.NewV7())
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 2}
 		var reset bool
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
@@ -684,8 +684,8 @@ func TestService_Lockout(t *testing.T) {
 	})
 
 	t.Run("successful auth with no prior attempts does not reset", func(t *testing.T) {
-		uid := uuid.New()
-		ident := &identity.Identity{ID: uuid.New(), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 0}
+		uid := uuid.Must(uuid.NewV7())
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash, FailedAttempts: 0}
 		store := &storetest.MockStore{
 			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 				return &identity.User{ID: uid}, nil

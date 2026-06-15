@@ -34,7 +34,7 @@ func TestVerifyRefreshTokenMultiTenant(t *testing.T) {
 	svc := newMultiTenantService(t)
 
 	const tenant = "tenant-a"
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{
 		Subject:  userID,
@@ -68,7 +68,7 @@ func TestVerifyAPIKeyMultiTenant(t *testing.T) {
 	svc := newMultiTenantService(t)
 
 	const tenant = "tenant-a"
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	apiKey, err := svc.IssueAPIKey(ctx, "sk_test_", tokens.Claims[struct{}]{
 		Subject:  userID,
@@ -101,7 +101,7 @@ func TestSingleTenantVerifyUnchanged(t *testing.T) {
 	svc := newMultiTenantService(t)
 	st := jwt.NewSingleTenant[struct{}](svc)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	pair, err := st.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
@@ -125,7 +125,7 @@ func TestVerifyAccessTokenForTenant(t *testing.T) {
 	svc := newMultiTenantService(t)
 
 	const tenantA = "tenant-a"
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{
 		Subject:  userID,
@@ -158,7 +158,7 @@ func TestVerifyAccessTokenSingleTenantStillWorks(t *testing.T) {
 	ctx := context.Background()
 	svc := newMultiTenantService(t)
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 

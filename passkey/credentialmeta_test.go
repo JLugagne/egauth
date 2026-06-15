@@ -20,7 +20,7 @@ import (
 func TestFinishRegistration_CapturesTransportsAndBackupFlags(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := newSoftAuthenticator(t, testRPID, testOrigin)
 	auth.transports = []string{"internal", "hybrid"}
 
@@ -45,7 +45,7 @@ func TestFinishRegistration_CapturesTransportsAndBackupFlags(t *testing.T) {
 func TestFinishRegistration_SingleDevicePasskeyHasNoBackupFlags(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := newSoftAuthenticator(t, testRPID, testOrigin)
 
 	_, session, err := svc.BeginRegistration(ctx, "", userID, "user@example.com", "User")
@@ -65,7 +65,7 @@ func TestFinishRegistration_SingleDevicePasskeyHasNoBackupFlags(t *testing.T) {
 func TestFinishLogin_SetsLastUsedAt(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	before := time.Now().UTC()
@@ -92,7 +92,7 @@ func TestFinishLogin_SetsLastUsedAt(t *testing.T) {
 func TestFinishLogin_PreservesTransportsAndNickname(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	creds, err := svc.ListCredentials(ctx, "", userID)
@@ -119,7 +119,7 @@ func TestFinishLogin_PreservesTransportsAndNickname(t *testing.T) {
 func TestFinishDiscoverableLogin_SetsLastUsedAt(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := register(t, svc, userID)
 
 	_, session, err := svc.BeginDiscoverableLogin()
@@ -138,7 +138,7 @@ func TestFinishDiscoverableLogin_SetsLastUsedAt(t *testing.T) {
 func TestRenameCredential_SetsNickname(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	register(t, svc, userID)
 
 	creds, err := svc.ListCredentials(ctx, "", userID)
@@ -158,7 +158,7 @@ func TestRenameCredential_SetsNickname(t *testing.T) {
 func TestRenameCredential_UnknownCredential(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	register(t, svc, userID)
 
 	err := svc.RenameCredential(ctx, "", userID, []byte{0xde, 0xad}, "nope")
@@ -169,7 +169,7 @@ func TestRenameCredential_UnknownCredential(t *testing.T) {
 func TestListCredentials_SurfacesMetadata(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	auth := newSoftAuthenticator(t, testRPID, testOrigin)
 	auth.transports = []string{"usb"}
 
@@ -195,7 +195,7 @@ func TestListCredentials_SurfacesMetadata(t *testing.T) {
 func TestRenameCredentialHandler_PersistsNickname(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	register(t, svc, userID)
 
 	creds, err := svc.ListCredentials(ctx, "", userID)
@@ -237,7 +237,7 @@ func TestRenameCredentialHandler_Guards(t *testing.T) {
 	t.Run("GET -> 405", func(t *testing.T) {
 		h := passkey.RenameCredentialHandler(svc,
 			passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
-				return uuid.New(), "", "", "", true
+				return uuid.Must(uuid.NewV7()), "", "", "", true
 			}))
 		rec := httptest.NewRecorder()
 		h(rec, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -250,7 +250,7 @@ func TestRenameCredentialHandler_Guards(t *testing.T) {
 func TestSignalAllAcceptedCredentials_ReturnsSurvivors(t *testing.T) {
 	ctx := context.Background()
 	svc := newPasskeyService(t)
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	auth1 := register(t, svc, userID)
 	auth2 := register(t, svc, userID) // a second, distinct credential for the same user

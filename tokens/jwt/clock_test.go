@@ -38,7 +38,7 @@ func TestWithClock_DeterministicTokenExpiry(t *testing.T) {
 		Clock:          clock,
 	})
 
-	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.New()})
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
 	// The TTL stamp must come from the injected clock.
 	assert.Equal(t, base.Add(5*time.Minute), pair.AccessTokenExpiresAt, "access exp must be clock-now + AccessTTL")

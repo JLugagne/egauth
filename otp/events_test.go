@@ -38,7 +38,7 @@ func (c *captureSink) find(t event.Type) (event.Event, bool) {
 func TestOTPEvents_BlockedOnTooManyAttempts(t *testing.T) {
 	ctx := context.Background()
 	sink := &captureSink{}
-	subjectID := uuid.New()
+	subjectID := uuid.Must(uuid.NewV7())
 	const tenantID, purpose = "tenant-1", "phone_verify"
 
 	svc := otp.NewService(otpmemory.NewStore(),
@@ -63,7 +63,7 @@ func TestOTPEvents_BlockedOnTooManyAttempts(t *testing.T) {
 
 func TestOTPEvents_NilSinkSafe(t *testing.T) {
 	ctx := context.Background()
-	subjectID := uuid.New()
+	subjectID := uuid.Must(uuid.NewV7())
 	svc := otp.NewService(otpmemory.NewStore(), otp.WithMaxAttempts(1))
 	_, err := svc.Issue(ctx, "t", subjectID, "p")
 	require.NoError(t, err)

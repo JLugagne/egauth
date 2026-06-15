@@ -65,7 +65,7 @@ func cookieByName(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 }
 
 func TestLoginHandler_SuccessSetsCookies(t *testing.T) {
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			assert.Equal(t, "password", provider)
@@ -92,7 +92,7 @@ func TestLoginHandler_SuccessSetsCookies(t *testing.T) {
 func TestLoginHandler_RememberMePersistsRefresh(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
@@ -118,7 +118,7 @@ func changePwForm(t *testing.T, current, newPw string) *http.Request {
 }
 
 func TestChangePasswordHandler(t *testing.T) {
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	withUser := identity.WithUserResolver(func(r *http.Request) (*identity.User, bool) {
 		return &identity.User{ID: uid}, true
 	})
@@ -177,7 +177,7 @@ func TestLoginHandler_RejectsOversizedBody(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			called = true
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
@@ -244,7 +244,7 @@ func TestLoginHandler_FailureRedirect(t *testing.T) {
 func TestLoginHandler_SuccessRedirect(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
@@ -269,7 +269,7 @@ func TestLoginHandler_TenantResolverPropagates(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			capturedTenant = tenantID
-			return &identity.User{ID: uuid.New(), TenantID: capturedTenant}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7()), TenantID: capturedTenant}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
@@ -300,7 +300,7 @@ func TestLoginHandler_CSRFOriginBlocked(t *testing.T) {
 func TestLoginHandler_CSRFOriginAllowed(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
@@ -331,7 +331,7 @@ func TestLoginHandler_CSRFMissingOriginRejected(t *testing.T) {
 func TestRegisterHandler_SuccessAutoLogin(t *testing.T) {
 	svc := &servicetest.MockService{
 		RegisterFunc: func(ctx context.Context, tenantID string, email, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New(), Email: email}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7()), Email: email}, nil
 		},
 	}
 	h := identity.RegisterHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
@@ -399,7 +399,7 @@ func TestLoginHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			called = true
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
@@ -420,7 +420,7 @@ func TestLoginHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 func TestLoginHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
@@ -441,7 +441,7 @@ func TestLoginHandler_WithInsecureNoOriginCheck(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			called = true
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),

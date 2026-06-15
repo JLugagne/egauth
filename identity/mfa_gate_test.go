@@ -46,7 +46,7 @@ func capturingIssuer(captured *tokens.Claims[struct{}]) *issuertest.MockIssuer[s
 // user must NOT receive a full refreshable pair. It must receive a short-lived INTERIM access
 // token stamped AMR=[pwd] (never AMRMFA) and NO refresh cookie.
 func TestLoginHandler_MFAGate_EnrolledGetsInterimNoRefresh(t *testing.T) {
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return &identity.User{ID: uid}, nil
@@ -78,7 +78,7 @@ func TestLoginHandler_MFAGate_EnrolledGetsInterimNoRefresh(t *testing.T) {
 func TestLoginHandler_MFAGate_NotEnrolledGetsFullPair(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
-			return &identity.User{ID: uuid.New()}, nil
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 	}
 	var captured tokens.Claims[struct{}]

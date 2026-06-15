@@ -274,7 +274,7 @@ func TestVerification_TokensDoNotResurrectDeactivatedUsers(t *testing.T) {
 
 func TestRegister_CompensatesOrphanWhenAddIdentityFails(t *testing.T) {
 	ctx := context.Background()
-	created := &identity.User{ID: uuid.New(), Email: "orphan@example.com"}
+	created := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "orphan@example.com"}
 	deleted := false
 	store := &storetest.MockStore{
 		CreateUserFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {

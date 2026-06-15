@@ -21,7 +21,7 @@ func TestTouch_ExtendsExpiry(t *testing.T) {
 	ctx := context.Background()
 	svc := newService()
 
-	sess, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", time.Minute)
+	sess, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 	original := sess.ExpiresAt
 
@@ -40,7 +40,7 @@ func TestRotate_ChangesTokenAndInvalidatesOld(t *testing.T) {
 	ctx := context.Background()
 	svc := newService()
 
-	sess, oldToken, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", time.Minute)
+	sess, oldToken, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 
 	rotated, newToken, err := svc.Rotate(ctx, "", oldToken, time.Hour)
@@ -63,11 +63,11 @@ func TestBindUser_RebindsUserAndRotatesToken(t *testing.T) {
 	ctx := context.Background()
 	svc := newService()
 
-	anonUser := uuid.New()
+	anonUser := uuid.Must(uuid.NewV7())
 	sess, oldToken, err := svc.CreateSession(ctx, "tenant-x", anonUser, "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 
-	authUser := uuid.New()
+	authUser := uuid.Must(uuid.NewV7())
 	bound, newToken, err := svc.BindUser(ctx, "tenant-x", oldToken, authUser, time.Hour)
 	require.NoError(t, err)
 	assert.NotEqual(t, oldToken, newToken, "BindUser must mint a new token (fixation defense)")
@@ -86,7 +86,7 @@ func TestBindUser_RebindsUserAndRotatesToken(t *testing.T) {
 }
 
 func TestBindUser_UnknownToken(t *testing.T) {
-	_, _, err := newService().BindUser(context.Background(), "", "nope", uuid.New(), time.Hour)
+	_, _, err := newService().BindUser(context.Background(), "", "nope", uuid.Must(uuid.NewV7()), time.Hour)
 	assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
 }
 
@@ -100,7 +100,7 @@ func TestTouchAndRotate_RejectExpiredSession(t *testing.T) {
 	svc := newService()
 
 	// A session created already-expired must not be touchable or rotatable.
-	_, token, err := svc.CreateSession(ctx, "", uuid.New(), "UA", "1.1.1.1", -time.Hour)
+	_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", -time.Hour)
 	require.NoError(t, err)
 
 	_, err = svc.Touch(ctx, "", token, time.Hour)
@@ -114,7 +114,7 @@ func TestTouchAndRotate_RejectExpiredSession(t *testing.T) {
 // store's compare-and-set fails (the token was already swapped by the winner), so Rotate must
 // return ErrSessionNotFound rather than a fresh token that would never validate.
 func TestRotate_ConcurrentLoserGetsHonestError(t *testing.T) {
-	sess := &sessions.Session{ID: uuid.New(), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
+	sess := &sessions.Session{ID: uuid.Must(uuid.NewV7()), TokenHash: "h-old", ExpiresAt: time.Now().Add(time.Hour), CreatedAt: time.Now()}
 	store := &storetest.MockStore{
 		FindSessionByHashFunc: func(_ context.Context, _ string, _ string) (*sessions.Session, error) {
 			c := *sess
@@ -135,7 +135,7 @@ func TestRotate_PreservesUserAndTenant(t *testing.T) {
 	ctx := context.Background()
 	svc := newService()
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	_, token, err := svc.CreateSession(ctx, "tenant-x", userID, "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 

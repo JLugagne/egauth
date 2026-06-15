@@ -24,7 +24,7 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 	const total = 20
 
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 
 	// gate blocks every delivery goroutine until we release it, so we can count in-flight slots.
 	gate := make(chan struct{})
@@ -88,7 +88,7 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 // configured timeout, preventing goroutine leaks when the Mailer/SMSSender stalls.
 func TestIssueHandler_DeliveryTimeout(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 
 	const timeout = 50 * time.Millisecond
 

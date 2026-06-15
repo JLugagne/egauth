@@ -19,9 +19,9 @@ func TestStore(t *testing.T) {
 // newSession is a test helper building a session for tenantID with the given token hash.
 func newSession(tenantID, tokenHash string, expiresAt time.Time) *sessions.Session {
 	return &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenantID,
-		UserID:    uuid.New(),
+		UserID:    uuid.Must(uuid.NewV7()),
 		TokenHash: tokenHash,
 		ExpiresAt: expiresAt,
 		CreatedAt: time.Now(),
@@ -121,10 +121,10 @@ func TestUpdateSessionPinsUserIDAndCreatedAt(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore()
 
-	originalUser := uuid.New()
+	originalUser := uuid.Must(uuid.NewV7())
 	originalCreatedAt := time.Now().Add(-time.Hour)
 	sess := &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  "tenantA",
 		UserID:    originalUser,
 		TokenHash: "h1",
@@ -137,7 +137,7 @@ func TestUpdateSessionPinsUserIDAndCreatedAt(t *testing.T) {
 
 	// A caller attempts to re-bind the user and reset CreatedAt through UpdateSession.
 	tampered := *sess
-	tampered.UserID = uuid.New()
+	tampered.UserID = uuid.Must(uuid.NewV7())
 	tampered.CreatedAt = time.Now()
 	tampered.TokenHash = "h2"
 	if err := store.UpdateSession(ctx, "tenantA", &tampered, "h1"); err != nil {
@@ -163,9 +163,9 @@ func TestBindSessionChangesUserID(t *testing.T) {
 	ctx := context.Background()
 	store := NewStore()
 
-	anonUser := uuid.New()
+	anonUser := uuid.Must(uuid.NewV7())
 	sess := &sessions.Session{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  "tenantA",
 		UserID:    anonUser,
 		TokenHash: "anon-h",
@@ -176,7 +176,7 @@ func TestBindSessionChangesUserID(t *testing.T) {
 		t.Fatalf("CreateSession: %v", err)
 	}
 
-	authUser := uuid.New()
+	authUser := uuid.Must(uuid.NewV7())
 	rebound := *sess
 	rebound.UserID = authUser
 	rebound.TokenHash = "auth-h"

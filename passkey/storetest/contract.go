@@ -25,7 +25,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 		// An empty tenantID is a legal tenant key (the single-tenant default partition).
 		// This pins the cross-backend agreement (I19): all backends must accept an empty
 		// tenantID rather than rejecting the call.
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		cred := &passkey.Credential{
 			UserID: uid, ID: []byte{0xd0, 0xd1}, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
 		}
@@ -41,7 +41,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 	})
 
 	t.Run("save / get / update / delete", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 
 		got, err := store.GetCredentials(ctx, tenantA, uid)
 		require.NoError(t, err)
@@ -95,7 +95,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 	})
 
 	t.Run("credential IDs are unique tenant-wide", func(t *testing.T) {
-		uid1, uid2 := uuid.New(), uuid.New()
+		uid1, uid2 := uuid.Must(uuid.NewV7()), uuid.Must(uuid.NewV7())
 		id := []byte{0x55, 0x66, 0x77}
 		require.NoError(t, store.SaveCredential(ctx, tenantA, &passkey.Credential{
 			UserID: uid1, ID: id, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
@@ -109,7 +109,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 	})
 
 	t.Run("tenant mismatch is rejected", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		cred := &passkey.Credential{
 			UserID: uid, TenantID: "other-tenant", ID: []byte{0xee, 0xff},
 			PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
@@ -119,7 +119,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 	})
 
 	t.Run("management metadata round-trips", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		lastUsed := time.Date(2026, 6, 11, 8, 30, 0, 0, time.UTC)
 		cred := &passkey.Credential{
 			UserID:         uid,
@@ -171,7 +171,7 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 	})
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
-			uid := uuid.New()
+			uid := uuid.Must(uuid.NewV7())
 			require.NoError(t, store.SaveCredential(ctx, tenantA, &passkey.Credential{
 				UserID: uid, ID: []byte{0x10}, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
 			}))

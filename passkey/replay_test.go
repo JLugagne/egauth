@@ -97,7 +97,7 @@ func cookieOnlyService(t *testing.T) *passkey.Service {
 // ChallengeStore is wired: the first Finish succeeds, an identical replayed Finish fails.
 func TestFinishLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 	svc := newPasskeyService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	auth := registerTenant(t, svc, "t1", uid)
 
 	cs := passkeymemory.NewChallengeStore()
@@ -130,7 +130,7 @@ func TestFinishLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 // sign-count-0 replay still succeeds. This is why a ChallengeStore is now required by default.
 func TestFinishLogin_Replay_UnchangedWithoutChallengeStore(t *testing.T) {
 	svc := cookieOnlyService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	auth := registerTenant(t, svc, "t1", uid)
 
 	opts := []passkey.HandlerOption{

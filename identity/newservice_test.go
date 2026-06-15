@@ -49,7 +49,7 @@ func TestChangePasswordNilPolicy(t *testing.T) {
 	ctx := context.Background()
 	svc := identity.NewService(identitymemory.NewStore(), &hashertest.MockHasher{}, nil)
 
-	err := svc.ChangePassword(ctx, "", uuid.New(), "current", "NewValidPass123!")
+	err := svc.ChangePassword(ctx, "", uuid.Must(uuid.NewV7()), "current", "NewValidPass123!")
 	assert.ErrorIs(t, err, identity.ErrPasswordPolicyRequired,
 		"a password ChangePassword with a nil policy must return a clear error, not panic")
 }
@@ -82,7 +82,7 @@ func TestChangePasswordNilHasher(t *testing.T) {
 	policy := &mockPolicy{VerifyFunc: func(context.Context, string) error { return nil }}
 	svc := identity.NewService(identitymemory.NewStore(), nil, policy)
 
-	err := svc.ChangePassword(ctx, "", uuid.New(), "current", "NewValidPass123!")
+	err := svc.ChangePassword(ctx, "", uuid.Must(uuid.NewV7()), "current", "NewValidPass123!")
 	assert.ErrorIs(t, err, identity.ErrPasswordHasherRequired,
 		"a password ChangePassword with a nil hasher must return a clear error, not panic")
 }

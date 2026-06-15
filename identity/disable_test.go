@@ -88,8 +88,8 @@ func TestDisableUser_UnknownUser(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newVerificationService(t)
 
-	assert.ErrorIs(t, svc.DisableUser(ctx, "", uuid.New()), identity.ErrUserNotFound)
-	assert.ErrorIs(t, svc.EnableUser(ctx, "", uuid.New()), identity.ErrUserNotFound)
+	assert.ErrorIs(t, svc.DisableUser(ctx, "", uuid.Must(uuid.NewV7())), identity.ErrUserNotFound)
+	assert.ErrorIs(t, svc.EnableUser(ctx, "", uuid.Must(uuid.NewV7())), identity.ErrUserNotFound)
 }
 
 // TestDisableEnableUser_EmitsEvents verifies the security events are emitted.

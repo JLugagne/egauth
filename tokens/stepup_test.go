@@ -28,7 +28,7 @@ func stepUpService() *jwt.Service[struct{}] {
 
 func TestRequireAuth_StepUpAMRGate(t *testing.T) {
 	svc := stepUpService()
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 
 	issue := func(amr ...string) string {
 		pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid, AMR: amr})
@@ -72,7 +72,7 @@ func TestRequireAuth_StepUpAMRGate(t *testing.T) {
 func TestVerifyAccessToken_AMRRoundTrip(t *testing.T) {
 	svc := stepUpService()
 	pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{
-		Subject: uuid.New(),
+		Subject: uuid.Must(uuid.NewV7()),
 		AMR:     []string{tokens.AMRPassword, tokens.AMRWebAuthn},
 	})
 	require.NoError(t, err)

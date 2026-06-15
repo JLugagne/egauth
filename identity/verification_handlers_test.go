@@ -101,7 +101,7 @@ func postForm(values url.Values) *http.Request {
 }
 
 func TestRequestPasswordResetHandler_DeliversAndIsUniform(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 
 	t.Run("known account: mailer receives the token", func(t *testing.T) {
 		svc := &servicetest.MockService{
@@ -196,7 +196,7 @@ func TestVerifyEmailHandler(t *testing.T) {
 		svc := &servicetest.MockService{
 			VerifyEmailFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
-				return &identity.User{ID: uuid.New()}, nil
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
 		}
 		h := identity.VerifyEmailHandler(svc)
@@ -207,7 +207,7 @@ func TestVerifyEmailHandler(t *testing.T) {
 }
 
 func TestRequestMagicLinkHandler(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "ml@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "ml@example.com"}
 
 	t.Run("known account: mailer receives the link token", func(t *testing.T) {
 		svc := &servicetest.MockService{
@@ -239,7 +239,7 @@ func TestRequestMagicLinkHandler(t *testing.T) {
 
 func TestMagicLinkLoginHandler(t *testing.T) {
 	t.Run("success issues auth cookies", func(t *testing.T) {
-		uid := uuid.New()
+		uid := uuid.Must(uuid.NewV7())
 		svc := &servicetest.MockService{
 			LoginWithMagicLinkFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
@@ -269,7 +269,7 @@ func TestMagicLinkLoginHandler(t *testing.T) {
 }
 
 func TestRequestEmailVerificationHandler_RequiresResolvedUser(t *testing.T) {
-	user := &identity.User{ID: uuid.New(), Email: "u@example.com"}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
 
 	t.Run("no resolver -> 401", func(t *testing.T) {
 		h := identity.RequestEmailVerificationHandler(&servicetest.MockService{}, newMockMailer().asMailer())

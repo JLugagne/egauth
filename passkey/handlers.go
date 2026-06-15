@@ -51,6 +51,8 @@ type handlerConfig struct {
 	challenges         ChallengeStore
 	discoverableTenant TenantExtractor
 	maxBodyBytes       int64
+	// cookieKeys, when set, resolves the ceremony-cookie HMAC key per tenant so a cookie sealed for one tenant cannot be opened under another (per-tenant cryptographic isolation). When nil the static cookieKey is used for every tenant (unchanged single-key behavior).
+	cookieKeys CookieKeyResolver
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -140,7 +142,7 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 			cfg.fail(w, err)
 			return
 		}
-		if !cfg.storeSession(w, session) {
+		if !cfg.storeSession(w, r, tenant, session) {
 			return
 		}
 		httputil.WriteJSON(w, http.StatusOK, creation)
@@ -156,7 +158,7 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 		if !ok {
 			return
 		}
-		session, ok := cfg.loadSession(w, r)
+		session, ok := cfg.loadSession(w, r, tenant)
 		if !ok {
 			return
 		}
@@ -195,7 +197,7 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, err)
 			return
 		}
-		if !cfg.storeSession(w, session) {
+		if !cfg.storeSession(w, r, tenant, session) {
 			return
 		}
 		httputil.WriteJSON(w, http.StatusOK, assertion)
@@ -211,7 +213,7 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 		if !ok {
 			return
 		}
-		session, ok := cfg.loadSession(w, r)
+		session, ok := cfg.loadSession(w, r, tenant)
 		if !ok {
 			return
 		}
@@ -257,11 +259,11 @@ func (cfg handlerConfig) subject(w http.ResponseWriter, r *http.Request) (uuid.U
 	return uid, name, displayName, tenant, true
 }
 
-func (cfg handlerConfig) storeSession(w http.ResponseWriter, session *webauthn.SessionData) bool {
-	if len(cfg.cookieKey) == 0 {
+func (cfg handlerConfig) storeSession(w http.ResponseWriter, r *http.Request, tenant string, session *webauthn.SessionData) bool {
+	key, ok := cfg.cookieKeyFor(w, r.Context(), tenant)
+	if !ok {
 		// Fail closed: an unauthenticated ceremony cookie is forgeable (challenge / UV
-		// downgrade). The consumer must configure WithCookieKey.
-		http.Error(w, "server_misconfigured", http.StatusInternalServerError)
+		// downgrade). cookieKeyFor has already written the 500.
 		return false
 	}
 	raw, err := json.Marshal(session)
@@ -271,7 +273,7 @@ func (cfg handlerConfig) storeSession(w http.ResponseWriter, session *webauthn.S
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     cfg.sessionCookie,
-		Value:    cfg.seal(raw),
+		Value:    cfg.seal(key, raw),
 		Domain:   cfg.cookieDomain,
 		Path:     "/",
 		HttpOnly: true,
@@ -282,11 +284,11 @@ func (cfg handlerConfig) storeSession(w http.ResponseWriter, session *webauthn.S
 	return true
 }
 
-func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request) (webauthn.SessionData, bool) {
+func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request, tenant string) (webauthn.SessionData, bool) {
 	cfg.clearSession(w) // single-use, regardless of outcome
 	var session webauthn.SessionData
-	if len(cfg.cookieKey) == 0 {
-		http.Error(w, "server_misconfigured", http.StatusInternalServerError)
+	key, ok := cfg.cookieKeyFor(w, r.Context(), tenant)
+	if !ok {
 		return session, false
 	}
 	c, err := r.Cookie(cfg.sessionCookie)
@@ -294,7 +296,7 @@ func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request) (we
 		cfg.fail(w, ErrSessionInvalid)
 		return session, false
 	}
-	raw, ok := cfg.open(c.Value)
+	raw, ok := cfg.open(key, c.Value)
 	if !ok || json.Unmarshal(raw, &session) != nil {
 		cfg.fail(w, ErrSessionInvalid)
 		return session, false
@@ -304,21 +306,21 @@ func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request) (we
 
 // seal prepends an HMAC-SHA256 tag to the payload and base64url-encodes the result, so the
 // cookie cannot be tampered with by the client.
-func (cfg handlerConfig) seal(raw []byte) string {
-	mac := hmac.New(sha256.New, cfg.cookieKey)
+func (cfg handlerConfig) seal(key, raw []byte) string {
+	mac := hmac.New(sha256.New, key)
 	mac.Write(raw)
 	return base64.RawURLEncoding.EncodeToString(append(mac.Sum(nil), raw...))
 }
 
 // open verifies the HMAC tag (constant time) and returns the payload, or ok=false on any
 // mismatch / malformed value.
-func (cfg handlerConfig) open(value string) ([]byte, bool) {
+func (cfg handlerConfig) open(key []byte, value string) ([]byte, bool) {
 	blob, err := base64.RawURLEncoding.DecodeString(value)
 	if err != nil || len(blob) < sha256.Size {
 		return nil, false
 	}
 	tag, raw := blob[:sha256.Size], blob[sha256.Size:]
-	mac := hmac.New(sha256.New, cfg.cookieKey)
+	mac := hmac.New(sha256.New, key)
 	mac.Write(raw)
 	if !hmac.Equal(tag, mac.Sum(nil)) {
 		return nil, false
@@ -463,7 +465,7 @@ func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Han
 			cfg.fail(w, err)
 			return
 		}
-		if !cfg.storeSession(w, session) {
+		if !cfg.storeSession(w, r, tenant, session) {
 			return
 		}
 		httputil.WriteJSON(w, http.StatusOK, assertion)
@@ -486,7 +488,7 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 		if cfg.discoverableTenant != nil {
 			tenant = cfg.discoverableTenant(r)
 		}
-		session, ok := cfg.loadSession(w, r)
+		session, ok := cfg.loadSession(w, r, tenant)
 		if !ok {
 			return
 		}
@@ -553,4 +555,44 @@ func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFu
 		}
 		w.WriteHeader(http.StatusNoContent)
 	}
+}
+
+// WithTenantCookieKeys makes the ceremony-cookie HMAC key tenant-scoped: before sealing or
+// opening the cookie, the handler resolves the key for the request's tenant through resolver. This
+// extends the per-tenant cryptographic isolation already provided for JWT signing keys (see
+// egauth/keystore) to the passkey ceremony cookie, so a ceremony cookie sealed under tenant A's key
+// fails its HMAC check — and is rejected as an invalid session — when presented to tenant B.
+//
+// resolver receives the tenant id exactly as produced by WithUserResolver (registration/login) or
+// WithDiscoverableTenant (discoverable login); the empty string is the single-tenant partition. It
+// must return a stable, random secret of at least MinCookieKeyLength bytes for the tenant. Returning
+// an error fails the request closed (500) rather than falling back to a shared key. Back the
+// resolver with egauth/keystore (e.g. derive a per-tenant cookie key from the tenant's KeyStore
+// material) so cookie keys rotate and revoke with the rest of the tenant's crypto.
+//
+// WithTenantCookieKeys takes precedence over the static Config.CookieKey / WithCookieKey for every
+// tenant it is asked about; leave it unset to keep the single shared cookie key (unchanged behavior).
+func WithTenantCookieKeys(resolver CookieKeyResolver) HandlerOption {
+	return func(h *handlerConfig) { h.cookieKeys = resolver }
+}
+
+// cookieKeyFor resolves the ceremony-cookie HMAC key for the request's tenant. When a per-tenant
+// resolver is configured (WithTenantCookieKeys) it is consulted; otherwise the static cookieKey
+// (Config.CookieKey / WithCookieKey) is returned. A resolver error or a too-short / missing key
+// fails the request closed with 500 and ok=false, mirroring storeSession/loadSession's existing
+// fail-closed behavior for an unconfigured key — never silently downgrading to a shared key.
+func (cfg handlerConfig) cookieKeyFor(w http.ResponseWriter, ctx context.Context, tenant string) ([]byte, bool) {
+	if cfg.cookieKeys == nil {
+		if len(cfg.cookieKey) == 0 {
+			http.Error(w, "server_misconfigured", http.StatusInternalServerError)
+			return nil, false
+		}
+		return cfg.cookieKey, true
+	}
+	key, err := cfg.cookieKeys(ctx, tenant)
+	if err != nil || len(key) < MinCookieKeyLength {
+		http.Error(w, "server_misconfigured", http.StatusInternalServerError)
+		return nil, false
+	}
+	return key, true
 }

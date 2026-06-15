@@ -15,7 +15,7 @@ import (
 )
 
 func TestMiddleware(t *testing.T) {
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-1"
 	token := "valid_token"
 
@@ -106,7 +106,7 @@ func TestMiddleware(t *testing.T) {
 // request to a tenant) must be treated as a resolution failure and rejected with
 // a 4xx, NOT silently admitted into the single-tenant ("") partition.
 func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	token := "valid_token"
 
 	// A session exists under the "" partition (e.g. a bootstrap/admin session).
@@ -148,7 +148,7 @@ func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
 // token from the specified cookie name (e.g. "__Host-session") instead of
 // the hardcoded "session_token". This test MUST fail before the fix is applied.
 func TestMiddleware_WithCookieName(t *testing.T) {
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-1"
 	token := "valid_token"
 
@@ -197,7 +197,7 @@ func TestMiddleware_WithCookieName(t *testing.T) {
 // (DefaultSessionCookieName) and ignores the legacy plain "session_token" name. WithCookieName
 // remains an escape hatch for deployments that genuinely cannot use a __Host- cookie.
 func TestMiddleware_SecureCookieNameIsDefault(t *testing.T) {
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-1"
 	token := "valid_token"
 

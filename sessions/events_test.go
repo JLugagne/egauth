@@ -39,12 +39,12 @@ func (c *captureSink) find(t event.Type) (event.Event, bool) {
 func TestSessionsEvents_LogoutOnRevoke(t *testing.T) {
 	ctx := context.Background()
 	tenantID := "tenant-1"
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	sink := &captureSink{}
 
 	store := &storetest.MockStore{
 		FindSessionByHashFunc: func(_ context.Context, _ string, _ string) (*sessions.Session, error) {
-			return &sessions.Session{ID: uuid.New(), TenantID: tenantID, UserID: userID, ExpiresAt: time.Now().Add(time.Hour)}, nil
+			return &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantID, UserID: userID, ExpiresAt: time.Now().Add(time.Hour)}, nil
 		},
 		DeleteSessionFunc: func(_ context.Context, _ string, _ uuid.UUID) error { return nil },
 	}
@@ -61,7 +61,7 @@ func TestSessionsEvents_LogoutOnRevoke(t *testing.T) {
 func TestSessionsEvents_LogoutOnRevokeAll(t *testing.T) {
 	ctx := context.Background()
 	tenantID := "tenant-1"
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 	sink := &captureSink{}
 
 	store := &storetest.MockStore{
@@ -85,5 +85,5 @@ func TestSessionsEvents_NilSinkSafe(t *testing.T) {
 	}
 	// No WithEventSink: a nil sink must be a no-op, never a panic.
 	svc := sessions.NewService(store)
-	require.NoError(t, svc.RevokeAllForUser(ctx, "t", uuid.New()))
+	require.NoError(t, svc.RevokeAllForUser(ctx, "t", uuid.Must(uuid.NewV7())))
 }

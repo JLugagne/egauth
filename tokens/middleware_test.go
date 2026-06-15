@@ -14,7 +14,7 @@ import (
 )
 
 func TestRequireAuth(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-123"
 
 	mockVerifier := &issuertest.MockVerifier[any]{

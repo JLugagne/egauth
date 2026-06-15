@@ -27,7 +27,7 @@ func codeForm(code string) *http.Request {
 
 func TestIssueHandler_DeliversAndAlwaysSucceeds(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 
 	var delivered *otp.Challenge
 	done := make(chan struct{})
@@ -63,7 +63,7 @@ func TestIssueHandler_UnknownSubjectStillReturns204(t *testing.T) {
 
 func TestVerifyHandler_Success(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	ch, err := svc.Issue(context.Background(), "", subject, "login")
 	require.NoError(t, err)
 
@@ -76,7 +76,7 @@ func TestVerifyHandler_Success(t *testing.T) {
 }
 
 func TestVerifyHandler_CollapsesAllFailures(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	withSubject := otp.WithSubjectResolver(func(r *http.Request) (uuid.UUID, bool) { return subject, true })
 
 	// Wrong code (a challenge exists) and no-challenge-at-all must be indistinguishable.
@@ -119,7 +119,7 @@ func issuePost() *http.Request {
 // tokens/identity handlers.
 func TestIssueHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	delivered := false
 	deliver := func(context.Context, *otp.Challenge) error { delivered = true; return nil }
 	h := otp.IssueHandler(svc, deliver, otp.WithSubjectResolver(func(*http.Request) (uuid.UUID, bool) {
@@ -139,7 +139,7 @@ func TestIssueHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 // TestIssueHandler_WithInsecureNoOriginCheck proves the loud opt-out restores accept-all behavior.
 func TestIssueHandler_WithInsecureNoOriginCheck(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	h := otp.IssueHandler(svc, nil, otp.WithSubjectResolver(func(*http.Request) (uuid.UUID, bool) {
 		return subject, true
 	}), otp.WithInsecureNoOriginCheck())

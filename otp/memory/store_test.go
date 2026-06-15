@@ -27,7 +27,7 @@ func TestBoundedOTPStore_NeverExceedsCap(t *testing.T) {
 
 	for i := range cap {
 		o := &otp.OTP{
-			SubjectID: uuid.New(),
+			SubjectID: uuid.Must(uuid.NewV7()),
 			Purpose:   "login",
 			CodeHash:  "hash-" + strconv.Itoa(i),
 			ExpiresAt: future.Add(time.Duration(i) * time.Second),
@@ -43,7 +43,7 @@ func TestBoundedOTPStore_NeverExceedsCap(t *testing.T) {
 
 	// Insert one more — must evict an existing entry to stay at cap.
 	extra := &otp.OTP{
-		SubjectID: uuid.New(),
+		SubjectID: uuid.Must(uuid.NewV7()),
 		Purpose:   "login",
 		CodeHash:  "hash-extra",
 		ExpiresAt: future.Add(time.Hour),
@@ -71,9 +71,9 @@ func TestBoundedOTPStore_EvictsExpiredFirst(t *testing.T) {
 	future := time.Now().Add(time.Hour)
 	past := time.Now().Add(-time.Minute)
 
-	expiredSubject := uuid.New()
-	liveSubject1 := uuid.New()
-	liveSubject2 := uuid.New()
+	expiredSubject := uuid.Must(uuid.NewV7())
+	liveSubject1 := uuid.Must(uuid.NewV7())
+	liveSubject2 := uuid.Must(uuid.NewV7())
 
 	entries := []*otp.OTP{
 		{SubjectID: expiredSubject, Purpose: "p", CodeHash: "e", ExpiresAt: past, CreatedAt: time.Now()},
@@ -87,7 +87,7 @@ func TestBoundedOTPStore_EvictsExpiredFirst(t *testing.T) {
 	}
 
 	// 4th insertion — should evict the expired one.
-	extraSubject := uuid.New()
+	extraSubject := uuid.Must(uuid.NewV7())
 	extra := &otp.OTP{
 		SubjectID: extraSubject,
 		Purpose:   "p",
@@ -121,7 +121,7 @@ func TestNewOTPStore_Unbounded(t *testing.T) {
 	ctx := context.Background()
 	for i := range 100 {
 		o := &otp.OTP{
-			SubjectID: uuid.New(),
+			SubjectID: uuid.Must(uuid.NewV7()),
 			Purpose:   "p",
 			CodeHash:  "h" + strconv.Itoa(i),
 			ExpiresAt: time.Now().Add(time.Hour),

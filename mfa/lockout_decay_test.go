@@ -28,7 +28,7 @@ func TestVerifyTOTP_LockoutDecaysAfterDuration(t *testing.T) {
 		mfa.WithMaxAttempts(maxAttempts),
 		mfa.WithLockoutDuration(lockoutDuration),
 	)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	// Advance one period so a new code window is available.
@@ -66,7 +66,7 @@ func TestVerifyRecoveryCode_LockoutDecaysAfterDuration(t *testing.T) {
 		mfa.WithMaxAttempts(maxAttempts),
 		mfa.WithLockoutDuration(lockoutDuration),
 	)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	_, recovery := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	// Exhaust the attempt budget via wrong recovery codes.
@@ -98,7 +98,7 @@ func TestUnlockMFA_AdminPrimitive(t *testing.T) {
 		mfa.WithClock(clk.now),
 		mfa.WithMaxAttempts(maxAttempts),
 	)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)

@@ -29,7 +29,7 @@ func TestWithClock_DeterministicLockoutGate(t *testing.T) {
 	now := base
 	clock := func() time.Time { return now }
 
-	user := &identity.User{ID: uuid.New(), Email: email}
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: email}
 	store := &storetest.MockStore{
 		FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 			return user, nil

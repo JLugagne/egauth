@@ -128,7 +128,7 @@ func TestEvents_LoginFailureUnknownAccountCarriesNoUserID(t *testing.T) {
 func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 	ctx := context.Background()
 	sink := &captureSink{}
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	hash := "h"
 	store := &storetest.MockStore{
 		FindUserByEmailFunc: func(_ context.Context, _ string, email string) (*identity.User, error) {
@@ -137,7 +137,7 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 		FindIdentityByProviderFunc: func(_ context.Context, _ string, provider, providerID string) (*identity.Identity, error) {
 			// FailedAttempts=1 so the next attempt would cross a threshold of 2 — but the store
 			// increment below errors, so no lock is actually persisted.
-			return &identity.Identity{ID: uuid.New(), UserID: uid, Provider: provider, ProviderID: providerID, PasswordHash: &hash, FailedAttempts: 1}, nil
+			return &identity.Identity{ID: uuid.Must(uuid.NewV7()), UserID: uid, Provider: provider, ProviderID: providerID, PasswordHash: &hash, FailedAttempts: 1}, nil
 		},
 		IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) error {
 			return errors.New("store unavailable")

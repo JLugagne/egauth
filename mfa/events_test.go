@@ -44,7 +44,7 @@ func TestMFAEvents_Lifecycle(t *testing.T) {
 		mfa.WithEventSink(sink),
 		mfa.WithClock(func() time.Time { return at }))
 
-	userID := uuid.New()
+	userID := uuid.Must(uuid.NewV7())
 
 	enr, err := svc.EnrollTOTP(ctx, "", userID, "user@example.com")
 	require.NoError(t, err)

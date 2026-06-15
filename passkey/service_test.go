@@ -90,7 +90,7 @@ func TestNewService_ChallengeStoreOptOut(t *testing.T) {
 
 func TestBeginRegistration(t *testing.T) {
 	svc, _ := testService(t)
-	creation, session, err := svc.BeginRegistration(context.Background(), "t1", uuid.New(), "alice", "Alice")
+	creation, session, err := svc.BeginRegistration(context.Background(), "t1", uuid.Must(uuid.NewV7()), "alice", "Alice")
 	require.NoError(t, err)
 	require.NotNil(t, creation)
 	assert.NotEmpty(t, creation.Response.Challenge)
@@ -99,13 +99,13 @@ func TestBeginRegistration(t *testing.T) {
 
 func TestBeginLogin_NoCredentials(t *testing.T) {
 	svc, _ := testService(t)
-	_, _, err := svc.BeginLogin(context.Background(), "t1", uuid.New())
+	_, _, err := svc.BeginLogin(context.Background(), "t1", uuid.Must(uuid.NewV7()))
 	assert.ErrorIs(t, err, passkey.ErrNoCredentials)
 }
 
 func TestBeginLogin_OffersRegisteredCredential(t *testing.T) {
 	svc, store := testService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	saveTestCredential(t, store, uid, []byte{0x01, 0x02, 0x03, 0x04})
 
 	assertion, session, err := svc.BeginLogin(context.Background(), "t1", uid)
@@ -118,7 +118,7 @@ func TestBeginLogin_OffersRegisteredCredential(t *testing.T) {
 
 func TestListAndDeleteCredentials(t *testing.T) {
 	svc, store := testService(t)
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	saveTestCredential(t, store, uid, []byte{0xaa})
 
 	creds, err := svc.ListCredentials(context.Background(), "t1", uid)

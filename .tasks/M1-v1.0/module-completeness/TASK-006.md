@@ -4,7 +4,7 @@ title: Module completeness & feature gaps
 description: Close the per-module feature gaps from road-to-v1.md §4 — export the passkey soft authenticator, add a real sessions-revocation integration test, and record the oauth/providers module placement decision.
 milestone: M1-v1.0
 epic: module-completeness
-status: in_progress
+status: done
 priority: normal
 type: feature
 blocked_by: []

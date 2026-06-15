@@ -9,8 +9,8 @@ import (
 	"github.com/JLugagne/egauth/passkey/memory"
 	"github.com/JLugagne/egauth/passkey/storetest"
 	"github.com/google/uuid"
-	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMemoryStore_Contract(t *testing.T) {
@@ -23,7 +23,7 @@ func TestMemoryStore_Contract(t *testing.T) {
 func TestMemoryStore_ManagementMetadataRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore()
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 
 	lastUsed := time.Date(2026, 6, 11, 8, 30, 0, 0, time.UTC)
 	transports := []string{"usb", "hybrid"}

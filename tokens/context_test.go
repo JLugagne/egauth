@@ -36,7 +36,7 @@ func newContextVerifier(subject uuid.UUID, tenantID string) *issuertest.MockVeri
 }
 
 func TestContextMiddleware(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-123"
 	verifier := newContextVerifier(subject, tenantID)
 
@@ -118,7 +118,7 @@ func TestActorFromContext_Empty(t *testing.T) {
 // TestClaimsFromContext_WrongType proves a ClaimsFromContext call with the wrong C fails
 // closed (ok=false) instead of panicking, so a mis-typed consumer rejects rather than crashes.
 func TestClaimsFromContext_WrongType(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	verifier := newContextVerifier(subject, "t1")
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -138,7 +138,7 @@ func TestClaimsFromContext_WrongType(t *testing.T) {
 }
 
 func TestUserResolverFromContext(t *testing.T) {
-	subject := uuid.New()
+	subject := uuid.Must(uuid.NewV7())
 	tenantID := "tenant-xyz"
 	verifier := newContextVerifier(subject, tenantID)
 

@@ -328,7 +328,7 @@ func New[C any](cfg Config[C]) *Service[C] {
 // IssueTokenPair generates a new Access and Refresh token pair for the given claims,
 // starting a fresh rotation family.
 func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error) {
-	return s.issuePair(ctx, claims, uuid.New(), true)
+	return s.issuePair(ctx, claims, uuid.Must(uuid.NewV7()), true)
 }
 
 // issuePair signs an access JWT and mints an opaque refresh token, persisting the refresh
@@ -363,7 +363,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 			Audience:  claims.Audiences,
 			ExpiresAt: jwt.NewNumericDate(accessExpiresAt),
 			IssuedAt:  jwt.NewNumericDate(now),
-			ID:        uuid.New().String(),
+			ID:        uuid.Must(uuid.NewV7()).String(),
 		},
 		TenantID: claims.TenantID,
 		AuthTime: authTimeUnix,
@@ -447,7 +447,7 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 	}
 
 	key := &tokens.APIKey[C]{
-		ID:        uuid.New(),
+		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  claims.TenantID,
 		Prefix:    prefix,
 		Token:     tokenStr,

@@ -183,6 +183,6 @@ func TestChangeEmail_RequestForUnknownUserIsRejected(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newVerificationService(t)
 
-	_, err := svc.RequestEmailChange(ctx, "", uuid.New(), "ghost-new@example.com")
+	_, err := svc.RequestEmailChange(ctx, "", uuid.Must(uuid.NewV7()), "ghost-new@example.com")
 	assert.ErrorIs(t, err, identity.ErrUserNotFound)
 }

@@ -34,7 +34,7 @@ func stepUpCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	// Enroll + confirm a TOTP factor for the user.
@@ -92,7 +92,7 @@ func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 func TestStepUpHandler_BadCodeMintsNothing(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
-	uid := uuid.New()
+	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
