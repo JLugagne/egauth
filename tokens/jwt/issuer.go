@@ -42,7 +42,10 @@ type Service[C any] struct {
 	signingKeyID   string            // "kid" stamped on new tokens ("" in legacy single-key mode)
 	verifyKeys     map[string][]byte // kid -> key, for verifying kid-tagged tokens
 	legacyKey      []byte            // key tried for a token carrying no kid (the configured SecretKey)
-	issuer         string
+	// keyStore, when non-nil, resolves the signing/verification keyset per tenant, overriding the
+	// static signingKey/verifyKeys above. Nil keeps the static single-keyset (zero-config) mode.
+	keyStore KeyStore
+	issuer   string
 	// expected audiences for the verify path; empty disables the aud check
 	expectedAudiences []string
 	accessTTL         time.Duration
@@ -85,6 +88,12 @@ type Config[C any] struct {
 	// ActiveKeyID selects which SigningKeys entry signs new tokens. It defaults to the sole entry
 	// when exactly one key is configured, and is required when several are.
 	ActiveKeyID string
+	// KeyStore optionally provides per-tenant signing material, enabling per-tenant cryptographic
+	// isolation: when set, the Service resolves each tenant's keyset through it instead of using the
+	// static SecretKey/SigningKeys above. The static keyset still serves the single-tenant partition
+	// ("") and is the fallback when a tenant is unknown to the KeyStore. Leaving it nil keeps the
+	// zero-config single-keyset mode. See github.com/JLugagne/egauth/keystore.
+	KeyStore KeyStore
 	// ClaimsProvider resolves fresh claims during refresh-token rotation. It is required
 	// for Rotate; IssueTokenPair / IssueAPIKey do not need it.
 	ClaimsProvider tokens.ClaimsProvider[C]
@@ -303,6 +312,7 @@ func New[C any](cfg Config[C]) *Service[C] {
 		signingKeyID:      signKeyID,
 		verifyKeys:        verifyKeys,
 		legacyKey:         legacyKey,
+		keyStore:          cfg.KeyStore,
 		issuer:            cfg.Issuer,
 		expectedAudiences: cfg.ExpectedAudience,
 		accessTTL:         cfg.AccessTTL,
@@ -364,13 +374,19 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		Custom:   claims.Custom,
 	}
 
+	// Resolve the signing key for this tenant. With a KeyStore configured this is the tenant's
+	// active key (per-tenant cryptographic isolation); otherwise it is the static keyset.
+	signSecret, signKID, err := s.resolveSigningKey(ctx, claims.TenantID)
+	if err != nil {
+		return nil, err
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, wrapper)
 	// Tag the token with the active key id so verifiers can select the right key during a
 	// rollover. Legacy single-key mode leaves it empty, preserving the original (kid-less) format.
-	if s.signingKeyID != "" {
-		token.Header["kid"] = s.signingKeyID
+	if signKID != "" {
+		token.Header["kid"] = signKID
 	}
-	accessTokenStr, err := token.SignedString(s.signingKey)
+	accessTokenStr, err := token.SignedString(signSecret)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -479,7 +495,7 @@ func (s *Service[C]) verificationKey(token *jwt.Token) (any, error) {
 // token and returns its claims WITHOUT any tenant binding. It is the shared core used by the
 // public VerifyAccessToken (single-tenant) and VerifyAccessTokenForTenant (which adds the tenant
 // comparison). It is unexported precisely so the tenant binding cannot be bypassed by callers.
-func (s *Service[C]) verifyAccessToken(ctx context.Context, tokenStr string) (*tokens.Claims[C], error) {
+func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
 	// WithTimeFunc routes the library's exp/nbf validation through the same injected clock the
@@ -502,7 +518,14 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tokenStr string) (*t
 		opts = append(opts, jwt.WithAudience(s.expectedAudiences...))
 	}
 
-	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, s.verificationKey, opts...)
+	// Select the verification keyfunc: per-tenant via the KeyStore when configured, else the
+	// static keyset. The per-tenant keyfunc only consults tenantID's keys, so a token signed for
+	// another tenant cannot verify here (cross-tenant isolation on the verify path).
+	keyFunc := s.verificationKey
+	if s.keyStore != nil {
+		keyFunc = s.tenantKeyFunc(ctx, tenantID)
+	}
+	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, keyFunc, opts...)
 
 	if err != nil {
 		// An expired token keeps the dedicated sentinel. An iss/aud mismatch is an
@@ -698,7 +721,7 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 // tenant B's context, since the signing key is shared. Single-tenant callers issue under the
 // empty tenant and pass "".
 func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
-	claims, err := s.verifyAccessToken(ctx, tokenStr)
+	claims, err := s.verifyAccessToken(ctx, tenantID, tokenStr)
 	if err != nil {
 		return nil, err
 	}

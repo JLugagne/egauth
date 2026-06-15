@@ -33,10 +33,12 @@ type Manager struct {
 	events event.Sink
 	now    func() time.Time
 	rand   func([]byte) (int, error)
-
 	// erasers are fanned out by DeleteTenant to purge tenant-scoped records from downstream
 	// stores (sessions, tokens, …) in addition to crypto material.
 	erasers []TenantEraser
+	// lazy, when set, makes a keyset resolution auto-provision an unknown tenant on first use
+	// instead of returning ErrTenantNotFound. Off by default: provisioning is explicit.
+	lazy bool
 }
 
 // ManagerOption configures a Manager.
@@ -269,4 +271,11 @@ func (m *Manager) newKey(tenantID, keyID string, ttl time.Duration) (SigningKey,
 // emit sends a lifecycle event through the configured sink (nil-safe via event.Emit).
 func (m *Manager) emit(ctx context.Context, t event.Type, tenantID, reason string) {
 	event.Emit(ctx, m.events, event.Event{Type: t, TenantID: tenantID, Reason: reason})
+}
+
+// WithLazyProvisioning makes the Manager auto-provision a tenant the first time its keyset is
+// resolved, instead of returning ErrTenantNotFound. It is opt-in: by default provisioning is
+// explicit (call ProvisionTenant), which keeps tenant creation an auditable, deliberate act.
+func WithLazyProvisioning() ManagerOption {
+	return func(m *Manager) { m.lazy = true }
 }

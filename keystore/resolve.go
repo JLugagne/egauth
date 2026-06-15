@@ -1,6 +1,10 @@
 package keystore
 
-import "context"
+import (
+	"context"
+	"errors"
+	"time"
+)
 
 // ActiveSigningKey returns the tenant's current active signing key with its secret decrypted,
 // ready for tokens/jwt to sign with. It returns ErrNoActiveKey if the tenant has no active key
@@ -10,7 +14,15 @@ import "context"
 func (m *Manager) ActiveSigningKey(ctx context.Context, tenantID string) (SigningKey, error) {
 	key, err := m.store.ActiveSigningKey(ctx, tenantID)
 	if err != nil {
-		return SigningKey{}, err
+		if m.lazy && errors.Is(err, ErrTenantNotFound) {
+			if perr := m.ProvisionTenant(ctx, tenantID); perr != nil {
+				return SigningKey{}, perr
+			}
+			key, err = m.store.ActiveSigningKey(ctx, tenantID)
+		}
+		if err != nil {
+			return SigningKey{}, err
+		}
 	}
 	if err := m.openKey(&key); err != nil {
 		return SigningKey{}, err
@@ -72,4 +84,29 @@ func (m *Manager) openKey(key *SigningKey) error {
 // conformance suite can construct sealed key material without reaching into the KEK directly.
 func (m *Manager) SealSecret(plaintext []byte) ([]byte, error) {
 	return m.kek.Seal(plaintext)
+}
+
+// NotAfter returns the NotAfter of a tenant's active signing key — the instant past which it
+// stops signing and should already have been renewed. A zero time means the active key never
+// expires. It returns ErrNoActiveKey / ErrTenantNotFound like ActiveSigningKey.
+func (m *Manager) NotAfter(ctx context.Context, tenantID string) (time.Time, error) {
+	key, err := m.store.ActiveSigningKey(ctx, tenantID)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return key.NotAfter, nil
+}
+
+// NeedsRenewal reports whether a tenant's active signing key is within window of its NotAfter (or
+// already past it), so a scheduler can renew ahead of expiry for zero-downtime rollover. A key
+// with no expiry never needs renewal.
+func (m *Manager) NeedsRenewal(ctx context.Context, tenantID string, window time.Duration) (bool, error) {
+	key, err := m.store.ActiveSigningKey(ctx, tenantID)
+	if err != nil {
+		return false, err
+	}
+	if key.NotAfter.IsZero() {
+		return false, nil
+	}
+	return !m.now().Before(key.NotAfter.Add(-window)), nil
 }

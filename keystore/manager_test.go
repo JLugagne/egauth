@@ -3,8 +3,10 @@ package keystore_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/keystore"
@@ -147,5 +149,85 @@ func TestManager_DeleteAbortsOnEraserFailure(t *testing.T) {
 	}
 	if exists, _ := store.TenantExists(ctx, "acme"); !exists {
 		t.Fatal("crypto must NOT be deleted when a downstream eraser fails (resumable delete)")
+	}
+}
+
+// TestManager_LazyProvisioning: with WithLazyProvisioning, resolving an unknown tenant auto-
+// provisions it; without it, the same resolution fails with ErrTenantNotFound.
+func TestManager_LazyProvisioning(t *testing.T) {
+	ctx := context.Background()
+
+	strict, _ := keystore.NewManager(memory.New(), newKEK(t))
+	if _, err := strict.ActiveSigningKey(ctx, "new-tenant"); !errors.Is(err, keystore.ErrTenantNotFound) {
+		t.Fatalf("strict mode: want ErrTenantNotFound, got %v", err)
+	}
+
+	lazy, _ := keystore.NewManager(memory.New(), newKEK(t), keystore.WithLazyProvisioning())
+	key, err := lazy.ActiveSigningKey(ctx, "new-tenant")
+	if err != nil {
+		t.Fatalf("lazy mode: unexpected error %v", err)
+	}
+	if key.KeyID == "" {
+		t.Fatal("lazy mode must auto-provision an active key")
+	}
+}
+
+// TestManager_JWKSNeverLeaksSecret: the JWKS must expose kid/alg metadata but never the secret.
+func TestManager_JWKSNeverLeaksSecret(t *testing.T) {
+	ctx := context.Background()
+	store := memory.New()
+	mgr, _ := keystore.NewManager(store, newKEK(t))
+	if err := mgr.ProvisionTenant(ctx, "acme"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	set, err := mgr.JWKS(ctx, "acme")
+	if err != nil {
+		t.Fatalf("JWKS: %v", err)
+	}
+	if len(set.Keys) != 1 {
+		t.Fatalf("want 1 JWK, got %d", len(set.Keys))
+	}
+	blob, err := json.Marshal(set)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The marshalled JWKS must NOT contain a "k" field (the symmetric secret).
+	if bytes.Contains(blob, []byte("\"k\"")) {
+		t.Fatalf("JWKS must never serialize the symmetric secret; got %s", blob)
+	}
+	jwk := set.Keys[0]
+	if jwk.Alg != "HS256" || jwk.Kty != "oct" || jwk.Use != "sig" || jwk.Kid == "" {
+		t.Fatalf("unexpected JWK metadata: %+v", jwk)
+	}
+}
+
+// TestManager_NeedsRenewal: a key is flagged for renewal once it enters the renewal window.
+func TestManager_NeedsRenewal(t *testing.T) {
+	ctx := context.Background()
+	t0 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clk := t0
+	store := memory.New(memory.WithClock(func() time.Time { return clk }))
+	mgr, _ := keystore.NewManager(store, newKEK(t), keystore.WithClock(func() time.Time { return clk }))
+	if err := mgr.ProvisionTenant(ctx, "acme", func(o *keystore.ProvisionOptions) {
+		o.KeyTTL = 24 * time.Hour
+	}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Far from expiry: no renewal needed.
+	need, err := mgr.NeedsRenewal(ctx, "acme", time.Hour)
+	if err != nil {
+		t.Fatalf("NeedsRenewal: %v", err)
+	}
+	if need {
+		t.Fatal("fresh key should not need renewal")
+	}
+	// Step to within the window.
+	clk = t0.Add(23*time.Hour + 30*time.Minute)
+	need, err = mgr.NeedsRenewal(ctx, "acme", time.Hour)
+	if err != nil {
+		t.Fatalf("NeedsRenewal: %v", err)
+	}
+	if !need {
+		t.Fatal("key within the renewal window must need renewal")
 	}
 }
