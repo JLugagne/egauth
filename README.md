@@ -7,11 +7,14 @@
 A complete, composable, non-opinionated authentication toolkit for Go.
 
 > **About this project — please read.** egauth was built mostly through "vibe coding"
-> (AI-assisted development), and its security review to date is an **AI-driven audit, not an
-> external human one**. I wrote it because I wanted a library like this for my own projects. The
-> code is engineered carefully and secure-by-default — an adversarial pass found no high/critical
-> issue — but it has **not yet had an independent third-party security audit**, so weigh the
-> status accordingly before using it for anything sensitive.
+> (AI-assisted development). egauth's security review to date is an AI-driven audit only; it has
+> not had an independent third-party human security audit, and that risk is accepted for v1.0 —
+> pin a reviewed commit, commission your own audit, or wait if that trade-off is unacceptable. I
+> wrote it because I wanted a library like this for my own projects. The code is engineered
+> carefully and secure-by-default — an adversarial pass found no high/critical issue — but
+> "AI-audited" is **not** a synonym for "audited", so weigh the status accordingly before using
+> it for anything sensitive. The full audit status, scope, and escape hatch live in
+> [AUDIT.md](AUDIT.md).
 >
 > **Comments, reviews, issues, and security audits are genuinely welcome.** If you spot something —
 > a bug, a design smell, a crypto/protocol concern — please open an issue or PR; for anything
@@ -177,11 +180,24 @@ trade-offs (e.g. TOTP secrets stored recoverably, accepted account-existence dis
 boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mail/SMS transport,
 observability, idempotency).
 
-**Observability and idempotency** — egauth ships no first-party metrics or tracing adapter and no
-request-level idempotency layer. Wire your metrics/audit pipeline to `event.Sink` (use
-`event.NewSlogSink` for the common slog case, or implement the interface for Prometheus/OpenTelemetry);
-use the propagated `context.Context` for span injection. Request-level idempotency is the application
+**Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
+for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for
+OpenTelemetry spans (`NewSpanSink` creates one child span per security event with `egauth.*`
+attributes). Combine them with `event.MultiSink`. Request-level idempotency is the application
 layer's responsibility. See [SECURITY.md § Observability and idempotency](SECURITY.md#observability-and-idempotency-consumer-responsibility).
+
+## Reference application
+
+[`examples/fullstack`](examples/fullstack) is a self-contained runnable application that wires
+the full egauth stack — identity + tokens with custom claims + MFA (TOTP) + passkey + admin
+operations + audit events — over HTTP using only in-memory backends and the standard library
+mux. It builds from the module proxy with no local `go.work` workspace:
+
+```sh
+go run github.com/JLugagne/egauth/examples/fullstack@latest
+```
+
+A smoke test (`go test ./examples/fullstack`) exercises all six concerns end-to-end.
 
 ## Documentation
 
@@ -215,8 +231,15 @@ stores for their `pgx` counterparts (which rely on the database for eviction ins
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
 follow SemVer with a CHANGELOG. Pin a commit or tag in `go.mod` for reproducible builds.
 
-**Go version support policy.** egauth targets the newest major Go release as its minimum toolchain.
-The `go.mod` directive is currently `go 1.26` and is bumped deliberately — each time a new major
-Go version ships, the floor moves up to it. This is an intentional choice (not an accident): the
-library is expected to be adopted in greenfield projects that run the current toolchain. If you
-need support for an older Go version, pin an earlier egauth release.
+**Go version support policy.**
+
+- **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.
+  v1.0 through v1.x will all require `go 1.26` (the minimum toolchain at v1.0 release). Bumping to a
+  newer major Go release is deferred to v2. This provides maximum build stability within a major
+  version.
+  
+- **Pre-v1 releases**: egauth targets the newest major Go release as its minimum toolchain. The `go.mod`
+  directive is bumped deliberately — each time a new major Go version ships, the floor moves up to it.
+  This is an intentional choice (not an accident): the library is expected to be adopted in greenfield
+  projects that run the current toolchain. If you need support for an older Go version, pin an earlier
+  egauth release.

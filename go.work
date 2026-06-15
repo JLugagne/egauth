@@ -7,4 +7,5 @@ go 1.26
 use (
 	.
 	./adapters/pgx
+	./adapters/otel
 )

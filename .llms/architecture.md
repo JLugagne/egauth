@@ -3,6 +3,17 @@
 module: `github.com/JLugagne/egauth` (Go 1.26+)
 root package exports only `Actor` (see [infra.md](infra.md)). All behavior lives in sub-packages.
 
+## Go version support policy
+
+- **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.
+  v1.0 through v1.x will all use `go 1.26` as the minimum toolchain. Bumping to a newer major Go
+  release is deferred to v2, ensuring maximum build compatibility within v1. This is a stability
+  guarantee for consumers building against v1.x.
+  
+- **Pre-v1 releases**: egauth targets the newest major Go release as its minimum toolchain and bumps
+  deliberately with each new major Go version. This allows pre-v1 development to track the cutting
+  edge. If you need support for an older Go version, pin an earlier egauth release.
+
 ## Model: à-la-carte, not a framework
 
 egauth is a set of independent modules in the style of `database/sql`: import the ones you need,
@@ -73,10 +84,56 @@ See [recipes.md](recipes.md) for concrete wiring of each stack.
 
 ## Storage backends
 
-- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, unbounded —
-  must schedule eviction via `janitor`).
+- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, self-bounding
+  or janitor-evicted — see below).
 - `adapters/pgx` is a separate go.mod so core consumers never pull pgx/testcontainers/Docker.
   `Migrate(ctx, pool)` once at startup (forward-only, versioned, idempotent). [storage-pgx.md](storage-pgx.md).
+
+### In-memory store growth control
+
+All three in-process stores that can grow without bound ship a **bounded variant** alongside the
+original unbounded constructor:
+
+| Package | Unbounded (original) | Bounded (new) | Cap policy |
+|---|---|---|---|
+| `sessions/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `otp/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `ratelimit` | `NewTokenBucket(…)` | `NewTokenBucket(…, WithMaxKeys(n))` | evicts most-refilled (least-pressure) bucket |
+
+The unbounded constructors remain available for callers that prefer to schedule periodic eviction
+via `janitor`. Both models are safe for concurrent use. The bounded variants require no external
+scheduler and are recommended for Internet-facing deployments where key cardinality is unbounded.
+
+## Module placement decisions (v1 API freeze)
+
+### oauth/providers — keep in core module (decided 2026-06-15)
+
+The 12 built-in OAuth providers (`apple`, `auth0`, `cognito`, `discord`, `facebook`, `github`,
+`gitlab`, `google`, `keycloak`, `linkedin`, `microsoft`, `okta`) live in `oauth/providers` inside
+the core `github.com/JLugagne/egauth` module, not in a separate module.
+
+Rationale:
+- Provider constructors are already stable and in active use (reference app, docs examples).
+- Moving to a separate module before v1 would be a breaking import-path change for any existing
+  consumer, which is worse than the status quo.
+- Provider churn in v1.x can be absorbed by additive changes (new constructors, not changed ones).
+  A provider signature never needs to change — only new providers are added.
+- A separate module for providers would add go.mod/go.sum overhead with no real isolation benefit:
+  providers import `oauth` core anyway, so the dependency graph is unchanged.
+
+Trade-off accepted: `oauth/providers` is part of the v1 public API surface and is frozen under
+SemVer. Breaking a provider constructor requires a v2. This is the accepted cost of keeping the
+DX simple.
+
+### passkey/passkeytest — test-helper package in core module (decided 2026-06-15)
+
+`passkey/passkeytest` (package `passkeytest`) exports `SoftAuthenticator`, a minimal software
+WebAuthn authenticator for integration testing. It lives in the core module rather than a separate
+module because:
+- It has no additional dependencies beyond what `passkey` itself imports.
+- It mirrors the established pattern of `identity/servicetest`, `identity/storetest`, `mfa/storetest`,
+  etc., which all live in the core module.
+- A separate test-helper module would add friction with no benefit.
 
 ## Security posture (summary)
 

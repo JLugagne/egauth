@@ -1,5 +1,12 @@
 # Security model — handling secrets and passwords
 
+> **Audit status.** egauth's security review to date is an AI-driven audit only; it has not had
+> an independent third-party human security audit, and that risk is accepted for v1.0 — pin a
+> reviewed commit, commission your own audit, or wait if that trade-off is unacceptable.
+> "AI-audited" is **not** a synonym for "audited". See [AUDIT.md](AUDIT.md) for the full review
+> scope (what was reviewed and how, what was not, the accepted trade-offs) and the cautious-user
+> escape hatch.
+
 This document describes how `egauth` handles sensitive values (passwords, opaque
 tokens, hashes) and what the **consumer** of the library is responsible for.
 
@@ -365,14 +372,30 @@ preset exposes.
 
 ## Observability and idempotency (consumer responsibility)
 
-egauth ships no first-party metrics, tracing, or request-level idempotency layer.
-
 **Observability** — wire `event.Sink` to your metrics pipeline or audit log. The ready-made
-`event.NewSlogSink` covers the "log it with slog" case; for richer consumers (Prometheus
-counters, OpenTelemetry spans, SIEM ingestion) implement `event.Sink` directly or use
-`event.MultiSink` to fan out. Every operation propagates a `context.Context`, so span
-propagation and deadline enforcement are fully under the consumer's control. egauth ships no
-first-party OpenTelemetry or Prometheus adapter (a later milestone, if wanted).
+`event.NewSlogSink` covers the "log it with slog" case. For OpenTelemetry tracing, egauth ships
+a reference adapter at `github.com/JLugagne/egauth/adapters/otel`:
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    egauthotel "github.com/JLugagne/egauth/adapters/otel"
+    "github.com/JLugagne/egauth/event"
+)
+
+tracer := otel.Tracer("egauth")
+sink   := egauthotel.NewSpanSink(tracer)
+
+// Fan out to both slog and spans:
+combined := event.MultiSink(event.NewSlogSink(nil), sink)
+```
+
+`NewSpanSink` creates one child span per security event (auth success/failure, MFA, refresh
+rotation, token-family revocation, insecure-cookie misuse, etc.) with `egauth.*` attributes and
+records errors via `span.RecordError`. For Prometheus counters or SIEM ingestion, implement
+`event.Sink` directly or use `event.MultiSink` to fan out. Every operation propagates a
+`context.Context`, so span propagation and deadline enforcement are fully under the consumer's
+control.
 
 **Idempotency** — request-level deduplication (idempotency keys, retry-safe mutations) is the
 application layer's responsibility. egauth provides no idempotency-key layer; consuming

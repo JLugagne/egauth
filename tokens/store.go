@@ -8,13 +8,12 @@ import (
 
 // Store defines the persistence interface for Refresh Tokens and API Keys.
 //
-// STABILITY: Store is intentionally monolithic for v0.x — it will NOT be split into a
-// core+capability set of interfaces before v1. Methods MAY be added in minor releases
-// without a major version bump. External implementers MUST run the conformance suite at
-// github.com/JLugagne/egauth/tokens/storetest on every upgrade to catch newly-required
-// methods before they silently break an auth flow. (A core+capability split is deferred
-// to v1, when the surface has stabilised and external adoption makes the churn cost worth
-// weighing.)
+// It is the composition of the RefreshTokenStore (rotating refresh tokens and their families),
+// the APIKeyStore[C] (long-lived API keys, generic over the custom-claims type C) and the optional
+// TokenReaper (the schedulable expired-record sweep that only a background job calls). Segmenting
+// the contract this way means a future v1.x capability can ship as a NEW optional interface —
+// implementers type-assert for it — rather than as a method on this interface, which would break
+// every external Store. Both the in-memory and pgx stores implement the whole Store.
 //
 // It stores ONLY the hash of the tokens to ensure security at rest.
 //
@@ -22,6 +21,15 @@ import (
 // string is a legal tenant key (the single-tenant default partition); it must still be
 // passed explicitly.
 type Store[C any] interface {
+	RefreshTokenStore
+	APIKeyStore[C]
+	TokenReaper
+}
+
+// RefreshTokenStore is the refresh-token capability of a tokens backend: persisting, looking up,
+// single-use-consuming and revoking the rotating refresh tokens (and their families) that back
+// long-lived sessions. It is independent of the custom-claims type C.
+type RefreshTokenStore interface {
 	// SaveRefreshToken persists a refresh token record (storing only its hash). If the
 	// record already carries a non-empty TenantID that differs from tenantID, it returns
 	// ErrTenantMismatch.
@@ -40,14 +48,24 @@ type Store[C any] interface {
 
 	// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
 	RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
+}
 
+// APIKeyStore is the API-key capability of a tokens backend, generic over the custom-claims type C
+// carried by each key.
+type APIKeyStore[C any] interface {
 	// SaveAPIKey persists an API key. If the key already carries a non-empty TenantID that
 	// differs from tenantID, it returns ErrTenantMismatch.
 	SaveAPIKey(ctx context.Context, tenantID string, key *APIKey[C]) error
 
 	// FindAPIKeyByHash retrieves an API key by its hash.
 	FindAPIKeyByHash(ctx context.Context, tenantID string, tokenHash string) (*APIKey[C], error)
+}
 
+// TokenReaper is the optional GC capability of a tokens backend: the schedulable sweep that purges
+// expired refresh tokens and API keys. It is separated from the core stores because the request
+// path never calls it — only a background job does. The full Store composes RefreshTokenStore +
+// APIKeyStore + TokenReaper; both the in-memory and pgx stores implement the whole Store.
+type TokenReaper interface {
 	// DeleteExpired purges expired records (refresh tokens and any API keys past their expiry)
 	// within the given tenant, returning the number deleted. It is the schedulable GC reaper:
 	// refresh-token rows are retained past consumption for reuse/theft detection, so they

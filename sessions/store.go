@@ -8,10 +8,26 @@ import (
 
 // Store defines the persistence interface for Sessions.
 //
+// It is the composition of the stable-core SessionStore (the create/lookup/mutate/delete
+// operations the Service touches on every request path) and the optional SessionReaper (the
+// schedulable expired-session sweep that only a background job calls). Segmenting the contract
+// this way means a future v1.x capability can ship as a NEW optional interface — implementers
+// type-assert for it — rather than as a new method on this interface, which would break every
+// external Store. Both the in-memory and pgx stores implement the whole Store.
+//
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
 // string is a legal tenant key (the single-tenant default partition); it must still be
 // passed explicitly.
 type Store interface {
+	SessionStore
+	SessionReaper
+}
+
+// SessionStore is the stable-core capability of a sessions backend: the create, lookup, mutate
+// and delete operations the Service needs on every request path. It is the part of the contract
+// frozen for v1; new optional behaviour is added as a separate capability interface, never as a
+// method here.
+type SessionStore interface {
 	// CreateSession persists a new session. If the record already carries a non-empty
 	// TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	CreateSession(ctx context.Context, tenantID string, session *Session) error
@@ -54,7 +70,13 @@ type Store interface {
 
 	// DeleteSessionsByUserID removes all sessions for a user within the given tenant.
 	DeleteSessionsByUserID(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
 
+// SessionReaper is the optional GC capability of a sessions backend: the schedulable sweep that
+// purges expired sessions. It is separated from the core SessionStore because the request path
+// never calls it — only a background job (e.g. janitor.Start) does. The full Store composes
+// SessionStore + SessionReaper; both the in-memory and pgx stores implement the whole Store.
+type SessionReaper interface {
 	// DeleteExpired purges sessions past their expiry within the given tenant, returning the
 	// number deleted. It is the schedulable GC reaper that keeps the session store from growing
 	// unbounded. Run it periodically from a background job.
