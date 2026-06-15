@@ -1,5 +1,12 @@
 # Security model — handling secrets and passwords
 
+> **Audit status.** egauth's security review to date is an AI-driven audit only; it has not had
+> an independent third-party human security audit, and that risk is accepted for v1.0 — pin a
+> reviewed commit, commission your own audit, or wait if that trade-off is unacceptable.
+> "AI-audited" is **not** a synonym for "audited". See [AUDIT.md](AUDIT.md) for the full review
+> scope (what was reviewed and how, what was not, the accepted trade-offs) and the cautious-user
+> escape hatch.
+
 This document describes how `egauth` handles sensitive values (passwords, opaque
 tokens, hashes) and what the **consumer** of the library is responsible for.
 

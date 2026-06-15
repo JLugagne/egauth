@@ -4,6 +4,8 @@
 > `database/sql` style: import what you need, wire with dependency injection. No framework —
 > egauth never owns your router, DB, or mail/SMS transport. Secure-by-default.
 
+AUDIT STATUS: egauth's security review to date is an AI-driven audit only; it has not had an independent third-party human security audit, and that risk is accepted for v1.0 — pin a reviewed commit, commission your own audit, or wait if that trade-off is unacceptable. "AI-audited" is not a synonym for "audited". Full status, scope, and escape hatch in `AUDIT.md`.
+
 module: `github.com/JLugagne/egauth` · Go 1.26+ · License MIT · status: pre-1.0 (API settling; AI-audited, no third-party human audit yet)
 install (core): `go get github.com/JLugagne/egauth`
 install (PostgreSQL stores, separate module): `go get github.com/JLugagne/egauth/adapters/pgx`

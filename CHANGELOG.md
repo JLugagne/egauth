@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security / disclosure (v1.0.0)
+
+- **Audit-status disclosure.** egauth's security review to date is an AI-driven audit only; it
+  has not had an independent third-party human security audit, and that risk is accepted for
+  v1.0 — pin a reviewed commit, commission your own audit, or wait if that trade-off is
+  unacceptable. "AI-audited" is **not** a synonym for "audited". The full review scope (what was
+  reviewed and how, what was not, the accepted trade-offs) and the cautious-user escape hatch
+  live in the new [`AUDIT.md`](AUDIT.md) ledger. The canonical sentence above is reused verbatim
+  across the README, root package godoc (`doc.go`), `llms.txt`, and `SECURITY.md`, and its
+  presence on those surfaces is enforced by a build-failing test (`disclosure_test.go`).
+  Post-v1, any security-relevant change re-discloses its review status here (see AUDIT.md's
+  re-disclosure policy). (#19)
+
 ## [0.3.0] - 2026-06-06
 
 Public-release hardening: secure-by-default behavior changes, a PostgreSQL storage-adapter
