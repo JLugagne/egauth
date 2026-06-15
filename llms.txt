@@ -18,6 +18,7 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 
 - [Architecture & conventions](.llms/architecture.md): the Service/Store/SingleTenant pattern, multi-tenancy, seams, conformance suites, security posture, composition graph. READ FIRST.
 - [Recipes](.llms/recipes.md): copy-pasteable wiring for each stack (password+JWT, sessions, OAuth/OIDC, MFA, passkeys, OTP, password reset, production hardening, API keys).
+- [Reference application](examples/fullstack): runnable example wiring identity + tokens (custom claims) + MFA + passkey + admin + audit over HTTP with in-memory stores. Run: `go run github.com/JLugagne/egauth/examples/fullstack@latest`.
 
 ## Module reference
 
