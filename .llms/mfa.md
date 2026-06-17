@@ -87,7 +87,7 @@ type Store interface {
     // MarkTOTPUsed: returns false=replay; on true MUST reset FailedAttempts to 0
     MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error)
     // IncrementTOTPAttempts: atomic pre-compare gate; returns new count; ErrNotEnrolled if absent
-    IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) (int, error)
+    IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error)
 
     // ReplaceRecoveryCodes: atomically discards old hashes, stores new ones
     ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error

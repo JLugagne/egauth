@@ -102,11 +102,36 @@ Migrations:
 
 ---
 
+### keystore
+
+import: `github.com/JLugagne/egauth/adapters/pgx/keystore`
+implements: `keystore.Store`
+constructor: `func NewStore(db DBQuerier) *Store`
+
+Methods:
+- `CreateTenant(ctx, tenantID, initial keystore.SigningKey) error`
+- `TenantExists(ctx, tenantID) (bool, error)`
+- `PutSigningKey(ctx, tenantID, key keystore.SigningKey) error`
+- `ActiveSigningKey(ctx, tenantID) (keystore.SigningKey, error)`
+- `VerificationKeys(ctx, tenantID) (map[string]keystore.SigningKey, error)`
+- `RotateSigningKey(ctx, tenantID, next keystore.SigningKey, retiredAt time.Time) error`
+- `RetireExpiredKeys(ctx, tenantID, now time.Time) (int64, error)`
+- `RevokeTenantKeys(ctx, tenantID) error`
+- `DeleteTenant(ctx, tenantID) error`
+
+Migrations:
+```
+001_create_keystore_keys_table.sql
+```
+
+---
+
 ### mfa
 
 import: `github.com/JLugagne/egauth/adapters/pgx/mfa`
 implements: `mfa.Store`
-constructor: `func NewStore(db DBQuerier) *Store`
+constructor: `func NewStore(db DBQuerier, kek KEK) *Store`
+`KEK` provides envelope encryption for TOTP secrets and must be implemented or provided by the `keystore` package.
 
 Methods:
 - `SaveTOTP`, `GetTOTP`, `DeleteTOTP`
@@ -166,7 +191,8 @@ Migrations:
 
 import: `github.com/JLugagne/egauth/adapters/pgx/oauth`
 implements: `oauth.ProviderStore`
-constructor: `func NewStore(db DBQuerier, opts ...StoreOption) *Store`
+constructor: `func NewStore(db DBQuerier, kek KEK, opts ...StoreOption) *Store`
+`KEK` provides envelope encryption for OAuth client secrets and must be implemented or provided by the `keystore` package.
 
 StoreOption:
 ```go

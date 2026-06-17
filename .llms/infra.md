@@ -183,4 +183,6 @@ mux.Handle("/login", ratelimit.Middleware(tb, ratelimit.ClientIP)(loginHandler))
 - `health.Pinger` is pgx-only; in-memory stores never satisfy it.
 - `ClientIP` does not trust proxy headers; supply a custom `KeyFunc` when behind a trusted proxy.
 - `ratelimit.TokenBucket.Cleanup` only removes fully-refilled buckets; it does not reset limits for keys still under pressure.
+- `ratelimit.TokenBucket` eviction is O(1) by sampling, preventing DoS during cleanup under heavy load.
+- `janitor` automatically recovers from panics in the cleanup function, ensuring the background loop stays alive.
 - Multi-tenant janitor: fan out inside one goroutine by iterating `tenantIDs()` inside `fn`.

@@ -38,7 +38,7 @@ type Rotator[C any] interface {
 }
 
 type ClaimsProvider[C any] interface {
-    // Called during Rotate to resolve fresh claims; error aborts rotation (old token stays consumed).
+    // Called during Rotate to resolve fresh claims; error aborts rotation (old token is NOT consumed to allow retry on transient error).
     ClaimsForUser(ctx context.Context, userID uuid.UUID, tenantID string) (Claims[C], error)
 }
 

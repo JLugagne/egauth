@@ -20,6 +20,7 @@ type Service interface {
     LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
     RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
     LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
+    // ChangePassword changes the user's password and triggers all registered AccountErasers to terminate sessions.
     ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
     RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
     ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
@@ -176,6 +177,7 @@ Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
 
 `func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; reads `current_password`, `new_password` from form
+- Note: Changing the password proactively terminates all sessions by invoking registered `AccountEraser`s.
 - Errors: `401 invalid_credentials`, `400 password_rejected`, `401 unauthorized`
 
 `func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc`
