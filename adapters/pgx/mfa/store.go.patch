@@ -1,0 +1,67 @@
+--- adapters/pgx/mfa/store.go
++++ adapters/pgx/mfa/store.go
+@@ -5,2 +5,4 @@
+ 	"context"
+ 	"embed"
++	"encoding/base64"
+ 	"errors"
++	"fmt"
+ 	"time"
+@@ -35,5 +37,12 @@
+ 
++// KEK provides envelope encryption for TOTP secrets at rest.
++type KEK interface {
++	Seal(plaintext []byte) ([]byte, error)
++	Open(sealed []byte) ([]byte, error)
++}
++
+ // Store implements mfa.Store for PostgreSQL.
+ type Store struct {
+ 	db DBQuerier
++	kek KEK
+ }
+ 
+ // NewStore creates a new PostgreSQL mfa store.
+-func NewStore(db DBQuerier) *Store {
+-	return &Store{db: db}
++func NewStore(db DBQuerier, kek KEK) *Store {
++	if kek == nil {
++		panic("mfa pgx: KEK is required")
++	}
++	return &Store{db: db, kek: kek}
+ }
+ 
+@@ -69,3 +78,9 @@
+ 	}
+-	_, err := s.db.Exec(ctx, query, tenantID, e.UserID, e.Secret, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
++
++	sealed, err := s.kek.Seal([]byte(e.Secret))
++	if err != nil {
++		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
++	}
++	secretStr := base64.StdEncoding.EncodeToString(sealed)
++
++	_, err = s.db.Exec(ctx, query, tenantID, e.UserID, secretStr, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
+ 	return err
+@@ -81,5 +96,6 @@
+ 	e := &mfa.TOTPEnrollment{UserID: userID, TenantID: tenantID}
+ 	var lastAttemptAt *time.Time
++	var secretStr string
+ 	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(
+-		&e.Secret, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &lastAttemptAt, &e.CreatedAt,
++		&secretStr, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &lastAttemptAt, &e.CreatedAt,
+ 	)
+@@ -90,2 +106,12 @@
+ 		return nil, err
++	}
++
++	sealed, err := base64.StdEncoding.DecodeString(secretStr)
++	if err != nil {
++		return nil, fmt.Errorf("mfa pgx: decoding secret: %w", err)
++	}
++	plaintext, err := s.kek.Open(sealed)
++	if err != nil {
++		return nil, fmt.Errorf("mfa pgx: opening secret: %w", err)
+ 	}
++	e.Secret = string(plaintext)
+ 	if lastAttemptAt != nil {

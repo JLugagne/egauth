@@ -3,11 +3,13 @@ package pgx
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/oauth"
@@ -57,11 +59,13 @@ type Store struct {
 	// mu guards the providerCache below.
 	mu sync.RWMutex
 	// providerCache memoizes built oauth.Provider instances keyed by (tenantID, providerName)
-	// so the verifier's 1h JWKS cache and warm OIDC discovery survive across requests. Without
-	// this, every callback rebuilt the Provider (and an empty jwksCache), forcing a fresh discovery
-	// + JWKS fetch to the tenant-controlled issuer on each login (DoS-amplification / availability).
-	// Entries are dropped on UpsertProvider/DeleteProvider.
-	providerCache map[string]*oauth.Provider
+	// so the verifier's 1h JWKS cache and warm OIDC discovery survive across requests. We map to
+	// a cachedProvider that includes the DB row's updated_at timestamp. This solves distributed
+	// cache invalidation: every GetProvider hits the DB (which is cheap) but reuses the built
+	// *oauth.Provider if updated_at hasn't changed.
+	providerCache map[string]*cachedProvider
+	// kek encrypts the OIDC client_secret at rest.
+	kek KEK
 }
 
 // StoreOption configures a Store at construction.
@@ -95,11 +99,25 @@ var ErrIssuerNotAllowed = errors.New("oauth/pgx: issuer not on allowlist")
 // make it fail at request time (PANIC-01).
 var ErrInvalidProviderConfig = errors.New("oauth/pgx: invalid provider configuration")
 
+// KEK defines the interface for a Key Encryption Key used to encrypt secrets at rest.
+type KEK interface {
+	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, ciphertext []byte) ([]byte, error)
+}
+
+type cachedProvider struct {
+	provider  *oauth.Provider
+	updatedAt time.Time
+}
+
 // NewStore creates a new PostgreSQL store for OAuth providers. db may be a *pgxpool.Pool or a
 // pgx.Tx (anything satisfying DBQuerier). Pass StoreOptions such as WithIssuerAllowlist to harden
-// the multi-tenant configuration surface.
-func NewStore(db DBQuerier, opts ...StoreOption) *Store {
-	s := &Store{db: db, providerCache: make(map[string]*oauth.Provider)}
+// the multi-tenant configuration surface. The kek is used to encrypt the OIDC client_secret at rest.
+func NewStore(db DBQuerier, kek KEK, opts ...StoreOption) *Store {
+	if kek == nil {
+		panic("oauth/pgx: kek is required")
+	}
+	s := &Store{db: db, kek: kek, providerCache: make(map[string]*cachedProvider)}
 	for _, o := range opts {
 		o(s)
 	}
@@ -122,26 +140,17 @@ func (s *Store) checkIssuerAllowed(issuer string) error {
 func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) (*oauth.Provider, error) {
 	key := providerCacheKey(tenantID, providerName)
 
-	// Fast path: return the already-built provider so its verifier's JWKS cache (1h TTL) and
-	// warm OIDC discovery survive across requests. The issuer allowlist is fixed at construction,
-	// so a cached provider necessarily passed checkIssuerAllowed when it was first built.
-	s.mu.RLock()
-	if p, ok := s.providerCache[key]; ok {
-		s.mu.RUnlock()
-		return p, nil
-	}
-	s.mu.RUnlock()
-
 	query := `
-		SELECT client_id, client_secret, auth_url, token_url, issuer, jwks_url, scopes
+		SELECT client_id, client_secret, auth_url, token_url, issuer, jwks_url, scopes, updated_at
 		FROM oauth_oidc_providers
 		WHERE tenant_id = $1 AND provider_name = $2
 	`
 	var (
-		clientID, clientSecret, authURL, tokenURL, issuer, jwksURL, scopesStr string
+		clientID, clientSecretEnc, authURL, tokenURL, issuer, jwksURL, scopesStr string
+		updatedAt                                                                time.Time
 	)
 	err := s.db.QueryRow(ctx, query, tenantID, providerName).Scan(
-		&clientID, &clientSecret, &authURL, &tokenURL, &issuer, &jwksURL, &scopesStr,
+		&clientID, &clientSecretEnc, &authURL, &tokenURL, &issuer, &jwksURL, &scopesStr, &updatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -149,6 +158,28 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		}
 		return nil, err
 	}
+
+	var clientSecret string
+	if clientSecretEnc != "" {
+		sealed, decErr := base64.StdEncoding.DecodeString(clientSecretEnc)
+		if decErr != nil {
+			return nil, fmt.Errorf("oauth/pgx: failed to base64 decode client_secret: %w", decErr)
+		}
+		dec, decErr := s.kek.Open(ctx, sealed)
+		if decErr != nil {
+			return nil, fmt.Errorf("oauth/pgx: failed to decrypt client_secret: %w", decErr)
+		}
+		clientSecret = string(dec)
+	}
+
+	// Cache check with updated_at: if the database row hasn't changed since we built the
+	// cached provider, we can safely reuse it to preserve the JWKS cache.
+	s.mu.RLock()
+	if cp, ok := s.providerCache[key]; ok && cp.updatedAt.Equal(updatedAt) {
+		s.mu.RUnlock()
+		return cp.provider, nil
+	}
+	s.mu.RUnlock()
 
 	// Defence in depth: reject a stored issuer that is no longer on the operator allowlist.
 	if err := s.checkIssuerAllowed(issuer); err != nil {
@@ -187,13 +218,13 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 	// build; we keep whichever wins the lock and return that one so all callers share a single
 	// instance (and therefore a single JWKS cache) from then on.
 	s.mu.Lock()
-	if existing, ok := s.providerCache[key]; ok {
+	if existing, ok := s.providerCache[key]; ok && existing.updatedAt.Equal(updatedAt) {
 		s.mu.Unlock()
-		return existing, nil
+		return existing.provider, nil
 	}
 	p := oauth.New(providerName, clientID, clientSecret, authURL, tokenURL, scopes, fetch,
 		oauth.WithHTTPClient(safeClient), oauth.WithOIDC(cfg))
-	s.providerCache[key] = p
+	s.providerCache[key] = &cachedProvider{provider: p, updatedAt: updatedAt}
 	s.mu.Unlock()
 	return p, nil
 }
@@ -223,9 +254,19 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 			scopes = EXCLUDED.scopes,
 			updated_at = NOW()
 	`
+
+	var sealedSecret string
+	if config.ClientSecret != "" {
+		enc, err := s.kek.Seal(ctx, []byte(config.ClientSecret))
+		if err != nil {
+			return fmt.Errorf("oauth/pgx: failed to encrypt client_secret: %w", err)
+		}
+		sealedSecret = base64.StdEncoding.EncodeToString(enc)
+	}
+
 	_, err := s.db.Exec(ctx, query,
 		tenantID, providerName,
-		config.ClientID, config.ClientSecret,
+		config.ClientID, sealedSecret,
 		config.AuthURL, config.TokenURL,
 		config.Issuer, config.JWKSURL, strings.Join(config.Scopes, " "),
 	)

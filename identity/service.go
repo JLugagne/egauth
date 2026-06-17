@@ -711,6 +711,23 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash); err != nil {
 		return err
 	}
+
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := erase(ctx, tenantID, userID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID})
 	return nil
 }

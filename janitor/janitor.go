@@ -99,7 +99,12 @@ func Start(ctx context.Context, interval time.Duration, fn func()) *Janitor {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				fn()
+				func() {
+					defer func() {
+						_ = recover()
+					}()
+					fn()
+				}()
 			}
 		}
 	}()

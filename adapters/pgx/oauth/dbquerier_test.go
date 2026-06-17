@@ -30,7 +30,7 @@ func (stubQuerier) QueryRow(context.Context, string, ...any) pgx.Row        { re
 // TestNewStoreAcceptsDBQuerier proves the constructor takes the widened DBQuerier interface
 // (here a stub; in practice a *pgxpool.Pool or a pgx.Tx) rather than a concrete *pgxpool.Pool.
 func TestNewStoreAcceptsDBQuerier(t *testing.T) {
-	if s := NewStore(stubQuerier{}, WithIssuerAllowlist([]string{"https://idp.example.com"})); s == nil {
+	if s := NewStore(stubQuerier{}, dummyKEK{}, WithIssuerAllowlist([]string{"https://idp.example.com"})); s == nil {
 		t.Fatal("NewStore returned nil for a non-pool DBQuerier")
 	}
 }

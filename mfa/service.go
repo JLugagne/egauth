@@ -342,28 +342,13 @@ func (s *service) atLimit(n int) bool { return s.maxAttempts > 0 && n >= s.maxAt
 
 // reserveAttempt atomically claims one slot of the attempt budget and returns the new count.
 // When limiting is disabled it is a no-op that reports 0 (never locked).
-// If a lockoutDuration is configured and the elapsed time since the last failed attempt
-// exceeds it, the counter is reset before claiming a new slot so the caller starts with a
-// fresh budget (time-based lockout decay).
+// If a lockoutDuration is configured, the store handles time-based lockout decay atomically
+// and prevents perpetual DoS if already locked.
 func (s *service) reserveAttempt(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
 	if s.maxAttempts <= 0 {
 		return 0, nil
 	}
-	// Check whether the lockout window has expired so we can decay the counter before
-	// incrementing. We read the current enrollment to inspect LastAttemptAt.
-	if s.lockoutDuration > 0 {
-		enrollment, err := s.store.GetTOTP(ctx, tenantID, userID)
-		if err == nil && enrollment.FailedAttempts >= s.maxAttempts {
-			// The factor is currently locked; check whether the window has elapsed.
-			if !enrollment.LastAttemptAt.IsZero() && s.now().Sub(enrollment.LastAttemptAt) > s.lockoutDuration {
-				// Window expired: reset the counter so this attempt starts a fresh budget.
-				if rerr := s.store.ResetTOTPAttempts(ctx, tenantID, userID); rerr != nil {
-					return 0, rerr
-				}
-			}
-		}
-	}
-	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID, s.now())
+	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID, s.now(), s.maxAttempts, s.lockoutDuration)
 }
 
 // emitBlocked reports that a second factor was locked after exhausting its attempt budget.

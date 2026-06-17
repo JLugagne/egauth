@@ -92,7 +92,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		now := time.Now()
 
 		// Incrementing a missing factor reports not-enrolled.
-		_, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, now)
+		_, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, now, 0, 0)
 		assert.ErrorIs(t, err, mfa.ErrNotEnrolled)
 
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: now}))
@@ -103,11 +103,11 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 
 		// Increments return the new count, persist FailedAttempts, and record LastAttemptAt.
 		t1 := now.Add(time.Second)
-		n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
+		n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, t1, 0, 0)
 		require.NoError(t, err)
 		assert.Equal(t, 1, n)
 		t2 := t1.Add(time.Second)
-		n, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t2)
+		n, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t2, 0, 0)
 		require.NoError(t, err)
 		assert.Equal(t, 2, n)
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
@@ -127,7 +127,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 
 		// A consumed recovery code also resets the counter and LastAttemptAt.
 		require.NoError(t, store.ReplaceRecoveryCodes(ctx, tenantA, uid, []string{"rc1"}))
-		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1, 0, 0)
 		require.NoError(t, err)
 		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "rc1"))
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
@@ -135,7 +135,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		assert.True(t, got.LastAttemptAt.IsZero(), "ConsumeRecoveryCode must clear LastAttemptAt")
 
 		// Re-saving (re-enroll) resets the counter via the upsert.
-		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1)
+		_, err = store.IncrementTOTPAttempts(ctx, tenantA, uid, t1, 0, 0)
 		require.NoError(t, err)
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S2", CreatedAt: time.Now()}))
 		got, _ = store.GetTOTP(ctx, tenantA, uid)
@@ -155,8 +155,8 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		require.NoError(t, store.SaveTOTP(ctx, tenantA, &mfa.TOTPEnrollment{UserID: uid, Secret: "S", CreatedAt: now}))
 
 		// Increment a few times to set a non-zero counter and LastAttemptAt.
-		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(time.Second))
-		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(2*time.Second))
+		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(time.Second), 0, 0)
+		_, _ = store.IncrementTOTPAttempts(ctx, tenantA, uid, now.Add(2*time.Second), 0, 0)
 		got, err := store.GetTOTP(ctx, tenantA, uid)
 		require.NoError(t, err)
 		assert.Equal(t, 2, got.FailedAttempts)
@@ -186,7 +186,7 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		for range goroutines {
 			wg.Go(func() {
 				<-start
-				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, time.Now())
+				n, err := store.IncrementTOTPAttempts(ctx, tenantA, uid, time.Now(), 0, 0)
 				if err == nil && n >= 1 && n <= goroutines {
 					atomic.AddInt64(&seen[n], 1)
 				}

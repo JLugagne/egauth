@@ -80,7 +80,7 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.U
 	return true, nil
 }
 
-func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time) (int, error) {
+func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -88,6 +88,23 @@ func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, user
 	if !ok {
 		return 0, mfa.ErrNotEnrolled
 	}
+
+	if maxAttempts > 0 && e.FailedAttempts >= maxAttempts {
+		decayed := false
+		if lockoutDuration > 0 && !e.LastAttemptAt.IsZero() && now.Sub(e.LastAttemptAt) > lockoutDuration {
+			decayed = true
+		}
+		if !decayed {
+			// Locked and not decayed: DoS fix: do not increment or bump timestamp,
+			// but return an over-limit count so the service knows it's locked.
+			return e.FailedAttempts + 1, nil
+		}
+		// Decayed
+		e.FailedAttempts = 1
+		e.LastAttemptAt = now
+		return e.FailedAttempts, nil
+	}
+
 	e.FailedAttempts++
 	e.LastAttemptAt = now
 	return e.FailedAttempts, nil

@@ -44,8 +44,10 @@ type TOTPStore interface {
 	// the service reserves a slot here BEFORE the constant-time compare, so concurrent wrong
 	// guesses cannot run more comparisons than the configured limit. The now parameter is the
 	// caller's clock value and is stored as LastAttemptAt to enable time-based lockout decay.
+	// If the factor is already locked (>= maxAttempts) and hasn't decayed (lockoutDuration),
+	// it MUST return the current count without updating LastAttemptAt (to prevent perpetual DoS).
 	// Returns ErrNotEnrolled if there is no enrollment.
-	IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time) (int, error)
+	IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error)
 	// ResetTOTPAttempts sets the failed-attempt counter and LastAttemptAt back to their zero
 	// values for the given enrollment. It is used by the service for time-based lockout decay
 	// and by the admin UnlockMFA primitive. Returns ErrNotEnrolled if the enrollment is absent.

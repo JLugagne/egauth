@@ -161,7 +161,10 @@ func (tb *TokenBucket) evictOne(now time.Time) {
 	var (
 		evictKey  string
 		evictToks float64 = -1
+		sampled   int
 	)
+	// Go maps iterate in random order. Sampling 5 elements is sufficient for finding
+	// a reasonably good candidate for eviction in O(1) time.
 	for k, b := range tb.buckets {
 		toks := b.tokens + float64(now.Sub(b.last))/float64(tb.refill)
 		if toks > tb.burst {
@@ -170,6 +173,10 @@ func (tb *TokenBucket) evictOne(now time.Time) {
 		if toks > evictToks {
 			evictToks = toks
 			evictKey = k
+		}
+		sampled++
+		if sampled >= 5 {
+			break
 		}
 	}
 	if evictKey != "" {

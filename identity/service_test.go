@@ -171,6 +171,42 @@ func TestService_ChangePassword(t *testing.T) {
 		assert.ErrorIs(t, err, identity.ErrInvalidCredentials)
 		assert.True(t, decoyed, "should apply a decoy hash to equalize timing for an account with no password")
 	})
+
+	t.Run("successful change runs account erasers", func(t *testing.T) {
+		store := &storetest.MockStore{
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string) error {
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error { return nil },
+			HashFunc:    func(ctx context.Context, p string) (string, error) { return "h", nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+
+		eraser1Run := false
+		eraser2Run := false
+		e1 := func(ctx context.Context, tenantID string, uid uuid.UUID) error {
+			assert.Equal(t, userID, uid)
+			eraser1Run = true
+			return nil
+		}
+		e2 := func(ctx context.Context, tenantID string, uid uuid.UUID) error {
+			assert.Equal(t, userID, uid)
+			eraser2Run = true
+			return nil
+		}
+
+		svc := identity.NewService(store, hasher, policy, identity.WithAccountErasers(e1, e2))
+
+		err := svc.ChangePassword(ctx, "", userID, "current", "NewValidPass123!")
+		require.NoError(t, err)
+		assert.True(t, eraser1Run, "first eraser must run")
+		assert.True(t, eraser2Run, "second eraser must run")
+	})
 }
 
 func TestService_Register(t *testing.T) {

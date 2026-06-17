@@ -164,21 +164,25 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 	if err := guardTenant(tenantID, next); err != nil {
 		return err
 	}
-	// Retire active keys, capping not_after at the overlap boundary.
-	retireQuery := `
-		UPDATE keystore_keys
-		SET retired_at = $2,
-			not_after = CASE
-				WHEN not_after IS NULL OR not_after > $2 THEN $2
-				ELSE not_after
-			END
-		WHERE tenant_id = $1 AND retired_at IS NULL AND (not_after IS NULL OR not_after > now())
+	query := `
+		WITH retired AS (
+			UPDATE keystore_keys
+			SET retired_at = $2,
+				not_after = CASE
+					WHEN not_after IS NULL OR not_after > $2 THEN $2
+					ELSE not_after
+				END
+			WHERE tenant_id = $1 AND retired_at IS NULL AND (not_after IS NULL OR not_after > now())
+		)
+		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at)
+		VALUES ($1, $3, $4, $5, $6, $7)
+		ON CONFLICT (tenant_id, key_id) DO UPDATE
+		SET secret = EXCLUDED.secret, created_at = EXCLUDED.created_at,
+			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at
 	`
-	if _, err := s.db.Exec(ctx, retireQuery, tenantID, retiredAt); err != nil {
-		return err
-	}
 	next.TenantID = tenantID
-	return s.PutSigningKey(ctx, tenantID, next)
+	_, err := s.db.Exec(ctx, query, tenantID, retiredAt, next.KeyID, next.Secret, next.CreatedAt, nullTime(next.NotAfter), next.RetiredAt)
+	return err
 }
 
 // RetireExpiredKeys deletes keys whose not_after is at or before now, returning the count

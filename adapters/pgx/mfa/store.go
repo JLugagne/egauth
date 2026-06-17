@@ -4,7 +4,9 @@ package pgx
 import (
 	"context"
 	"embed"
+	"encoding/base64"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
@@ -34,14 +36,24 @@ type DBQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// KEK provides envelope encryption for TOTP secrets at rest.
+type KEK interface {
+	Seal(plaintext []byte) ([]byte, error)
+	Open(sealed []byte) ([]byte, error)
+}
+
 // Store implements mfa.Store for PostgreSQL.
 type Store struct {
-	db DBQuerier
+	db  DBQuerier
+	kek KEK
 }
 
 // NewStore creates a new PostgreSQL mfa store.
-func NewStore(db DBQuerier) *Store {
-	return &Store{db: db}
+func NewStore(db DBQuerier, kek KEK) *Store {
+	if kek == nil {
+		panic("mfa pgx: KEK is required")
+	}
+	return &Store{db: db, kek: kek}
 }
 
 func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment) error {
@@ -68,7 +80,14 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 		t := e.LastAttemptAt.UTC()
 		lastAttemptAt = &t
 	}
-	_, err := s.db.Exec(ctx, query, tenantID, e.UserID, e.Secret, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
+
+	sealed, err := s.kek.Seal([]byte(e.Secret))
+	if err != nil {
+		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
+	}
+	secretStr := base64.StdEncoding.EncodeToString(sealed)
+
+	_, err = s.db.Exec(ctx, query, tenantID, e.UserID, secretStr, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt)
 	return err
 }
 
@@ -80,8 +99,9 @@ func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) 
 	`
 	e := &mfa.TOTPEnrollment{UserID: userID, TenantID: tenantID}
 	var lastAttemptAt *time.Time
+	var secretStr string
 	err := s.db.QueryRow(ctx, query, tenantID, userID).Scan(
-		&e.Secret, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &lastAttemptAt, &e.CreatedAt,
+		&secretStr, &e.ConfirmedAt, &e.LastUsedStep, &e.FailedAttempts, &lastAttemptAt, &e.CreatedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -89,6 +109,17 @@ func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) 
 		}
 		return nil, err
 	}
+
+	sealed, err := base64.StdEncoding.DecodeString(secretStr)
+	if err != nil {
+		return nil, fmt.Errorf("mfa pgx: decoding secret: %w", err)
+	}
+	plaintext, err := s.kek.Open(sealed)
+	if err != nil {
+		return nil, fmt.Errorf("mfa pgx: opening secret: %w", err)
+	}
+	e.Secret = string(plaintext)
+
 	if lastAttemptAt != nil {
 		e.LastAttemptAt = *lastAttemptAt
 	}
@@ -113,18 +144,57 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.U
 	return tag.RowsAffected() > 0, nil
 }
 
-func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time) (int, error) {
-	const query = `
-		UPDATE mfa_totp SET failed_attempts = failed_attempts + 1, last_attempt_at = $3
-		WHERE tenant_id = $1 AND user_id = $2
-		RETURNING failed_attempts
-	`
-	var attempts int
-	err := s.db.QueryRow(ctx, query, tenantID, userID, now.UTC()).Scan(&attempts)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, mfa.ErrNotEnrolled
+func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
+	increment := func(q DBQuerier) (int, error) {
+		var currentAttempts int
+		var lastAttemptAt *time.Time
+		err := q.QueryRow(ctx, `SELECT failed_attempts, last_attempt_at FROM mfa_totp WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`, tenantID, userID).Scan(&currentAttempts, &lastAttemptAt)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return 0, mfa.ErrNotEnrolled
+			}
+			return 0, err
 		}
+
+		newAttempts := currentAttempts + 1
+		newLastAttempt := now.UTC()
+
+		if maxAttempts > 0 && currentAttempts >= maxAttempts {
+			decayed := false
+			if lockoutDuration > 0 && lastAttemptAt != nil && now.Sub(*lastAttemptAt) > lockoutDuration {
+				decayed = true
+			}
+			if !decayed {
+				// Locked and not decayed: DoS fix: do not increment or bump timestamp,
+				// but return an over-limit count so the service knows it's locked.
+				return currentAttempts + 1, nil
+			}
+			newAttempts = 1
+		}
+
+		_, err = q.Exec(ctx, `UPDATE mfa_totp SET failed_attempts = $3, last_attempt_at = $4 WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID, newAttempts, newLastAttempt)
+		if err != nil {
+			return 0, err
+		}
+		return newAttempts, nil
+	}
+
+	beginner, ok := s.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return increment(s.db)
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	attempts, err := increment(tx)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return 0, err
 	}
 	return attempts, nil

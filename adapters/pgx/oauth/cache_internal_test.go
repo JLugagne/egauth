@@ -2,8 +2,10 @@ package pgx
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -15,21 +17,30 @@ type fakeRow struct{}
 func (fakeRow) Scan(dest ...any) error {
 	// Column order matches GetProvider's SELECT:
 	// client_id, client_secret, auth_url, token_url, issuer, jwks_url, scopes
-	values := []string{
+	values := []any{
 		"client-id",
-		"client-secret",
+		base64.StdEncoding.EncodeToString([]byte("client-secret")),
 		"https://sso.example.com/auth",
 		"https://sso.example.com/token",
 		"https://sso.example.com",
 		"https://sso.example.com/jwks",
 		"openid email profile",
+		time.Time{},
 	}
 	for i := range dest {
+		if i == 7 {
+			p, ok := dest[i].(*time.Time)
+			if !ok {
+				return fmt.Errorf("fakeRow: dest[%d] is not *time.Time", i)
+			}
+			*p = time.Time{}
+			continue
+		}
 		p, ok := dest[i].(*string)
 		if !ok {
 			return fmt.Errorf("fakeRow: dest[%d] is not *string", i)
 		}
-		*p = values[i]
+		*p = values[i].(string)
 	}
 	return nil
 }
@@ -60,7 +71,7 @@ func (c *countingQuerier) QueryRow(context.Context, string, ...any) pgx.Row {
 // the very same *oauth.Provider instance, so the verifier's 1h JWKS cache survives requests.
 func TestGetProviderCachesBuiltProvider(t *testing.T) {
 	q := &countingQuerier{}
-	store := NewStore(q)
+	store := NewStore(q, dummyKEK{})
 	ctx := context.Background()
 
 	p1, err := store.GetProvider(ctx, "tenant-1", "my-sso")
@@ -75,8 +86,8 @@ func TestGetProviderCachesBuiltProvider(t *testing.T) {
 	if p1 != p2 {
 		t.Errorf("GetProvider returned distinct instances (%p vs %p); the per-request rebuild defeats the JWKS cache", p1, p2)
 	}
-	if q.queryRowCalls != 1 {
-		t.Errorf("expected 1 DB read across two GetProvider calls, got %d", q.queryRowCalls)
+	if q.queryRowCalls != 2 {
+		t.Errorf("expected 2 DB reads across two GetProvider calls, got %d", q.queryRowCalls)
 	}
 }
 
@@ -84,7 +95,7 @@ func TestGetProviderCachesBuiltProvider(t *testing.T) {
 // cached instance so a subsequent GetProvider re-reads from the database.
 func TestGetProviderCacheInvalidation(t *testing.T) {
 	q := &countingQuerier{}
-	store := NewStore(q)
+	store := NewStore(q, dummyKEK{})
 	ctx := context.Background()
 
 	if _, err := store.GetProvider(ctx, "tenant-1", "my-sso"); err != nil {

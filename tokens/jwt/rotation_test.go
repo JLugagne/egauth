@@ -154,12 +154,12 @@ func TestRotate_NoClaimsProvider(t *testing.T) {
 	assert.Nil(t, rt.ConsumedAt, "token must not be consumed when rotation is unavailable")
 }
 
-func TestRotate_ClaimsProviderErrorFailsClosed(t *testing.T) {
+func TestRotate_ClaimsProviderErrorDoesNotConsume(t *testing.T) {
 	ctx := context.Background()
 	disabled := tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
-		return tokens.Claims[struct{}]{}, errors.New("user disabled")
+		return tokens.Claims[struct{}]{}, errors.New("provider transient error")
 	})
-	svc, _ := newRotatingService(t, disabled, time.Hour)
+	svc, store := newRotatingService(t, disabled, time.Hour)
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
 	require.NoError(t, err)
@@ -167,9 +167,11 @@ func TestRotate_ClaimsProviderErrorFailsClosed(t *testing.T) {
 	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
 	require.Error(t, err, "rotation must fail when fresh claims cannot be resolved")
 
-	// Fail-closed: the token was consumed, so a retry is treated as reuse (no new pair leaks).
-	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
-	require.ErrorIs(t, err, tokens.ErrRefreshTokenReused)
+	// The token must NOT be consumed, so a retry can succeed once the transient error clears.
+	// This prevents dropping the user's session over a transient claims-provider failure.
+	rt, err := store.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
+	require.NoError(t, err)
+	assert.Nil(t, rt.ConsumedAt, "token must not be consumed when claims provider fails")
 }
 
 func TestRotate_MultiTenantIsolation(t *testing.T) {

@@ -664,6 +664,19 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 		return nil, tokens.ErrTokenExpired
 	}
 
+	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
+	// trusting values frozen at login.
+	// Surface which family is being rotated (plus its preserved auth_time) so the provider can
+	// re-evaluate per-session assurance (AMR/scopes) for this exact session rather than guessing
+	// from the user alone. Without this a provider can neither preserve a legitimately elevated
+	// session's AMR across a silent refresh nor avoid blanket-elevating every session of an
+	// MFA-enrolled user, so the documented "AMR re-evaluated, not frozen" semantics are impossible.
+	rotationCtx := tokens.WithRotationContext(ctx, tokens.RotationContext{FamilyID: rt.FamilyID, AuthTime: rt.AuthTime})
+	claims, err := s.claimsProvider.ClaimsForUser(rotationCtx, rt.UserID, rt.TenantID)
+	if err != nil {
+		return nil, err
+	}
+
 	// Atomically consume (single-use). Losing this race means another in-flight request
 	// rotated the SAME not-yet-consumed token first. That is benign concurrency (parallel
 	// tabs, link prefetch, concurrent sub-resource loads), NOT theft — so we reject this
@@ -678,19 +691,6 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
 			return nil, tokens.ErrRefreshConcurrent
 		}
-		return nil, err
-	}
-
-	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
-	// trusting values frozen at login.
-	// Surface which family is being rotated (plus its preserved auth_time) so the provider can
-	// re-evaluate per-session assurance (AMR/scopes) for this exact session rather than guessing
-	// from the user alone. Without this a provider can neither preserve a legitimately elevated
-	// session's AMR across a silent refresh nor avoid blanket-elevating every session of an
-	// MFA-enrolled user, so the documented "AMR re-evaluated, not frozen" semantics are impossible.
-	rotationCtx := tokens.WithRotationContext(ctx, tokens.RotationContext{FamilyID: rt.FamilyID, AuthTime: rt.AuthTime})
-	claims, err := s.claimsProvider.ClaimsForUser(rotationCtx, rt.UserID, rt.TenantID)
-	if err != nil {
 		return nil, err
 	}
 

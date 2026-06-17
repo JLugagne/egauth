@@ -103,7 +103,7 @@ func TestValidateProviderConfig(t *testing.T) {
 // empty client_id before any DB access (db is nil; reaching s.db.Exec would panic). This
 // stops a row that would later panic at resolution from being stored (PANIC-01).
 func TestUpsertProviderRejectsEmptyClientID(t *testing.T) {
-	s := NewStore(nil)
+	s := NewStore(nil, dummyKEK{})
 	err := s.UpsertProvider(context.Background(), "tenant", "sso", OIDCProviderConfig{
 		ClientID:     "",
 		ClientSecret: "secret",
