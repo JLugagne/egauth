@@ -82,7 +82,7 @@ func TestCachingKeyStore_ServesFromCacheWithinTTL(t *testing.T) {
 	cache := NewCachingKeyStore(backing, time.Minute)
 
 	ctx := context.Background()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if _, err := cache.ActiveSigningKey(ctx, "tenant-a"); err != nil {
 			t.Fatalf("ActiveSigningKey: %v", err)
 		}

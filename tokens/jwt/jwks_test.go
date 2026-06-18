@@ -39,8 +39,8 @@ func TestPublicJWKS_RSA(t *testing.T) {
 	require.NoError(t, err)
 	n := new(big.Int).SetBytes(nBytes)
 	e := new(big.Int).SetBytes(eBytes)
-	assert.Equal(t, 0, key.PublicKey.N.Cmp(n))
-	assert.Equal(t, key.PublicKey.E, int(e.Int64()))
+	assert.Equal(t, 0, key.N.Cmp(n))
+	assert.Equal(t, key.E, int(e.Int64()))
 }
 
 func TestPublicJWKS_EC(t *testing.T) {

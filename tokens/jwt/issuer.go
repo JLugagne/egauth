@@ -254,7 +254,7 @@ func resolveKeyset[C any](cfg Config[C]) (active Signer, verify map[string]Signe
 	// Signers path: pluggable signer set supersedes SecretKey/SigningKeys for signing/verification.
 	if len(cfg.Signers) > 0 {
 		if len(cfg.SigningKeys) > 0 {
-			return nil, nil, nil, errors.New("Signers must not be combined with SigningKeys")
+			return nil, nil, nil, errors.New("jwt: Signers must not be combined with SigningKeys")
 		}
 		for _, sg := range cfg.Signers {
 			kid := sg.KeyID()

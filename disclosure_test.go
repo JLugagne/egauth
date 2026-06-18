@@ -60,7 +60,6 @@ func TestDisclosureSentencePresent(t *testing.T) {
 	}
 
 	for _, surface := range disclosureSurfaces {
-		surface := surface
 		t.Run(surface, func(t *testing.T) {
 			raw, err := os.ReadFile(surface)
 			if err != nil {

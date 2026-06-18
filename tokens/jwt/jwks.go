@@ -65,6 +65,11 @@ func jwkFromSigner(kid string, signer Signer) JWK {
 			E:   base64.RawURLEncoding.EncodeToString(eBytes),
 		}
 	case *ecdsa.PublicKey:
+		// pub.Bytes() is the SEC 1 uncompressed point (0x04 || X || Y) with each coordinate
+		// fixed-length to the curve byte size — exactly the fixed-width X/Y a JWK needs, and the
+		// non-deprecated replacement for reading pub.X / pub.Y directly. It cannot fail here:
+		// NewECDSASigner only ever holds a P-256/384/521 key.
+		raw, _ := pub.Bytes()
 		byteLen := (pub.Curve.Params().BitSize + 7) / 8
 		return JWK{
 			Kty: "EC",
@@ -72,8 +77,8 @@ func jwkFromSigner(kid string, signer Signer) JWK {
 			Alg: alg,
 			Kid: kid,
 			Crv: crvName(pub.Curve),
-			X:   base64.RawURLEncoding.EncodeToString(leftPad(pub.X.Bytes(), byteLen)),
-			Y:   base64.RawURLEncoding.EncodeToString(leftPad(pub.Y.Bytes(), byteLen)),
+			X:   base64.RawURLEncoding.EncodeToString(raw[1 : 1+byteLen]),
+			Y:   base64.RawURLEncoding.EncodeToString(raw[1+byteLen:]),
 		}
 	case ed25519.PublicKey:
 		return JWK{
@@ -102,16 +107,4 @@ func crvName(c elliptic.Curve) string {
 	default:
 		return curveName(c)
 	}
-}
-
-// leftPad returns b left-padded with zero bytes to exactly size bytes. A coordinate whose
-// big-endian encoding has a leading zero byte (or is shorter than the field size) must be padded so
-// JWK consumers parse a fixed-width value.
-func leftPad(b []byte, size int) []byte {
-	if len(b) >= size {
-		return b
-	}
-	out := make([]byte, size)
-	copy(out[size-len(b):], b)
-	return out
 }

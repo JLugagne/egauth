@@ -98,6 +98,12 @@ func publicJWKFromKey(kid, alg string, der []byte) (JWK, error) {
 		}, nil
 	case *ecdsa.PrivateKey:
 		pub := &key.PublicKey
+		// pub.Bytes() is the SEC 1 uncompressed point (0x04 || X || Y), each coordinate
+		// fixed-length to the curve byte size — the non-deprecated replacement for pub.X / pub.Y.
+		raw, err := pub.Bytes()
+		if err != nil {
+			return JWK{}, fmt.Errorf("keystore: encoding EC public key for key %q: %w", kid, err)
+		}
 		byteLen := (pub.Curve.Params().BitSize + 7) / 8
 		return JWK{
 			Kty: "EC",
@@ -105,8 +111,8 @@ func publicJWKFromKey(kid, alg string, der []byte) (JWK, error) {
 			Alg: alg,
 			Kid: kid,
 			Crv: pub.Curve.Params().Name,
-			X:   base64.RawURLEncoding.EncodeToString(leftPad(pub.X.Bytes(), byteLen)),
-			Y:   base64.RawURLEncoding.EncodeToString(leftPad(pub.Y.Bytes(), byteLen)),
+			X:   base64.RawURLEncoding.EncodeToString(raw[1 : 1+byteLen]),
+			Y:   base64.RawURLEncoding.EncodeToString(raw[1+byteLen:]),
 		}, nil
 	case ed25519.PrivateKey:
 		pub := key.Public().(ed25519.PublicKey)
@@ -121,14 +127,4 @@ func publicJWKFromKey(kid, alg string, der []byte) (JWK, error) {
 	default:
 		return JWK{}, fmt.Errorf("keystore: unsupported public key type %T for key %q", priv, kid)
 	}
-}
-
-// leftPad left-pads b with zero bytes to length n (no-op when len(b) >= n).
-func leftPad(b []byte, n int) []byte {
-	if len(b) >= n {
-		return b
-	}
-	out := make([]byte, n)
-	copy(out[n-len(b):], b)
-	return out
 }

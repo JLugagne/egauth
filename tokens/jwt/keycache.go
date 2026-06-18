@@ -18,6 +18,7 @@ package jwt
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -185,8 +186,6 @@ func cloneKeys(in map[string]Signer) map[string]Signer {
 		return nil
 	}
 	out := make(map[string]Signer, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	maps.Copy(out, in)
 	return out
 }
