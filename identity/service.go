@@ -214,6 +214,17 @@ type Service interface {
 	// unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it behind
 	// appropriate authorization.
 	EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// PasswordChangeRequired reports whether userID's password credential is flagged for a forced
+	// change at next login. It is the soft-gate query behind WithPasswordChangeGate: the credential
+	// stays valid (this is never a lockout), the caller just issues an access-only flagged token and
+	// soft-redirects to the reset page. It returns true when the identity's MustChangePassword flag is
+	// set (admin/one-time provisioning), OR when age-based rotation is enabled for the tenant and the
+	// password is older than the effective max age. Age-based rotation is OPT-IN: with no
+	// WithPasswordRotation default and no enabling WithPasswordRotationResolver entry it returns false.
+	// A legacy zero PasswordChangedAt is treated as NOT due. An account with no password identity
+	// (e.g. OAuth-only) is never flagged (returns false). It returns ErrUserNotFound for an unknown,
+	// soft-deleted or cross-tenant user (propagated from the store).
+	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
@@ -225,20 +236,22 @@ type Service interface {
 type AccountEraser func(ctx context.Context, tenantID string, userID uuid.UUID) error
 
 type service struct {
-	store                Store
-	hasher               passwords.Hasher
-	policy               passwords.Policy
-	lockThreshold        int
-	lockDuration         time.Duration
-	passwordResetTTL     time.Duration
-	emailVerificationTTL time.Duration
-	magicLinkTTL         time.Duration
-	emailChangeTTL       time.Duration
-	phoneVerificationTTL time.Duration
-	recoveryEmailTTL     time.Duration
-	erasers              []AccountEraser
-	events               event.Sink
-	now                  func() time.Time
+	store                    Store
+	hasher                   passwords.Hasher
+	policy                   passwords.Policy
+	lockThreshold            int
+	lockDuration             time.Duration
+	passwordResetTTL         time.Duration
+	emailVerificationTTL     time.Duration
+	magicLinkTTL             time.Duration
+	emailChangeTTL           time.Duration
+	phoneVerificationTTL     time.Duration
+	recoveryEmailTTL         time.Duration
+	erasers                  []AccountEraser
+	events                   event.Sink
+	now                      func() time.Time
+	passwordMaxAge           time.Duration
+	passwordRotationResolver func(tenantID string) (time.Duration, bool)
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -1224,4 +1237,70 @@ func (s *service) EnableUser(ctx context.Context, tenantID string, userID uuid.U
 	}
 	s.emit(ctx, event.Event{Type: event.AccountEnabled, UserID: userID.String(), TenantID: tenantID})
 	return nil
+}
+
+// WithPasswordRotation enables age-based password rotation with the given global maximum age:
+// once a password's PasswordChangedAt is older than maxAge, PasswordChangeRequired reports true so
+// the next login is soft-gated to the reset page (the credential itself stays valid). It is OPT-IN —
+// when neither this option nor a WithPasswordRotationResolver entry enables rotation for a tenant,
+// age never sets the flag. A non-positive maxAge leaves age-based rotation OFF (the global default
+// is "no rotation"); use a positive duration to turn it on. A legacy zero PasswordChangedAt is
+// treated as NOT due, so pre-existing users are not all flagged the moment rotation is enabled.
+func WithPasswordRotation(maxAge time.Duration) ServiceOption {
+	return func(s *service) { s.passwordMaxAge = maxAge }
+}
+
+// WithPasswordRotationResolver installs a per-tenant override for age-based rotation. For a given
+// tenantID the resolver returns (maxAge, enabled): when enabled is true the returned maxAge is used
+// for that tenant INSTEAD of the WithPasswordRotation global default; when enabled is false rotation
+// is OFF for that tenant regardless of the global default (a tenant opt-out). The resolver is only
+// consulted when set; a nil resolver falls back to the global default. This lets a deployment run a
+// global policy while letting individual tenants tighten, loosen, or opt out of rotation.
+func WithPasswordRotationResolver(fn func(tenantID string) (time.Duration, bool)) ServiceOption {
+	return func(s *service) { s.passwordRotationResolver = fn }
+}
+
+func (s *service) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
+	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, userID)
+	if err != nil {
+		return false, err
+	}
+
+	var pwIdent *Identity
+	for _, id := range idents {
+		if id.Provider == "password" && id.PasswordHash != nil {
+			pwIdent = id
+			break
+		}
+	}
+	// No password identity (e.g. an OAuth-only account) is never flagged: there is no credential
+	// to rotate and the soft-gate would have nothing to redirect to.
+	if pwIdent == nil {
+		return false, nil
+	}
+
+	// An explicit flag (admin/one-time provisioning) always wins, independent of any age policy.
+	if pwIdent.MustChangePassword {
+		return true, nil
+	}
+
+	// Resolve the effective age policy. The per-tenant resolver, when set, fully overrides the
+	// global default for that tenant — including opting out (enabled=false). With no resolver the
+	// global default applies; a non-positive global default means age-based rotation is OFF.
+	maxAge := s.passwordMaxAge
+	enabled := maxAge > 0
+	if s.passwordRotationResolver != nil {
+		maxAge, enabled = s.passwordRotationResolver(tenantID)
+	}
+	if !enabled || maxAge <= 0 {
+		return false, nil
+	}
+
+	// A legacy zero PasswordChangedAt is treated as NOT due: enabling rotation must not flag every
+	// pre-existing user whose stamp was never recorded.
+	if pwIdent.PasswordChangedAt.IsZero() {
+		return false, nil
+	}
+
+	return s.now().Sub(pwIdent.PasswordChangedAt) > maxAge, nil
 }

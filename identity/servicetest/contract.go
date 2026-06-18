@@ -30,6 +30,7 @@ type MockService struct {
 	DeleteAccountFunc                   func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	DisableUserFunc                     func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	EnableUserFunc                      func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	PasswordChangeRequiredFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -179,4 +180,11 @@ func (m *MockService) EnableUser(ctx context.Context, tenantID string, userID uu
 		panic("called not defined EnableUserFunc")
 	}
 	return m.EnableUserFunc(ctx, tenantID, userID)
+}
+
+func (m *MockService) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
+	if m.PasswordChangeRequiredFunc == nil {
+		panic("called not defined PasswordChangeRequiredFunc")
+	}
+	return m.PasswordChangeRequiredFunc(ctx, tenantID, userID)
 }
