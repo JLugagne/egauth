@@ -238,11 +238,22 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 	ident.CreatedAt = time.Now().UTC()
 	ident.UpdatedAt = time.Now().UTC()
 
+	// password_changed_at is stored as NULL when the zero value is passed (legacy / not yet set).
+	var changedAt *time.Time
+	if !ident.PasswordChangedAt.IsZero() {
+		t := ident.PasswordChangedAt.UTC()
+		changedAt = &t
+	}
+
 	query := `
-		INSERT INTO identities (id, user_id, tenant_id, provider, provider_id, password_hash, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO identities (id, user_id, tenant_id, provider, provider_id, password_hash, password_changed_at, must_change_password, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 	`
-	_, err := s.db.Exec(ctx, query, ident.ID, ident.UserID, ident.TenantID, ident.Provider, ident.ProviderID, ident.PasswordHash, ident.CreatedAt, ident.UpdatedAt)
+	_, err := s.db.Exec(ctx, query,
+		ident.ID, ident.UserID, ident.TenantID, ident.Provider, ident.ProviderID,
+		ident.PasswordHash, changedAt, ident.MustChangePassword,
+		ident.CreatedAt, ident.UpdatedAt,
+	)
 	if err != nil {
 		return mapError(err)
 	}
@@ -252,7 +263,7 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 
 func (s *Store) FindIdentitiesByUserID(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error) {
 	query := `
-		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
+		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, password_changed_at, must_change_password, created_at, updated_at
 		FROM identities
 		WHERE user_id = $1 AND tenant_id = $2
 	`
@@ -265,8 +276,17 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, tenantID string, use
 	var identities []*identity.Identity
 	for rows.Next() {
 		var ident identity.Identity
-		if err := rows.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt); err != nil {
+		var changedAt *time.Time
+		if err := rows.Scan(
+			&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID,
+			&ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil,
+			&changedAt, &ident.MustChangePassword,
+			&ident.CreatedAt, &ident.UpdatedAt,
+		); err != nil {
 			return nil, err
+		}
+		if changedAt != nil {
+			ident.PasswordChangedAt = *changedAt
 		}
 		identities = append(identities, &ident)
 	}
@@ -280,33 +300,46 @@ func (s *Store) FindIdentitiesByUserID(ctx context.Context, tenantID string, use
 
 func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error) {
 	query := `
-		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, created_at, updated_at
+		SELECT id, user_id, tenant_id, provider, provider_id, password_hash, failed_attempts, locked_until, password_changed_at, must_change_password, created_at, updated_at
 		FROM identities
 		WHERE provider = $1 AND provider_id = $2 AND tenant_id = $3
 	`
 	row := s.db.QueryRow(ctx, query, provider, providerID, tenantID)
 
 	var ident identity.Identity
-	err := row.Scan(&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID, &ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil, &ident.CreatedAt, &ident.UpdatedAt)
+	var changedAt *time.Time
+	err := row.Scan(
+		&ident.ID, &ident.UserID, &ident.TenantID, &ident.Provider, &ident.ProviderID,
+		&ident.PasswordHash, &ident.FailedAttempts, &ident.LockedUntil,
+		&changedAt, &ident.MustChangePassword,
+		&ident.CreatedAt, &ident.UpdatedAt,
+	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, identity.ErrIdentityNotFound
 		}
 		return nil, err
 	}
+	if changedAt != nil {
+		ident.PasswordChangedAt = *changedAt
+	}
 
 	return &ident, nil
 }
 
 // UpdateIdentityPassword sets a new password hash on the user's "password" identity and
-// atomically clears any lockout.
-func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error {
+// atomically clears any lockout (failed_attempts and locked_until). It also stamps
+// password_changed_at=changedAt and sets must_change_password=mustChange in the same write,
+// so the rotation policy can flag or clear the credential without a second round-trip.
+// Returns ErrIdentityNotFound when the user has no password identity.
+func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error {
 	query := `
 		UPDATE identities
-		SET password_hash = $1, failed_attempts = 0, locked_until = NULL, updated_at = now()
+		SET password_hash = $1, failed_attempts = 0, locked_until = NULL,
+		    password_changed_at = $4, must_change_password = $5, updated_at = now()
 		WHERE user_id = $2 AND tenant_id = $3 AND provider = 'password'
 	`
-	tag, err := s.db.Exec(ctx, query, passwordHash, userID, tenantID)
+	tag, err := s.db.Exec(ctx, query, passwordHash, userID, tenantID, changedAt.UTC(), mustChange)
 	if err != nil {
 		return err
 	}
