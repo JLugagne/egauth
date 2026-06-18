@@ -38,12 +38,12 @@ const DefaultReuseGracePeriod = 10 * time.Second
 type Service[C any] struct {
 	store          tokens.Store[C]
 	claimsProvider tokens.ClaimsProvider[C]
-	signingKey     []byte            // active key used to sign new access tokens
+	active         Signer            // signs new tokens on the static path (nil only when no static signer)
 	signingKeyID   string            // "kid" stamped on new tokens ("" in legacy single-key mode)
-	verifyKeys     map[string][]byte // kid -> key, for verifying kid-tagged tokens
-	legacyKey      []byte            // key tried for a token carrying no kid (the configured SecretKey)
+	verifySigners  map[string]Signer // kid -> signer, for verifying kid-tagged tokens
+	legacy         Signer            // signer tried for a token carrying no kid (the configured SecretKey); may be nil
 	// keyStore, when non-nil, resolves the signing/verification keyset per tenant, overriding the
-	// static signingKey/verifyKeys above. Nil keeps the static single-keyset (zero-config) mode.
+	// static signers above. Nil keeps the static single-keyset (zero-config) mode.
 	keyStore KeyStore
 	issuer   string
 	// expected audiences for the verify path; empty disables the aud check
@@ -88,6 +88,12 @@ type Config[C any] struct {
 	// ActiveKeyID selects which SigningKeys entry signs new tokens. It defaults to the sole entry
 	// when exactly one key is configured, and is required when several are.
 	ActiveKeyID string
+	// Signers, when non-empty, is the pluggable signer set (HMAC or asymmetric). It supersedes
+	// SecretKey/SigningKeys for signing and verification: the signer named by ActiveKeyID signs new
+	// tokens (stamping its KeyID as "kid"); every signer verifies. A non-empty SecretKey alongside
+	// Signers is kept as a kid-less legacy VERIFY-only HMAC key. SigningKeys MUST NOT be combined with
+	// Signers.
+	Signers []Signer
 	// KeyStore optionally provides per-tenant signing material, enabling per-tenant cryptographic
 	// isolation: when set, the Service resolves each tenant's keyset through it instead of using the
 	// static SecretKey/SigningKeys above. The static keyset still serves the single-tenant partition
@@ -146,14 +152,41 @@ func (cfg Config[C]) Validate() error {
 		errs = append(errs, errors.New("jwt: ClaimsProvider must not be nil"))
 	}
 
-	if len(cfg.SigningKeys) == 0 {
+	switch {
+	case len(cfg.Signers) > 0:
+		if len(cfg.SigningKeys) > 0 {
+			errs = append(errs, errors.New("jwt: Signers must not be combined with SigningKeys"))
+		}
+		seen := make(map[string]bool, len(cfg.Signers))
+		for i, sg := range cfg.Signers {
+			kid := sg.KeyID()
+			switch {
+			case kid == "":
+				errs = append(errs, fmt.Errorf("jwt: Signers[%d] must have a non-empty KeyID", i))
+			case seen[kid]:
+				errs = append(errs, fmt.Errorf("jwt: duplicate Signers KeyID %q", kid))
+			}
+			seen[kid] = true
+		}
+		if cfg.ActiveKeyID == "" {
+			if len(cfg.Signers) > 1 {
+				errs = append(errs, errors.New("jwt: ActiveKeyID is required when more than one Signers is configured"))
+			}
+		} else if !seen[cfg.ActiveKeyID] {
+			errs = append(errs, fmt.Errorf("jwt: ActiveKeyID %q is not present in Signers", cfg.ActiveKeyID))
+		}
+		// A legacy SecretKey kept for kid-less rollover must still be a strong HMAC key.
+		if cfg.SecretKey != "" && len(cfg.SecretKey) < MinSecretKeyLength {
+			errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
+		}
+	case len(cfg.SigningKeys) == 0:
 		switch {
 		case cfg.SecretKey == "":
 			errs = append(errs, errors.New("jwt: SecretKey must not be empty"))
 		case len(cfg.SecretKey) < MinSecretKeyLength:
 			errs = append(errs, fmt.Errorf("jwt: SecretKey must be at least %d bytes for HS256", MinSecretKeyLength))
 		}
-	} else {
+	default:
 		seen := make(map[string]bool, len(cfg.SigningKeys))
 		for i, k := range cfg.SigningKeys {
 			switch {
@@ -200,71 +233,93 @@ func (cfg Config[C]) Validate() error {
 	return errors.Join(errs...)
 }
 
-// resolveKeyset builds the signing/verification material from the config. It returns a structural
-// error only when no coherent signer can be built (no key at all, a keyset entry missing its
-// KeyID or Secret, a duplicate KeyID, or an unresolvable ActiveKeyID).
-func resolveKeyset[C any](cfg Config[C]) (signKey []byte, signKeyID string, verify map[string][]byte, legacy []byte, err error) {
-	verify = map[string][]byte{}
+// resolveKeyset builds the signing/verification signers from the config. It returns the active
+// signer (signs new static-path tokens), the verify set keyed by kid, and an optional kid-less
+// legacy signer. It returns a structural error only when no coherent signer can be built (no key at
+// all, a malformed entry, a duplicate KeyID, an unresolvable ActiveKeyID, or Signers combined with
+// SigningKeys).
+func resolveKeyset[C any](cfg Config[C]) (active Signer, verify map[string]Signer, legacy Signer, err error) {
+	verify = map[string]Signer{}
+
+	// A non-empty SecretKey is always built as the kid-less legacy HMAC signer (verify-only when
+	// Signers/SigningKeys drive signing; the active signer in single-key mode). This preserves the
+	// weak-key error wording surfaced by New.
 	if cfg.SecretKey != "" {
-		legacy = []byte(cfg.SecretKey)
+		legacy, err = newHMACSignerAllowWeak("", []byte(cfg.SecretKey), cfg.InsecureAllowWeakKey)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+
+	// Signers path: pluggable signer set supersedes SecretKey/SigningKeys for signing/verification.
+	if len(cfg.Signers) > 0 {
+		if len(cfg.SigningKeys) > 0 {
+			return nil, nil, nil, errors.New("Signers must not be combined with SigningKeys")
+		}
+		for _, sg := range cfg.Signers {
+			kid := sg.KeyID()
+			if kid == "" {
+				return nil, nil, nil, errors.New("every Signers entry must have a non-empty KeyID")
+			}
+			if _, dup := verify[kid]; dup {
+				return nil, nil, nil, fmt.Errorf("duplicate Signers KeyID %q", kid)
+			}
+			verify[kid] = sg
+		}
+		activeID := cfg.ActiveKeyID
+		if activeID == "" {
+			if len(cfg.Signers) != 1 {
+				return nil, nil, nil, errors.New("ActiveKeyID is required when more than one Signers is configured")
+			}
+			activeID = cfg.Signers[0].KeyID()
+		}
+		a, ok := verify[activeID]
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("ActiveKeyID %q is not present in Signers", activeID)
+		}
+		return a, verify, legacy, nil
 	}
 
 	// Single-key (legacy) mode: sign without a kid; verify a kid-less token with the SecretKey.
 	if len(cfg.SigningKeys) == 0 {
 		if cfg.SecretKey == "" {
-			return nil, "", nil, nil, errors.New("no signing key configured (set SecretKey or SigningKeys)")
+			return nil, nil, nil, errors.New("no signing key configured (set SecretKey, SigningKeys or Signers)")
 		}
-		if !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
-			return nil, "", nil, nil, fmt.Errorf(
-				"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
-				len(cfg.SecretKey), MinSecretKeyLength,
-			)
-		}
-		return legacy, "", verify, legacy, nil
+		return legacy, verify, legacy, nil
 	}
 
-	// Keyset mode: every key verifies; ActiveKeyID signs.
+	// Keyset mode: every key verifies; ActiveKeyID signs. Each key becomes an HMAC signer.
 	seen := map[string]bool{}
 	for _, k := range cfg.SigningKeys {
 		if k.KeyID == "" {
-			return nil, "", nil, nil, errors.New("every SigningKeys entry must have a KeyID")
+			return nil, nil, nil, errors.New("every SigningKeys entry must have a KeyID")
 		}
 		if seen[k.KeyID] {
-			return nil, "", nil, nil, fmt.Errorf("duplicate SigningKeys KeyID %q", k.KeyID)
+			return nil, nil, nil, fmt.Errorf("duplicate SigningKeys KeyID %q", k.KeyID)
 		}
 		if k.Secret == "" {
-			return nil, "", nil, nil, fmt.Errorf("SigningKeys[%q] has an empty Secret", k.KeyID)
+			return nil, nil, nil, fmt.Errorf("SigningKeys[%q] has an empty Secret", k.KeyID)
 		}
-		if !cfg.InsecureAllowWeakKey && len(k.Secret) < MinSecretKeyLength {
-			return nil, "", nil, nil, fmt.Errorf(
-				"SigningKeys[%q].Secret is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
-				k.KeyID, len(k.Secret), MinSecretKeyLength,
-			)
+		sig, serr := newHMACSignerAllowWeak(k.KeyID, []byte(k.Secret), cfg.InsecureAllowWeakKey)
+		if serr != nil {
+			return nil, nil, nil, fmt.Errorf("SigningKeys[%q]: %w", k.KeyID, serr)
 		}
 		seen[k.KeyID] = true
-		verify[k.KeyID] = []byte(k.Secret)
-	}
-
-	// Also check the legacy SecretKey if present alongside SigningKeys.
-	if cfg.SecretKey != "" && !cfg.InsecureAllowWeakKey && len(cfg.SecretKey) < MinSecretKeyLength {
-		return nil, "", nil, nil, fmt.Errorf(
-			"SecretKey is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",
-			len(cfg.SecretKey), MinSecretKeyLength,
-		)
+		verify[k.KeyID] = sig
 	}
 
 	activeID := cfg.ActiveKeyID
 	if activeID == "" {
 		if len(cfg.SigningKeys) != 1 {
-			return nil, "", nil, nil, errors.New("ActiveKeyID is required when more than one SigningKeys is configured")
+			return nil, nil, nil, errors.New("ActiveKeyID is required when more than one SigningKeys is configured")
 		}
 		activeID = cfg.SigningKeys[0].KeyID
 	}
-	sk, ok := verify[activeID]
+	a, ok := verify[activeID]
 	if !ok {
-		return nil, "", nil, nil, fmt.Errorf("ActiveKeyID %q is not present in SigningKeys", activeID)
+		return nil, nil, nil, fmt.Errorf("ActiveKeyID %q is not present in SigningKeys", activeID)
 	}
-	return sk, activeID, verify, legacy, nil
+	return a, verify, legacy, nil
 }
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
@@ -280,9 +335,13 @@ func New[C any](cfg Config[C]) *Service[C] {
 	if cfg.Store == nil {
 		panic("jwt: New requires a non-nil Store")
 	}
-	signKey, signKeyID, verifyKeys, legacyKey, err := resolveKeyset(cfg)
+	active, verifySigners, legacy, err := resolveKeyset(cfg)
 	if err != nil {
 		panic("jwt: New: " + err.Error() + " (call Config.Validate to check configuration)")
+	}
+	signKeyID := ""
+	if active != nil {
+		signKeyID = active.KeyID()
 	}
 	if cfg.RefreshLength == 0 {
 		cfg.RefreshLength = 32
@@ -308,10 +367,10 @@ func New[C any](cfg Config[C]) *Service[C] {
 	return &Service[C]{
 		store:             cfg.Store,
 		claimsProvider:    cfg.ClaimsProvider,
-		signingKey:        signKey,
+		active:            active,
 		signingKeyID:      signKeyID,
-		verifyKeys:        verifyKeys,
-		legacyKey:         legacyKey,
+		verifySigners:     verifySigners,
+		legacy:            legacy,
 		keyStore:          cfg.KeyStore,
 		issuer:            cfg.Issuer,
 		expectedAudiences: cfg.ExpectedAudience,
@@ -376,17 +435,17 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 
 	// Resolve the signing key for this tenant. With a KeyStore configured this is the tenant's
 	// active key (per-tenant cryptographic isolation); otherwise it is the static keyset.
-	signSecret, signKID, err := s.resolveSigningKey(ctx, claims.TenantID)
+	signer, err := s.resolveSigningKey(ctx, claims.TenantID)
 	if err != nil {
 		return nil, err
 	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, wrapper)
+	token := jwt.NewWithClaims(signer.Method(), wrapper)
 	// Tag the token with the active key id so verifiers can select the right key during a
 	// rollover. Legacy single-key mode leaves it empty, preserving the original (kid-less) format.
-	if signKID != "" {
-		token.Header["kid"] = signKID
+	if kid := signer.KeyID(); kid != "" {
+		token.Header["kid"] = kid
 	}
-	accessTokenStr, err := token.SignedString(signSecret)
+	accessTokenStr, err := token.SignedString(signer.SignKey())
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -463,30 +522,39 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 	return key, nil
 }
 
-// verificationKey is the jwt.Keyfunc selecting the HMAC key for a token. It pins the signing
-// method to HMAC (rejecting "none" and alg-confusion) and resolves the key by the "kid" header:
-// a tagged token must match a key in the verification set; a token with NO kid header (legacy,
-// or single-key mode) is verified with the legacy SecretKey. An unknown kid — or a present but
-// malformed kid (non-string, or empty) — is rejected outright rather than falling back to the
-// legacy key, so a present kid header can never be passed off as "kid-less".
+// verificationKey is the jwt.Keyfunc selecting the verification key for a token. It resolves the
+// Signer for the token's "kid" (or the legacy kid-less signer) BEFORE consulting the alg, then
+// pins token.Method.Alg() to that signer's algorithm. Resolving the signer first is the
+// alg-confusion defense: a token claiming alg:HS256 against a kid that maps to an RSA signer is
+// rejected (HS256 != RS256), and "none" never matches any signer's alg. A present but malformed
+// kid (non-string or empty) is rejected outright rather than falling back to the legacy key.
 func (s *Service[C]) verificationKey(token *jwt.Token) (any, error) {
-	if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-		return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+	signer, err := s.resolveVerifySigner(token)
+	if err != nil {
+		return nil, err
 	}
-	// A present kid header must be a non-empty string and must name a known key. Only a token
-	// that omits kid entirely may fall back to the legacy key.
+	if token.Method.Alg() != signer.Method().Alg() {
+		return nil, fmt.Errorf("unexpected signing method %q for key %q", token.Method.Alg(), signer.KeyID())
+	}
+	return signer.VerifyKey(), nil
+}
+
+// resolveVerifySigner selects the static-path Signer for a token: by its "kid" header when present
+// (which must be a non-empty string naming a known signer), or the legacy kid-less signer when the
+// header is absent. A present kid can never be passed off as "kid-less".
+func (s *Service[C]) resolveVerifySigner(token *jwt.Token) (Signer, error) {
 	if rawKid, present := token.Header["kid"]; present {
 		kid, ok := rawKid.(string)
 		if !ok || kid == "" {
 			return nil, errors.New("malformed kid header")
 		}
-		if key, ok := s.verifyKeys[kid]; ok {
-			return key, nil
+		if signer, ok := s.verifySigners[kid]; ok {
+			return signer, nil
 		}
 		return nil, fmt.Errorf("unknown signing key id %q", kid)
 	}
-	if s.legacyKey != nil {
-		return s.legacyKey, nil
+	if s.legacy != nil {
+		return s.legacy, nil
 	}
 	return nil, errors.New("token has no kid and no legacy key is configured")
 }

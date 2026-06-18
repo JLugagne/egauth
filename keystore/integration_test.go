@@ -2,7 +2,10 @@ package keystore_test
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -181,4 +184,83 @@ func TestJWT_TamperedTokenRejected(t *testing.T) {
 	if _, err := svc.VerifyAccessTokenForTenant(ctx, "a", tampered); err == nil {
 		t.Fatal("tampered token must be rejected")
 	}
+}
+
+// newAsymJWTService builds a multi-tenant jwt.Service backed by a keystore.Manager, returning the
+// manager so the test can provision tenants with a chosen algorithm.
+func newAsymJWTService(t *testing.T) (*jwt.Service[struct{}], *keystore.Manager) {
+	t.Helper()
+	mgr, err := keystore.NewManager(memory.New(), newKEK(t))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	svc := jwt.New(jwt.Config[struct{}]{
+		Store:      tokmem.NewStore[struct{}](),
+		Issuer:     "egauth-test",
+		SecretKey:  "static-single-tenant-key-at-least-32b!",
+		KeyStore:   keystore.NewJWTKeyStore(mgr),
+		AccessTTL:  time.Hour,
+		RefreshTTL: 24 * time.Hour,
+	})
+	return svc, mgr
+}
+
+func TestJWT_AsymmetricTenantRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	svc, mgr := newAsymJWTService(t)
+	if err := mgr.ProvisionTenant(ctx, "a", func(o *keystore.ProvisionOptions) {
+		o.Alg = "RS256"
+	}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	tok := issueFor(t, svc, "a")
+	if _, err := svc.VerifyAccessTokenForTenant(ctx, "a", tok); err != nil {
+		t.Fatalf("RS256 token must verify: %v", err)
+	}
+	alg := algHeader(t, tok)
+	if alg != "RS256" {
+		t.Fatalf("token alg header = %q, want RS256", alg)
+	}
+}
+
+func TestJWT_AsymmetricCrossTenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	svc, mgr := newAsymJWTService(t)
+	if err := mgr.ProvisionTenant(ctx, "a", func(o *keystore.ProvisionOptions) {
+		o.Alg = "RS256"
+	}); err != nil {
+		t.Fatalf("provision a: %v", err)
+	}
+	if err := mgr.ProvisionTenant(ctx, "b", func(o *keystore.ProvisionOptions) {
+		o.Alg = "ES256"
+	}); err != nil {
+		t.Fatalf("provision b: %v", err)
+	}
+	aTok := issueFor(t, svc, "a")
+	if _, err := svc.VerifyAccessTokenForTenant(ctx, "a", aTok); err != nil {
+		t.Fatalf("A token must verify as A: %v", err)
+	}
+	if _, err := svc.VerifyAccessTokenForTenant(ctx, "b", aTok); err == nil {
+		t.Fatal("A's RS256 token must NOT verify as B (ES256)")
+	}
+}
+
+// algHeader decodes a JWT's protected header and returns its alg.
+func algHeader(t *testing.T, token string) string {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) < 2 {
+		t.Fatalf("malformed token")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		t.Fatalf("decode header: %v", err)
+	}
+	var hdr struct {
+		Alg string `json:"alg"`
+	}
+	if err := json.Unmarshal(raw, &hdr); err != nil {
+		t.Fatalf("unmarshal header: %v", err)
+	}
+	return hdr.Alg
 }

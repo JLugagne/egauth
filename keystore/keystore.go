@@ -44,8 +44,13 @@ var (
 	ErrKeyNotFound = errors.New("keystore: key not found")
 )
 
-// SigningKey is one tenant-scoped HS256 signing key. It maps directly onto tokens/jwt's keyset
-// model: KeyID is stamped as the JWT "kid" header, Secret is the HMAC key.
+// AlgHS256 is the default signing algorithm for a key with an empty Alg (backward compat). A key
+// whose Alg is "" is treated as HS256 everywhere it is consumed (jwtadapter, jwks, backends).
+const AlgHS256 = "HS256"
+
+// SigningKey is one tenant-scoped signing key. It maps directly onto tokens/jwt's keyset model:
+// KeyID is stamped as the JWT "kid" header, Alg names the algorithm, and Secret holds the key
+// material (an HMAC secret for HS256, or the PKCS#8 DER of the private key for an asymmetric alg).
 //
 // A key is the ACTIVE signer for its tenant when RetiredAt is nil and (NotAfter is zero or in
 // the future). After renewal the previous key is kept verify-only (RetiredAt set) until its
@@ -55,8 +60,9 @@ type SigningKey struct {
 	KeyID string
 	// TenantID is the owning tenant ("" = single-tenant partition).
 	TenantID string
-	// Secret is the raw HMAC secret. Inside a Store backend it is held only in its
-	// KEK-encrypted form; it is decrypted into this field by the Manager before use.
+	// Secret is the key material: the raw HMAC secret for HS256, or the PKCS#8 DER of the private
+	// key for an asymmetric Alg (RS256/ES256/ES384/ES512/EdDSA). Inside a Store backend it is held
+	// only in its KEK-encrypted form; it is decrypted into this field by the Manager before use.
 	Secret []byte
 	// CreatedAt is when the key was minted.
 	CreatedAt time.Time
@@ -66,6 +72,10 @@ type SigningKey struct {
 	// RetiredAt, when non-nil, marks the key verify-only: it no longer signs new tokens but
 	// keeps validating outstanding ones until NotAfter. Renewal sets this on the previous key.
 	RetiredAt *time.Time
+	// Alg identifies the signing algorithm of this key: "HS256" (default), "RS256", "ES256",
+	// "ES384", "ES512", or "EdDSA". For HS256 Secret holds the raw HMAC secret (sealed at rest);
+	// for asymmetric algs Secret holds the PKCS#8 DER of the private key (sealed at rest).
+	Alg string
 }
 
 // IsActive reports whether the key may sign new tokens as of now: not retired and not past its

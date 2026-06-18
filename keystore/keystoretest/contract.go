@@ -10,6 +10,8 @@ package keystoretest
 import (
 	"bytes"
 	"context"
+	"crypto/rsa"
+	"crypto/x509"
 	"testing"
 	"time"
 
@@ -54,6 +56,8 @@ func StoreContractTesting(t *testing.T, newStore StoreFactory) {
 	t.Run("CrossTenantIsolation", func(t *testing.T) { testCrossTenantIsolation(t, newStore) })
 	t.Run("LifecycleIsolation", func(t *testing.T) { testLifecycleIsolation(t, newStore) })
 	t.Run("TenantMismatchGuard", func(t *testing.T) { testTenantMismatchGuard(t, newStore) })
+	t.Run("AlgRoundTrip", func(t *testing.T) { testAlgRoundTrip(t, newStore) })
+	t.Run("AsymmetricProvisionRoundTrip", func(t *testing.T) { testAsymmetricProvisionRoundTrip(t, newStore) })
 }
 
 func testProvisionIdempotent(t *testing.T, newStore StoreFactory) {
@@ -324,5 +328,71 @@ func testTenantMismatchGuard(t *testing.T, newStore StoreFactory) {
 	err := store.PutSigningKey(ctx, "acme", mismatched)
 	if err == nil {
 		t.Fatal("PutSigningKey must reject a key whose TenantID contradicts the op tenant")
+	}
+}
+
+// testAlgRoundTrip asserts a non-default Alg survives a store write/read cycle. It pokes the
+// Store directly with a sealed dummy DER so it exercises persistence (column/scan wiring) on
+// every backend, independent of how the Manager generates asymmetric keys.
+func testAlgRoundTrip(t *testing.T, newStore StoreFactory) {
+	ctx := context.Background()
+	store, mgr := newPair(t, newStore, time.Now)
+	sealed, err := mgr.SealSecret([]byte("dummy-pkcs8-der-bytes-stand-in-for-a-key"))
+	if err != nil {
+		t.Fatalf("SealSecret: %v", err)
+	}
+	key := keystore.SigningKey{
+		KeyID:     "rsa-1",
+		TenantID:  "acme",
+		Secret:    sealed,
+		CreatedAt: time.Now(),
+		Alg:       "RS256",
+	}
+	if err := store.PutSigningKey(ctx, "acme", key); err != nil {
+		t.Fatalf("PutSigningKey: %v", err)
+	}
+	active, err := store.ActiveSigningKey(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ActiveSigningKey: %v", err)
+	}
+	if active.Alg != "RS256" {
+		t.Fatalf("ActiveSigningKey Alg = %q, want RS256", active.Alg)
+	}
+	verify, err := store.VerificationKeys(ctx, "acme")
+	if err != nil {
+		t.Fatalf("VerificationKeys: %v", err)
+	}
+	got, ok := verify["rsa-1"]
+	if !ok {
+		t.Fatal("verify set missing rsa-1")
+	}
+	if got.Alg != "RS256" {
+		t.Fatalf("VerificationKeys Alg = %q, want RS256", got.Alg)
+	}
+}
+
+// testAsymmetricProvisionRoundTrip drives the full Manager provision path for an asymmetric alg,
+// asserting the active key carries the chosen Alg and a parseable PKCS#8 private key.
+func testAsymmetricProvisionRoundTrip(t *testing.T, newStore StoreFactory) {
+	ctx := context.Background()
+	_, mgr := newPair(t, newStore, time.Now)
+	if err := mgr.ProvisionTenant(ctx, "acme", func(o *keystore.ProvisionOptions) {
+		o.Alg = "RS256"
+	}); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	k, err := mgr.ActiveSigningKey(ctx, "acme")
+	if err != nil {
+		t.Fatalf("ActiveSigningKey: %v", err)
+	}
+	if k.Alg != "RS256" {
+		t.Fatalf("Alg = %q, want RS256", k.Alg)
+	}
+	priv, err := x509.ParsePKCS8PrivateKey(k.Secret)
+	if err != nil {
+		t.Fatalf("opened secret must parse as PKCS#8: %v", err)
+	}
+	if _, ok := priv.(*rsa.PrivateKey); !ok {
+		t.Fatalf("got %T, want *rsa.PrivateKey", priv)
 	}
 }

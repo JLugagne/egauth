@@ -1,51 +1,134 @@
 package keystore
 
-import "context"
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/base64"
+	"fmt"
+	"math/big"
+)
 
-// JWK is a single entry in a tenant's JSON Web Key Set. egauth signs with HS256 (a SYMMETRIC
-// algorithm), so a JWK here is deliberately metadata-only: it carries the key id, algorithm and
-// intended use, but NEVER the secret ("k") value.
+// JWK is a single entry in a tenant's JSON Web Key Set (RFC 7517).
 //
-// Publishing the symmetric secret in a public /.well-known/jwks.json would hand every verifier
-// the power to MINT tokens — a critical vulnerability. So this JWKS is for internal introspection
-// and operational tooling (which kids are live for a tenant), not for public distribution. A
-// truly publishable JWKS requires asymmetric signing (RS256/EdDSA), which is deferred to a
-// future task (see the Discussion in TASK-003 / road-to-v1 §1b). The shape is forward-compatible:
-// asymmetric public-key fields can be added without breaking this contract.
+// For asymmetric keys (RS256/ES256/ES384/ES512/EdDSA) a JWK carries the full PUBLIC key parameters
+// and is safe to publish at a public /.well-known/jwks.json: a verifier learns only how to verify,
+// never how to mint. For HS256 (a SYMMETRIC algorithm) a JWK is deliberately metadata-only: it
+// carries kid/alg/use but NEVER the secret ("k"), because publishing the symmetric secret would
+// hand every verifier the power to forge tokens — a critical vulnerability. So an HS256 JWKS is for
+// internal introspection only; a mixed set publishes the asymmetric public keys and exposes the
+// HMAC keys as metadata-only entries.
 type JWK struct {
-	// Kty is the key type. For HS256 keys this is "oct" (symmetric octet sequence).
+	// Kty is the key type: "RSA" | "EC" | "OKP" | "oct".
 	Kty string `json:"kty"`
 	// Use is the intended use: "sig" (signature).
-	Use string `json:"use"`
-	// Alg is the algorithm, "HS256".
-	Alg string `json:"alg"`
+	Use string `json:"use,omitempty"`
+	// Alg is the algorithm (RS256/ES256/ES384/ES512/EdDSA/HS256).
+	Alg string `json:"alg,omitempty"`
 	// Kid is the key id (the JWT "kid" header value).
-	Kid string `json:"kid"`
-	// Note: the symmetric secret ("k") is intentionally omitted — see the type doc.
+	Kid string `json:"kid,omitempty"`
+	// N is the RSA modulus (base64url, big-endian).
+	N string `json:"n,omitempty"`
+	// E is the RSA public exponent (base64url, big-endian minimal).
+	E string `json:"e,omitempty"`
+	// Crv is the curve: "P-256" | "P-384" | "P-521" (EC) or "Ed25519" (OKP).
+	Crv string `json:"crv,omitempty"`
+	// X is the EC x coordinate (fixed length) or the OKP public key (base64url).
+	X string `json:"x,omitempty"`
+	// Y is the EC y coordinate (base64url, EC only).
+	Y string `json:"y,omitempty"`
+	// Note: the HMAC secret ("k") is intentionally NEVER emitted — see the type doc.
 }
 
-// JWKSet is a tenant's JSON Web Key Set (metadata only — see JWK).
+// JWKSet is a tenant's JSON Web Key Set.
 type JWKSet struct {
 	Keys []JWK `json:"keys"`
 }
 
-// JWKS returns the metadata-only JWK set for a tenant: one entry per currently-verifiable key
-// (active plus retired-but-unexpired), describing kid/alg/use but NOT the secret. It is safe to
-// expose to internal operators; it is NOT safe to publish publicly while signing is symmetric
-// (see the JWK doc). tenantID "" is the single-tenant partition.
+// JWKS returns the JWK set for a tenant: one entry per currently-verifiable key (active plus
+// retired-but-unexpired). Asymmetric keys publish their full public parameters (safe to expose
+// publicly); HMAC keys are metadata-only (kid/alg/use but never the secret). tenantID "" is the
+// single-tenant partition.
 func (m *Manager) JWKS(ctx context.Context, tenantID string) (JWKSet, error) {
-	keys, err := m.store.VerificationKeys(ctx, tenantID)
+	// Route through VerificationKeys (which opens the sealed secrets) so asymmetric keys can be
+	// parsed to extract their public parameters.
+	keys, err := m.VerificationKeys(ctx, tenantID)
 	if err != nil {
 		return JWKSet{}, err
 	}
 	set := JWKSet{Keys: make([]JWK, 0, len(keys))}
-	for kid := range keys {
-		set.Keys = append(set.Keys, JWK{
-			Kty: "oct",
-			Use: "sig",
-			Alg: "HS256",
-			Kid: kid,
-		})
+	for kid, k := range keys {
+		alg := k.Alg
+		if alg == "" {
+			alg = AlgHS256
+		}
+		if alg == AlgHS256 {
+			// Symmetric: metadata only, never the secret.
+			set.Keys = append(set.Keys, JWK{Kty: "oct", Use: "sig", Alg: "HS256", Kid: kid})
+			continue
+		}
+		jwk, err := publicJWKFromKey(kid, alg, k.Secret)
+		if err != nil {
+			return JWKSet{}, err
+		}
+		set.Keys = append(set.Keys, jwk)
 	}
 	return set, nil
+}
+
+// publicJWKFromKey parses the PKCS#8 DER of an asymmetric private key (already KEK-opened) and
+// builds the public JWK with the full public parameters for the key's algorithm.
+func publicJWKFromKey(kid, alg string, der []byte) (JWK, error) {
+	priv, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return JWK{}, fmt.Errorf("keystore: parsing key %q for JWKS: %w", kid, err)
+	}
+	switch key := priv.(type) {
+	case *rsa.PrivateKey:
+		pub := &key.PublicKey
+		return JWK{
+			Kty: "RSA",
+			Use: "sig",
+			Alg: alg,
+			Kid: kid,
+			N:   base64.RawURLEncoding.EncodeToString(pub.N.Bytes()),
+			E:   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(pub.E)).Bytes()),
+		}, nil
+	case *ecdsa.PrivateKey:
+		pub := &key.PublicKey
+		byteLen := (pub.Curve.Params().BitSize + 7) / 8
+		return JWK{
+			Kty: "EC",
+			Use: "sig",
+			Alg: alg,
+			Kid: kid,
+			Crv: pub.Curve.Params().Name,
+			X:   base64.RawURLEncoding.EncodeToString(leftPad(pub.X.Bytes(), byteLen)),
+			Y:   base64.RawURLEncoding.EncodeToString(leftPad(pub.Y.Bytes(), byteLen)),
+		}, nil
+	case ed25519.PrivateKey:
+		pub := key.Public().(ed25519.PublicKey)
+		return JWK{
+			Kty: "OKP",
+			Use: "sig",
+			Alg: alg,
+			Kid: kid,
+			Crv: "Ed25519",
+			X:   base64.RawURLEncoding.EncodeToString(pub),
+		}, nil
+	default:
+		return JWK{}, fmt.Errorf("keystore: unsupported public key type %T for key %q", priv, kid)
+	}
+}
+
+// leftPad left-pads b with zero bytes to length n (no-op when len(b) >= n).
+func leftPad(b []byte, n int) []byte {
+	if len(b) >= n {
+		return b
+	}
+	out := make([]byte, n)
+	copy(out[n-len(b):], b)
+	return out
 }

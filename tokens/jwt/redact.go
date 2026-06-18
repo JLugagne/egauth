@@ -86,8 +86,8 @@ func (cfg Config[C]) LogValue() slog.Value {
 // resolved HS256 key bytes in unexported fields, which fmt would otherwise dump verbatim (as a
 // byte slice) for %v/%+v/%#v; this keeps those paths safe.
 func (s *Service[C]) String() string {
-	keyIDs := make([]string, 0, len(s.verifyKeys))
-	for kid := range s.verifyKeys {
+	keyIDs := make([]string, 0, len(s.verifySigners))
+	for kid := range s.verifySigners {
 		keyIDs = append(keyIDs, kid)
 	}
 	sort.Strings(keyIDs)
@@ -103,8 +103,8 @@ func (s *Service[C]) GoString() string { return s.String() }
 
 // LogValue redacts the Service for structured (slog) logging.
 func (s *Service[C]) LogValue() slog.Value {
-	keyIDs := make([]string, 0, len(s.verifyKeys))
-	for kid := range s.verifyKeys {
+	keyIDs := make([]string, 0, len(s.verifySigners))
+	for kid := range s.verifySigners {
 		keyIDs = append(keyIDs, kid)
 	}
 	sort.Strings(keyIDs)
