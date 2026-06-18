@@ -225,6 +225,10 @@ type Service interface {
 	// (e.g. OAuth-only) is never flagged (returns false). It returns ErrUserNotFound for an unknown,
 	// soft-deleted or cross-tenant user (propagated from the store).
 	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families. It returns ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
+	SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
+	// AdminCreateUser provisions a new user account with a temporary password that forces a change at the next login. It normalizes email, creates the user, hashes tempPassword and adds a password identity with MustChangePassword=true and PasswordChangedAt=now. It returns ErrInvalidEmail for a malformed address, ErrEmailAlreadyExists when the email is taken, and any policy or hashing error on an invalid tempPassword. On a successful call the returned User is the newly created account.
+	AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error)
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
@@ -1303,4 +1307,81 @@ func (s *service) PasswordChangeRequired(ctx context.Context, tenantID string, u
 	}
 
 	return s.now().Sub(pwIdent.PasswordChangedAt) > maxAge, nil
+}
+
+// SetTemporaryPassword replaces the user's password credential with a temporary one and sets
+// the MustChangePassword flag so the user is forced to choose a new password at next login.
+// It validates tempPassword against the policy, hashes it, and then runs every registered
+// AccountEraser to revoke the user's existing sessions and refresh-token families, mirroring
+// the behavior of ChangePassword and ResetPassword.
+func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error {
+	if err := s.requirePasswordDeps(); err != nil {
+		return err
+	}
+	if err := s.policy.Verify(ctx, tempPassword); err != nil {
+		return err
+	}
+	hash, err := s.hasher.Hash(ctx, tempPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash, s.now(), true); err != nil {
+		return err
+	}
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := erase(ctx, tenantID, userID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// AdminCreateUser provisions a new user account with a temporary password. The caller is
+// expected to deliver the temporary password out-of-band; the account's MustChangePassword flag
+// is set so the user is forced to choose their own password at first login.
+func (s *service) AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error) {
+	if err := s.requirePasswordDeps(); err != nil {
+		return nil, err
+	}
+	var err error
+	email, err = normalizeEmail(email)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.policy.Verify(ctx, tempPassword); err != nil {
+		return nil, err
+	}
+	hash, err := s.hasher.Hash(ctx, tempPassword)
+	if err != nil {
+		return nil, err
+	}
+	user, err := s.store.CreateUser(ctx, tenantID, email)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	ident := &Identity{
+		UserID:             user.ID,
+		Provider:           "password",
+		ProviderID:         email,
+		PasswordHash:       &hash,
+		MustChangePassword: true,
+		PasswordChangedAt:  now,
+	}
+	if err := s.store.AddIdentity(ctx, tenantID, ident); err != nil {
+		// Compensate the orphaned user so its email slot is freed, mirroring Register.
+		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
+		return nil, err
+	}
+	return user, nil
 }

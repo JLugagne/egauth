@@ -31,6 +31,8 @@ type MockService struct {
 	DisableUserFunc                     func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	EnableUserFunc                      func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	PasswordChangeRequiredFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+	SetTemporaryPasswordFunc            func(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
+	AdminCreateUserFunc                 func(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error)
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -187,4 +189,18 @@ func (m *MockService) PasswordChangeRequired(ctx context.Context, tenantID strin
 		panic("called not defined PasswordChangeRequiredFunc")
 	}
 	return m.PasswordChangeRequiredFunc(ctx, tenantID, userID)
+}
+
+func (m *MockService) SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error {
+	if m.SetTemporaryPasswordFunc == nil {
+		panic("called not defined SetTemporaryPasswordFunc")
+	}
+	return m.SetTemporaryPasswordFunc(ctx, tenantID, userID, tempPassword)
+}
+
+func (m *MockService) AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error) {
+	if m.AdminCreateUserFunc == nil {
+		panic("called not defined AdminCreateUserFunc")
+	}
+	return m.AdminCreateUserFunc(ctx, tenantID, email, tempPassword)
 }

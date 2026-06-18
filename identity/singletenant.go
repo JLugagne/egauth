@@ -141,3 +141,13 @@ func (s *SingleTenant) EnableUser(ctx context.Context, userID uuid.UUID) error {
 func (s *SingleTenant) PasswordChangeRequired(ctx context.Context, userID uuid.UUID) (bool, error) {
 	return s.svc.PasswordChangeRequired(ctx, "", userID)
 }
+
+// SetTemporaryPassword calls Service.SetTemporaryPassword on the empty tenant.
+func (s *SingleTenant) SetTemporaryPassword(ctx context.Context, userID uuid.UUID, tempPassword string) error {
+	return s.svc.SetTemporaryPassword(ctx, "", userID, tempPassword)
+}
+
+// AdminCreateUser calls Service.AdminCreateUser on the empty tenant.
+func (s *SingleTenant) AdminCreateUser(ctx context.Context, email, tempPassword string) (*User, error) {
+	return s.svc.AdminCreateUser(ctx, "", email, tempPassword)
+}
