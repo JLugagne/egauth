@@ -2,7 +2,12 @@ package keystore
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -94,6 +99,9 @@ type ProvisionOptions struct {
 	KeyTTL time.Duration
 	// KeyID overrides the generated initial key ID. Leave empty to auto-generate.
 	KeyID string
+	// Alg selects the signing algorithm for the generated key: "" or "HS256" (default, backward
+	// compatible) / "RS256" / "ES256" / "ES384" / "ES512" / "EdDSA".
+	Alg string
 }
 
 // ProvisionTenant creates a tenant with a fresh active signing key. It is idempotent: if the
@@ -111,7 +119,7 @@ func (m *Manager) ProvisionTenant(ctx context.Context, tenantID string, opts ...
 	if exists {
 		return nil // idempotent
 	}
-	key, err := m.newKey(tenantID, o.KeyID, o.KeyTTL)
+	key, err := m.newKey(tenantID, o.KeyID, o.Alg, o.KeyTTL)
 	if err != nil {
 		return err
 	}
@@ -136,6 +144,9 @@ type RenewOptions struct {
 	OverlapTTL time.Duration
 	// KeyID overrides the generated new key ID.
 	KeyID string
+	// Alg selects the signing algorithm for the generated key: "" or "HS256" (default, backward
+	// compatible) / "RS256" / "ES256" / "ES384" / "ES512" / "EdDSA".
+	Alg string
 }
 
 // RenewSigningKey rolls a tenant's active signing key: it mints a new active key and keeps the
@@ -157,7 +168,7 @@ func (m *Manager) RenewSigningKey(ctx context.Context, tenantID string, opts ...
 	if !exists {
 		return ErrTenantNotFound
 	}
-	next, err := m.newKey(tenantID, o.KeyID, o.KeyTTL)
+	next, err := m.newKey(tenantID, o.KeyID, o.Alg, o.KeyTTL)
 	if err != nil {
 		return err
 	}
@@ -229,16 +240,22 @@ func (m *Manager) PurgeTenant(ctx context.Context, tenantID string) error {
 	return m.DeleteTenant(ctx, tenantID)
 }
 
-// newKey mints a fresh SigningKey for tenantID with a random secret. An empty keyID is
-// auto-generated. ttl of 0 selects DefaultKeyTTL; a negative ttl means no expiry.
-func (m *Manager) newKey(tenantID, keyID string, ttl time.Duration) (SigningKey, error) {
-	secret := make([]byte, secretLength)
-	if _, err := m.rand(secret); err != nil {
-		return SigningKey{}, fmt.Errorf("keystore: generating secret: %w", err)
+// newKey mints a fresh SigningKey for tenantID with material for the requested algorithm. An
+// empty alg defaults to HS256 (backward compatible). For HS256 the secret is 32 random bytes; for
+// asymmetric algs a fresh private key is generated and marshaled to PKCS#8 DER. The resulting raw
+// material is KEK-sealed before it is stored. An empty keyID is auto-generated. ttl of 0 selects
+// DefaultKeyTTL; a negative ttl means no expiry.
+func (m *Manager) newKey(tenantID, keyID, alg string, ttl time.Duration) (SigningKey, error) {
+	if alg == "" {
+		alg = AlgHS256
 	}
-	// Seal the secret with the KEK before it ever reaches the Store: backends persist only the
+	raw, err := m.generateKeyMaterial(alg)
+	if err != nil {
+		return SigningKey{}, err
+	}
+	// Seal the material with the KEK before it ever reaches the Store: backends persist only the
 	// envelope-encrypted form. ActiveSigningKey/VerificationKeys open it again before use.
-	sealed, err := m.kek.Seal(secret)
+	sealed, err := m.kek.Seal(raw)
 	if err != nil {
 		return SigningKey{}, err
 	}
@@ -262,10 +279,54 @@ func (m *Manager) newKey(tenantID, keyID string, ttl time.Duration) (SigningKey,
 	return SigningKey{
 		KeyID:     keyID,
 		TenantID:  tenantID,
+		Alg:       alg,
 		Secret:    sealed,
 		CreatedAt: now,
 		NotAfter:  notAfter,
 	}, nil
+}
+
+// generateKeyMaterial produces the raw (pre-seal) key bytes for alg: 32 random bytes for HS256,
+// or the PKCS#8 DER of a freshly generated private key for an asymmetric alg. Asymmetric keygen
+// uses crypto/rand.Reader directly (the deterministic-rand seam is only needed for HMAC tests).
+func (m *Manager) generateKeyMaterial(alg string) ([]byte, error) {
+	switch alg {
+	case AlgHS256:
+		secret := make([]byte, secretLength)
+		if _, err := m.rand(secret); err != nil {
+			return nil, fmt.Errorf("keystore: generating secret: %w", err)
+		}
+		return secret, nil
+	case "RS256":
+		key, err := rsa.GenerateKey(rand.Reader, 2048)
+		if err != nil {
+			return nil, fmt.Errorf("keystore: generating RSA key: %w", err)
+		}
+		return x509.MarshalPKCS8PrivateKey(key)
+	case "ES256", "ES384", "ES512":
+		var curve elliptic.Curve
+		switch alg {
+		case "ES256":
+			curve = elliptic.P256()
+		case "ES384":
+			curve = elliptic.P384()
+		default:
+			curve = elliptic.P521()
+		}
+		key, err := ecdsa.GenerateKey(curve, rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("keystore: generating ECDSA key: %w", err)
+		}
+		return x509.MarshalPKCS8PrivateKey(key)
+	case "EdDSA":
+		_, priv, err := ed25519.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("keystore: generating Ed25519 key: %w", err)
+		}
+		return x509.MarshalPKCS8PrivateKey(priv)
+	default:
+		return nil, fmt.Errorf("keystore: unsupported alg %q", alg)
+	}
 }
 
 // emit sends a lifecycle event through the configured sink (nil-safe via event.Emit).

@@ -136,3 +136,46 @@ func TestPgxKeystore_TenantMismatchGuard(t *testing.T) {
 	err := store.PutSigningKey(ctx, "acme", keystore.SigningKey{KeyID: "k1", TenantID: "other", Secret: []byte("x")})
 	require.True(t, errors.Is(err, keystore.ErrTenantMismatch))
 }
+
+// TestPgxKeystore_AlgRoundTrip asserts a non-default Alg survives the insert/scan cycle on both
+// the active and verification read paths (migration 002 + alg column wiring).
+func TestPgxKeystore_AlgRoundTrip(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	store := pgxkeystore.NewStore(pool)
+	key := keystore.SigningKey{
+		KeyID:     "rsa-1",
+		TenantID:  "acme",
+		Secret:    []byte("sealed-pkcs8-der-stand-in"),
+		CreatedAt: time.Now(),
+		Alg:       "RS256",
+	}
+	require.NoError(t, store.PutSigningKey(ctx, "acme", key))
+
+	active, err := store.ActiveSigningKey(ctx, "acme")
+	require.NoError(t, err)
+	require.Equal(t, "RS256", active.Alg)
+
+	verify, err := store.VerificationKeys(ctx, "acme")
+	require.NoError(t, err)
+	require.Contains(t, verify, "rsa-1")
+	require.Equal(t, "RS256", verify["rsa-1"].Alg)
+}
+
+// TestPgxKeystore_DefaultAlgForLegacyRow asserts a row inserted without an explicit alg relies on
+// the column default and scans back as HS256 (backward compat for pre-migration rows).
+func TestPgxKeystore_DefaultAlgForLegacyRow(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	// Insert directly without the alg column so the DEFAULT 'HS256' applies, simulating a row
+	// written before migration 002.
+	_, err := pool.Exec(ctx,
+		`INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at) VALUES ($1, $2, $3, now())`,
+		"legacy", "k1", []byte("sealed"))
+	require.NoError(t, err)
+
+	store := pgxkeystore.NewStore(pool)
+	active, err := store.ActiveSigningKey(ctx, "legacy")
+	require.NoError(t, err)
+	require.Equal(t, "HS256", active.Alg)
+}

@@ -33,20 +33,36 @@ func (s *countingKeyStore) kidFor(tenantID string) string {
 	return "k1-" + tenantID
 }
 
-func (s *countingKeyStore) ActiveSigningKey(_ context.Context, tenantID string) (TenantKey, error) {
+func (s *countingKeyStore) ActiveSigningKey(_ context.Context, tenantID string) (Signer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.activeCalls[tenantID]++
 	kid := s.kidFor(tenantID)
-	return TenantKey{KeyID: kid, Secret: []byte("secret-" + kid)}, nil
+	return mustHMACSigner(kid), nil
 }
 
-func (s *countingKeyStore) VerificationKeys(_ context.Context, tenantID string) (map[string]TenantKey, error) {
+func (s *countingKeyStore) VerificationKeys(_ context.Context, tenantID string) (map[string]Signer, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.verifyCalls[tenantID]++
 	kid := s.kidFor(tenantID)
-	return map[string]TenantKey{kid: {KeyID: kid, Secret: []byte("secret-" + kid)}}, nil
+	return map[string]Signer{kid: mustHMACSigner(kid)}, nil
+}
+
+// mustHMACSigner builds an HMAC signer with a padded secret, panicking on the (impossible) error.
+// Used where the call site has no *testing.T.
+func mustHMACSigner(kid string) Signer {
+	secret := []byte("secret-" + kid)
+	if len(secret) < MinSecretKeyLength {
+		padded := make([]byte, MinSecretKeyLength)
+		copy(padded, secret)
+		secret = padded
+	}
+	sg, err := NewHMACSigner(kid, secret)
+	if err != nil {
+		panic(err)
+	}
+	return sg
 }
 
 func (s *countingKeyStore) rotate(tenantID, newKid string) {
@@ -66,7 +82,7 @@ func TestCachingKeyStore_ServesFromCacheWithinTTL(t *testing.T) {
 	cache := NewCachingKeyStore(backing, time.Minute)
 
 	ctx := context.Background()
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if _, err := cache.ActiveSigningKey(ctx, "tenant-a"); err != nil {
 			t.Fatalf("ActiveSigningKey: %v", err)
 		}
@@ -120,21 +136,21 @@ func TestCachingKeyStore_InvalidateOnRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveSigningKey: %v", err)
 	}
-	if k.KeyID != "k1-tenant-a" {
-		t.Fatalf("unexpected initial kid %q", k.KeyID)
+	if k.KeyID() != "k1-tenant-a" {
+		t.Fatalf("unexpected initial kid %q", k.KeyID())
 	}
 
 	// Rotate the backing key, then prove the cache still serves the stale kid until invalidated.
 	backing.rotate("tenant-a", "k2")
 	k, _ = cache.ActiveSigningKey(ctx, "tenant-a")
-	if k.KeyID != "k1-tenant-a" {
-		t.Fatalf("expected stale cached kid before invalidation, got %q", k.KeyID)
+	if k.KeyID() != "k1-tenant-a" {
+		t.Fatalf("expected stale cached kid before invalidation, got %q", k.KeyID())
 	}
 
 	cache.Invalidate("tenant-a")
 	k, _ = cache.ActiveSigningKey(ctx, "tenant-a")
-	if k.KeyID != "k2" {
-		t.Fatalf("expected rotated kid after invalidation, got %q", k.KeyID)
+	if k.KeyID() != "k2" {
+		t.Fatalf("expected rotated kid after invalidation, got %q", k.KeyID())
 	}
 }
 
@@ -164,11 +180,11 @@ func TestCachingKeyStore_InvalidatesOnKeystoreEvents(t *testing.T) {
 			cache.EmitEvent(ctx, event.Event{Type: tc.typ, TenantID: "tenant-a"})
 
 			k, _ := cache.ActiveSigningKey(ctx, "tenant-a")
-			if tc.flush && k.KeyID != "k2" {
-				t.Fatalf("expected cache flushed on %s, still serving %q", tc.typ, k.KeyID)
+			if tc.flush && k.KeyID() != "k2" {
+				t.Fatalf("expected cache flushed on %s, still serving %q", tc.typ, k.KeyID())
 			}
-			if !tc.flush && k.KeyID != "k1-tenant-a" {
-				t.Fatalf("expected cache untouched by %s, got %q", tc.typ, k.KeyID)
+			if !tc.flush && k.KeyID() != "k1-tenant-a" {
+				t.Fatalf("expected cache untouched by %s, got %q", tc.typ, k.KeyID())
 			}
 		})
 	}
@@ -187,7 +203,7 @@ func TestCachingKeyStore_VerificationKeysReturnsCopy(t *testing.T) {
 	for k := range keys {
 		delete(keys, k)
 	}
-	keys["forged"] = TenantKey{KeyID: "forged", Secret: []byte("x")}
+	keys["forged"] = mustHMACSigner("forged")
 
 	again, err := cache.VerificationKeys(ctx, "tenant-a")
 	if err != nil {

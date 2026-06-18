@@ -18,6 +18,7 @@ package jwt
 
 import (
 	"context"
+	"maps"
 	"sync"
 	"time"
 
@@ -41,8 +42,8 @@ const (
 
 // cachedKeyset is one tenant's resolved material plus the instant it was cached.
 type cachedKeyset struct {
-	active   TenantKey
-	verify   map[string]TenantKey
+	active   Signer
+	verify   map[string]Signer
 	cachedAt time.Time
 }
 
@@ -110,7 +111,7 @@ func (c *CachingKeyStore) lookup(tenantID string) (cachedKeyset, bool) {
 
 // store records a resolved keyset for tenantID. Both fields are populated together so the active
 // key and the verification set served from cache are always from the same backing read.
-func (c *CachingKeyStore) store(tenantID string, active TenantKey, verify map[string]TenantKey) {
+func (c *CachingKeyStore) store(tenantID string, active Signer, verify map[string]Signer) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[tenantID] = cachedKeyset{active: active, verify: verify, cachedAt: c.now()}
@@ -119,17 +120,17 @@ func (c *CachingKeyStore) store(tenantID string, active TenantKey, verify map[st
 // ActiveSigningKey returns the tenant's active key, serving a cached value when fresh and otherwise
 // resolving both the active key and the verification set from the delegate in one fill so a later
 // VerificationKeys call for the same tenant is served from cache.
-func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string) (TenantKey, error) {
+func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string) (Signer, error) {
 	if e, ok := c.lookup(tenantID); ok {
 		return e.active, nil
 	}
 	active, err := c.delegate.ActiveSigningKey(ctx, tenantID)
 	if err != nil {
-		return TenantKey{}, err
+		return nil, err
 	}
 	verify, err := c.delegate.VerificationKeys(ctx, tenantID)
 	if err != nil {
-		return TenantKey{}, err
+		return nil, err
 	}
 	c.store(tenantID, active, verify)
 	return active, nil
@@ -138,7 +139,7 @@ func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string)
 // VerificationKeys returns every key that may still verify a token for tenantID, served from cache
 // when fresh. A defensive copy is returned so a caller cannot mutate the cached map. It fills both
 // halves of the entry on a miss for the same reason as ActiveSigningKey.
-func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string) (map[string]TenantKey, error) {
+func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string) (map[string]Signer, error) {
 	if e, ok := c.lookup(tenantID); ok {
 		return cloneKeys(e.verify), nil
 	}
@@ -180,13 +181,11 @@ func (c *CachingKeyStore) EmitEvent(_ context.Context, e event.Event) {
 }
 
 // cloneKeys returns a shallow copy of a kid->key map so cached state cannot be mutated by callers.
-func cloneKeys(in map[string]TenantKey) map[string]TenantKey {
+func cloneKeys(in map[string]Signer) map[string]Signer {
 	if in == nil {
 		return nil
 	}
-	out := make(map[string]TenantKey, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
+	out := make(map[string]Signer, len(in))
+	maps.Copy(out, in)
 	return out
 }

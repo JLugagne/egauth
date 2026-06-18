@@ -46,7 +46,7 @@ func TestStore_Ping(t *testing.T) {
 	store := pgx.NewStore(pool)
 
 	// The store must expose the optional Pinger seam.
-	pinger, ok := interface{}(store).(health.Pinger)
+	pinger, ok := any(store).(health.Pinger)
 	require.True(t, ok, "pgx Store must implement health.Pinger")
 
 	// Healthy while the pool is up.

@@ -86,14 +86,14 @@ func (s *Store) PutSigningKey(ctx context.Context, tenantID string, key keystore
 		return err
 	}
 	query := `
-		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at, alg)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (tenant_id, key_id) DO UPDATE
 		SET secret = EXCLUDED.secret, created_at = EXCLUDED.created_at,
-			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at
+			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at, alg = EXCLUDED.alg
 	`
 	_, err := s.db.Exec(ctx, query, tenantID, key.KeyID, key.Secret,
-		key.CreatedAt, nullTime(key.NotAfter), key.RetiredAt)
+		key.CreatedAt, nullTime(key.NotAfter), key.RetiredAt, algOrDefault(key.Alg))
 	return err
 }
 
@@ -107,7 +107,7 @@ func (s *Store) ActiveSigningKey(ctx context.Context, tenantID string) (keystore
 		return keystore.SigningKey{}, keystore.ErrTenantNotFound
 	}
 	query := `
-		SELECT key_id, secret, created_at, not_after, retired_at
+		SELECT key_id, secret, created_at, not_after, retired_at, alg
 		FROM keystore_keys
 		WHERE tenant_id = $1
 		  AND retired_at IS NULL
@@ -136,7 +136,7 @@ func (s *Store) VerificationKeys(ctx context.Context, tenantID string) (map[stri
 		return nil, keystore.ErrTenantNotFound
 	}
 	query := `
-		SELECT key_id, secret, created_at, not_after, retired_at
+		SELECT key_id, secret, created_at, not_after, retired_at, alg
 		FROM keystore_keys
 		WHERE tenant_id = $1 AND (not_after IS NULL OR not_after > now())
 	`
@@ -174,14 +174,14 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 				END
 			WHERE tenant_id = $1 AND retired_at IS NULL AND (not_after IS NULL OR not_after > now())
 		)
-		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at)
-		VALUES ($1, $3, $4, $5, $6, $7)
+		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at, alg)
+		VALUES ($1, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (tenant_id, key_id) DO UPDATE
 		SET secret = EXCLUDED.secret, created_at = EXCLUDED.created_at,
-			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at
+			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at, alg = EXCLUDED.alg
 	`
 	next.TenantID = tenantID
-	_, err := s.db.Exec(ctx, query, tenantID, retiredAt, next.KeyID, next.Secret, next.CreatedAt, nullTime(next.NotAfter), next.RetiredAt)
+	_, err := s.db.Exec(ctx, query, tenantID, retiredAt, next.KeyID, next.Secret, next.CreatedAt, nullTime(next.NotAfter), next.RetiredAt, algOrDefault(next.Alg))
 	return err
 }
 
@@ -235,8 +235,9 @@ func scanKey(r rowScanner, tenantID string) (keystore.SigningKey, error) {
 		k         keystore.SigningKey
 		notAfter  *time.Time
 		retiredAt *time.Time
+		alg       string
 	)
-	if err := r.Scan(&k.KeyID, &k.Secret, &k.CreatedAt, &notAfter, &retiredAt); err != nil {
+	if err := r.Scan(&k.KeyID, &k.Secret, &k.CreatedAt, &notAfter, &retiredAt, &alg); err != nil {
 		return keystore.SigningKey{}, err
 	}
 	k.TenantID = tenantID
@@ -244,6 +245,7 @@ func scanKey(r rowScanner, tenantID string) (keystore.SigningKey, error) {
 		k.NotAfter = *notAfter
 	}
 	k.RetiredAt = retiredAt
+	k.Alg = alg
 	return k, nil
 }
 
@@ -261,4 +263,13 @@ func guardTenant(tenantID string, key keystore.SigningKey) error {
 		return keystore.ErrTenantMismatch
 	}
 	return nil
+}
+
+// algOrDefault maps an empty Alg to "HS256" so a key minted before the alg field existed persists
+// as HS256 rather than an empty string.
+func algOrDefault(a string) string {
+	if a == "" {
+		return "HS256"
+	}
+	return a
 }
