@@ -34,7 +34,7 @@ type MockStore struct {
 	FindIdentityByProviderFunc          func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
 	IncrementFailedAttemptsFunc         func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
 	ResetFailedAttemptsFunc             func(ctx context.Context, tenantID string, identityID uuid.UUID) error
-	UpdateIdentityPasswordFunc          func(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
+	UpdateIdentityPasswordFunc          func(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error
 	CreateVerificationTokenFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
 	ConsumeVerificationTokenFunc        func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
 	DeleteExpiredVerificationTokensFunc func(ctx context.Context, tenantID string) (int64, error)
@@ -42,11 +42,11 @@ type MockStore struct {
 
 var _ identity.Store = (*MockStore)(nil)
 
-func (m *MockStore) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error {
+func (m *MockStore) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error {
 	if m.UpdateIdentityPasswordFunc == nil {
 		panic("called not defined UpdateIdentityPasswordFunc")
 	}
-	return m.UpdateIdentityPasswordFunc(ctx, tenantID, userID, passwordHash)
+	return m.UpdateIdentityPasswordFunc(ctx, tenantID, userID, passwordHash, changedAt, mustChange)
 }
 
 func (m *MockStore) CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error) {
@@ -377,7 +377,8 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		// Lock the account, then update the password: lockout must be cleared atomically.
 		require.NoError(t, store.IncrementFailedAttempts(ctx, tenantA, ident.ID, 1, defaultTestLockDuration))
 
-		err = store.UpdateIdentityPassword(ctx, tenantA, user.ID, "new_hash")
+		changedAt := time.Now().UTC().Truncate(time.Second)
+		err = store.UpdateIdentityPassword(ctx, tenantA, user.ID, "new_hash", changedAt, true)
 		require.NoError(t, err)
 
 		found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
@@ -386,11 +387,20 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.Equal(t, "new_hash", *found.PasswordHash)
 		assert.Equal(t, 0, found.FailedAttempts, "password update must clear failed attempts")
 		assert.Nil(t, found.LockedUntil, "password update must clear the lock")
+		assert.WithinDuration(t, changedAt, found.PasswordChangedAt, time.Second, "password update must stamp PasswordChangedAt")
+		assert.True(t, found.MustChangePassword, "password update must set the must-change flag when requested")
+
+		// A subsequent update with mustChange=false clears the flag again.
+		err = store.UpdateIdentityPassword(ctx, tenantA, user.ID, "newer_hash", time.Now().UTC(), false)
+		require.NoError(t, err)
+		found, err = store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		assert.False(t, found.MustChangePassword, "password update must clear the must-change flag when not requested")
 
 		// Updating a user without a password identity fails.
 		ghost, err := store.CreateUser(ctx, tenantA, "ghost@example.com")
 		require.NoError(t, err)
-		err = store.UpdateIdentityPassword(ctx, tenantA, ghost.ID, "x")
+		err = store.UpdateIdentityPassword(ctx, tenantA, ghost.ID, "x", time.Now(), false)
 		assert.ErrorIs(t, err, identity.ErrIdentityNotFound)
 	})
 

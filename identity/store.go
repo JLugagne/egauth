@@ -95,12 +95,13 @@ type IdentityStore interface {
 	AddIdentity(ctx context.Context, tenantID string, identity *Identity) error
 	FindIdentitiesByUserID(ctx context.Context, tenantID string, userID uuid.UUID) ([]*Identity, error)
 	FindIdentityByProvider(ctx context.Context, tenantID string, provider, providerID string) (*Identity, error)
-
 	// UpdateIdentityPassword sets a new password hash on the user's "password" identity and
 	// atomically clears any lockout (failed_attempts and locked_until), since proving control
-	// of the reset channel re-establishes trust. Returns ErrIdentityNotFound when the user
-	// has no password identity.
-	UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
+	// of the reset channel re-establishes trust. It also stamps password_changed_at=changedAt
+	// and sets must_change_password=mustChange in the same write, so the rotation policy can
+	// flag or clear the credential without a second round-trip. Returns ErrIdentityNotFound
+	// when the user has no password identity.
+	UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error
 }
 
 // VerificationTokenStore is the verification-token capability of the identity backend: the

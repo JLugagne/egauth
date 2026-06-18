@@ -265,9 +265,9 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, pro
 	return nil, identity.ErrIdentityNotFound
 }
 
-// UpdateIdentityPassword sets a new password hash on the user's "password" identity and
-// clears any lockout.
-func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error {
+// UpdateIdentityPassword sets a new password hash on the user's "password" identity,
+// clears any lockout, stamps PasswordChangedAt and sets the MustChangePassword flag.
+func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -277,6 +277,8 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, use
 			ident.PasswordHash = &hash
 			ident.FailedAttempts = 0
 			ident.LockedUntil = nil
+			ident.PasswordChangedAt = changedAt
+			ident.MustChangePassword = mustChange
 			ident.UpdatedAt = time.Now()
 			return nil
 		}

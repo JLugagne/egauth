@@ -640,7 +640,7 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 		return err
 	}
 
-	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash, s.now(), false); err != nil {
 		return err
 	}
 
@@ -708,7 +708,7 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	if err != nil {
 		return err
 	}
-	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash, s.now(), false); err != nil {
 		return err
 	}
 
