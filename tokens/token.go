@@ -35,8 +35,15 @@ type Claims[C any] struct {
 	// the application when issuing the pair (e.g. after a second factor) and is enforced by the
 	// RequireAuth middleware via WithRequiredAMR. On refresh it is whatever the ClaimsProvider
 	// returns, so the assurance level is re-evaluated rather than frozen at login.
-	AMR    []string
-	Custom C
+	AMR []string
+	// MustChangePassword is a first-class advisory flag telling the middleware the subject must
+	// rotate their credential before proceeding. It is a soft gate: a flagged token still
+	// authenticates, but RequireAuth soft-redirects to the reset page. It is set at issuance by
+	// the rotation policy (age-based or admin-provisioned) and is NOT carried across refresh —
+	// flagged logins are access-only, so the claim cannot survive a silent refresh. Living here
+	// rather than inside Custom lets the middleware enforce it generically.
+	MustChangePassword bool
+	Custom             C
 }
 
 // FreshAuth reports whether the subject authenticated within maxAge of now, anchored on AuthTime
