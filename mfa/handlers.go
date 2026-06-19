@@ -35,6 +35,8 @@ type handlerConfig struct {
 	insecureNoOriginCheck bool
 	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
 	maxBodyBytes int64
+	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true and issues ACCESS-ONLY (no refresh cookie), so a verified interim token carrying the flag cannot escape the rotation gate after a second factor. Nil (default) keeps the full-pair behavior.
+	mustChangeResolve func(r *http.Request) bool
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -110,6 +112,17 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 // (default DefaultMaxBodyBytes = 4 KiB). A non-positive value disables the cap.
 func WithMaxBodyBytes(n int64) HandlerOption {
 	return func(h *handlerConfig) { h.maxBodyBytes = n }
+}
+
+// WithMustChangeResolver surfaces the verified interim token's password-rotation flag to
+// StepUpHandler. When fn reports true, the re-issued step-up token is stamped
+// Claims.MustChangePassword=true and is issued ACCESS-ONLY (the access cookie is written but
+// the refresh cookie is NOT), mirroring the flagged login path so a must-change user who is
+// also MFA-enrolled cannot drop the flag by completing a second factor and then silently
+// refreshing. Wire it with tokens.MustChangeResolverFromContext when StepUpHandler is mounted
+// behind tokens.ContextMiddleware. Nil (the default) keeps the unconditional full-pair behavior.
+func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
+	return func(h *handlerConfig) { h.mustChangeResolve = fn }
 }
 
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
@@ -327,13 +340,24 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		// The factor set is now password + a verified TOTP, so the token reaches the MFA
 		// assurance level. AMR is set here (not by the builder) so it is authoritative.
 		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
+		// Carry the rotation gate forward. If the verified interim token was flagged
+		// must-change, the stepped-up token MUST stay flagged and access-only, exactly like the
+		// flagged login path — otherwise an MFA-enrolled must-change user could complete a second
+		// factor, obtain a full renewable pair, and silently refresh the flag away.
+		mustChange := cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r)
+		if mustChange {
+			claims.MustChangePassword = true
+		}
 		pair, err := issuer.IssueTokenPair(r.Context(), claims)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
 		cfg.cookies.SetAccess(w, pair.AccessToken)
-		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		if !mustChange {
+			// Full renewable session: the interim access-only state is upgraded to a pair.
+			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		}
 		cfg.ok(w, r)
 	})
 }
