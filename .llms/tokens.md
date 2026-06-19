@@ -81,7 +81,14 @@ type Claims[C any] struct {
     // AMR: RFC 8176 authentication method refs (pwd, otp, hwk, mfa).
     // Re-evaluated by ClaimsProvider on every rotation, not frozen at login.
     AMR    []string
-    Custom C
+    // MustChangePassword is a first-class advisory flag set by the rotation policy (age-based
+    // or admin-provisioned). It is a soft gate: a flagged token still authenticates, but
+    // RequireAuth with WithPasswordChangeGate soft-redirects to the reset page. Flagged logins
+    // are ACCESS-ONLY (no refresh cookie, short TTL) so the flag cannot be silently dropped by
+    // a silent refresh. JWT claim name: "must_change_password" (omitempty). Lives here, not in
+    // Custom, so the middleware can enforce it generically regardless of the application's C type.
+    MustChangePassword bool
+    Custom             C
 }
 
 func (c Claims[C]) FreshAuth(maxAge time.Duration) bool
@@ -345,6 +352,7 @@ type egauth.Actor struct {
 | `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
+| `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -406,6 +414,15 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
 - **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
 - **Cookie security**: always `HttpOnly`; `Secure` is opt-out (`Insecure bool`, defaults false = secure); `SameSite=Lax` by default.
+- **Forced-password-change gate** (`WithPasswordChangeGate`): after successful token verification,
+  if `Claims.MustChangePassword` is `true`, the wrapped handler is bypassed and the request is
+  soft-redirected to the configured reset URL (or `403 password_change_required` if no URL).
+  The credential is never invalidated — login always succeeds — only the post-login app surface is
+  gated until the user completes the change. Flagged logins are issued as access-only short-TTL
+  tokens (TTL = `identity.DefaultMustChangeTTL`, override via `identity.WithMustChangeTTL`) with
+  **no refresh cookie**, so a silent refresh cannot drop the flag and bypass the gate.
+  `tokens.MustChangeResolverFromContext` adapts the verified claims for `mfa.WithMustChangeResolver`,
+  preserving the flag through the MFA step-up flow.
 
 ## Wiring
 

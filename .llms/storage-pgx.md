@@ -60,7 +60,19 @@ Migrations (schema evolution):
 004_add_phone.sql
 005_add_recovery_email.sql
 006_add_disabled_at.sql
+007_add_expires_at_index.sql
+008_add_password_rotation.sql
 ```
+
+Migration `008_add_password_rotation.sql` adds two columns to the `identities` table:
+- `password_changed_at TIMESTAMP WITH TIME ZONE` — records when the password hash was last set.
+  `NULL` (legacy credential) is treated as **not due** for rotation: the age-based evaluator skips
+  flagging users whose `PasswordChangedAt` is zero, so applying this migration to an existing
+  deployment does not immediately flag every pre-existing user.
+- `must_change_password BOOLEAN NOT NULL DEFAULT false` — advisory flag set by admin provisioning
+  (`identity.AdminCreateUser`, `identity.SetTemporaryPassword`) or the rotation-policy evaluator.
+  Never blocks authentication; causes the next login to issue a flagged, access-only token.
+  Cleared automatically by every `UpdateIdentityPassword` write.
 
 ---
 

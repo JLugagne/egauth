@@ -79,6 +79,12 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
   `otp` (email/SMS one-time codes, also usable as passwordless primary).
 - **Step-up** = `tokens` carries `AuthTime`/`AMR`; `Claims.FreshAuth(maxAge)` gates sensitive ops.
 - **Account deletion fan-out** = `identity.WithAccountErasers(...)` runs cross-module revocation hooks before soft-delete.
+- **Forced password change (opt-in)** = `identity.WithPasswordRotation(maxAge)` / `identity.WithPasswordRotationResolver`
+  evaluate the policy at next login; a flagged user receives an access-only short-TTL token (`tokens.Claims.MustChangePassword=true`,
+  no refresh cookie) and `tokens.WithPasswordChangeGate` soft-redirects every protected route to the reset page.
+  The credential stays valid — the user is never locked out. Admin provisioning uses `identity.AdminCreateUser`
+  or `identity.SetTemporaryPassword` to flag the credential explicitly. See [tokens.md](tokens.md) for the
+  gate middleware and SECURITY.md for the full policy description.
 
 See [recipes.md](recipes.md) for concrete wiring of each stack.
 
@@ -142,6 +148,13 @@ brute-force lockout, single-use selector/verifier tokens, refresh-token rotation
 theft detection, per-kid alg-pinned JWTs (symmetric HS256 or asymmetric RS256/ES256/EdDSA; reject `none`/alg-confusion), SHA-256-only storage of
 refresh/API/session/OTP secrets, secure-by-default cookies, pre-auth body caps against hashing-DoS,
 secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
+
+**Opt-in forced-password-change policy.** `identity.WithPasswordRotation(maxAge)` enables age-based
+credential rotation; `identity.WithPasswordRotationResolver` overrides per tenant. When the policy
+flags a credential at next login, the handler issues a short-TTL access-only token
+(`tokens.Claims.MustChangePassword=true`, no refresh cookie) so the flag cannot be silently dropped
+by a silent refresh. `tokens.WithPasswordChangeGate` enforces the gate generically in the
+`RequireAuth` middleware. Off by default — zero behavior change when unconfigured.
 
 Consumer responsibilities (NOT provided by egauth): CSRF tokens (origin check available via
 `WithTrustedOrigins`), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.

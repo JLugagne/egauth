@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Opt-in forced-password-change / rotation policy** (M7). Enables two triggers for requiring a
+  credential change at the user's next login, without ever locking the user out:
+
+  - *Age-based rotation* — `identity.WithPasswordRotation(maxAge)` sets a global maximum password
+    age. `identity.WithPasswordRotationResolver(fn)` overrides or opts out per tenant.
+  - *Admin-provisioned credentials* — `identity.AdminCreateUser(ctx, tenantID, email, tempPwd)`
+    and `identity.SetTemporaryPassword(ctx, tenantID, userID, tempPwd)` flag the credential so
+    the user is required to set their own password before the app is usable.
+
+  At next login, when the policy flags a credential, `LoginHandler` / `MagicLinkLoginHandler`
+  issue a short-TTL **access-only** token (`tokens.Claims.MustChangePassword=true`, JSON claim
+  `must_change_password`). No refresh cookie is set for a flagged login, so a silent background
+  refresh cannot drop the flag. The TTL defaults to `identity.DefaultMustChangeTTL` and is
+  configurable via `identity.WithMustChangeTTL`.
+
+  `tokens.WithPasswordChangeGate[C](resetURL)` enforces the gate generically in the `RequireAuth`
+  middleware: after successful token verification, if `Claims.MustChangePassword` is true, the
+  wrapped handler is bypassed and the request is redirected `303` to `resetURL` (or `403
+  password_change_required` if `resetURL` is empty). The change-password and logout routes must
+  be excluded from this middleware.
+
+  On a successful `ChangePassword` / `ResetPassword`, `UpdateIdentityPassword` atomically stamps
+  `PasswordChangedAt` and clears the flag; `ChangePasswordWithReissueHandler` re-issues a full
+  access+refresh pair so the user is immediately authenticated.
+
+  New `identity.Store` method: `UpdateIdentityPassword(ctx, tenantID, userID, passwordHash,
+  changedAt time.Time, mustChange bool)` (stamps timestamp and flag in one atomic write). External
+  store implementers must add this method; run `identity/storetest` to verify conformance.
+
+  New pgx migration: `adapters/pgx/identity` migration `008_add_password_rotation.sql` adds
+  `password_changed_at` (nullable; `NULL` = not due, so pre-existing rows are never immediately
+  flagged) and `must_change_password` (boolean, default false) to the `identities` table.
+
+  Off by default — zero behavior change when the policy is left unconfigured.
+
 ### Security / disclosure (v1.0.0)
 
 - **Audit-status disclosure.** egauth's security review to date is an AI-driven audit only; it
