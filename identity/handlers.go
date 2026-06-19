@@ -44,6 +44,13 @@ const DefaultDeliveryTimeout = 30 * time.Second
 // step, never long enough to be a usable session. Override with WithInterimTokenTTL.
 const DefaultInterimTokenTTL = 5 * time.Minute
 
+// DefaultMustChangeTTL is the lifetime of the short-lived ACCESS-ONLY token issued to a user
+// whose credential is flagged for rotation (age-based or admin-provisioned). It must be just
+// long enough for the user to reach the reset page and change the password, never long enough to
+// be a usable session — and since no refresh cookie is written it cannot be silently renewed.
+// Override with WithMustChangeTTL.
+const DefaultMustChangeTTL = 15 * time.Minute
+
 // handlerConfig holds the configurable behavior of the identity HTTP handlers.
 type handlerConfig struct {
 	provider             string
@@ -80,6 +87,9 @@ type handlerConfig struct {
 	mfaGate MFAEnrollmentChecker
 	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
 	interimTTL time.Duration
+	// mustChangeTTL is the lifetime of the access-only token issued when the rotation policy flags
+	// the credential for change. Zero means DefaultMustChangeTTL.
+	mustChangeTTL time.Duration
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -102,6 +112,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		deliveryConcurrency:  DefaultDeliveryConcurrency,
 		deliveryTimeout:      DefaultDeliveryTimeout,
 		interimTTL:           DefaultInterimTokenTTL,
+		mustChangeTTL:        DefaultMustChangeTTL,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -325,10 +336,21 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			return
 		}
 
+		// Rotation policy: consult whether the credential is flagged for change (age-based or
+		// admin-provisioned). This is a soft gate — login still succeeds — but a flagged login is
+		// access-only with no refresh cookie. Fail closed on a policy error rather than silently
+		// issuing an unflagged full pair, which would let a flagged user slip past the gate.
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+
 		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
 		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
 		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
-		// the full pair. Users without an enrolled factor fall through to the full pair below.
+		// the full pair. Users without an enrolled factor fall through below. When the user is
+		// also must-change, the flag is carried onto the interim token so step-up preserves it.
 		if cfg.mfaGate != nil {
 			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
 			if err != nil {
@@ -336,13 +358,24 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 				return
 			}
 			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, mustChange); err != nil {
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
 				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 				return
 			}
+		}
+
+		// Flagged but not MFA-gated: issue the access-only, short-TTL token (no refresh cookie)
+		// instead of the full pair, so the middleware soft-redirects to the reset page.
+		if mustChange {
+			if err := issueMustChangeAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+				return
+			}
+			httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+			return
 		}
 
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
@@ -705,6 +738,23 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		if err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
+			return
+		}
+
+		// Rotation policy: a magic-link login is still subject to the must-change gate. When the
+		// credential is flagged, issue the access-only, short-TTL token (no refresh cookie) instead
+		// of the full pair. Fail closed on a policy error.
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+		if mustChange {
+			if err := issueMustChangeAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+				return
+			}
+			httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 			return
 		}
 
@@ -1252,17 +1302,33 @@ func WithInterimTokenTTL(d time.Duration) HandlerOption {
 	}
 }
 
+// WithMustChangeTTL overrides the lifetime of the ACCESS-ONLY token issued by LoginHandler /
+// MagicLinkLoginHandler when the rotation policy flags the credential for change (default
+// DefaultMustChangeTTL). A non-positive value falls back to the default rather than minting a
+// non-expiring token.
+func WithMustChangeTTL(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) {
+		if d > 0 {
+			h.mustChangeTTL = d
+		}
+	}
+}
+
 // issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
 // who has passed the password step but not yet the second factor, and writes ONLY the access
 // cookie. The interim token carries AMR=[tokens.AMRPassword] (so tokens.WithRequiredAMR with the
 // MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
 // pre-step-up state is not a renewable session. The application completes the flow with
 // mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
-func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User) error {
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, mustChange bool) error {
 	claims := claimsOf(user)
 	// Stamp the password factor only and force a short explicit access-token expiry, overriding
 	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
 	claims.AMR = []string{tokens.AMRPassword}
+	// When the credential is ALSO flagged for rotation, carry the advisory flag on the interim
+	// token so the step-up re-issuance (mfa.StepUpHandler, TASK-065) can preserve it: an
+	// MFA-enrolled must-change user must not escape the gate by completing the second factor.
+	claims.MustChangePassword = mustChange
 	ttl := cfg.interimTTL
 	if ttl <= 0 {
 		ttl = DefaultInterimTokenTTL
@@ -1274,6 +1340,33 @@ func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg
 	}
 	// Deliberately set ONLY the access cookie: the refresh token (minted by the issuer) is not
 	// surfaced to the client, so the interim state cannot be renewed via /refresh.
+	cfg.cookies.SetAccess(w, pair.AccessToken)
+	return nil
+}
+
+// issueMustChangeAndSetCookie issues the short-lived ACCESS-ONLY token for a user whose credential
+// the rotation policy has flagged for change, and writes ONLY the access cookie. The token carries
+// the first-class Claims.MustChangePassword flag (so WithPasswordChangeGate middleware soft-redirects
+// to the reset page) and an explicit short expiry; no refresh cookie is written, so a silent refresh
+// cannot drop the flag and let the user slip past the gate. The credential itself stays valid — this
+// is a soft gate, never a lockout. On a successful password change the handler forges a fresh clean
+// full pair (see ChangePasswordHandler).
+func issueMustChangeAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User) error {
+	claims := claimsOf(user)
+	// Stamp the advisory must-change flag and force a short explicit access-token expiry, overriding
+	// whatever ExpiresAt the consumer's builder produced. The AMR is left untouched.
+	claims.MustChangePassword = true
+	ttl := cfg.mustChangeTTL
+	if ttl <= 0 {
+		ttl = DefaultMustChangeTTL
+	}
+	claims.ExpiresAt = time.Now().Add(ttl)
+	pair, err := issuer.IssueTokenPair(r.Context(), claims)
+	if err != nil {
+		return err
+	}
+	// Deliberately set ONLY the access cookie: the refresh token is not surfaced, so the flagged
+	// state cannot be renewed via /refresh (which would re-evaluate and drop the flag).
 	cfg.cookies.SetAccess(w, pair.AccessToken)
 	return nil
 }

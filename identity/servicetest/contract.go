@@ -184,9 +184,13 @@ func (m *MockService) EnableUser(ctx context.Context, tenantID string, userID uu
 	return m.EnableUserFunc(ctx, tenantID, userID)
 }
 
+// PasswordChangeRequired reports whether the credential is flagged for rotation. Because
+// LoginHandler and MagicLinkLoginHandler now consult it unconditionally, an unset func defaults
+// to the feature-off answer (false, nil) instead of panicking, so handler tests that don't
+// exercise rotation need no extra wiring.
 func (m *MockService) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
 	if m.PasswordChangeRequiredFunc == nil {
-		panic("called not defined PasswordChangeRequiredFunc")
+		return false, nil
 	}
 	return m.PasswordChangeRequiredFunc(ctx, tenantID, userID)
 }
