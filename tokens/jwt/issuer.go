@@ -462,13 +462,14 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	refreshExpiresAt := now.Add(s.refreshTTL)
 
 	rt := &tokens.RefreshToken{
-		Hash:      refreshHash,
-		FamilyID:  familyID,
-		UserID:    claims.Subject,
-		TenantID:  claims.TenantID,
-		AuthTime:  authTime,
-		ExpiresAt: refreshExpiresAt,
-		CreatedAt: now,
+		Hash:               refreshHash,
+		FamilyID:           familyID,
+		UserID:             claims.Subject,
+		TenantID:           claims.TenantID,
+		AuthTime:           authTime,
+		MustChangePassword: claims.MustChangePassword,
+		ExpiresAt:          refreshExpiresAt,
+		CreatedAt:          now,
 	}
 
 	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
@@ -776,6 +777,15 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
 	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
 	claims.AuthTime = rt.AuthTime
+	// Carry the forced-password-change gate forward verbatim, overriding whatever the
+	// ClaimsProvider returned: the refreshed token must be flagged if and only if the family it
+	// descends from was flagged. This makes the soft gate survive every silent refresh — a flagged
+	// user cannot escape WithPasswordChangeGate by waiting for the access token to expire — without
+	// re-querying the credential's state on each refresh. The flag is dropped only by minting a
+	// fresh family (a new login after the password is changed); to force a change on an active
+	// session, an administrator revokes the user's families (e.g. via SetTemporaryPassword's
+	// erasers).
+	claims.MustChangePassword = rt.MustChangePassword
 
 	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the

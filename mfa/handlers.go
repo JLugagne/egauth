@@ -35,7 +35,7 @@ type handlerConfig struct {
 	insecureNoOriginCheck bool
 	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
 	maxBodyBytes int64
-	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true and issues ACCESS-ONLY (no refresh cookie), so a verified interim token carrying the flag cannot escape the rotation gate after a second factor. Nil (default) keeps the full-pair behavior.
+	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true on the re-issued full pair. The pair is renewable, but the refresh family persists the flag (Rotate replays it on every refresh), so a verified interim token carrying the flag cannot escape the forced-change gate after a second factor. Nil (default) leaves the flag unset.
 	mustChangeResolve func(r *http.Request) bool
 }
 
@@ -114,13 +114,13 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 	return func(h *handlerConfig) { h.maxBodyBytes = n }
 }
 
-// WithMustChangeResolver surfaces the verified interim token's password-rotation flag to
-// StepUpHandler. When fn reports true, the re-issued step-up token is stamped
-// Claims.MustChangePassword=true and is issued ACCESS-ONLY (the access cookie is written but
-// the refresh cookie is NOT), mirroring the flagged login path so a must-change user who is
-// also MFA-enrolled cannot drop the flag by completing a second factor and then silently
-// refreshing. Wire it with tokens.MustChangeResolverFromContext when StepUpHandler is mounted
-// behind tokens.ContextMiddleware. Nil (the default) keeps the unconditional full-pair behavior.
+// WithMustChangeResolver surfaces the verified interim token's forced-change flag to
+// StepUpHandler. When fn reports true, the re-issued step-up full pair is stamped
+// Claims.MustChangePassword=true. The pair is fully renewable, but the refresh family persists the
+// flag and Rotate replays it onto every silent refresh, so a must-change user who is also
+// MFA-enrolled cannot drop the flag by completing a second factor and then refreshing. Wire it with
+// tokens.MustChangeResolverFromContext when StepUpHandler is mounted behind
+// tokens.ContextMiddleware. Nil (the default) leaves the flag unset.
 func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
 }
@@ -340,12 +340,13 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		// The factor set is now password + a verified TOTP, so the token reaches the MFA
 		// assurance level. AMR is set here (not by the builder) so it is authoritative.
 		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
-		// Carry the rotation gate forward. If the verified interim token was flagged
-		// must-change, the stepped-up token MUST stay flagged and access-only, exactly like the
-		// flagged login path — otherwise an MFA-enrolled must-change user could complete a second
-		// factor, obtain a full renewable pair, and silently refresh the flag away.
-		mustChange := cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r)
-		if mustChange {
+		// Carry the forced-change gate forward: if the verified interim token was flagged
+		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
+		// refresh family persists the flag and Rotate replays it onto every silent refresh — so an
+		// MFA-enrolled must-change user cannot escape WithPasswordChangeGate by completing a second
+		// factor and then refreshing. The flag clears only on a fresh login after the password is
+		// changed (or when an admin revokes the family).
+		if cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r) {
 			claims.MustChangePassword = true
 		}
 		pair, err := issuer.IssueTokenPair(r.Context(), claims)
@@ -353,11 +354,9 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
+		// Upgrade the interim access-only state to a full renewable pair, writing both cookies.
 		cfg.cookies.SetAccess(w, pair.AccessToken)
-		if !mustChange {
-			// Full renewable session: the interim access-only state is upgraded to a pair.
-			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
-		}
+		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
 		cfg.ok(w, r)
 	})
 }

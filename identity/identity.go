@@ -57,8 +57,10 @@ type Identity struct {
 	// PasswordChangedAt records when the password hash was last set. A zero value denotes a
 	// legacy credential whose change time is unknown and is treated as not due for rotation.
 	PasswordChangedAt time.Time
-	// MustChangePassword, when true, advises the next login to issue a flagged, access-only token
-	// so the password-change gate can soft-redirect the user. It never blocks authentication.
+	// MustChangePassword, when true, makes the next login issue a token flagged
+	// (Claims.MustChangePassword) so the password-change gate can soft-redirect the user. The flag
+	// is carried across token refresh, so it cannot be escaped by waiting. It never blocks
+	// authentication.
 	MustChangePassword bool
 	CreatedAt          time.Time
 	UpdatedAt          time.Time

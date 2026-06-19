@@ -88,6 +88,12 @@ func newJourneyServer(t *testing.T, now func() time.Time) *journeyServer {
 		AccessTTL:  time.Hour,
 		RefreshTTL: 24 * time.Hour,
 		Clock:      now,
+		// The provider deliberately does NOT set MustChangePassword: it models a normal app that
+		// does not re-query the credential's must-change state on every refresh. The flag must
+		// instead be carried forward by Rotate from the stored refresh family.
+		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](func(_ context.Context, userID uuid.UUID, tenant string) (tokens.Claims[struct{}], error) {
+			return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}, nil
+		}),
 	})
 
 	// Insecure, non-__Host- cookies so the test client jar will store and resend them over
@@ -113,7 +119,7 @@ func newJourneyServer(t *testing.T, now func() time.Time) *journeyServer {
 
 	mux := http.NewServeMux()
 
-	// Login: a flagged credential gets an access-only short-TTL token (no refresh cookie).
+	// Login: a flagged credential gets a full renewable pair carrying the must-change flag.
 	mux.Handle("/login", identity.LoginHandler[struct{}](svc, jwtSvc, claimsOf, handlerOpts...))
 
 	// Gated app route: RequireAuth verifies the access cookie, then the gate soft-redirects
@@ -154,6 +160,11 @@ func newJourneyServer(t *testing.T, now func() time.Time) *journeyServer {
 		tokens.WithoutHeaderAuth[struct{}](),
 	))
 
+	// Refresh route: rotates the refresh cookie to a fresh pair. Used to prove that a flagged
+	// session's renewed token still carries must_change_password (carried by the family, not the
+	// provider) — a user cannot escape the gate by waiting for the access token to expire.
+	mux.Handle("/refresh", tokens.RefreshHandler[struct{}](jwtSvc, tokens.WithCookies(cookies)))
+
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
@@ -179,7 +190,7 @@ func (j *journeyServer) postForm(t *testing.T, path string, form url.Values) *ht
 	req.Header.Set("Origin", j.srv.URL)
 	resp, err := j.srv.Client().Do(req)
 	require.NoError(t, err)
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -190,13 +201,14 @@ func (j *journeyServer) get(t *testing.T, path string) *http.Response {
 	require.NoError(t, err)
 	resp, err := j.srv.Client().Do(req)
 	require.NoError(t, err)
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
 // jarCookie returns the named cookie currently held in the client jar for the server, or
 // nil if absent. This is how the journey asserts an access cookie was set but NO refresh
-// cookie (the access-only flagged login) or that a full pair was issued after the change.
+// cookie. Used to assert a flagged login still receives a refresh cookie (renewable) and that the
+// gate persists across a /refresh.
 func (j *journeyServer) jarCookie(t *testing.T, name string) *http.Cookie {
 	t.Helper()
 	u, err := url.Parse(j.srv.URL)
@@ -210,15 +222,13 @@ func (j *journeyServer) jarCookie(t *testing.T, name string) *http.Cookie {
 }
 
 // TestPasswordForcedChangeJourney_IC1_AdminProvisioned proves integration contract IC-1 over a
-// full HTTP journey: the must-change requirement is driven purely by the admin-provisioned flag.
+// full HTTP journey: the must-change requirement is driven purely by the admin-provisioned flag,
+// the flagged session is RENEWABLE, and a refresh keeps the gate engaged.
 //
-//	AdminCreateUser(temp) -> login (access-only flagged, NO refresh) -> /app 303 to reset
-//	  -> change password -> full pair issued -> /app 200.
+//	AdminCreateUser(temp) -> login (renewable flagged pair) -> /app 303 to reset
+//	  -> refresh -> /app STILL 303 (flag carried forward) -> change password -> clean pair -> /app 200.
 func TestPasswordForcedChangeJourney_IC1_AdminProvisioned(t *testing.T) {
 	ctx := context.Background()
-	// The flagged access-only token's expiry is stamped from the real wall clock (see
-	// issueMustChangeAndSetCookie), so the verifier clock must track real time too; using a
-	// far-off fixed clock would make the short-TTL token look already-expired at verify time.
 	j := newJourneyServer(t, time.Now)
 
 	const email = "admin-made@example.com"
@@ -226,16 +236,26 @@ func TestPasswordForcedChangeJourney_IC1_AdminProvisioned(t *testing.T) {
 	_, err := j.svc.AdminCreateUser(ctx, j.tenant, email, tempPassword)
 	require.NoError(t, err)
 
-	// 1. The user logs in with the temporary password. Login SUCCEEDS (soft gate) but the
-	//    flagged credential yields an access-only token: access cookie set, no refresh.
+	// 1. The user logs in with the temporary password. Login SUCCEEDS (soft gate) and the flagged
+	//    credential yields a full, renewable pair (access AND refresh) carrying must_change_password.
 	resp := j.postForm(t, "/login", url.Values{"email": {email}, "password": {tempPassword}})
 	require.Equal(t, http.StatusNoContent, resp.StatusCode, "flagged login must still succeed")
 	require.NotNil(t, j.jarCookie(t, "access_token"), "flagged login must set an access cookie")
-	require.Nil(t, j.jarCookie(t, "refresh_token"), "a must-change login must NOT receive a refresh cookie")
+	require.NotNil(t, j.jarCookie(t, "refresh_token"), "a flagged login is renewable: it must receive a refresh cookie")
 
 	// 2. The protected app route soft-redirects (303) to the reset page: the gate fired.
 	resp = j.get(t, "/app")
 	require.Equal(t, http.StatusSeeOther, resp.StatusCode, "the gate must 303 a flagged request")
+	assert.Contains(t, resp.Header.Get("Location"), journeyResetURL)
+
+	// 2b. Refresh the session (simulating the access token expiring). The renewed token MUST still
+	//     carry the flag — the refresh family preserves it even though the ClaimsProvider does not
+	//     re-set it — so the gate keeps firing. A user cannot escape the reset by waiting + refreshing.
+	resp = j.postForm(t, "/refresh", url.Values{})
+	require.Equal(t, http.StatusNoContent, resp.StatusCode, "refresh must succeed for a flagged session")
+	require.NotNil(t, j.jarCookie(t, "refresh_token"), "refresh must re-issue a refresh cookie")
+	resp = j.get(t, "/app")
+	require.Equal(t, http.StatusSeeOther, resp.StatusCode, "the refreshed token must STILL be gated (flag carried forward)")
 	assert.Contains(t, resp.Header.Get("Location"), journeyResetURL)
 
 	// 3. The user changes their password via the re-issuing change handler (current = temp).

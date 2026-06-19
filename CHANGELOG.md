@@ -20,11 +20,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   egauth deliberately does **not** offer periodic, age-based password rotation: fixed-interval
   expiry is discouraged by NIST SP 800-63B.
 
-  At next login, when a credential is flagged, `LoginHandler` / `MagicLinkLoginHandler`
-  issue a short-TTL **access-only** token (`tokens.Claims.MustChangePassword=true`, JSON claim
-  `must_change_password`). No refresh cookie is set for a flagged login, so a silent background
-  refresh cannot drop the flag. The TTL defaults to `identity.DefaultMustChangeTTL` and is
-  configurable via `identity.WithMustChangeTTL`.
+  At next login, when a credential is flagged, `LoginHandler` / `MagicLinkLoginHandler` issue a
+  full, **renewable** pair whose access token carries `tokens.Claims.MustChangePassword=true` (JSON
+  claim `must_change_password`). The flag is recorded on the refresh-token family and `Rotate`
+  replays it onto every silent refresh (overriding the `ClaimsProvider`), so the renewed token is
+  flagged iff the family was — a silent refresh cannot drop the flag and a user cannot escape the
+  gate by waiting for the access token to expire. To force a change on a user's existing sessions,
+  an admin revokes their token families (`SetTemporaryPassword` does this via its erasers).
 
   `tokens.WithPasswordChangeGate[C](resetURL)` enforces the gate generically in the `RequireAuth`
   middleware: after successful token verification, if `Claims.MustChangePassword` is true, the
@@ -40,9 +42,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changedAt time.Time, mustChange bool)` (stamps timestamp and flag in one atomic write). External
   store implementers must add this method; run `identity/storetest` to verify conformance.
 
-  New pgx migration: `adapters/pgx/identity` migration `008_add_password_change_columns.sql` adds
-  `password_changed_at` (nullable, informational "last changed" audit metadata — drives no
-  behavior) and `must_change_password` (boolean, default false) to the `identities` table.
+  New `tokens.RefreshToken.MustChangePassword` field records the gate on the rotation family; the
+  `tokens.Store` (`SaveRefreshToken` / `FindRefreshToken`) must persist and return it. External
+  token-store implementers must carry this field; run `tokens/storetest` to verify conformance.
+
+  New pgx migrations: `adapters/pgx/identity` migration `008_add_password_change_columns.sql` adds
+  `password_changed_at` (nullable, informational "last changed" audit metadata — drives no behavior)
+  and `must_change_password` (boolean, default false) to the `identities` table;
+  `adapters/pgx/tokens` migration `005_add_refresh_token_must_change_password.sql` adds
+  `must_change_password` (boolean, default false) to the `tokens` table so the gate survives refresh.
 
   Zero behavior change unless a credential is explicitly flagged via admin provisioning.
 

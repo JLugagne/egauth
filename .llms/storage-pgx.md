@@ -71,7 +71,8 @@ Migration `008_add_password_change_columns.sql` adds two columns to the `identit
   rotation policy.
 - `must_change_password BOOLEAN NOT NULL DEFAULT false` — advisory flag set by admin provisioning
   of temporary credentials (`identity.AdminCreateUser`, `identity.SetTemporaryPassword`). Never
-  blocks authentication; causes the next login to issue a flagged, access-only token. Cleared
+  blocks authentication; causes the next login to issue a flagged, renewable token (the flag is
+  carried across refresh by the token layer). Cleared
   automatically by every `UpdateIdentityPassword` write.
 
 ---
@@ -93,7 +94,14 @@ Migrations:
 001_create_tokens_table.sql
 002_add_refresh_token_rotation.sql
 003_add_refresh_token_auth_time.sql
+004_add_expires_at_index.sql
+005_add_refresh_token_must_change_password.sql
 ```
+
+Migration `005_add_refresh_token_must_change_password.sql` adds `must_change_password` (boolean, NOT
+NULL DEFAULT false) to the `tokens` table. It records the forced-password-change gate on a refresh
+family and is carried verbatim onto every rotated descendant, so a flagged session stays gated
+across silent refresh (a user cannot escape by waiting for the access token to expire).
 
 ---
 

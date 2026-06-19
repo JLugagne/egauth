@@ -37,11 +37,13 @@ type Claims[C any] struct {
 	// returns, so the assurance level is re-evaluated rather than frozen at login.
 	AMR []string
 	// MustChangePassword is a first-class advisory flag telling the middleware the subject must
-	// rotate their credential before proceeding. It is a soft gate: a flagged token still
-	// authenticates, but RequireAuth soft-redirects to the reset page. It is set at issuance by
-	// the rotation policy (age-based or admin-provisioned) and is NOT carried across refresh —
-	// flagged logins are access-only, so the claim cannot survive a silent refresh. Living here
-	// rather than inside Custom lets the middleware enforce it generically.
+	// change their credential before proceeding. It is a soft gate: a flagged token still
+	// authenticates, but RequireAuth (with WithPasswordChangeGate) soft-redirects to the reset page.
+	// It is set at issuance for an admin-provisioned/temporary credential and is carried across
+	// refresh: the flag is recorded on the RefreshToken family and Rotate replays it verbatim onto
+	// every silent refresh, so a flagged session cannot escape the gate by waiting for the access
+	// token to expire. Living here rather than inside Custom lets the middleware enforce it
+	// generically.
 	MustChangePassword bool
 	Custom             C
 }
@@ -91,8 +93,15 @@ type RefreshToken struct {
 	// AuthTime is when the subject authenticated to start this rotation family. It is set on the
 	// initial pair and carried unchanged onto every rotated descendant, so a silent refresh does
 	// not reset step-up freshness (see Claims.AuthTime).
-	AuthTime   time.Time
-	ExpiresAt  time.Time
-	CreatedAt  time.Time
-	ConsumedAt *time.Time
+	AuthTime time.Time
+	// MustChangePassword records whether this rotation family is gated on a forced password change.
+	// Like AuthTime it is set on the initial pair and carried unchanged onto every rotated
+	// descendant: Rotate copies it verbatim onto the new token's claims (overriding the
+	// ClaimsProvider), so a flagged session stays flagged across every silent refresh — a user
+	// cannot escape the WithPasswordChangeGate by waiting for the access token to expire. It is
+	// cleared only by minting a fresh family (a new login after the password has been changed).
+	MustChangePassword bool
+	ExpiresAt          time.Time
+	CreatedAt          time.Time
+	ConsumedAt         *time.Time
 }

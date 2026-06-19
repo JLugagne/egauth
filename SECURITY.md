@@ -197,10 +197,15 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 
   The soft-gate contract: **a flagged credential still authenticates — the user is never locked
   out.** At next login the handler detects the flag (via `identity.PasswordChangeRequired`) and
-  issues a **short-lived access-only token** (`tokens.Claims.MustChangePassword=true`; default TTL
-  is `identity.DefaultMustChangeTTL`, configurable with `identity.WithMustChangeTTL`). Critically,
-  **no refresh cookie is set** for a flagged login. This means a silent background refresh cannot
-  silently drop the flag and let the user slip past the gate on the next access-token expiry.
+  issues a **full, renewable token pair** whose access token carries
+  `tokens.Claims.MustChangePassword=true`. Crucially the flag is recorded on the refresh-token
+  **family**, and `Rotate` replays it verbatim onto every silent refresh (overriding whatever the
+  `ClaimsProvider` returns), so the renewed token is flagged **if and only if** the family it
+  descends from was flagged. A user therefore **cannot escape the gate by waiting for the access
+  token to expire and refreshing** — the carry-forward is enforced in the token layer, not the
+  handler. The flag clears only when a fresh family is minted (a new login after the password is
+  changed). To force a change on a user's *existing* active sessions, an administrator revokes their
+  families — `SetTemporaryPassword` does this via the registered `AccountErasers`.
 
   The `tokens.WithPasswordChangeGate` `AuthOption` enforces the gate generically in the
   `RequireAuth` middleware: after successful token verification, if `Claims.MustChangePassword`
@@ -208,9 +213,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   reset URL (or `403 password_change_required` if none). The change-password and logout routes
   should be excluded from this middleware.
 
-  Evaluation timing is **next-login-only**: there is no active session revocation, no refresh-time
-  re-evaluation, and no background janitor sweep. A flagged-but-not-yet-logged-in user is unaffected
-  until their next login attempt.
+  egauth never proactively re-queries the credential's state on refresh and never auto-revokes
+  sessions to force a change: the flag is set at login and carried forward, and forcing a change on
+  live sessions is an explicit administrative action (family revocation). A flagged-but-not-yet-
+  logged-in user is unaffected until their next login attempt.
 
   On a successful `ChangePassword` / `ResetPassword`, `UpdateIdentityPassword` atomically stamps
   `PasswordChangedAt` and clears `MustChangePassword`; `ChangePasswordWithReissueHandler` then

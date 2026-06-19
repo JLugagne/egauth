@@ -188,11 +188,13 @@ observability, idempotency).
 **Forced-password-change for temporary credentials.** Provision a one-time credential via
 `identity.AdminCreateUser` (admin-created account) or `identity.SetTemporaryPassword` (admin-issued
 temporary password); both flag the credential so the user must choose a new password at next login.
-A flagged login issues a short-TTL access-only token (`tokens.Claims.MustChangePassword=true`, no
-refresh cookie); mount `tokens.WithPasswordChangeGate` on your protected routes to soft-redirect to
-the reset page. The credential stays valid throughout — the user is never locked out. egauth does
-NOT do periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval expiry). See
-[SECURITY.md](SECURITY.md) for the full semantics.
+A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`; the
+flag is recorded on the refresh-token family and carried onto every silent refresh, so mounting
+`tokens.WithPasswordChangeGate` on your protected routes keeps soft-redirecting to the reset page
+until the password is changed — a user cannot escape by waiting for the access token to expire. The
+credential stays valid throughout — never a lockout. egauth does NOT do periodic, age-based rotation
+(NIST SP 800-63B discourages fixed-interval expiry). See [SECURITY.md](SECURITY.md) for the full
+semantics.
 
 **Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
 for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for

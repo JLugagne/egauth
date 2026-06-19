@@ -15,11 +15,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestLoginHandler_MustChange_AccessOnlyFlagged proves SC-5 for the password login path: a user
-// whose credential the rotation policy flags is still authenticated (login succeeds) but receives
-// an ACCESS-ONLY token carrying MustChangePassword=true and NO refresh cookie, so a silent refresh
-// cannot drop the flag and slip past the gate.
-func TestLoginHandler_MustChange_AccessOnlyFlagged(t *testing.T) {
+// TestLoginHandler_MustChange_RenewableFlagged proves SC-5 for the password login path: a user
+// whose credential is flagged is authenticated and receives a full, RENEWABLE pair (access AND
+// refresh) carrying MustChangePassword=true. The refresh family persists the flag (Rotate replays
+// it), so the renewable session stays gated until the password is changed — the user cannot escape
+// by waiting for the access token to expire.
+func TestLoginHandler_MustChange_RenewableFlagged(t *testing.T) {
 	uid := uuid.Must(uuid.NewV7())
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
@@ -37,11 +38,10 @@ func TestLoginHandler_MustChange_AccessOnlyFlagged(t *testing.T) {
 	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "flagged login must still issue an access cookie")
-	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
-		"a must-change login must NOT receive a refresh cookie")
+	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "flagged login must issue an access cookie")
+	require.NotNil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
+		"a flagged login is renewable: it MUST receive a refresh cookie (the flag is carried across refresh, not dropped)")
 	assert.True(t, captured.MustChangePassword, "the access token must carry must_change_password=true")
-	assert.False(t, captured.ExpiresAt.IsZero(), "the flagged token must carry a short explicit expiry")
 }
 
 // TestLoginHandler_MustChange_NormalUserFullPair confirms the gate is transparent for an unflagged
@@ -98,9 +98,9 @@ func TestLoginHandler_MustChange_MFAEnrolledCarriesFlag(t *testing.T) {
 		"an MFA-enrolled must-change user's interim token must carry the flag for step-up to preserve")
 }
 
-// TestMagicLinkLoginHandler_MustChange_AccessOnlyFlagged proves SC-5 for the passwordless path: a
-// must-change user completing a magic-link login receives an access-only flagged token, no refresh.
-func TestMagicLinkLoginHandler_MustChange_AccessOnlyFlagged(t *testing.T) {
+// TestMagicLinkLoginHandler_MustChange_RenewableFlagged proves SC-5 for the passwordless path: a
+// must-change user completing a magic-link login receives a full, renewable pair carrying the flag.
+func TestMagicLinkLoginHandler_MustChange_RenewableFlagged(t *testing.T) {
 	uid := uuid.Must(uuid.NewV7())
 	svc := &servicetest.MockService{
 		LoginWithMagicLinkFunc: func(ctx context.Context, tenantID string, token string) (*identity.User, error) {
@@ -118,11 +118,10 @@ func TestMagicLinkLoginHandler_MustChange_AccessOnlyFlagged(t *testing.T) {
 	h(rec, postForm(url.Values{"token": {"sel.ver"}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "flagged magic-link login must still issue an access cookie")
-	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
-		"a must-change magic-link login must NOT receive a refresh cookie")
+	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "flagged magic-link login must issue an access cookie")
+	require.NotNil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
+		"a flagged magic-link login is renewable: it MUST receive a refresh cookie")
 	assert.True(t, captured.MustChangePassword, "the access token must carry must_change_password=true")
-	assert.False(t, captured.ExpiresAt.IsZero(), "the flagged token must carry a short explicit expiry")
 }
 
 // TestMagicLinkLoginHandler_MustChange_NormalUserFullPair confirms an unflagged magic-link login

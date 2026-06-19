@@ -93,7 +93,7 @@ func bearerRequest(t *testing.T, srv *httptest.Server, path, token string) *http
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 

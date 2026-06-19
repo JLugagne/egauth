@@ -216,8 +216,8 @@ type Service interface {
 	EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// PasswordChangeRequired reports whether userID's password credential is flagged for a forced
 	// change at next login. It is the soft-gate query behind WithPasswordChangeGate: the credential
-	// stays valid (this is never a lockout), the caller just issues an access-only flagged token and
-	// soft-redirects to the reset page. It returns true when the identity's MustChangePassword flag is
+	// stays valid (this is never a lockout), the caller just issues a flagged token (renewable, the
+	// flag carried across refresh) and soft-redirects to the reset page. It returns true when the identity's MustChangePassword flag is
 	// set — i.e. a temporary/one-time password provisioned by SetTemporaryPassword or AdminCreateUser.
 	// egauth does NOT do periodic, age-based password rotation: forced expiry on a fixed interval is
 	// discouraged by NIST SP 800-63B and is intentionally not offered. An account with no password

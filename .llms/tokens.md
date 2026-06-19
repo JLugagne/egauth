@@ -84,9 +84,10 @@ type Claims[C any] struct {
     // MustChangePassword is a first-class advisory flag set for admin-provisioned temporary
     // credentials (identity.AdminCreateUser / SetTemporaryPassword). It is a soft gate: a flagged
     // token still authenticates, but RequireAuth with WithPasswordChangeGate soft-redirects to the
-    // reset page. Flagged logins are ACCESS-ONLY (no refresh cookie, short TTL) so the flag cannot
-    // be silently dropped by a silent refresh. JWT claim name: "must_change_password" (omitempty).
-    // Lives here, not in Custom, so the middleware can enforce it generically regardless of C.
+    // reset page. The flag is recorded on the refresh-token family and Rotate replays it onto every
+    // silent refresh, so a flagged (renewable) session stays gated — a user cannot escape by waiting
+    // for the access token to expire. JWT claim name: "must_change_password" (omitempty). Lives
+    // here, not in Custom, so the middleware can enforce it generically regardless of C.
     MustChangePassword bool
     Custom             C
 }
@@ -418,9 +419,11 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
   if `Claims.MustChangePassword` is `true`, the wrapped handler is bypassed and the request is
   soft-redirected to the configured reset URL (or `403 password_change_required` if no URL).
   The credential is never invalidated — login always succeeds — only the post-login app surface is
-  gated until the user completes the change. Flagged logins are issued as access-only short-TTL
-  tokens (TTL = `identity.DefaultMustChangeTTL`, override via `identity.WithMustChangeTTL`) with
-  **no refresh cookie**, so a silent refresh cannot drop the flag and bypass the gate.
+  gated until the user completes the change. A flagged login issues a full, renewable pair; the flag
+  is recorded on the refresh-token family and `Rotate` replays it onto every silent refresh
+  (overriding the `ClaimsProvider`), so the renewed token is flagged iff the family was — a silent
+  refresh cannot drop the flag and bypass the gate. The flag clears only on a fresh login after the
+  password changes; to force a change on live sessions, an admin revokes the user's families.
   `tokens.MustChangeResolverFromContext` adapts the verified claims for `mfa.WithMustChangeResolver`,
   preserving the flag through the MFA step-up flow.
 

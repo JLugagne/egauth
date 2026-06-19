@@ -80,11 +80,13 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 - **Step-up** = `tokens` carries `AuthTime`/`AMR`; `Claims.FreshAuth(maxAge)` gates sensitive ops.
 - **Account deletion fan-out** = `identity.WithAccountErasers(...)` runs cross-module revocation hooks before soft-delete.
 - **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
-  flag a credential for a forced change at next login; the flagged user receives an access-only short-TTL token
-  (`tokens.Claims.MustChangePassword=true`, no refresh cookie) and `tokens.WithPasswordChangeGate` soft-redirects
-  every protected route to the reset page. The credential stays valid — the user is never locked out. egauth does
-  NOT do age-based/periodic rotation (NIST SP 800-63B discourages fixed-interval expiry). See [tokens.md](tokens.md)
-  for the gate middleware and SECURITY.md for the full policy description.
+  flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
+  `tokens.Claims.MustChangePassword=true`. The flag is recorded on the refresh-token family and `Rotate` replays it
+  onto every silent refresh, so `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the
+  reset page until the password is changed — a user cannot escape by waiting for the access token to expire. The
+  credential stays valid — never a lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B
+  discourages fixed-interval expiry). See [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the
+  full policy description.
 
 See [recipes.md](recipes.md) for concrete wiring of each stack.
 
@@ -151,12 +153,14 @@ secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
 
 **Forced-password-change for temporary credentials.** `identity.AdminCreateUser` and
 `identity.SetTemporaryPassword` provision a credential flagged for a forced change at next login
-(admin-created accounts, admin-issued one-time passwords). When a flagged credential logs in, the
-handler issues a short-TTL access-only token (`tokens.Claims.MustChangePassword=true`, no refresh
-cookie) so the flag cannot be dropped by a silent refresh. `tokens.WithPasswordChangeGate` enforces
-the gate generically in the `RequireAuth` middleware. egauth deliberately does NOT force periodic,
-age-based rotation (NIST SP 800-63B discourages fixed-interval expiry). Zero behavior change unless
-a credential is explicitly flagged.
+(admin-created accounts, admin-issued one-time passwords). A flagged login issues a full, renewable
+pair carrying `tokens.Claims.MustChangePassword=true`; the flag is recorded on the refresh-token
+family and `Rotate` replays it onto every silent refresh (overriding the `ClaimsProvider`), so the
+flag cannot be dropped by refreshing. `tokens.WithPasswordChangeGate` enforces the gate generically
+in the `RequireAuth` middleware. Forcing a change on a user's *existing* sessions is an explicit
+admin action (revoke their token families, e.g. via `SetTemporaryPassword`'s erasers). egauth
+deliberately does NOT force periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval
+expiry). Zero behavior change unless a credential is explicitly flagged.
 
 Consumer responsibilities (NOT provided by egauth): CSRF tokens (origin check available via
 `WithTrustedOrigins`), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.

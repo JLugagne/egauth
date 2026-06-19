@@ -87,12 +87,12 @@ func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	assert.Equal(t, "full-refresh-opaque", refresh.Value)
 }
 
-// TestStepUpHandler_MustChange_FlaggedAccessOnly proves the rotation gate survives an MFA
+// TestStepUpHandler_MustChange_FlaggedRenewable proves the forced-change gate survives an MFA
 // step-up: when the verified interim token was must-change (surfaced via WithMustChangeResolver),
-// the re-issued token is stamped MustChangePassword=true and is issued ACCESS-ONLY — only the
-// access cookie is written, never the refresh cookie — so the flag cannot be dropped by a silent
-// refresh after a second factor.
-func TestStepUpHandler_MustChange_FlaggedAccessOnly(t *testing.T) {
+// the re-issued full pair is stamped MustChangePassword=true and is fully renewable (both cookies
+// written). The refresh family persists the flag (Rotate replays it), so the flag cannot be dropped
+// by a silent refresh after a second factor.
+func TestStepUpHandler_MustChange_FlaggedRenewable(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
 	uid := uuid.Must(uuid.NewV7())
@@ -137,12 +137,13 @@ func TestStepUpHandler_MustChange_FlaggedAccessOnly(t *testing.T) {
 	assert.True(t, captured.MustChangePassword, "step-up must preserve the must-change flag")
 	// The MFA factor set is still stamped — the user did complete the second factor.
 	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
-	// Access-only: access cookie present, NO refresh cookie, so a silent refresh cannot drop the flag.
+	// Renewable: both cookies present. The flag is carried by the refresh family (Rotate replays
+	// it), so the renewable session stays gated rather than dropping the flag on the next refresh.
 	access := stepUpCookie(rec, tokens.DefaultAccessCookieName)
-	require.NotNil(t, access, "flagged step-up must still set the access cookie")
+	require.NotNil(t, access, "flagged step-up must set the access cookie")
 	assert.Equal(t, "flagged-access-jwt", access.Value)
-	assert.Nil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName),
-		"flagged step-up must NOT set a refresh cookie (access-only)")
+	require.NotNil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName),
+		"flagged step-up is renewable: it MUST set a refresh cookie (the flag is carried across refresh)")
 }
 
 // TestStepUpHandler_MustChange_NormalUserGetsFullPair proves the gate is opt-in per request: a
