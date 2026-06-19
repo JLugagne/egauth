@@ -85,7 +85,7 @@ func TestService_ChangePassword(t *testing.T) {
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				return passwordIdent(), nil
 			},
-			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string) error {
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
 				updated = true
 				return nil
 			},
@@ -112,7 +112,7 @@ func TestService_ChangePassword(t *testing.T) {
 				assert.Equal(t, userID, id)
 				return passwordIdent(), nil
 			},
-			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string) error {
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
 				assert.Equal(t, userID, id)
 				gotHash = hash
 				return nil
@@ -177,7 +177,7 @@ func TestService_ChangePassword(t *testing.T) {
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				return passwordIdent(), nil
 			},
-			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string) error {
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
 				return nil
 			},
 		}

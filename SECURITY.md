@@ -187,6 +187,47 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   MFA-elevated session after one access-token TTL or blanket-elevate every session of an
   MFA-enrolled user — the latter being a step-up bypass where a password-only family would gain
   `AMRMFA` on its first silent refresh.
+- **Forced-password-change for temporary credentials (soft gate).** egauth forces a password
+  change only for **admin-provisioned credentials** — `identity.AdminCreateUser` (admin-created
+  account) and `identity.SetTemporaryPassword` (admin-issued one-time password) set the
+  `MustChangePassword` flag on the identity explicitly, so the user must choose their own password
+  before the app is usable. egauth deliberately does **not** offer periodic, age-based password
+  rotation: forcing expiry on a fixed interval is discouraged by NIST SP 800-63B (it drives weaker,
+  predictably-incremented passwords) and is intentionally not implemented.
+
+  The soft-gate contract: **a flagged credential still authenticates — the user is never locked
+  out.** At next login the handler detects the flag (via `identity.PasswordChangeRequired`) and
+  issues a **full, renewable token pair** whose access token carries
+  `tokens.Claims.MustChangePassword=true`. Crucially the flag is recorded on the refresh-token
+  **family**, and `Rotate` replays it verbatim onto every silent refresh (overriding whatever the
+  `ClaimsProvider` returns), so the renewed token is flagged **if and only if** the family it
+  descends from was flagged. A user therefore **cannot escape the gate by waiting for the access
+  token to expire and refreshing** — the carry-forward is enforced in the token layer, not the
+  handler. The flag clears only when a fresh family is minted (a new login after the password is
+  changed). To force a change on a user's *existing* active sessions, an administrator revokes their
+  families — `SetTemporaryPassword` does this via the registered `AccountErasers`.
+
+  The `tokens.WithPasswordChangeGate` `AuthOption` enforces the gate generically in the
+  `RequireAuth` middleware: after successful token verification, if `Claims.MustChangePassword`
+  is true the wrapped handler is bypassed and the request is redirected (`303`) to the configured
+  reset URL (or `403 password_change_required` if none). The change-password and logout routes
+  should be excluded from this middleware.
+
+  egauth never proactively re-queries the credential's state on refresh and never auto-revokes
+  sessions to force a change: the flag is set at login and carried forward, and forcing a change on
+  live sessions is an explicit administrative action (family revocation). A flagged-but-not-yet-
+  logged-in user is unaffected until their next login attempt.
+
+  On a successful `ChangePassword` / `ResetPassword`, `UpdateIdentityPassword` atomically stamps
+  `PasswordChangedAt` and clears `MustChangePassword`; `ChangePasswordWithReissueHandler` then
+  re-issues a full access+refresh pair so the user is immediately authenticated and the
+  change-password redirect loop stops.
+
+  `PasswordChangedAt` (added by migration `008_add_password_change_columns.sql`) is **informational
+  audit metadata** — "when the password hash was last set" — stamped on every password write. It
+  does **not** drive any forced-change decision (there is no age-based policy); a zero value on a
+  legacy row is simply an unknown last-changed time and is harmless.
+
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.

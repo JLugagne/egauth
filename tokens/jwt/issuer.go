@@ -17,13 +17,14 @@ import (
 // claimsWrapper wraps the standard JWT claims and our custom generic claims.
 type claimsWrapper[C any] struct {
 	jwt.RegisteredClaims
-	TenantID string   `json:"tenant_id,omitempty"`
-	AuthTime int64    `json:"auth_time,omitempty"` // OIDC auth_time (unix seconds), preserved across refresh
-	Scopes   []string `json:"scopes,omitempty"`
-	Groups   []string `json:"groups,omitempty"`
-	Roles    []string `json:"roles,omitempty"`
-	AMR      []string `json:"amr,omitempty"`
-	Custom   C        `json:"custom"`
+	TenantID           string   `json:"tenant_id,omitempty"`
+	AuthTime           int64    `json:"auth_time,omitempty"` // OIDC auth_time (unix seconds), preserved across refresh
+	Scopes             []string `json:"scopes,omitempty"`
+	Groups             []string `json:"groups,omitempty"`
+	Roles              []string `json:"roles,omitempty"`
+	AMR                []string `json:"amr,omitempty"`
+	MustChangePassword bool     `json:"must_change_password,omitempty"`
+	Custom             C        `json:"custom"`
 }
 
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
@@ -424,13 +425,14 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 			IssuedAt:  jwt.NewNumericDate(now),
 			ID:        uuid.Must(uuid.NewV7()).String(),
 		},
-		TenantID: claims.TenantID,
-		AuthTime: authTimeUnix,
-		Scopes:   claims.Scopes,
-		Groups:   claims.Groups,
-		Roles:    claims.Roles,
-		AMR:      claims.AMR,
-		Custom:   claims.Custom,
+		TenantID:           claims.TenantID,
+		AuthTime:           authTimeUnix,
+		Scopes:             claims.Scopes,
+		Groups:             claims.Groups,
+		Roles:              claims.Roles,
+		AMR:                claims.AMR,
+		MustChangePassword: claims.MustChangePassword,
+		Custom:             claims.Custom,
 	}
 
 	// Resolve the signing key for this tenant. With a KeyStore configured this is the tenant's
@@ -460,13 +462,14 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	refreshExpiresAt := now.Add(s.refreshTTL)
 
 	rt := &tokens.RefreshToken{
-		Hash:      refreshHash,
-		FamilyID:  familyID,
-		UserID:    claims.Subject,
-		TenantID:  claims.TenantID,
-		AuthTime:  authTime,
-		ExpiresAt: refreshExpiresAt,
-		CreatedAt: now,
+		Hash:               refreshHash,
+		FamilyID:           familyID,
+		UserID:             claims.Subject,
+		TenantID:           claims.TenantID,
+		AuthTime:           authTime,
+		MustChangePassword: claims.MustChangePassword,
+		ExpiresAt:          refreshExpiresAt,
+		CreatedAt:          now,
 	}
 
 	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
@@ -615,16 +618,17 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 	}
 
 	claims := tokens.Claims[C]{
-		Subject:   subject,
-		TenantID:  wrapper.TenantID,
-		IssuedAt:  wrapper.IssuedAt.Time,
-		ExpiresAt: wrapper.ExpiresAt.Time,
-		Audiences: wrapper.Audience,
-		Scopes:    wrapper.Scopes,
-		Groups:    wrapper.Groups,
-		Roles:     wrapper.Roles,
-		AMR:       wrapper.AMR,
-		Custom:    wrapper.Custom,
+		Subject:            subject,
+		TenantID:           wrapper.TenantID,
+		IssuedAt:           wrapper.IssuedAt.Time,
+		ExpiresAt:          wrapper.ExpiresAt.Time,
+		Audiences:          wrapper.Audience,
+		Scopes:             wrapper.Scopes,
+		Groups:             wrapper.Groups,
+		Roles:              wrapper.Roles,
+		AMR:                wrapper.AMR,
+		MustChangePassword: wrapper.MustChangePassword,
+		Custom:             wrapper.Custom,
 	}
 	if wrapper.AuthTime > 0 {
 		claims.AuthTime = time.Unix(wrapper.AuthTime, 0).UTC()
@@ -773,6 +777,15 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
 	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
 	claims.AuthTime = rt.AuthTime
+	// Carry the forced-password-change gate forward verbatim, overriding whatever the
+	// ClaimsProvider returned: the refreshed token must be flagged if and only if the family it
+	// descends from was flagged. This makes the soft gate survive every silent refresh — a flagged
+	// user cannot escape WithPasswordChangeGate by waiting for the access token to expire — without
+	// re-querying the credential's state on each refresh. The flag is dropped only by minting a
+	// fresh family (a new login after the password is changed); to force a change on an active
+	// session, an administrator revokes the user's families (e.g. via SetTemporaryPassword's
+	// erasers).
+	claims.MustChangePassword = rt.MustChangePassword
 
 	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the

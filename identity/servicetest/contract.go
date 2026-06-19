@@ -30,6 +30,9 @@ type MockService struct {
 	DeleteAccountFunc                   func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	DisableUserFunc                     func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	EnableUserFunc                      func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	PasswordChangeRequiredFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+	SetTemporaryPasswordFunc            func(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
+	AdminCreateUserFunc                 func(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error)
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -179,4 +182,29 @@ func (m *MockService) EnableUser(ctx context.Context, tenantID string, userID uu
 		panic("called not defined EnableUserFunc")
 	}
 	return m.EnableUserFunc(ctx, tenantID, userID)
+}
+
+// PasswordChangeRequired reports whether the credential is flagged for rotation. Because
+// LoginHandler and MagicLinkLoginHandler now consult it unconditionally, an unset func defaults
+// to the feature-off answer (false, nil) instead of panicking, so handler tests that don't
+// exercise rotation need no extra wiring.
+func (m *MockService) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
+	if m.PasswordChangeRequiredFunc == nil {
+		return false, nil
+	}
+	return m.PasswordChangeRequiredFunc(ctx, tenantID, userID)
+}
+
+func (m *MockService) SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error {
+	if m.SetTemporaryPasswordFunc == nil {
+		panic("called not defined SetTemporaryPasswordFunc")
+	}
+	return m.SetTemporaryPasswordFunc(ctx, tenantID, userID, tempPassword)
+}
+
+func (m *MockService) AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error) {
+	if m.AdminCreateUserFunc == nil {
+		panic("called not defined AdminCreateUserFunc")
+	}
+	return m.AdminCreateUserFunc(ctx, tenantID, email, tempPassword)
 }

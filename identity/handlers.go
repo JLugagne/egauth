@@ -325,10 +325,22 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			return
 		}
 
+		// Forced-change gate: consult whether the credential is flagged (admin-provisioned /
+		// temporary password). This is a soft gate — login still succeeds and the session is fully
+		// renewable — but the issued pair carries Claims.MustChangePassword so the middleware
+		// soft-redirects to the reset page. Fail closed on a policy error rather than silently
+		// issuing an unflagged pair, which would let a flagged user slip past the gate.
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+
 		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
 		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
 		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
-		// the full pair. Users without an enrolled factor fall through to the full pair below.
+		// the full pair. Users without an enrolled factor fall through below. When the user is
+		// also must-change, the flag is carried onto the interim token so step-up preserves it.
 		if cfg.mfaGate != nil {
 			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
 			if err != nil {
@@ -336,7 +348,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 				return
 			}
 			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user); err != nil {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, mustChange); err != nil {
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
@@ -345,7 +357,11 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			}
 		}
 
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
+		// Not MFA-gated: issue the full, renewable pair. When mustChange is true the pair carries
+		// Claims.MustChangePassword and the refresh family persists it (Rotate replays it on every
+		// silent refresh), so WithPasswordChangeGate keeps soft-redirecting to the reset page while
+		// the session stays valid. Login is never a lockout.
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
@@ -382,7 +398,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			return
 		}
 
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, false); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
@@ -392,8 +408,16 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 
 // issuePairAndSetCookies builds the user's claims, issues a token pair and writes both auth
 // cookies. The refresh cookie is persistent when remember is true.
-func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, remember bool) error {
+//
+// When mustChange is true the credential is flagged for a forced password change: the pair still
+// authenticates and is fully renewable (login is never a lockout), but its access token carries
+// Claims.MustChangePassword and the refresh family persists the flag, so Rotate replays it onto
+// every silent refresh. WithPasswordChangeGate therefore keeps soft-redirecting to the reset page
+// until the password is actually changed — the user cannot escape by waiting for the access token
+// to expire.
+func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, remember bool, mustChange bool) error {
 	claims := claimsOf(user)
+	claims.MustChangePassword = mustChange
 	pair, err := issuer.IssueTokenPair(r.Context(), claims)
 	if err != nil {
 		return err
@@ -708,7 +732,16 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			return
 		}
 
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember); err != nil {
+		// Forced-change gate: a magic-link login is still subject to the must-change flag. When the
+		// credential is flagged the renewable pair carries Claims.MustChangePassword (persisted across
+		// refresh), so the middleware soft-redirects to the reset page. Fail closed on a policy error.
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
@@ -763,6 +796,73 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 			default:
 				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
 			}
+			return
+		}
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// ChangePasswordWithReissueHandler is the generic, re-issuing sibling of ChangePasswordHandler.
+// It accepts the same service, options and form fields, but additionally takes a token issuer and
+// a claims builder. On a successful password change it forges a FRESH FULL ACCESS+REFRESH token
+// pair (MustChangePassword is absent, since the builder does not set it and UpdateIdentityPassword
+// cleared the flag in the store) and writes BOTH cookies, so the caller is immediately
+// re-authenticated — no extra round-trip login required after clearing the must-change gate.
+//
+// Use this variant when ChangePasswordHandler is wired behind the WithPasswordChangeGate
+// middleware and you want the user to land back in the application immediately after the change.
+// Use the plain ChangePasswordHandler when you prefer the caller to re-authenticate via the
+// normal login flow (it returns 204/redirect and writes no new cookies).
+//
+// The new pair is issued AFTER svc.ChangePassword returns, so it is never caught by the
+// AccountErasers that revoke prior refresh-token families. remember is always false for the
+// re-issued refresh cookie: a password change is not a "remember me" affirmation.
+func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		current := r.PostForm.Get(cfg.currentPasswordField)
+		newPassword := r.PostForm.Get(cfg.newPasswordField)
+
+		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidCredentials):
+				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
+			case isPasswordPolicyError(err):
+				cfg.fail(w, r, http.StatusBadRequest, "password_rejected")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+
+		// ChangePassword succeeded: the must-change flag is cleared in the store and prior
+		// refresh-token families have been revoked by the AccountErasers. Issue a fresh full pair
+		// now (mustChange=false) so the user is immediately re-authenticated, with a clean refresh
+		// family that no longer replays the gate, without an extra login round-trip.
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, false, false); err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
@@ -1258,11 +1358,15 @@ func WithInterimTokenTTL(d time.Duration) HandlerOption {
 // MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
 // pre-step-up state is not a renewable session. The application completes the flow with
 // mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
-func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User) error {
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, mustChange bool) error {
 	claims := claimsOf(user)
 	// Stamp the password factor only and force a short explicit access-token expiry, overriding
 	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
 	claims.AMR = []string{tokens.AMRPassword}
+	// When the credential is ALSO flagged for rotation, carry the advisory flag on the interim
+	// token so the step-up re-issuance (mfa.StepUpHandler, TASK-065) can preserve it: an
+	// MFA-enrolled must-change user must not escape the gate by completing the second factor.
+	claims.MustChangePassword = mustChange
 	ttl := cfg.interimTTL
 	if ttl <= 0 {
 		ttl = DefaultInterimTokenTTL

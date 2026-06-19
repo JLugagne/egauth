@@ -149,13 +149,14 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		authTime := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 
 		rt := &tokens.RefreshToken{
-			Hash:      tokenHash,
-			FamilyID:  familyID,
-			UserID:    userID,
-			TenantID:  tenantA,
-			AuthTime:  authTime,
-			ExpiresAt: expiresAt,
-			CreatedAt: time.Now().Truncate(time.Second),
+			Hash:               tokenHash,
+			FamilyID:           familyID,
+			UserID:             userID,
+			TenantID:           tenantA,
+			AuthTime:           authTime,
+			MustChangePassword: true,
+			ExpiresAt:          expiresAt,
+			CreatedAt:          time.Now().Truncate(time.Second),
 		}
 		err := store.SaveRefreshToken(ctx, tenantA, rt)
 		require.NoError(t, err)
@@ -167,6 +168,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.Equal(t, familyID, found.FamilyID)
 		assert.WithinDuration(t, expiresAt, found.ExpiresAt, time.Second)
 		assert.WithinDuration(t, authTime, found.AuthTime, time.Second, "auth_time must round-trip (step-up freshness)")
+		assert.True(t, found.MustChangePassword, "must_change_password must round-trip (forced-change gate carried across refresh)")
 		assert.Nil(t, found.ConsumedAt, "freshly saved token must not be consumed")
 
 		// Consume once succeeds.

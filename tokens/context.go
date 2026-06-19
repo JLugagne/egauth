@@ -123,3 +123,22 @@ func SubjectResolverFromContext(r *http.Request) (uuid.UUID, bool) {
 	}
 	return a.UserID, true
 }
+
+// MustChangeResolverFromContext adapts the verified Claims[C] injected by ContextMiddleware to
+// the bool resolver shape used by mfa.WithMustChangeResolver. It reports whether the interim
+// token carried must_change_password, so the MFA step-up handler can keep the forced-change gate:
+// when true the stepped-up full pair stays flagged (and carries the flag across refresh). The C must match the
+// ContextMiddleware[C] that produced the entry; a mismatch (or an unauthenticated request)
+// reports false. Mount ContextMiddleware ahead of the step-up handler and wire it in one line:
+//
+//	mux.Handle("/mfa/step-up", tokens.ContextMiddleware(verifier,
+//	    mfa.StepUpHandler(svc, issuer, claimsOf,
+//	        mfa.WithUserResolver(tokens.UserResolverFromContext),
+//	        mfa.WithMustChangeResolver(tokens.MustChangeResolverFromContext[C]))))
+func MustChangeResolverFromContext[C any](r *http.Request) bool {
+	claims, ok := ClaimsFromContext[C](r.Context())
+	if !ok {
+		return false
+	}
+	return claims.MustChangePassword
+}

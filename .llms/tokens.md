@@ -8,7 +8,7 @@ source: `tokens/*.go`, `tokens/jwt/*.go`, `tokens/basic/*.go`, `tokens/memory/*.
 
 ## Purpose
 
-All core types are generic over `C` — the application's custom claims payload embedded in `Claims[C]`. Set `C = struct{}` when no custom claims are needed; use the `basic` package for a zero-type-argument facade that specializes everything to `C = struct{}` automatically. The JWT reference implementation (`tokens/jwt`) produces HS256-signed access tokens and opaque random refresh tokens; the generic interfaces (`Issuer[C]`, `Rotator[C]`, `Verifier[C]`, `Store[C]`) allow alternate backends.
+All core types are generic over `C` — the application's custom claims payload embedded in `Claims[C]`. Set `C = struct{}` when no custom claims are needed; use the `basic` package for a zero-type-argument facade that specializes everything to `C = struct{}` automatically. The JWT reference implementation (`tokens/jwt`) signs access tokens with a pluggable scheme — symmetric HS256 by default, or asymmetric RS256/ES256/ES384/ES512/EdDSA via the `Signer` abstraction (see `jwt.Signer`) — plus opaque random refresh tokens; the generic interfaces (`Issuer[C]`, `Rotator[C]`, `Verifier[C]`, `Store[C]`) allow alternate backends.
 
 ## Core interfaces (tokens)
 
@@ -81,7 +81,15 @@ type Claims[C any] struct {
     // AMR: RFC 8176 authentication method refs (pwd, otp, hwk, mfa).
     // Re-evaluated by ClaimsProvider on every rotation, not frozen at login.
     AMR    []string
-    Custom C
+    // MustChangePassword is a first-class advisory flag set for admin-provisioned temporary
+    // credentials (identity.AdminCreateUser / SetTemporaryPassword). It is a soft gate: a flagged
+    // token still authenticates, but RequireAuth with WithPasswordChangeGate soft-redirects to the
+    // reset page. The flag is recorded on the refresh-token family and Rotate replays it onto every
+    // silent refresh, so a flagged (renewable) session stays gated — a user cannot escape by waiting
+    // for the access token to expire. JWT claim name: "must_change_password" (omitempty). Lives
+    // here, not in Custom, so the middleware can enforce it generically regardless of C.
+    MustChangePassword bool
+    Custom             C
 }
 
 func (c Claims[C]) FreshAuth(maxAge time.Duration) bool
@@ -138,8 +146,14 @@ type Config[C any] struct {
     Issuer           string          // JWT "iss" claim; required
     ExpectedAudience []string        // "aud" gate on verify; empty = disabled
     SecretKey        string          // HS256 single-key mode; >= 32 bytes (MinSecretKeyLength)
-    SigningKeys       []SigningKey    // rotation keyset; when set, SecretKey is verify-only
-    ActiveKeyID      string          // selects signing key in SigningKeys
+    SigningKeys       []SigningKey    // HMAC rotation keyset; when set, SecretKey is verify-only
+    // Signers: pluggable signer set (symmetric or asymmetric). When non-empty it supersedes
+    // SecretKey/SigningKeys for signing — ActiveKeyID signs, every signer verifies. A non-empty
+    // SecretKey alongside Signers is kept as a kid-less legacy verify-only HMAC key. MUST NOT be
+    // combined with SigningKeys. Build entries with NewHMACSigner/NewRSASigner/NewECDSASigner/
+    // NewEdDSASigner (or implement Signer yourself).
+    Signers          []Signer
+    ActiveKeyID      string          // selects the active (signing) key among SigningKeys or Signers
     ClaimsProvider   tokens.ClaimsProvider[C] // required for Rotate
     AccessTTL        time.Duration   // required, positive
     RefreshTTL       time.Duration   // required, positive
@@ -164,6 +178,39 @@ type SigningKey struct {
     Secret string // HS256 key material
 }
 // String/GoString/LogValue redact Secret.
+// HMAC-only convenience keyset (Config.SigningKeys). For asymmetric keys use Config.Signers.
+```
+
+### `jwt.Signer` — pluggable signing scheme (symmetric or asymmetric)
+```go
+type Signer interface {
+    KeyID() string                  // "kid" header; empty only for the legacy kid-less HMAC signer
+    Method() jwt.SigningMethod      // pins the alg; verify rejects any token whose alg differs
+    SignKey() any                   // []byte (HMAC) | *rsa.PrivateKey | *ecdsa.PrivateKey | ed25519.PrivateKey
+    VerifyKey() any                 // []byte (HMAC) | crypto.PublicKey
+}
+
+// Built-in constructors (all validate and return an error). Pass the result(s) via Config.Signers.
+func NewHMACSigner(keyID string, secret []byte) (Signer, error)        // HS256; secret >= 32 bytes; empty keyID allowed
+func NewRSASigner(keyID string, key *rsa.PrivateKey) (Signer, error)   // RS256; key >= 2048 bits; keyID required
+func NewECDSASigner(keyID string, key *ecdsa.PrivateKey) (Signer, error) // ES256/ES384/ES512 chosen from the curve (P-256/384/521); keyID required
+func NewEdDSASigner(keyID string, key ed25519.PrivateKey) (Signer, error) // EdDSA; keyID required
+```
+The verify path resolves the signer by the token's `kid` (or the legacy signer when absent) and then pins the algorithm: a token is rejected unless `token.alg == signer.Method().Alg()`. This per-kid pin is the alg-confusion / downgrade defense for both symmetric and asymmetric keys (e.g. an `RS256` token presenting a `kid` that maps to an HMAC signer, or `alg=none`, is rejected).
+
+### `jwt.JWK` / `jwt.JWKSet` + `PublicJWKS`
+```go
+type JWK struct {
+    Kty, Use, Alg, Kid string  // "RSA"|"EC"|"OKP"|"oct"; "sig"; RS256/ES256/.../EdDSA/HS256; key id
+    N, E               string  // RSA public params (base64url)
+    Crv, X, Y          string  // EC (crv/x/y) or OKP (crv "Ed25519"/x); EC y only
+}
+type JWKSet struct { Keys []JWK `json:"keys"` }
+
+// PublicJWKS returns the static-path verification keys as an RFC 7517 JWK Set for publishing at
+// /.well-known/jwks.json. Asymmetric keys publish their full PUBLIC parameters; HMAC keys publish
+// metadata only (kty "oct", kid/alg/use) and NEVER the symmetric secret ("k").
+func (s *Service[C]) PublicJWKS() JWKSet
 ```
 
 ### `Cookies`
@@ -224,7 +271,7 @@ func DefaultCookies() Cookies
 // SingleTenant variant drops tenantID:
 (*jwt.SingleTenant[C]).Rotate(ctx context.Context, refreshToken string) (*TokenPair[C], error)
 
-// DEPRECATED: validate JWT access token (HS256, alg-pinned, exp/nbf/iss/aud checked) WITHOUT
+// DEPRECATED: validate JWT access token (per-kid alg-pinned, exp/nbf/iss/aud checked) WITHOUT
 // tenant binding. With Config.MultiTenant=true it fails closed (ErrTenantBindingRequired).
 // Single-tenant only.
 (*jwt.Service[C]).VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
@@ -306,6 +353,7 @@ type egauth.Actor struct {
 | `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
+| `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -358,14 +406,26 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 
 ## Security notes
 
-- **HS256 alg-pinning**: access-token parser rejects `alg=none` and alg-confusion attempts.
+- **Per-kid alg-pinning**: the access-token verifier resolves the signer by `kid` then pins its algorithm — a token is rejected unless `token.alg == signer.Method().Alg()`. This rejects `alg=none` and alg-confusion/downgrade (e.g. an `RS256`-keyed `kid` presented as `HS256`) for both symmetric (HS256) and asymmetric (RS256/ES256/ES384/ES512/EdDSA) signing.
+- **Publishable JWKS**: `Service.PublicJWKS()` returns an RFC 7517 key set. Asymmetric public keys are safe to serve at `/.well-known/jwks.json`; HMAC keys are emitted metadata-only (`kty:"oct"`) and the secret (`k`) is NEVER published.
 - **SHA-256 at rest**: refresh tokens and API keys stored as `HashToken(raw)` (SHA-256 hex); clear-text never persisted.
 - **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
 - **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
-- **Key rotation**: `SigningKeys` + `ActiveKeyID` supports kid-tagged overlapping-validity key rollover. Legacy `SecretKey` verifies un-kidded tokens during migration.
+- **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
 - **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
 - **Cookie security**: always `HttpOnly`; `Secure` is opt-out (`Insecure bool`, defaults false = secure); `SameSite=Lax` by default.
+- **Forced-password-change gate** (`WithPasswordChangeGate`): after successful token verification,
+  if `Claims.MustChangePassword` is `true`, the wrapped handler is bypassed and the request is
+  soft-redirected to the configured reset URL (or `403 password_change_required` if no URL).
+  The credential is never invalidated — login always succeeds — only the post-login app surface is
+  gated until the user completes the change. A flagged login issues a full, renewable pair; the flag
+  is recorded on the refresh-token family and `Rotate` replays it onto every silent refresh
+  (overriding the `ClaimsProvider`), so the renewed token is flagged iff the family was — a silent
+  refresh cannot drop the flag and bypass the gate. The flag clears only on a fresh login after the
+  password changes; to force a change on live sessions, an admin revokes the user's families.
+  `tokens.MustChangeResolverFromContext` adapts the verified claims for `mfa.WithMustChangeResolver`,
+  preserving the flag through the MFA step-up flow.
 
 ## Wiring
 
@@ -425,6 +485,7 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 
 - `ClaimsProvider` is **required** for `Rotate`; omitting it returns `ErrNoClaimsProvider`. `IssueTokenPair`/`IssueAPIKey` do not need it.
 - `SecretKey` must be >= `jwt.MinSecretKeyLength` (32 bytes); `Config.Validate()` enforces this — `New`/`NewIssuer` panics only on structurally broken config, not on short keys.
+- Asymmetric signing: set `Config.Signers` with `NewRSASigner`/`NewECDSASigner`/`NewEdDSASigner` (and `ActiveKeyID` when >1). `Signers` supersedes `SecretKey`/`SigningKeys` for signing and MUST NOT be combined with `SigningKeys` (Validate/New reject it). Verifiers fetch the public keys via `Service.PublicJWKS()`. The `basic` facade is HS256-only — use generic `jwt.New[C]` for asymmetric.
 - `basic` vs generic: use `basic` when `C = struct{}`; use `jwt.New[C]` / `tokens.RequireAuth[C]` directly when embedding app-specific data in tokens.
 - `Store` is **monolithic** in v0.x (no capability split before v1); external implementations must run `tokens/storetest` conformance suite on each upgrade.
 - `RefreshPath` on `Cookies` must remain `"/"` when using `WithAutoRefresh` middleware (the browser only sends the refresh cookie on matching paths).

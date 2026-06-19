@@ -33,8 +33,8 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 
 | Module       | What it does                                                                 |
 |--------------|------------------------------------------------------------------------------|
-| `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking |
-| `tokens`     | Stateless JWT access tokens + single-use refresh tokens with rotation & theft detection; API keys. Reference impl in `tokens/jwt` |
+| `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; forced-password-change for temporary credentials (`AdminCreateUser`, `SetTemporaryPassword`) |
+| `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys. Reference impl in `tokens/jwt` |
 | `sessions`   | Server-side, revocable sessions with idle-timeout (`Touch`) and fixation defense (`Rotate`) |
 | `passwords`  | Hashing/policy/breach **seams** + references: `argon2`, `policy`, `breach/hibp`, `breach/offline` |
 | `mfa`        | TOTP (RFC 6238) with recovery codes                                          |
@@ -137,6 +137,11 @@ but every token type takes the type argument: `tokens.Claims[C]`, `jwt.New[C]`,
 `tokens.RequireAuth[C]`, and so on. Use `tokens.Claims[struct{}]` if you ever need the generic
 form with no custom claims. See `go doc github.com/JLugagne/egauth/tokens`.
 
+For **asymmetric signing** (so verifiers hold only a public key), set `jwt.Config.Signers` with
+`jwt.NewRSASigner` / `jwt.NewECDSASigner` / `jwt.NewEdDSASigner` instead of `SecretKey`, and serve
+the public keys from `Service.PublicJWKS()`. The default `tokens/basic` facade stays HS256-only;
+asymmetric signing uses the generic `tokens/jwt` API.
+
 ## Multi-tenancy
 
 Every tenant-scoped operation takes an explicit `tenantID string` argument. An empty string
@@ -172,13 +177,24 @@ store := identitypgx.NewStore(pool)
 ## Security
 
 egauth is enumeration-safe by default (uniform responses + decoy hashing), enforces brute-force
-lockout, pins JWTs to HS256 (rejecting `none`/alg-confusion), rotates refresh tokens with
+lockout, pins each JWT to its key's algorithm (rejecting `none`/alg-confusion) for symmetric (HS256) or asymmetric (RS256/ES256/EdDSA) signing, rotates refresh tokens with
 family-based theft detection, stores only SHA-256 hashes of refresh/API/session/OTP secrets, and
 caps pre-auth body size against hashing-DoS. Credential-bearing types redact their secrets on
 `fmt`/`slog`. Read **[SECURITY.md](SECURITY.md)** for the full model — including the explicit
 trade-offs (e.g. TOTP secrets stored recoverably, accepted account-existence disclosures) and the
 boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mail/SMS transport,
 observability, idempotency).
+
+**Forced-password-change for temporary credentials.** Provision a one-time credential via
+`identity.AdminCreateUser` (admin-created account) or `identity.SetTemporaryPassword` (admin-issued
+temporary password); both flag the credential so the user must choose a new password at next login.
+A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`; the
+flag is recorded on the refresh-token family and carried onto every silent refresh, so mounting
+`tokens.WithPasswordChangeGate` on your protected routes keeps soft-redirecting to the reset page
+until the password is changed — a user cannot escape by waiting for the access token to expire. The
+credential stays valid throughout — never a lockout. egauth does NOT do periodic, age-based rotation
+(NIST SP 800-63B discourages fixed-interval expiry). See [SECURITY.md](SECURITY.md) for the full
+semantics.
 
 **Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
 for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for

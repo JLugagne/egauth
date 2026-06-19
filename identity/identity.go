@@ -42,6 +42,7 @@ type User struct {
 }
 
 // Identity represents an authentication method linked to a User.
+// Identity represents an authentication method linked to a User.
 type Identity struct {
 	ID           uuid.UUID
 	UserID       uuid.UUID
@@ -53,6 +54,14 @@ type Identity struct {
 	FailedAttempts int
 	// LockedUntil, when set and in the future, blocks authentication for this identity.
 	LockedUntil *time.Time
-	CreatedAt   time.Time
-	UpdatedAt   time.Time
+	// PasswordChangedAt records when the password hash was last set. A zero value denotes a
+	// legacy credential whose change time is unknown and is treated as not due for rotation.
+	PasswordChangedAt time.Time
+	// MustChangePassword, when true, makes the next login issue a token flagged
+	// (Claims.MustChangePassword) so the password-change gate can soft-redirect the user. The flag
+	// is carried across token refresh, so it cannot be escaped by waiting. It never blocks
+	// authentication.
+	MustChangePassword bool
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }

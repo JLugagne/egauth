@@ -60,7 +60,20 @@ Migrations (schema evolution):
 004_add_phone.sql
 005_add_recovery_email.sql
 006_add_disabled_at.sql
+007_add_expires_at_index.sql
+008_add_password_change_columns.sql
 ```
+
+Migration `008_add_password_change_columns.sql` adds two columns to the `identities` table:
+- `password_changed_at TIMESTAMP WITH TIME ZONE` — **informational** audit metadata recording when
+  the password hash was last set; stamped on every `UpdateIdentityPassword` write. `NULL` is simply
+  an unknown last-changed time (e.g. legacy rows) and drives no behavior — egauth has no age-based
+  rotation policy.
+- `must_change_password BOOLEAN NOT NULL DEFAULT false` — advisory flag set by admin provisioning
+  of temporary credentials (`identity.AdminCreateUser`, `identity.SetTemporaryPassword`). Never
+  blocks authentication; causes the next login to issue a flagged, renewable token (the flag is
+  carried across refresh by the token layer). Cleared
+  automatically by every `UpdateIdentityPassword` write.
 
 ---
 
@@ -81,7 +94,14 @@ Migrations:
 001_create_tokens_table.sql
 002_add_refresh_token_rotation.sql
 003_add_refresh_token_auth_time.sql
+004_add_expires_at_index.sql
+005_add_refresh_token_must_change_password.sql
 ```
+
+Migration `005_add_refresh_token_must_change_password.sql` adds `must_change_password` (boolean, NOT
+NULL DEFAULT false) to the `tokens` table. It records the forced-password-change gate on a refresh
+family and is carried verbatim onto every rotated descendant, so a flagged session stays gated
+across silent refresh (a user cannot escape by waiting for the access token to expire).
 
 ---
 
@@ -119,9 +139,12 @@ Methods:
 - `RevokeTenantKeys(ctx, tenantID) error`
 - `DeleteTenant(ctx, tenantID) error`
 
+`keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only).
+
 Migrations:
 ```
 001_create_keystore_keys_table.sql
+002_add_key_algorithm.sql           -- adds the alg column (DEFAULT 'HS256'; additive, existing rows unchanged)
 ```
 
 ---

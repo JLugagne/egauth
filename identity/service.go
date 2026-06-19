@@ -214,6 +214,20 @@ type Service interface {
 	// unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it behind
 	// appropriate authorization.
 	EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// PasswordChangeRequired reports whether userID's password credential is flagged for a forced
+	// change at next login. It is the soft-gate query behind WithPasswordChangeGate: the credential
+	// stays valid (this is never a lockout), the caller just issues a flagged token (renewable, the
+	// flag carried across refresh) and soft-redirects to the reset page. It returns true when the identity's MustChangePassword flag is
+	// set — i.e. a temporary/one-time password provisioned by SetTemporaryPassword or AdminCreateUser.
+	// egauth does NOT do periodic, age-based password rotation: forced expiry on a fixed interval is
+	// discouraged by NIST SP 800-63B and is intentionally not offered. An account with no password
+	// identity (e.g. OAuth-only) is never flagged (returns false). It returns ErrUserNotFound for an
+	// unknown, soft-deleted or cross-tenant user (propagated from the store).
+	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
+	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families. It returns ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
+	SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
+	// AdminCreateUser provisions a new user account with a temporary password that forces a change at the next login. It normalizes email, creates the user, hashes tempPassword and adds a password identity with MustChangePassword=true and PasswordChangedAt=now. It returns ErrInvalidEmail for a malformed address, ErrEmailAlreadyExists when the email is taken, and any policy or hashing error on an invalid tempPassword. On a successful call the returned User is the newly created account.
+	AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error)
 }
 
 // AccountEraser revokes one class of a user's cross-module artifacts (e.g. active sessions,
@@ -640,7 +654,7 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 		return err
 	}
 
-	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, user.ID, hash, s.now(), false); err != nil {
 		return err
 	}
 
@@ -708,7 +722,7 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	if err != nil {
 		return err
 	}
-	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash); err != nil {
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash, s.now(), false); err != nil {
 		return err
 	}
 
@@ -1224,4 +1238,106 @@ func (s *service) EnableUser(ctx context.Context, tenantID string, userID uuid.U
 	}
 	s.emit(ctx, event.Event{Type: event.AccountEnabled, UserID: userID.String(), TenantID: tenantID})
 	return nil
+}
+
+func (s *service) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
+	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, userID)
+	if err != nil {
+		return false, err
+	}
+
+	var pwIdent *Identity
+	for _, id := range idents {
+		if id.Provider == "password" && id.PasswordHash != nil {
+			pwIdent = id
+			break
+		}
+	}
+	// No password identity (e.g. an OAuth-only account) is never flagged: there is no credential
+	// to force a change on, and the soft-gate would have nothing to redirect to.
+	if pwIdent == nil {
+		return false, nil
+	}
+
+	// The credential is gated only when explicitly flagged by temporary/one-time provisioning
+	// (SetTemporaryPassword / AdminCreateUser). egauth deliberately does NOT force periodic,
+	// age-based rotation: fixed-interval password expiry is discouraged by NIST SP 800-63B.
+	return pwIdent.MustChangePassword, nil
+}
+
+// SetTemporaryPassword replaces the user's password credential with a temporary one and sets
+// the MustChangePassword flag so the user is forced to choose a new password at next login.
+// It validates tempPassword against the policy, hashes it, and then runs every registered
+// AccountEraser to revoke the user's existing sessions and refresh-token families, mirroring
+// the behavior of ChangePassword and ResetPassword.
+func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error {
+	if err := s.requirePasswordDeps(); err != nil {
+		return err
+	}
+	if err := s.policy.Verify(ctx, tempPassword); err != nil {
+		return err
+	}
+	hash, err := s.hasher.Hash(ctx, tempPassword)
+	if err != nil {
+		return err
+	}
+	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash, s.now(), true); err != nil {
+		return err
+	}
+	var errs []error
+	for _, erase := range s.erasers {
+		if erase == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := erase(ctx, tenantID, userID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// AdminCreateUser provisions a new user account with a temporary password. The caller is
+// expected to deliver the temporary password out-of-band; the account's MustChangePassword flag
+// is set so the user is forced to choose their own password at first login.
+func (s *service) AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error) {
+	if err := s.requirePasswordDeps(); err != nil {
+		return nil, err
+	}
+	var err error
+	email, err = normalizeEmail(email)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.policy.Verify(ctx, tempPassword); err != nil {
+		return nil, err
+	}
+	hash, err := s.hasher.Hash(ctx, tempPassword)
+	if err != nil {
+		return nil, err
+	}
+	user, err := s.store.CreateUser(ctx, tenantID, email)
+	if err != nil {
+		return nil, err
+	}
+	now := s.now()
+	ident := &Identity{
+		UserID:             user.ID,
+		Provider:           "password",
+		ProviderID:         email,
+		PasswordHash:       &hash,
+		MustChangePassword: true,
+		PasswordChangedAt:  now,
+	}
+	if err := s.store.AddIdentity(ctx, tenantID, ident); err != nil {
+		// Compensate the orphaned user so its email slot is freed, mirroring Register.
+		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
+		return nil, err
+	}
+	return user, nil
 }

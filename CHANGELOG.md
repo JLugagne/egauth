@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Forced-password-change for temporary credentials** (M7). Lets an admin provision a credential
+  that requires the user to choose a new password at next login, without ever locking the user out:
+
+  - `identity.AdminCreateUser(ctx, tenantID, email, tempPwd)` creates an account with a temporary
+    password, and `identity.SetTemporaryPassword(ctx, tenantID, userID, tempPwd)` replaces an
+    existing credential with one — both flag the identity so the user must set their own password
+    before the app is usable.
+
+  egauth deliberately does **not** offer periodic, age-based password rotation: fixed-interval
+  expiry is discouraged by NIST SP 800-63B.
+
+  At next login, when a credential is flagged, `LoginHandler` / `MagicLinkLoginHandler` issue a
+  full, **renewable** pair whose access token carries `tokens.Claims.MustChangePassword=true` (JSON
+  claim `must_change_password`). The flag is recorded on the refresh-token family and `Rotate`
+  replays it onto every silent refresh (overriding the `ClaimsProvider`), so the renewed token is
+  flagged iff the family was — a silent refresh cannot drop the flag and a user cannot escape the
+  gate by waiting for the access token to expire. To force a change on a user's existing sessions,
+  an admin revokes their token families (`SetTemporaryPassword` does this via its erasers).
+
+  `tokens.WithPasswordChangeGate[C](resetURL)` enforces the gate generically in the `RequireAuth`
+  middleware: after successful token verification, if `Claims.MustChangePassword` is true, the
+  wrapped handler is bypassed and the request is redirected `303` to `resetURL` (or `403
+  password_change_required` if `resetURL` is empty). The change-password and logout routes must
+  be excluded from this middleware.
+
+  On a successful `ChangePassword` / `ResetPassword`, `UpdateIdentityPassword` atomically stamps
+  `PasswordChangedAt` and clears the flag; `ChangePasswordWithReissueHandler` re-issues a full
+  access+refresh pair so the user is immediately authenticated.
+
+  New `identity.Store` method: `UpdateIdentityPassword(ctx, tenantID, userID, passwordHash,
+  changedAt time.Time, mustChange bool)` (stamps timestamp and flag in one atomic write). External
+  store implementers must add this method; run `identity/storetest` to verify conformance.
+
+  New `tokens.RefreshToken.MustChangePassword` field records the gate on the rotation family; the
+  `tokens.Store` (`SaveRefreshToken` / `FindRefreshToken`) must persist and return it. External
+  token-store implementers must carry this field; run `tokens/storetest` to verify conformance.
+
+  New pgx migrations: `adapters/pgx/identity` migration `008_add_password_change_columns.sql` adds
+  `password_changed_at` (nullable, informational "last changed" audit metadata — drives no behavior)
+  and `must_change_password` (boolean, default false) to the `identities` table;
+  `adapters/pgx/tokens` migration `005_add_refresh_token_must_change_password.sql` adds
+  `must_change_password` (boolean, default false) to the `tokens` table so the gate survives refresh.
+
+  Zero behavior change unless a credential is explicitly flagged via admin provisioning.
+
 ### Security / disclosure (v1.0.0)
 
 - **Audit-status disclosure.** egauth's security review to date is an AI-driven audit only; it

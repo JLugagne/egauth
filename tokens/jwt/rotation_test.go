@@ -58,6 +58,51 @@ func TestRotate_HappyPath(t *testing.T) {
 	assert.Equal(t, userID, claims.Subject)
 }
 
+// TestRotate_CarriesMustChangePasswordForward proves the forced-password-change gate survives a
+// silent refresh. A pair issued with MustChangePassword=true rotates to a token that STILL carries
+// the flag — and stays flagged down the whole rotation chain — even though the ClaimsProvider
+// returns UNFLAGGED claims (modelling a normal app provider that does not re-query the credential's
+// must-change state). Rotate replays the flag verbatim from the parent refresh record, so a user
+// cannot escape WithPasswordChangeGate by waiting for the access token to expire and refreshing.
+// Conversely an unflagged family must never acquire the flag on refresh.
+func TestRotate_CarriesMustChangePasswordForward(t *testing.T) {
+	ctx := context.Background()
+	// okProvider deliberately returns claims WITHOUT the flag — the carry-forward must come from
+	// the stored refresh family, not from the provider.
+	svc, _ := newRotatingService(t, okProvider(t), 24*time.Hour)
+	userID := uuid.Must(uuid.NewV7())
+
+	t.Run("flagged family stays flagged across the rotation chain", func(t *testing.T) {
+		pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID, MustChangePassword: true})
+		require.NoError(t, err)
+		require.True(t, pair.Claims.MustChangePassword)
+
+		newPair, err := svc.Rotate(ctx, "", pair.RefreshToken)
+		require.NoError(t, err)
+		claims, err := svc.VerifyAccessTokenForTenant(ctx, "", newPair.AccessToken)
+		require.NoError(t, err)
+		assert.True(t, claims.MustChangePassword,
+			"the renewed token must still require a change (carried from the parent), not dropped by the provider")
+
+		// A second refresh further down the chain must keep carrying it.
+		newPair2, err := svc.Rotate(ctx, "", newPair.RefreshToken)
+		require.NoError(t, err)
+		claims2, err := svc.VerifyAccessTokenForTenant(ctx, "", newPair2.AccessToken)
+		require.NoError(t, err)
+		assert.True(t, claims2.MustChangePassword, "the flag must persist down the whole rotation chain")
+	})
+
+	t.Run("unflagged family stays unflagged across rotation", func(t *testing.T) {
+		pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+		require.NoError(t, err)
+		newPair, err := svc.Rotate(ctx, "", pair.RefreshToken)
+		require.NoError(t, err)
+		claims, err := svc.VerifyAccessTokenForTenant(ctx, "", newPair.AccessToken)
+		require.NoError(t, err)
+		assert.False(t, claims.MustChangePassword, "an unflagged family must never acquire the flag on refresh")
+	})
+}
+
 func TestRotate_ReuseDetectionRevokesFamily(t *testing.T) {
 	ctx := context.Background()
 	// Strict mode (negative grace): any replay of a consumed token is treated as theft.
