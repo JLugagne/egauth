@@ -61,10 +61,10 @@ Migrations (schema evolution):
 005_add_recovery_email.sql
 006_add_disabled_at.sql
 007_add_expires_at_index.sql
-008_add_password_rotation.sql
+008_add_password_change_columns.sql
 ```
 
-Migration `008_add_password_rotation.sql` adds two columns to the `identities` table:
+Migration `008_add_password_change_columns.sql` adds two columns to the `identities` table:
 - `password_changed_at TIMESTAMP WITH TIME ZONE` — **informational** audit metadata recording when
   the password hash was last set; stamped on every `UpdateIdentityPassword` write. `NULL` is simply
   an unknown last-changed time (e.g. legacy rows) and drives no behavior — egauth has no age-based

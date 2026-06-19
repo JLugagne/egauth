@@ -217,7 +217,7 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   re-issues a full access+refresh pair so the user is immediately authenticated and the
   change-password redirect loop stops.
 
-  `PasswordChangedAt` (added by migration `008_add_password_rotation.sql`) is **informational
+  `PasswordChangedAt` (added by migration `008_add_password_change_columns.sql`) is **informational
   audit metadata** — "when the password hash was last set" — stamped on every password write. It
   does **not** drive any forced-change decision (there is no age-based policy); a zero value on a
   legacy row is simply an unknown last-changed time and is harmless.

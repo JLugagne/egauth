@@ -40,7 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changedAt time.Time, mustChange bool)` (stamps timestamp and flag in one atomic write). External
   store implementers must add this method; run `identity/storetest` to verify conformance.
 
-  New pgx migration: `adapters/pgx/identity` migration `008_add_password_rotation.sql` adds
+  New pgx migration: `adapters/pgx/identity` migration `008_add_password_change_columns.sql` adds
   `password_changed_at` (nullable, informational "last changed" audit metadata — drives no
   behavior) and `must_change_password` (boolean, default false) to the `identities` table.
 
