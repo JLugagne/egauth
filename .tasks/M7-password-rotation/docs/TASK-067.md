@@ -4,7 +4,7 @@ title: Document the password-rotation / forced-change policy
 description: Update .llms (architecture, tokens), SECURITY.md, README.md and CHANGELOG.md to describe the opt-in policy: soft-gate semantics, access-only-when-flagged rationale, configuration surface and admin provisioning methods. Reference only symbols that exist; do not link audit-findings logs.
 milestone: M7-password-rotation
 epic: docs
-status: in_progress
+status: done
 priority: normal
 type: chore
 blocked_by: [TASK-059, TASK-062, TASK-066]
@@ -57,3 +57,34 @@ DoD verification commands:
 - `grep -c "soft.gate\|must.change\|rotation" SECURITY.md` — expect >= 3
 - `grep -c "password.rotation\|forced.password\|must.change" CHANGELOG.md` — expect >= 1
 - `go run ./internal/doctest` — expect exit 0 (no dangling symbols)
+
+### 2026-06-19 — closing review (reviewer, independent re-verification)
+
+Approved. Re-derived every claim from scratch; trusted no checkbox.
+
+Per-DoD verification:
+- architecture.md mentions rotation policy / WithPasswordRotation / WithPasswordRotationResolver —
+  verified by `grep -c "WithPasswordRotation" .llms/architecture.md` (PASS) and by reading the diff:
+  both options appear in the Composition graph and the Security posture summary.
+- tokens.md documents MustChangePassword / WithPasswordChangeGate / DefaultMustChangeTTL — verified
+  by the run: grep (PASS) and by reading the Claims field comment, the AuthOption table row, and the
+  middleware section referencing DefaultMustChangeTTL + WithMustChangeTTL.
+- storage-pgx.md documents migration 008 and the new columns — verified by the run: grep (PASS) and
+  by cross-checking against the actual file adapters/pgx/identity/migrations/008_add_password_rotation.sql:
+  the two columns and the NULL/zero = not-due legacy behaviour match the SQL comment exactly.
+- SECURITY.md has the forced-password-change / soft-gate section — verified by the run: grep (PASS)
+  and by reading the new bullet (soft-gate, access-only rationale, next-login-only, legacy rows).
+- CHANGELOG.md has an Unreleased M7 entry — verified by the run: grep (PASS) and by reading the
+  Added entry under Unreleased.
+- Doc-drift guard — re-ran `go run ./internal/doctest` independently: exit 0, all 89 egauth symbols resolve.
+
+Symbol existence independently confirmed via go-surgeon for every qualified identifier the docs add:
+WithPasswordRotation (identity/service.go:1253), WithPasswordRotationResolver (1263),
+PasswordChangeRequired (1267), SetTemporaryPassword (1317), AdminCreateUser (1352),
+WithPasswordChangeGate (tokens/middleware.go:307), tokens.Claims.MustChangePassword (tokens/token.go:45),
+DefaultMustChangeTTL (identity/handlers.go:52), WithMustChangeTTL (1376),
+ChangePasswordWithReissueHandler (837), MustChangeResolverFromContext (tokens/context.go:138),
+WithMustChangeResolver (mfa/handlers.go:124). Doc semantics match each symbol's own doc comment.
+
+Commit 8b713c6 is on feat/m7-password-rotation, prefixed "TASK-067:", authored by JLugagne with
+no Co-Authored-By trailer.
