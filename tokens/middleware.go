@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/internal/httputil"
 )
 
 // AuthenticatedHandlerFunc is an HTTP handler that explicitly requires an authenticated
@@ -15,13 +16,15 @@ type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request
 
 // authConfig holds the optional behavior of RequireAuth, configured via AuthOption.
 type authConfig[C any] struct {
-	cookies        *Cookies
-	rotator        Rotator[C]
-	tenantResolver func(*http.Request) string
-	readHeader     bool
-	persistRefresh bool
-	requiredAMR    []string
-	maxAuthAge     time.Duration
+	cookies                *Cookies
+	rotator                Rotator[C]
+	tenantResolver         func(*http.Request) string
+	readHeader             bool
+	persistRefresh         bool
+	requiredAMR            []string
+	maxAuthAge             time.Duration
+	passwordChangeGate     bool
+	passwordChangeResetURL string
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -172,6 +175,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				stepUpRequired(w)
 				return
 			}
+			if cfg.passwordChangeBlocked(claims) {
+				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
+				return
+			}
 			onAuth(w, r, claims)
 			return
 		}
@@ -210,6 +217,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
 			if !cfg.stepUpSatisfied(&pair.Claims) {
 				stepUpRequired(w)
+				return
+			}
+			if cfg.passwordChangeBlocked(&pair.Claims) {
+				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
 				return
 			}
 			onAuth(w, r, &pair.Claims)
@@ -278,4 +289,38 @@ func unauthorized(w http.ResponseWriter) {
 // route (RFC 8176 AMR gate); the client should re-authenticate with the missing factor.
 func stepUpRequired(w http.ResponseWriter) {
 	http.Error(w, "step_up_required", http.StatusForbidden)
+}
+
+// WithPasswordChangeGate enforces the soft password-change gate: after a request's access
+// token has been successfully verified (and any step-up / AMR checks have passed), if the
+// token carries Claims.MustChangePassword the request is intercepted and the wrapped handler
+// is NOT invoked. The credential itself stays valid — this is a soft redirect to the reset
+// flow, never a lockout.
+//
+// When resetURL is non-empty the gate replies 303 See Other with a Location pointing at
+// resetURL (carrying an ?error=password_change_required parameter); when resetURL is empty it
+// replies 403 Forbidden with the plain-text body "password_change_required".
+//
+// IMPORTANT: wrap the change-password and logout routes WITHOUT this option. A user who must
+// change their password has to be able to reach the reset endpoint (and to log out); gating
+// those routes would trap the user in a redirect loop. Apply the gate to every other route.
+func WithPasswordChangeGate[C any](resetURL string) AuthOption[C] {
+	return func(a *authConfig[C]) {
+		a.passwordChangeGate = true
+		a.passwordChangeResetURL = resetURL
+	}
+}
+
+// passwordChangeBlocked reports whether the gate is configured and the verified claims carry
+// the must-change-password flag, meaning the request must be diverted to the reset flow
+// instead of reaching the wrapped handler.
+func (cfg *authConfig[C]) passwordChangeBlocked(claims *Claims[C]) bool {
+	return cfg.passwordChangeGate && claims.MustChangePassword
+}
+
+// passwordChangeRequired emits the soft password-change-gate response: a 303 redirect to the
+// configured reset URL when one is set, otherwise a 403 with the "password_change_required"
+// code. It mirrors the WithFailureRedirect style by delegating to httputil.Fail.
+func passwordChangeRequired(w http.ResponseWriter, r *http.Request, resetURL string) {
+	httputil.Fail(w, r, resetURL, http.StatusForbidden, "password_change_required")
 }
