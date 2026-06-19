@@ -81,12 +81,12 @@ type Claims[C any] struct {
     // AMR: RFC 8176 authentication method refs (pwd, otp, hwk, mfa).
     // Re-evaluated by ClaimsProvider on every rotation, not frozen at login.
     AMR    []string
-    // MustChangePassword is a first-class advisory flag set by the rotation policy (age-based
-    // or admin-provisioned). It is a soft gate: a flagged token still authenticates, but
-    // RequireAuth with WithPasswordChangeGate soft-redirects to the reset page. Flagged logins
-    // are ACCESS-ONLY (no refresh cookie, short TTL) so the flag cannot be silently dropped by
-    // a silent refresh. JWT claim name: "must_change_password" (omitempty). Lives here, not in
-    // Custom, so the middleware can enforce it generically regardless of the application's C type.
+    // MustChangePassword is a first-class advisory flag set for admin-provisioned temporary
+    // credentials (identity.AdminCreateUser / SetTemporaryPassword). It is a soft gate: a flagged
+    // token still authenticates, but RequireAuth with WithPasswordChangeGate soft-redirects to the
+    // reset page. Flagged logins are ACCESS-ONLY (no refresh cookie, short TTL) so the flag cannot
+    // be silently dropped by a silent refresh. JWT claim name: "must_change_password" (omitempty).
+    // Lives here, not in Custom, so the middleware can enforce it generically regardless of C.
     MustChangePassword bool
     Custom             C
 }

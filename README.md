@@ -33,7 +33,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 
 | Module       | What it does                                                                 |
 |--------------|------------------------------------------------------------------------------|
-| `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; opt-in forced-password-change / rotation policy (`WithPasswordRotation`, `AdminCreateUser`, `SetTemporaryPassword`) |
+| `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; forced-password-change for temporary credentials (`AdminCreateUser`, `SetTemporaryPassword`) |
 | `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys. Reference impl in `tokens/jwt` |
 | `sessions`   | Server-side, revocable sessions with idle-timeout (`Touch`) and fixation defense (`Rotate`) |
 | `passwords`  | Hashing/policy/breach **seams** + references: `argon2`, `policy`, `breach/hibp`, `breach/offline` |
@@ -185,13 +185,14 @@ trade-offs (e.g. TOTP secrets stored recoverably, accepted account-existence dis
 boundaries egauth leaves to the application (CSRF tokens, rate-limit policy, mail/SMS transport,
 observability, idempotency).
 
-**Opt-in forced-password-change.** Enable age-based credential rotation with
-`identity.WithPasswordRotation(maxAge)` or provision a one-time credential via
-`identity.AdminCreateUser` / `identity.SetTemporaryPassword`. A flagged login issues a short-TTL
-access-only token (`tokens.Claims.MustChangePassword=true`, no refresh cookie); mount
-`tokens.WithPasswordChangeGate` on your protected routes to soft-redirect to the reset page. The
-credential stays valid throughout — the user is never locked out. See [SECURITY.md](SECURITY.md)
-for the full semantics.
+**Forced-password-change for temporary credentials.** Provision a one-time credential via
+`identity.AdminCreateUser` (admin-created account) or `identity.SetTemporaryPassword` (admin-issued
+temporary password); both flag the credential so the user must choose a new password at next login.
+A flagged login issues a short-TTL access-only token (`tokens.Claims.MustChangePassword=true`, no
+refresh cookie); mount `tokens.WithPasswordChangeGate` on your protected routes to soft-redirect to
+the reset page. The credential stays valid throughout — the user is never locked out. egauth does
+NOT do periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval expiry). See
+[SECURITY.md](SECURITY.md) for the full semantics.
 
 **Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
 for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for

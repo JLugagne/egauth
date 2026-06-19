@@ -187,13 +187,13 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   MFA-elevated session after one access-token TTL or blanket-elevate every session of an
   MFA-enrolled user — the latter being a step-up bypass where a password-only family would gain
   `AMRMFA` on its first silent refresh.
-- **Forced-password-change / rotation policy (opt-in, soft gate).** egauth supports two triggers
-  for forced credential rotation:
-  1. *Age-based rotation* — `identity.WithPasswordRotation(maxAge)` sets a global maximum password
-     age; `identity.WithPasswordRotationResolver(fn)` overrides per tenant (or opts a tenant out).
-  2. *Admin-provisioned credentials* — `identity.AdminCreateUser` and
-     `identity.SetTemporaryPassword` set the `MustChangePassword` flag on the identity explicitly,
-     so the user must choose their own password before the app is usable.
+- **Forced-password-change for temporary credentials (soft gate).** egauth forces a password
+  change only for **admin-provisioned credentials** — `identity.AdminCreateUser` (admin-created
+  account) and `identity.SetTemporaryPassword` (admin-issued one-time password) set the
+  `MustChangePassword` flag on the identity explicitly, so the user must choose their own password
+  before the app is usable. egauth deliberately does **not** offer periodic, age-based password
+  rotation: forcing expiry on a fixed interval is discouraged by NIST SP 800-63B (it drives weaker,
+  predictably-incremented passwords) and is intentionally not implemented.
 
   The soft-gate contract: **a flagged credential still authenticates — the user is never locked
   out.** At next login the handler detects the flag (via `identity.PasswordChangeRequired`) and
@@ -209,18 +209,18 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   should be excluded from this middleware.
 
   Evaluation timing is **next-login-only**: there is no active session revocation, no refresh-time
-  re-evaluation, and no background janitor sweep for rotation-due users. A flagged-but-not-yet-
-  logged-in user is unaffected until their next login attempt.
+  re-evaluation, and no background janitor sweep. A flagged-but-not-yet-logged-in user is unaffected
+  until their next login attempt.
 
   On a successful `ChangePassword` / `ResetPassword`, `UpdateIdentityPassword` atomically stamps
   `PasswordChangedAt` and clears `MustChangePassword`; `ChangePasswordWithReissueHandler` then
   re-issues a full access+refresh pair so the user is immediately authenticated and the
   change-password redirect loop stops.
 
-  Legacy deployments: `PasswordChangedAt=zero` (rows pre-dating migration
-  `008_add_password_rotation.sql`) is treated as **not due** — the age-based evaluator does not
-  flag users whose timestamp is unset. This prevents a blanket forced-change wave on an existing
-  user base when the policy is first enabled.
+  `PasswordChangedAt` (added by migration `008_add_password_rotation.sql`) is **informational
+  audit metadata** — "when the password hash was last set" — stamped on every password write. It
+  does **not** drive any forced-change decision (there is no age-based policy); a zero value on a
+  legacy row is simply an unknown last-changed time and is harmless.
 
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,

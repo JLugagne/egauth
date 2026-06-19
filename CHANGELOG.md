@@ -9,16 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Opt-in forced-password-change / rotation policy** (M7). Enables two triggers for requiring a
-  credential change at the user's next login, without ever locking the user out:
+- **Forced-password-change for temporary credentials** (M7). Lets an admin provision a credential
+  that requires the user to choose a new password at next login, without ever locking the user out:
 
-  - *Age-based rotation* — `identity.WithPasswordRotation(maxAge)` sets a global maximum password
-    age. `identity.WithPasswordRotationResolver(fn)` overrides or opts out per tenant.
-  - *Admin-provisioned credentials* — `identity.AdminCreateUser(ctx, tenantID, email, tempPwd)`
-    and `identity.SetTemporaryPassword(ctx, tenantID, userID, tempPwd)` flag the credential so
-    the user is required to set their own password before the app is usable.
+  - `identity.AdminCreateUser(ctx, tenantID, email, tempPwd)` creates an account with a temporary
+    password, and `identity.SetTemporaryPassword(ctx, tenantID, userID, tempPwd)` replaces an
+    existing credential with one — both flag the identity so the user must set their own password
+    before the app is usable.
 
-  At next login, when the policy flags a credential, `LoginHandler` / `MagicLinkLoginHandler`
+  egauth deliberately does **not** offer periodic, age-based password rotation: fixed-interval
+  expiry is discouraged by NIST SP 800-63B.
+
+  At next login, when a credential is flagged, `LoginHandler` / `MagicLinkLoginHandler`
   issue a short-TTL **access-only** token (`tokens.Claims.MustChangePassword=true`, JSON claim
   `must_change_password`). No refresh cookie is set for a flagged login, so a silent background
   refresh cannot drop the flag. The TTL defaults to `identity.DefaultMustChangeTTL` and is
@@ -39,10 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   store implementers must add this method; run `identity/storetest` to verify conformance.
 
   New pgx migration: `adapters/pgx/identity` migration `008_add_password_rotation.sql` adds
-  `password_changed_at` (nullable; `NULL` = not due, so pre-existing rows are never immediately
-  flagged) and `must_change_password` (boolean, default false) to the `identities` table.
+  `password_changed_at` (nullable, informational "last changed" audit metadata — drives no
+  behavior) and `must_change_password` (boolean, default false) to the `identities` table.
 
-  Off by default — zero behavior change when the policy is left unconfigured.
+  Zero behavior change unless a credential is explicitly flagged via admin provisioning.
 
 ### Security / disclosure (v1.0.0)
 

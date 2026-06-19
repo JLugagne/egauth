@@ -65,14 +65,14 @@ Migrations (schema evolution):
 ```
 
 Migration `008_add_password_rotation.sql` adds two columns to the `identities` table:
-- `password_changed_at TIMESTAMP WITH TIME ZONE` — records when the password hash was last set.
-  `NULL` (legacy credential) is treated as **not due** for rotation: the age-based evaluator skips
-  flagging users whose `PasswordChangedAt` is zero, so applying this migration to an existing
-  deployment does not immediately flag every pre-existing user.
+- `password_changed_at TIMESTAMP WITH TIME ZONE` — **informational** audit metadata recording when
+  the password hash was last set; stamped on every `UpdateIdentityPassword` write. `NULL` is simply
+  an unknown last-changed time (e.g. legacy rows) and drives no behavior — egauth has no age-based
+  rotation policy.
 - `must_change_password BOOLEAN NOT NULL DEFAULT false` — advisory flag set by admin provisioning
-  (`identity.AdminCreateUser`, `identity.SetTemporaryPassword`) or the rotation-policy evaluator.
-  Never blocks authentication; causes the next login to issue a flagged, access-only token.
-  Cleared automatically by every `UpdateIdentityPassword` write.
+  of temporary credentials (`identity.AdminCreateUser`, `identity.SetTemporaryPassword`). Never
+  blocks authentication; causes the next login to issue a flagged, access-only token. Cleared
+  automatically by every `UpdateIdentityPassword` write.
 
 ---
 
