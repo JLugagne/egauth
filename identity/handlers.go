@@ -819,6 +819,73 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 	}
 }
 
+// ChangePasswordWithReissueHandler is the generic, re-issuing sibling of ChangePasswordHandler.
+// It accepts the same service, options and form fields, but additionally takes a token issuer and
+// a claims builder. On a successful password change it forges a FRESH FULL ACCESS+REFRESH token
+// pair (MustChangePassword is absent, since the builder does not set it and UpdateIdentityPassword
+// cleared the flag in the store) and writes BOTH cookies, so the caller is immediately
+// re-authenticated — no extra round-trip login required after clearing the must-change gate.
+//
+// Use this variant when ChangePasswordHandler is wired behind the WithPasswordChangeGate
+// middleware and you want the user to land back in the application immediately after the change.
+// Use the plain ChangePasswordHandler when you prefer the caller to re-authenticate via the
+// normal login flow (it returns 204/redirect and writes no new cookies).
+//
+// The new pair is issued AFTER svc.ChangePassword returns, so it is never caught by the
+// AccountErasers that revoke prior refresh-token families. remember is always false for the
+// re-issued refresh cookie: a password change is not a "remember me" affirmation.
+func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
+		if cfg.userResolver == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		user, ok := cfg.userResolver(r)
+		if !ok || user == nil {
+			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if !cfg.parseLimitedForm(w, r) {
+			return
+		}
+
+		current := r.PostForm.Get(cfg.currentPasswordField)
+		newPassword := r.PostForm.Get(cfg.newPasswordField)
+
+		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
+			switch {
+			case errors.Is(err, ErrInvalidCredentials):
+				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
+			case isPasswordPolicyError(err):
+				cfg.fail(w, r, http.StatusBadRequest, "password_rejected")
+			default:
+				cfg.fail(w, r, http.StatusInternalServerError, "internal_error")
+			}
+			return
+		}
+
+		// ChangePassword succeeded: the must-change flag is cleared in the store and prior
+		// refresh-token families have been revoked by the AccountErasers. Issue a fresh full pair
+		// now so the user is immediately re-authenticated without an extra login round-trip.
+		// MustChangePassword will be false: claimsOf does not set it and the store has cleared it.
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, false); err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+			return
+		}
+		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
 // RequestEmailChangeHandler builds an authenticated HTTP handler that starts the change-email
 // flow for the signed-in user. The current user is obtained via WithUserResolver (typically
 // reading whatever the application's auth middleware stashed on the request); if no resolver
