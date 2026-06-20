@@ -6,12 +6,65 @@ source: `actor.go`, `ratelimit/*.go`, `event/*.go`, `health/*.go`, `janitor/*.go
 import: `github.com/JLugagne/egauth`
 
 ```go
+// PrincipalKind classifies the authenticated entity: User (interactive login), PAT (personal access
+// token acting on behalf of a human), or Service (machine/service identity).
+type PrincipalKind string
+
+const (
+    User    PrincipalKind = "user"    // interactive login; IsHuman()=true
+    PAT     PrincipalKind = "pat"     // personal access token; IsHuman()=true
+    Service PrincipalKind = "service" // machine identity; IsMachine()=true
+)
+
 type Actor struct {
+    // UserID is set for User and PAT actors; empty for Service actors (their subject is KeyID).
     UserID   uuid.UUID
     TenantID string
+    // Kind classifies the actor. Zero value ("") is treated as User by IsHuman/IsMachine.
+    Kind     PrincipalKind
+    // KeyID is the API key UUID for PAT and Service actors; empty for User actors.
+    KeyID    uuid.UUID
+    // Scopes are the permission scopes carried by this actor's token. egauth does not
+    // enforce scopes — they are exposed for application middleware (e.g. WithRequiredScopes).
+    Scopes   []string
 }
+
+func (a Actor) IsHuman() bool   // true for User, PAT, and zero Kind
+func (a Actor) IsMachine() bool // true only for Service
 ```
 Authenticated principal. Passed explicitly to handlers — never via `context.Context`. `TenantID` empty string is the valid single-tenant partition.
+
+### API key types (`tokens.KeyType`)
+```go
+const (
+    KeyTypePAT     tokens.KeyType = "pat"     // personal access token (human actor)
+    KeyTypeService tokens.KeyType = "service" // machine/service identity
+)
+```
+Set at `IssueAPIKey` call time; persisted in the store; surfaced on the resulting `Actor.Kind`.
+
+### Audit events — API key lifecycle
+| Type | When | `Event.Reason` | Key `Attrs` |
+|------|------|----------------|-------------|
+| `api_key.created` | Key issued | — | `"key_type"` (pat/service), `"created_by"` |
+| `api_key.auth.succeeded` | Verify succeeded | — | `"key_type"`, `"ip"`, `"user_agent"` (if RequestContext set) |
+| `api_key.auth.failed` | Verify failed | `not_found` / `expired` / `tenant_mismatch` / `wrong_type` | — |
+| `api_key.purged` | GC sweep | — | `"count"` |
+
+Audit events never carry secrets, tokens, hashes, or raw user input — only the short machine codes above.
+
+### `event.RequestContext`
+```go
+type RequestContext struct {
+    IP        string // client IP; recorded as "ip" Attr on login.* and api_key.auth.* events
+    UserAgent string // recorded as "user_agent" Attr
+}
+// Thread in as a variadic option to auth entry points.
+func RequestContextFrom(opts ...RequestContext) RequestContext
+func (rc RequestContext) ApplyTo(attrs map[string]any) map[string]any
+const AttrIP        = "ip"
+const AttrUserAgent = "user_agent"
+```
 
 ## ratelimit
 import: `github.com/JLugagne/egauth/ratelimit`

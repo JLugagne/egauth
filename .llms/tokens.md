@@ -131,12 +131,31 @@ type APIKey[C any] struct {
     ID        uuid.UUID
     TenantID  string
     Prefix    string     // e.g. "sk_live_"
-    Token     string     // clear-text, only at creation
+    Token     string     // clear-text, only at creation; NEVER persisted
     Hash      string     // SHA-256 hex stored in DB
     ExpiresAt *time.Time // nil = never expires
+    // Type identifies whether this is a PAT or a service token. Chosen at IssueAPIKey call;
+    // persisted in the store; surfaced on Actor.Kind at the auth boundary.
+    Type      tokens.KeyType  // KeyTypePAT | KeyTypeService
+    // CreatedBy is the UUID of the human user who issued this key. For PATs it is the owning
+    // user; for service tokens it is the operator who provisioned the key (the service token's
+    // Subject is its own ID, so CreatedBy is the only back-link to the creating human).
+    CreatedBy uuid.UUID
     Claims    Claims[C]
 }
 // String/GoString/LogValue redact Token.
+
+// IssueAPIKey does NOT copy the creating user's live roles into the key.
+// Pass Scopes explicitly — the key's authority is only what you set at issuance.
+```
+
+### `tokens.KeyType`
+```go
+type KeyType string
+const (
+    KeyTypePAT     KeyType = "pat"     // personal access token (IsHuman actor)
+    KeyTypeService KeyType = "service" // machine/service identity (IsMachine actor)
+)
 ```
 
 ### `jwt.Config[C any]`
@@ -337,9 +356,14 @@ type basic.AuthenticatedHandlerFunc = tokens.AuthenticatedHandlerFunc[struct{}]
 **`egauth.Actor` injected on success:**
 ```go
 type egauth.Actor struct {
-    UserID   uuid.UUID
+    UserID   uuid.UUID      // set for User and PAT; empty for Service (use KeyID)
     TenantID string
+    Kind     egauth.PrincipalKind // User | PAT | Service; zero behaves as User
+    KeyID    uuid.UUID      // API key UUID for PAT and Service actors
+    Scopes   []string       // scopes carried by the token; never interpreted by egauth
 }
+func (a Actor) IsHuman() bool   // User or PAT
+func (a Actor) IsMachine() bool // Service only
 ```
 
 ### `AuthOption[C]` — middleware options
@@ -354,6 +378,10 @@ type egauth.Actor struct {
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
 | `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
+| `WithRequiredScopes[C](scopes ...string)` | Require ALL listed scopes present in `Claims.Scopes`; rejects with `403 insufficient_scope`. Opt-in only — no default scope policy. |
+| `WithRequiredKind[C](kinds ...egauth.PrincipalKind)` | Require the credential's `Actor.Kind` to be one of the listed values; rejects with `403 wrong_principal_kind`. Opt-in only — no default kind policy. |
+| `RequireMachine[C]()` | Convenience: `WithRequiredKind(egauth.Service)` — admits Service tokens only. |
+| `RequireHuman[C]()` | Convenience: `WithRequiredKind(egauth.User, egauth.PAT)` — admits User and PAT tokens only. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |

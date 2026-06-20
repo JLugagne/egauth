@@ -228,6 +228,37 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   does **not** drive any forced-change decision (there is no age-based policy); a zero value on a
   legacy row is simply an unknown last-changed time and is harmless.
 
+- **API keys: PAT and service tokens.** egauth issues two kinds of long-lived key via `IssueAPIKey`.
+  A **PAT (Personal Access Token)** acts on behalf of a human: `Actor.Kind == egauth.PAT`,
+  `IsHuman()` returns `true`, and `Actor.UserID` is the owning user's UUID. A **Service token** is a
+  machine identity decoupled from any human: `Actor.Kind == egauth.Service`, `IsMachine()` returns
+  `true`, and the token's subject is the key's own ID (recorded in `Actor.KeyID`); the human who
+  created it is tracked separately in the key's `CreatedBy` field and emitted on the
+  `api_key.created` audit event.
+
+  **A key's authority is only the scopes you pass at issuance. `IssueAPIKey` does not copy, inherit,
+  or mirror the creating user's live roles.** Passing `Scopes: ["repo:read"]` at issuance constrains
+  the key to that capability regardless of the issuing user's full privilege set. This is the safe
+  default — a leaked PAT is bounded to the scopes it was issued with. If a broader scope is
+  appropriate, pass it explicitly; egauth never widens it silently.
+
+  Both key types are stored as SHA-256 hashes only — the clear-text token is returned exactly once
+  at issuance and is never persisted. Audit events for the key lifecycle never carry the token,
+  its hash, or any raw user input; they carry only short machine `Reason` codes and safe metadata:
+  - `api_key.created` — fired on issuance; `Attrs` carry `"key_type"` (pat/service) and `"created_by"`.
+  - `api_key.auth.succeeded` — fired on a successful verify; `Attrs` carry `"key_type"`, and optionally
+    `"ip"` / `"user_agent"` when a `event.RequestContext` is threaded in by the handler.
+  - `api_key.auth.failed` — fired on a failed verify; `Event.Reason` is one of: `not_found`,
+    `expired`, `tenant_mismatch`, `wrong_type`. No token or hash is included.
+  - `api_key.purged` — fired by the `DeleteExpired` GC sweep; `Attrs` carry `"count"`.
+
+  **Opt-in route gates** (`WithRequiredKind`, `WithRequiredScopes`, `RequireMachine`, `RequireHuman`)
+  are `AuthOption`s on `RequireAuth`. They are entirely opt-in: the library imposes no default
+  authority policy. A request carrying a PAT when the route requires a Service token (or vice versa)
+  receives `403 wrong_principal_kind`; a request missing a required scope receives `403 insufficient_scope`.
+  The `egauth.Actor` injected into every handler always carries `Kind`, `KeyID`, and `Scopes`, so
+  application code can also enforce policy directly without relying on middleware gates.
+
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
