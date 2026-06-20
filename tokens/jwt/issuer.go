@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/golang-jwt/jwt/v5"
@@ -690,25 +691,6 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, tenantID string, to
 	}, nil
 }
 
-// VerifyAPIKey validates an API key against the store and returns its claims.
-// tenantID scopes the store lookup to a single tenant's partition: a key saved under a
-// real tenant resolves only when the matching tenantID is passed, and verification fails
-// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
-func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
-	hash := tokens.HashToken(key)
-
-	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
-	if err != nil {
-		return nil, err
-	}
-
-	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
-		return nil, tokens.ErrTokenExpired
-	}
-
-	return &apiKey.Claims, nil
-}
-
 // Verify interface compliance.
 var (
 	_ tokens.Issuer[any]   = (*Service[any])(nil)
@@ -834,4 +816,54 @@ func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID st
 		return nil, tokens.ErrTenantMismatch
 	}
 	return claims, nil
+}
+
+// VerifyAPIKey validates an API key against the store and returns its claims.
+// tenantID scopes the store lookup to a single tenant's partition: a key saved under a
+// real tenant resolves only when the matching tenantID is passed, and verification fails
+// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
+//
+// It enforces expiry: a key past its ExpiresAt returns tokens.ErrTokenExpired. Use
+// VerifyAPIKeyActor when the caller needs the classified egauth.Actor (key type, key ID,
+// scopes, subject) in addition to the claims.
+func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key)
+	if err != nil {
+		return nil, err
+	}
+	return &apiKey.Claims, nil
+}
+
+// VerifyAPIKeyActor validates an API key exactly like VerifyAPIKey (same store lookup, same
+// fail-closed tenant scoping and the same tokens.ErrTokenExpired on an expired key) and, in
+// addition to the claims, returns the egauth.Actor that classifies the request the key
+// authenticates. The Actor carries the key's Kind (PAT→egauth.PAT, Service→egauth.Service),
+// its KeyID, its Scopes, and — for a PAT — the owning UserID; a Service key leaves UserID zero
+// since its subject is the key's own ID (held in KeyID). It is the entry point the audit and
+// middleware epics use so a verified key always yields the same Actor shape. No secret (the
+// presented key or its stored hash) is exposed on either return value.
+func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key string) (egauth.Actor, *tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key)
+	if err != nil {
+		return egauth.Actor{}, nil, err
+	}
+	return tokens.ActorFromAPIKey(apiKey), &apiKey.Claims, nil
+}
+
+// verifyAPIKey is the shared lookup + expiry check behind VerifyAPIKey and VerifyAPIKeyActor.
+// It returns the full stored APIKey (no clear-text token — the store never persists one) so the
+// callers can project it to claims and/or an Actor.
+func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.APIKey[C], error) {
+	hash := tokens.HashToken(key)
+
+	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
+	if err != nil {
+		return nil, err
+	}
+
+	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
+		return nil, tokens.ErrTokenExpired
+	}
+
+	return apiKey, nil
 }
