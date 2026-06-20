@@ -163,3 +163,64 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelInfo
 	}
 }
+
+// RequestContext carries optional, caller-supplied transport metadata about the request that
+// triggered an authentication event — the client IP and User-Agent. The library cannot discover
+// these on its own (they live on the inbound HTTP request, which the auth core never sees), so
+// the application threads a RequestContext into the auth entry points (login and API-key verify)
+// and egauth copies its non-empty fields into Event.Attrs ("ip" / "user_agent") on the resulting
+// login.* and api_key.auth.* events.
+//
+// It is entirely optional: the entry points accept it as a variadic option, so omitting it simply
+// omits the corresponding Attrs. Both fields are plain strings and may be left empty individually
+// (an empty field is never written to Attrs). RequestContext carries no secrets — an IP and a
+// User-Agent are not credentials — so it is consistent with the event package's no-secrets
+// contract.
+type RequestContext struct {
+	// IP is the client IP address as the application observed it (e.g. from RemoteAddr or a
+	// trusted proxy header). egauth does not parse, validate or trust it — it is recorded verbatim
+	// under the "ip" attribute when non-empty.
+	IP string
+	// UserAgent is the client's User-Agent string, recorded verbatim under the "user_agent"
+	// attribute when non-empty.
+	UserAgent string
+}
+
+// Attr keys used by RequestContext.ApplyTo.
+const (
+	AttrIP        = "ip"
+	AttrUserAgent = "user_agent"
+)
+
+// RequestContextFrom collapses a variadic RequestContext option into a single value. Auth entry
+// points accept the context as a trailing variadic argument so it is optional and existing callers
+// keep compiling; this helper gives them one uniform way to interpret it. When several are passed
+// the last one wins (so a wrapper can supply a default that an inner call overrides); when none are
+// passed the zero RequestContext is returned (both fields empty), which contributes no Attrs.
+func RequestContextFrom(opts ...RequestContext) RequestContext {
+	if len(opts) == 0 {
+		return RequestContext{}
+	}
+	return opts[len(opts)-1]
+}
+
+// ApplyTo copies rc's non-empty fields into attrs under the AttrIP / AttrUserAgent keys and
+// returns the (possibly newly allocated) map. A nil attrs is allocated only when rc has at least
+// one non-empty field, so a zero RequestContext applied to a nil map returns nil and adds nothing —
+// the emit site then carries no IP/User-Agent attribute. Existing entries in attrs are preserved;
+// only the IP/User-Agent keys are set.
+func (rc RequestContext) ApplyTo(attrs map[string]any) map[string]any {
+	if rc.IP == "" && rc.UserAgent == "" {
+		return attrs
+	}
+	if attrs == nil {
+		attrs = make(map[string]any, 2)
+	}
+	if rc.IP != "" {
+		attrs[AttrIP] = rc.IP
+	}
+	if rc.UserAgent != "" {
+		attrs[AttrUserAgent] = rc.UserAgent
+	}
+	return attrs
+}

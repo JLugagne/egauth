@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 )
@@ -54,15 +55,15 @@ func (s *SingleTenant[C]) VerifyRefreshToken(ctx context.Context, token string) 
 // VerifyAPIKey calls Service.VerifyAPIKey on the empty tenant. Its signature keeps the
 // single-tenant convenience contract (no tenantID): the underlying lookup is scoped to the
 // default partition ("").
-func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
-	return s.svc.VerifyAPIKey(ctx, "", key)
+func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string, rc ...event.RequestContext) (*tokens.Claims[C], error) {
+	return s.svc.VerifyAPIKey(ctx, "", key, rc...)
 }
 
 // VerifyAPIKeyActor calls Service.VerifyAPIKeyActor on the empty tenant, returning the
 // classified egauth.Actor alongside the claims. Like VerifyAPIKey it drops the tenantID
 // (the lookup is scoped to the default partition "").
-func (s *SingleTenant[C]) VerifyAPIKeyActor(ctx context.Context, key string) (egauth.Actor, *tokens.Claims[C], error) {
-	return s.svc.VerifyAPIKeyActor(ctx, "", key)
+func (s *SingleTenant[C]) VerifyAPIKeyActor(ctx context.Context, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error) {
+	return s.svc.VerifyAPIKeyActor(ctx, "", key, rc...)
 }
 
 // Rotate calls Service.Rotate on the empty tenant.

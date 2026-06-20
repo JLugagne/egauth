@@ -3,6 +3,7 @@ package servicetest
 import (
 	"context"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/google/uuid"
 )
@@ -121,7 +122,7 @@ func (m *MockService) Register(ctx context.Context, tenantID string, email, pass
 	return m.RegisterFunc(ctx, tenantID, email, password)
 }
 
-func (m *MockService) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+func (m *MockService) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, _ ...event.RequestContext) (*identity.User, error) {
 	if m.AuthenticateFunc == nil {
 		panic("called not defined AuthenticateFunc")
 	}

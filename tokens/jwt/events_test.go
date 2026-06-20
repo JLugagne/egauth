@@ -292,3 +292,90 @@ func TestAPIKeyAuditEmits(t *testing.T) {
 		require.NoError(t, err)
 	})
 }
+
+// TestAPIKeyAuthRequestContextIP proves that an optional event.RequestContext threaded into the
+// API-key verify entry points lands the client IP (and User-Agent) in Event.Attrs on both
+// api_key.auth.succeeded and api_key.auth.failed, alongside the existing key_type attribute, and
+// that omitting the context omits those attributes.
+func TestAPIKeyAuthRequestContextIP(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "tenant-ip"
+	const ip, ua = "198.51.100.42", "egauth-client/1.2"
+
+	newSvc := func() (*jwt.Service[struct{}], *captureSink) {
+		sink := &captureSink{}
+		svc := jwt.New[struct{}](jwt.Config[struct{}]{
+			Store:      memory.NewStore[struct{}](),
+			SecretKey:  "audit-secret-key-aaaaaaaaaaaaaaa!", // 32 bytes
+			Issuer:     "egauth-test",
+			AccessTTL:  5 * time.Minute,
+			RefreshTTL: 24 * time.Hour,
+			EventSink:  sink,
+		})
+		return svc, sink
+	}
+
+	issueKey := func(t *testing.T, svc *jwt.Service[struct{}], sink *captureSink) string {
+		t.Helper()
+		key, err := svc.IssueAPIKey(ctx, "sk_svc_", tokens.KeyTypeService, uuid.Must(uuid.NewV7()), tokens.Claims[struct{}]{
+			TenantID: tenant,
+		})
+		require.NoError(t, err)
+		// Reset so only the verify event is asserted.
+		sink.mu.Lock()
+		sink.events = nil
+		sink.mu.Unlock()
+		return key.Token
+	}
+
+	t.Run("succeeded carries IP and UA, alongside key_type", func(t *testing.T) {
+		svc, sink := newSvc()
+		token := issueKey(t, svc, sink)
+
+		_, err := svc.VerifyAPIKey(ctx, tenant, token, event.RequestContext{IP: ip, UserAgent: ua})
+		require.NoError(t, err)
+
+		e, ok := sink.findEvent(event.APIKeyAuthSucceeded)
+		require.True(t, ok)
+		assert.Equal(t, ip, e.Attrs[event.AttrIP])
+		assert.Equal(t, ua, e.Attrs[event.AttrUserAgent])
+		assert.Equal(t, string(tokens.KeyTypeService), e.Attrs["key_type"], "key_type must still be present")
+	})
+
+	t.Run("VerifyAPIKeyActor also threads the context", func(t *testing.T) {
+		svc, sink := newSvc()
+		token := issueKey(t, svc, sink)
+
+		_, _, err := svc.VerifyAPIKeyActor(ctx, tenant, token, event.RequestContext{IP: ip})
+		require.NoError(t, err)
+
+		e, ok := sink.findEvent(event.APIKeyAuthSucceeded)
+		require.True(t, ok)
+		assert.Equal(t, ip, e.Attrs[event.AttrIP])
+	})
+
+	t.Run("failed (not_found) carries IP when supplied", func(t *testing.T) {
+		svc, sink := newSvc()
+
+		_, err := svc.VerifyAPIKey(ctx, tenant, "sk_svc_missing", event.RequestContext{IP: ip})
+		require.ErrorIs(t, err, tokens.ErrAPIKeyNotFound)
+
+		e, ok := sink.findReason(event.APIKeyAuthFailed, event.ReasonAPIKeyNotFound)
+		require.True(t, ok)
+		assert.Equal(t, ip, e.Attrs[event.AttrIP])
+	})
+
+	t.Run("no context supplied omits the IP attribute", func(t *testing.T) {
+		svc, sink := newSvc()
+		token := issueKey(t, svc, sink)
+
+		_, err := svc.VerifyAPIKey(ctx, tenant, token)
+		require.NoError(t, err)
+
+		e, ok := sink.findEvent(event.APIKeyAuthSucceeded)
+		require.True(t, ok)
+		_, hasIP := e.Attrs[event.AttrIP]
+		assert.False(t, hasIP, "absent RequestContext must omit the IP attribute")
+		assert.Equal(t, string(tokens.KeyTypeService), e.Attrs["key_type"], "key_type stays present without a context")
+	})
+}

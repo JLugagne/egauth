@@ -837,8 +837,8 @@ func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID st
 // It enforces expiry: a key past its ExpiresAt returns tokens.ErrTokenExpired. Use
 // VerifyAPIKeyActor when the caller needs the classified egauth.Actor (key type, key ID,
 // scopes, subject) in addition to the claims.
-func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
-	apiKey, err := s.verifyAPIKey(ctx, tenantID, key)
+func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key, rc...)
 	if err != nil {
 		return nil, err
 	}
@@ -853,8 +853,8 @@ func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key stri
 // since its subject is the key's own ID (held in KeyID). It is the entry point the audit and
 // middleware epics use so a verified key always yields the same Actor shape. No secret (the
 // presented key or its stored hash) is exposed on either return value.
-func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key string) (egauth.Actor, *tokens.Claims[C], error) {
-	apiKey, err := s.verifyAPIKey(ctx, tenantID, key)
+func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key, rc...)
 	if err != nil {
 		return egauth.Actor{}, nil, err
 	}
@@ -864,7 +864,12 @@ func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key
 // verifyAPIKey is the shared lookup + expiry check behind VerifyAPIKey and VerifyAPIKeyActor.
 // It returns the full stored APIKey (no clear-text token — the store never persists one) so the
 // callers can project it to claims and/or an Actor.
-func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.APIKey[C], error) {
+func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*tokens.APIKey[C], error) {
+	// reqCtx is the (optional) caller-supplied client IP / User-Agent, copied into the Attrs of
+	// every api_key.auth.* event below so the audit trail carries the request's origin; when no
+	// context is supplied it contributes nothing.
+	reqCtx := event.RequestContextFrom(rc...)
+
 	hash := tokens.HashToken(key)
 
 	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
@@ -883,6 +888,7 @@ func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key stri
 			Type:     event.APIKeyAuthFailed,
 			TenantID: tenantID,
 			Reason:   reason,
+			Attrs:    reqCtx.ApplyTo(nil),
 		})
 		return nil, err
 	}
@@ -892,6 +898,7 @@ func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key stri
 			Type:     event.APIKeyAuthFailed,
 			TenantID: tenantID,
 			Reason:   event.ReasonAPIKeyExpired,
+			Attrs:    reqCtx.ApplyTo(nil),
 		})
 		return nil, tokens.ErrTokenExpired
 	}
@@ -899,9 +906,9 @@ func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key stri
 	event.Emit(ctx, s.events, event.Event{
 		Type:     event.APIKeyAuthSucceeded,
 		TenantID: tenantID,
-		Attrs: map[string]any{
+		Attrs: reqCtx.ApplyTo(map[string]any{
 			"key_type": string(apiKey.Type),
-		},
+		}),
 	})
 
 	return apiKey, nil

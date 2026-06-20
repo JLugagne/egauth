@@ -84,7 +84,11 @@ const (
 // legal tenant key (the single-tenant default partition); it must still be passed explicitly.
 type Service interface {
 	Register(ctx context.Context, tenantID string, email, password string) (*User, error)
-	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error)
+	// Authenticate verifies a credential login. An optional event.RequestContext supplies the
+	// client IP / User-Agent that egauth then records in Event.Attrs on the resulting
+	// login.succeeded / login.failed events; omitting it omits those attributes. Only the last
+	// supplied context is used.
+	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, rc ...event.RequestContext) (*User, error)
 	// RequestPasswordReset mints a password-reset token for the account owning email. To
 	// avoid account enumeration it returns ("", nil, nil) when no such account exists, so the
 	// caller can present an identical response either way. When a token is returned the user
@@ -464,12 +468,17 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 	_, _ = s.hasher.Hash(ctx, password)
 }
 
-func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error) {
+func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, rc ...event.RequestContext) (*User, error) {
+	// reqCtx is the (optional) caller-supplied client IP / User-Agent. It is copied into the
+	// Attrs of every login.* event below so the audit trail carries the request's origin; when
+	// no context is supplied it contributes nothing.
+	reqCtx := event.RequestContextFrom(rc...)
+
 	// loginFailed emits a uniform failure event. UserID is "" on the enumeration-safe paths
 	// (unknown account) where no user is resolved; the reason is deliberately uniform there so
 	// the audit log mirrors the uniform client response and is not itself an enumeration oracle.
 	loginFailed := func(userID, reason string) {
-		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenantID, Reason: reason})
+		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenantID, Reason: reason, Attrs: reqCtx.ApplyTo(nil)})
 	}
 
 	if provider == "password" {
@@ -539,7 +548,7 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			_ = s.store.ResetFailedAttempts(ctx, tenantID, ident.ID)
 		}
 
-		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
+		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID, Attrs: reqCtx.ApplyTo(nil)})
 		return user, nil
 	}
 

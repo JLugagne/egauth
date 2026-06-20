@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -57,7 +58,7 @@ func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, tenantID strin
 	return m.VerifyRefreshTokenFunc(ctx, tenantID, token)
 }
 
-func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
+func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string, _ ...event.RequestContext) (*tokens.Claims[C], error) {
 	if m.VerifyAPIKeyFunc == nil {
 		panic("called not defined VerifyAPIKeyFunc")
 	}

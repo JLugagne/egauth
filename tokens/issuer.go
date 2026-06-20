@@ -3,6 +3,7 @@ package tokens
 import (
 	"context"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
@@ -38,5 +39,9 @@ type Verifier[C any] interface {
 	// tenantID scopes the store lookup: the key is resolved only within that tenant's
 	// partition, so a key saved under a real tenant must be verified with the matching
 	// tenantID. Single-tenant callers pass "" (the default partition).
-	VerifyAPIKey(ctx context.Context, tenantID string, key string) (*Claims[C], error)
+	//
+	// An optional event.RequestContext supplies the client IP / User-Agent that egauth then
+	// records in Event.Attrs on the resulting api_key.auth.succeeded / api_key.auth.failed
+	// events; omitting it omits those attributes. Only the last supplied context is used.
+	VerifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*Claims[C], error)
 }

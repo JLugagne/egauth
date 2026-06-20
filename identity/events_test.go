@@ -47,6 +47,18 @@ func (c *captureSink) count(t event.Type) int {
 
 func (c *captureSink) has(t event.Type) bool { return c.count(t) > 0 }
 
+// last returns the most recent event of type t (and whether one exists).
+func (c *captureSink) last(t event.Type) (event.Event, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for i := len(c.events) - 1; i >= 0; i-- {
+		if c.events[i].Type == t {
+			return c.events[i], true
+		}
+	}
+	return event.Event{}, false
+}
+
 func okPolicy() *mockPolicy {
 	return &mockPolicy{VerifyFunc: func(context.Context, string) error { return nil }}
 }
@@ -193,4 +205,78 @@ func TestEvents_HandlerEmitsDeliveryFailed(t *testing.T) {
 	// Delivery runs off the response path; the swallowed failure surfaces as an event.
 	require.Eventually(t, func() bool { return sink.has(event.DeliveryFailed) }, time.Second, 5*time.Millisecond,
 		"a Mailer outage must surface as a DeliveryFailed event")
+}
+
+// TestAuthRequestContextIP proves that an optional event.RequestContext threaded into
+// Authenticate lands the client IP (and User-Agent) in Event.Attrs on both login.succeeded and
+// login.failed, and that omitting the context omits those attributes entirely.
+func TestAuthRequestContextIP(t *testing.T) {
+	const ip, ua = "203.0.113.7", "curl/8.0"
+
+	newSvc := func(sink event.Sink, passwordMatches bool) identity.Service {
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(context.Context, string) (string, error) { return "h", nil },
+			CompareFunc: func(context.Context, string, string) error {
+				if passwordMatches {
+					return nil
+				}
+				return errors.New("wrong")
+			},
+		}
+		return identity.NewService(identitymemory.NewStore(), hasher, okPolicy(), identity.WithEventSink(sink))
+	}
+
+	t.Run("login succeeded carries IP and UA when supplied", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newSvc(sink, true)
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "pw",
+			event.RequestContext{IP: ip, UserAgent: ua})
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok, "a successful login must emit login.succeeded")
+		assert.Equal(t, ip, e.Attrs[event.AttrIP], "the client IP must land in Attrs")
+		assert.Equal(t, ua, e.Attrs[event.AttrUserAgent], "the User-Agent must land in Attrs")
+	})
+
+	t.Run("login failed carries IP when supplied", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newSvc(sink, false)
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong",
+			event.RequestContext{IP: ip})
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+
+		e, ok := sink.last(event.LoginFailed)
+		require.True(t, ok, "a failed login must emit login.failed")
+		assert.Equal(t, ip, e.Attrs[event.AttrIP], "the client IP must land in Attrs on failure too")
+		// A UA-less context must not invent a User-Agent attribute.
+		_, hasUA := e.Attrs[event.AttrUserAgent]
+		assert.False(t, hasUA, "an empty User-Agent must not be written to Attrs")
+	})
+
+	t.Run("no IP attribute when no context supplied", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newSvc(sink, true)
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok)
+		_, hasIP := e.Attrs[event.AttrIP]
+		assert.False(t, hasIP, "absent RequestContext must omit the IP attribute")
+		_, hasUA := e.Attrs[event.AttrUserAgent]
+		assert.False(t, hasUA, "absent RequestContext must omit the User-Agent attribute")
+	})
 }

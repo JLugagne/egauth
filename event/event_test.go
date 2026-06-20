@@ -157,3 +157,39 @@ func TestAPIKeyInfoEvents_LogAtInfo(t *testing.T) {
 		assert.Equal(t, string(typ), r.Event)
 	}
 }
+
+func TestRequestContextFrom(t *testing.T) {
+	assert.Equal(t, event.RequestContext{}, event.RequestContextFrom(), "no option yields the zero value")
+
+	rc := event.RequestContext{IP: "1.2.3.4"}
+	assert.Equal(t, rc, event.RequestContextFrom(rc), "the single option is returned verbatim")
+
+	first := event.RequestContext{IP: "1.1.1.1"}
+	last := event.RequestContext{IP: "2.2.2.2", UserAgent: "ua"}
+	assert.Equal(t, last, event.RequestContextFrom(first, last), "the last option wins")
+}
+
+func TestRequestContext_ApplyTo(t *testing.T) {
+	t.Run("zero context leaves a nil map nil", func(t *testing.T) {
+		assert.Nil(t, event.RequestContext{}.ApplyTo(nil))
+	})
+
+	t.Run("both fields are written under the documented keys", func(t *testing.T) {
+		got := event.RequestContext{IP: "9.9.9.9", UserAgent: "agent"}.ApplyTo(nil)
+		assert.Equal(t, "9.9.9.9", got[event.AttrIP])
+		assert.Equal(t, "agent", got[event.AttrUserAgent])
+	})
+
+	t.Run("an empty field is omitted", func(t *testing.T) {
+		got := event.RequestContext{IP: "9.9.9.9"}.ApplyTo(nil)
+		assert.Equal(t, "9.9.9.9", got[event.AttrIP])
+		_, ok := got[event.AttrUserAgent]
+		assert.False(t, ok, "an empty User-Agent must not be written")
+	})
+
+	t.Run("existing entries are preserved", func(t *testing.T) {
+		got := event.RequestContext{IP: "9.9.9.9"}.ApplyTo(map[string]any{"key_type": "service"})
+		assert.Equal(t, "service", got["key_type"], "pre-existing attrs survive")
+		assert.Equal(t, "9.9.9.9", got[event.AttrIP])
+	})
+}

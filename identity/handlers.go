@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -318,7 +319,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password)
+		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password, requestContext(r))
 		if err != nil {
 			status, code := mapAuthError(err)
 			cfg.fail(w, r, status, code)
@@ -1397,4 +1398,21 @@ func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg
 // WithTrustedOrigins to extend, rather than remove, the allowlist.
 func WithInsecureNoOriginCheck() HandlerOption {
 	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
+}
+
+// requestContext builds the optional event.RequestContext that LoginHandler threads into
+// Service.Authenticate so the client IP and User-Agent land in the login.* event Attrs.
+//
+// The IP is taken from r.RemoteAddr (host part only) — the address of the immediate peer. egauth
+// deliberately does NOT trust X-Forwarded-For / Forwarded here: those headers are spoofable unless
+// a trusted reverse proxy terminates them, and egauth cannot know the deployment's proxy topology.
+// A deployment that terminates such a header at a trusted hop, or that wants a different IP source,
+// can call Service.Authenticate directly with its own event.RequestContext. This mirrors the
+// untrusted-RemoteAddr stance of ratelimit.ClientIP.
+func requestContext(r *http.Request) event.RequestContext {
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip = host
+	}
+	return event.RequestContext{IP: ip, UserAgent: r.UserAgent()}
 }
