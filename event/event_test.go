@@ -93,3 +93,67 @@ func TestNewSlogSink_NilLoggerUsesDefault(t *testing.T) {
 	sink := event.NewSlogSink(nil)
 	sink.EmitEvent(context.Background(), event.Event{Type: event.LoginSucceeded})
 }
+
+func TestAPIKeyEventTypes(t *testing.T) {
+	// Verify all four API-key Type constants have the expected string values.
+	assert.Equal(t, event.Type("api_key.created"), event.APIKeyCreated)
+	assert.Equal(t, event.Type("api_key.auth.succeeded"), event.APIKeyAuthSucceeded)
+	assert.Equal(t, event.Type("api_key.auth.failed"), event.APIKeyAuthFailed)
+	assert.Equal(t, event.Type("api_key.purged"), event.APIKeyPurged)
+
+	// Verify the Reason code constants.
+	assert.Equal(t, "not_found", event.ReasonAPIKeyNotFound)
+	assert.Equal(t, "expired", event.ReasonAPIKeyExpired)
+	assert.Equal(t, "tenant_mismatch", event.ReasonAPIKeyTenantMismatch)
+	assert.Equal(t, "wrong_type", event.ReasonAPIKeyWrongType)
+}
+
+func TestAPIKeyAuthFailed_LogsAtWarn(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sink := event.NewSlogSink(logger)
+
+	type record struct {
+		Level  string `json:"level"`
+		Event  string `json:"event"`
+		Reason string `json:"reason"`
+	}
+
+	for _, reason := range []string{
+		event.ReasonAPIKeyNotFound,
+		event.ReasonAPIKeyExpired,
+		event.ReasonAPIKeyTenantMismatch,
+		event.ReasonAPIKeyWrongType,
+	} {
+		buf.Reset()
+		sink.EmitEvent(context.Background(), event.Event{
+			Type:   event.APIKeyAuthFailed,
+			Reason: reason,
+		})
+		var r record
+		require.NoError(t, json.NewDecoder(&buf).Decode(&r))
+		assert.Equal(t, "WARN", r.Level, "reason=%s should log at WARN", reason)
+		assert.Equal(t, "api_key.auth.failed", r.Event)
+		assert.Equal(t, reason, r.Reason)
+	}
+}
+
+func TestAPIKeyInfoEvents_LogAtInfo(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	sink := event.NewSlogSink(logger)
+
+	type record struct {
+		Level string `json:"level"`
+		Event string `json:"event"`
+	}
+
+	for _, typ := range []event.Type{event.APIKeyCreated, event.APIKeyAuthSucceeded, event.APIKeyPurged} {
+		buf.Reset()
+		sink.EmitEvent(context.Background(), event.Event{Type: typ})
+		var r record
+		require.NoError(t, json.NewDecoder(&buf).Decode(&r))
+		assert.Equal(t, "INFO", r.Level, "type=%s should log at INFO", typ)
+		assert.Equal(t, string(typ), r.Event)
+	}
+}

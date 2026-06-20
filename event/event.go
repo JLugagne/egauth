@@ -1,8 +1,9 @@
 // Package event defines egauth's optional security-event seam. Services emit lifecycle and
 // security events — login success/failure, account lockout, refresh-token reuse, MFA changes,
-// delivery failures, ... — to a Sink the application supplies. It is entirely optional (a nil
-// Sink disables emission) and dependency-free, so any module can emit without coupling to a
-// particular logging or telemetry implementation.
+// API-key lifecycle (creation, successful auth, failed auth, expiry purge), delivery failures,
+// ... — to a Sink the application supplies. It is entirely optional (a nil Sink disables
+// emission) and dependency-free, so any module can emit without coupling to a particular
+// logging or telemetry implementation.
 //
 // A ready-made slog adapter (NewSlogSink) covers the common "just log it" case, giving the
 // injectable *slog.Logger seam; richer consumers implement Sink to feed a SIEM, metrics pipeline,
@@ -48,6 +49,22 @@ const (
 	MFADisabled             Type = "mfa.disabled"
 	DeliveryFailed          Type = "delivery.failed"         // a swallowed mailer/delivery error (outage signal)
 	InsecureCookieMisuse    Type = "cookies.insecure_misuse" // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
+
+	// API-key lifecycle events.
+	APIKeyCreated       Type = "api_key.created"        // a new API key (PAT or service token) was issued; carries type and created_by in Attrs
+	APIKeyAuthSucceeded Type = "api_key.auth.succeeded" // an API key was verified successfully; carries key type in Attrs
+	APIKeyAuthFailed    Type = "api_key.auth.failed"    // an API key verification failed; Reason carries the failure code (see ReasonAPIKey* constants)
+	APIKeyPurged        Type = "api_key.purged"         // expired keys were hard-deleted by the sweep; Attrs carries "count"
+)
+
+// Reason codes for APIKeyAuthFailed events. These are the only valid values for Event.Reason
+// when Type is APIKeyAuthFailed. They are intentionally short machine codes: no secrets,
+// tokens or raw attacker input.
+const (
+	ReasonAPIKeyNotFound       = "not_found"       // no key matched the provided token hash
+	ReasonAPIKeyExpired        = "expired"         // the key exists but its expiry has passed
+	ReasonAPIKeyTenantMismatch = "tenant_mismatch" // the key belongs to a different tenant
+	ReasonAPIKeyWrongType      = "wrong_type"      // the caller required a specific key type (PAT or service) but got the other
 )
 
 // Event is a single security-relevant occurrence.
@@ -105,8 +122,8 @@ type slogSink struct{ logger *slog.Logger }
 
 // NewSlogSink returns a Sink that logs events to logger (slog.Default() when nil). An event
 // carrying an Err is logged at Error; known failure/anomaly events (failed login, lockout,
-// refresh reuse, family revoke, MFA verification failure, delivery failure, insecure-cookie
-// misuse) at Warn; the rest at Info.
+// refresh reuse, family revoke, MFA verification failure, API-key auth failure, delivery
+// failure, insecure-cookie misuse) at Warn; the rest at Info.
 func NewSlogSink(logger *slog.Logger) Sink {
 	if logger == nil {
 		logger = slog.Default()
@@ -140,7 +157,7 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelError
 	}
 	switch e.Type {
-	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed, InsecureCookieMisuse:
+	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse:
 		return slog.LevelWarn
 	default:
 		return slog.LevelInfo
