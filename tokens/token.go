@@ -15,6 +15,21 @@ const (
 	AMRMFA      = "mfa" // multiple factors were verified in this session
 )
 
+// KeyType identifies the kind of API key, aligning with egauth.PrincipalKind at the
+// Actor-construction boundary. Defined locally in the tokens package to avoid an import
+// cycle: the tokens package is imported by the root egauth package, so tokens must not
+// import egauth in return.
+type KeyType string
+
+const (
+	// KeyTypePAT is a Personal Access Token acting on behalf of a human user.
+	// At the Actor boundary it maps to egauth.PrincipalKind == PAT, and IsHuman() is true.
+	KeyTypePAT KeyType = "pat"
+	// KeyTypeService is a machine/service identity decoupled from any human.
+	// At the Actor boundary it maps to egauth.PrincipalKind == Service, and IsMachine() is true.
+	KeyTypeService KeyType = "service"
+)
+
 // Claims represents standard JWT claims plus custom generic claims.
 type Claims[C any] struct {
 	Subject  uuid.UUID
@@ -80,6 +95,15 @@ type APIKey[C any] struct {
 	Token     string // The clear text value (only available at creation)
 	Hash      string // The hashed value (SHA-256) stored in DB
 	ExpiresAt *time.Time
+	// Type identifies whether the key is a PAT (personal access token acting on behalf of a
+	// human) or a Service token (machine identity). It is chosen at issuance, persisted in the
+	// store, and surfaced on the resulting Actor via egauth.PrincipalKind at the Actor-
+	// construction boundary.
+	Type KeyType
+	// CreatedBy records the uuid of the human user who created the key. For PATs this is the
+	// key owner. For service tokens the Subject in Claims is the key's own ID, so CreatedBy is
+	// the only field tying the key back to the creating user.
+	CreatedBy uuid.UUID
 	Claims    Claims[C]
 }
 
