@@ -74,3 +74,10 @@ func (s *SingleTenant[C]) Rotate(ctx context.Context, refreshToken string) (*tok
 func (s *SingleTenant[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
 	return s.svc.VerifyAccessTokenForTenant(ctx, tenantID, tokenStr)
 }
+
+// DeleteExpired calls Service.DeleteExpired on the empty tenant (the single-tenant default
+// partition) and emits api_key.purged with the deleted count. See Service.DeleteExpired for
+// the event contract.
+func (s *SingleTenant[C]) DeleteExpired(ctx context.Context) (int64, error) {
+	return s.svc.DeleteExpired(ctx, "")
+}

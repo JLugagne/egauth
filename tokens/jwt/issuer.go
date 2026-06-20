@@ -547,6 +547,17 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tok
 		return nil, err
 	}
 
+	// Emit api_key.created. Attrs carry type and created_by for observability; the clear-text
+	// token and its hash are intentionally excluded (events carry no secrets).
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyCreated,
+		TenantID: key.TenantID,
+		Attrs: map[string]any{
+			"key_type":   string(key.Type),
+			"created_by": key.CreatedBy.String(),
+		},
+	})
+
 	return key, nil
 }
 
@@ -858,12 +869,60 @@ func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key stri
 
 	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
 	if err != nil {
+		// Map the store error to the correct audit reason. ErrAPIKeyNotFound covers both "no
+		// such key" and the tenant-scoped lookup finding nothing for this tenant (stores return
+		// ErrAPIKeyNotFound rather than ErrTenantMismatch on a cross-tenant hash hit, since the
+		// hash lookup is always tenant-scoped in the WHERE clause). We emit not_found for both;
+		// a tenant_mismatch distinction would require a cross-tenant secondary lookup which is
+		// out of scope for this iteration.
+		reason := event.ReasonAPIKeyNotFound
+		if errors.Is(err, tokens.ErrTenantMismatch) {
+			reason = event.ReasonAPIKeyTenantMismatch
+		}
+		event.Emit(ctx, s.events, event.Event{
+			Type:     event.APIKeyAuthFailed,
+			TenantID: tenantID,
+			Reason:   reason,
+		})
 		return nil, err
 	}
 
 	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
+		event.Emit(ctx, s.events, event.Event{
+			Type:     event.APIKeyAuthFailed,
+			TenantID: tenantID,
+			Reason:   event.ReasonAPIKeyExpired,
+		})
 		return nil, tokens.ErrTokenExpired
 	}
 
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyAuthSucceeded,
+		TenantID: tenantID,
+		Attrs: map[string]any{
+			"key_type": string(apiKey.Type),
+		},
+	})
+
 	return apiKey, nil
+}
+
+// DeleteExpired delegates to the store's TokenReaper to purge expired refresh tokens and
+// API keys within tenantID, and emits api_key.purged with the deleted count in Attrs.
+// This method satisfies tokens.TokenReaper so callers can use the Service directly as the
+// schedulable sweeper rather than bypassing the event layer by calling the store directly.
+// A nil event sink is a safe no-op.
+func (s *Service[C]) DeleteExpired(ctx context.Context, tenantID string) (int64, error) {
+	n, err := s.store.DeleteExpired(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyPurged,
+		TenantID: tenantID,
+		Attrs: map[string]any{
+			"count": n,
+		},
+	})
+	return n, nil
 }
