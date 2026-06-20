@@ -491,8 +491,20 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}, nil
 }
 
-// IssueAPIKey generates a new API Key with the specified prefix and claims.
-func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+// IssueAPIKey generates a new API key of the given type, attributed to the human user
+// createdBy, carrying the authority (scopes/roles/audiences) supplied on claims verbatim.
+//
+// The caller is fully responsible for the key's authority: the issuer NEVER reads or copies
+// the creating user's stored roles/scopes. Whatever scopes a leaked key can exercise are
+// exactly the ones passed here, so callers should grant the narrowest set required.
+//
+// Claims.Subject is set per type and reflects what the key IS:
+//   - KeyTypePAT: the key acts on behalf of a human, so Subject is the user as supplied by the
+//     caller on claims.Subject (left untouched).
+//   - KeyTypeService: the key is a machine identity decoupled from any human, so Subject is
+//     overwritten with the newly generated key ID; createdBy remains the only link back to the
+//     human who minted it (recorded on APIKey.CreatedBy, not on the subject).
+func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
 	keyBytes := make([]byte, s.apiKeyLength)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)
@@ -503,18 +515,30 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 	// Hash the token for storage.
 	hashStr := tokens.HashToken(tokenStr)
 
+	keyID := uuid.Must(uuid.NewV7())
+
+	// A Service token is a machine identity decoupled from any human: its subject is its own
+	// key ID, not the creator. A PAT acts on behalf of a human, so its subject is left as the
+	// caller supplied (the user). The authority on claims (scopes/roles/audiences) is used as
+	// given for either type — never inflated from the creator's stored roles.
+	if keyType == tokens.KeyTypeService {
+		claims.Subject = keyID
+	}
+
 	var expiresAt *time.Time
 	if !claims.ExpiresAt.IsZero() {
 		expiresAt = &claims.ExpiresAt
 	}
 
 	key := &tokens.APIKey[C]{
-		ID:        uuid.Must(uuid.NewV7()),
+		ID:        keyID,
 		TenantID:  claims.TenantID,
 		Prefix:    prefix,
 		Token:     tokenStr,
 		Hash:      hashStr,
 		ExpiresAt: expiresAt,
+		Type:      keyType,
+		CreatedBy: createdBy,
 		Claims:    claims,
 	}
 

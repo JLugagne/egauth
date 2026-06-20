@@ -2,6 +2,8 @@ package tokens
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 // Issuer is responsible for generating tokens and API keys.
@@ -9,8 +11,12 @@ type Issuer[C any] interface {
 	// IssueTokenPair generates a new Access and Refresh token pair for the given claims.
 	IssueTokenPair(ctx context.Context, claims Claims[C]) (*TokenPair[C], error)
 
-	// IssueAPIKey generates a new API Key with the specified prefix and claims.
-	IssueAPIKey(ctx context.Context, prefix string, claims Claims[C]) (*APIKey[C], error)
+	// IssueAPIKey generates a new API key of the given type, attributed to the human user
+	// createdBy, with the authority (scopes/roles/audiences) carried verbatim on claims. The
+	// issuer never copies the creating user's stored roles. For KeyTypeService the resulting
+	// Claims.Subject is the key's own ID (a machine identity); for KeyTypePAT it is the user
+	// supplied on claims.Subject.
+	IssueAPIKey(ctx context.Context, prefix string, keyType KeyType, createdBy uuid.UUID, claims Claims[C]) (*APIKey[C], error)
 }
 
 // Verifier is responsible for validating tokens and extracting their claims.

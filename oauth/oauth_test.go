@@ -47,7 +47,7 @@ func (s *stubIssuer) IssueTokenPair(_ context.Context, _ tokens.Claims[struct{}]
 	return s.pair, s.err
 }
 
-func (s *stubIssuer) IssueAPIKey(_ context.Context, _ string, _ tokens.Claims[struct{}]) (*tokens.APIKey[struct{}], error) {
+func (s *stubIssuer) IssueAPIKey(_ context.Context, _ string, _ tokens.KeyType, _ uuid.UUID, _ tokens.Claims[struct{}]) (*tokens.APIKey[struct{}], error) {
 	return nil, nil
 }
 

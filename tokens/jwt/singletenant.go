@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
 // SingleTenant is a convenience wrapper around *Service[C] for applications that run with
@@ -38,8 +39,8 @@ func (s *SingleTenant[C]) IssueTokenPair(ctx context.Context, claims tokens.Clai
 }
 
 // IssueAPIKey calls Service.IssueAPIKey (tenant, if any, is carried on claims).
-func (s *SingleTenant[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
-	return s.svc.IssueAPIKey(ctx, prefix, claims)
+func (s *SingleTenant[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+	return s.svc.IssueAPIKey(ctx, prefix, keyType, createdBy, claims)
 }
 
 // VerifyRefreshToken calls Service.VerifyRefreshToken on the empty tenant. Its signature

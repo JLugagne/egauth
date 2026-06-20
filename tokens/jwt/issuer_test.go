@@ -61,6 +61,113 @@ func TestJWTIssuerVerifier_Contract(t *testing.T) {
 	issuertest.IssuerVerifierContractTesting[MyCustomClaims](t, svc, svc, MyCustomClaims{Plan: "pro", IsAdmin: true})
 }
 
+// newIssueKeyService builds a Service whose in-memory store captures every saved API key,
+// keyed by its hash, so a test can both verify the returned key and inspect what was persisted.
+func newIssueKeyService(t *testing.T) (*jwt.Service[MyCustomClaims], map[string]*tokens.APIKey[MyCustomClaims]) {
+	t.Helper()
+	saved := make(map[string]*tokens.APIKey[MyCustomClaims])
+	store := &storetest.MockStore[MyCustomClaims]{
+		SaveAPIKeyFunc: func(_ context.Context, _ string, key *tokens.APIKey[MyCustomClaims]) error {
+			cp := *key
+			saved[key.Hash] = &cp
+			return nil
+		},
+		FindAPIKeyByHashFunc: func(_ context.Context, _ string, hash string) (*tokens.APIKey[MyCustomClaims], error) {
+			key, ok := saved[hash]
+			if !ok {
+				return nil, tokens.ErrAPIKeyNotFound
+			}
+			return key, nil
+		},
+	}
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:      store,
+		SecretKey:  "super-secret-key-for-testing----", // 32 bytes
+		Issuer:     "egauth-test",
+		AccessTTL:  15 * time.Minute,
+		RefreshTTL: 24 * time.Hour,
+	}
+	return jwt.New[MyCustomClaims](cfg), saved
+}
+
+// TestIssueAPIKey covers the per-type issuance contract: a PAT's subject is the user, a
+// Service token's subject is its own key ID, both record the type and the human creator, and
+// the issuer uses only the caller-supplied scopes (it never copies the user's stored roles).
+func TestIssueAPIKey(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "tenant-abc"
+
+	t.Run("PAT subject is the user", func(t *testing.T) {
+		svc, saved := newIssueKeyService(t)
+		userID := uuid.Must(uuid.NewV7())
+		creatorID := uuid.Must(uuid.NewV7())
+
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
+			Subject:  userID,
+			TenantID: tenant,
+			Scopes:   []string{"repo:read"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, key)
+
+		assert.Equal(t, tokens.KeyTypePAT, key.Type)
+		assert.Equal(t, creatorID, key.CreatedBy)
+		assert.Equal(t, userID, key.Claims.Subject, "a PAT acts on behalf of the user, so its subject is the user")
+
+		// The persisted row mirrors the returned key.
+		stored := saved[key.Hash]
+		require.NotNil(t, stored)
+		assert.Equal(t, tokens.KeyTypePAT, stored.Type)
+		assert.Equal(t, creatorID, stored.CreatedBy)
+		assert.Equal(t, userID, stored.Claims.Subject)
+	})
+
+	t.Run("Service subject is the key's own ID, distinct from the creator", func(t *testing.T) {
+		svc, saved := newIssueKeyService(t)
+		creatorID := uuid.Must(uuid.NewV7())
+
+		key, err := svc.IssueAPIKey(ctx, "sk_svc_", tokens.KeyTypeService, creatorID, tokens.Claims[MyCustomClaims]{
+			// A caller-supplied subject must be ignored for a Service token.
+			Subject:  uuid.Must(uuid.NewV7()),
+			TenantID: tenant,
+			Scopes:   []string{"ingest:write"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, key)
+
+		assert.Equal(t, tokens.KeyTypeService, key.Type)
+		assert.Equal(t, creatorID, key.CreatedBy)
+		assert.Equal(t, key.ID, key.Claims.Subject, "a Service token's subject is its own key ID")
+		assert.NotEqual(t, creatorID, key.Claims.Subject, "the creator is distinct from the service identity")
+
+		stored := saved[key.Hash]
+		require.NotNil(t, stored)
+		assert.Equal(t, key.ID, stored.Claims.Subject)
+		assert.Equal(t, creatorID, stored.CreatedBy)
+	})
+
+	t.Run("no silent role copy: only caller-supplied scopes are used", func(t *testing.T) {
+		svc, _ := newIssueKeyService(t)
+		userID := uuid.Must(uuid.NewV7())
+		creatorID := uuid.Must(uuid.NewV7())
+
+		// The user is powerful (admin), but the PAT is issued with a deliberately narrow set.
+		// The issuer must NOT widen the key's authority to the user's roles.
+		narrow := []string{"repo:read"}
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
+			Subject:  userID,
+			TenantID: tenant,
+			Scopes:   narrow,
+			Roles:    []string{"viewer"},
+		})
+		require.NoError(t, err)
+
+		assert.Equal(t, narrow, key.Claims.Scopes, "scopes must be exactly those passed by the caller")
+		assert.Equal(t, []string{"viewer"}, key.Claims.Roles, "roles must be exactly those passed by the caller")
+		assert.NotContains(t, key.Claims.Roles, "admin", "the user's broader stored roles must never be copied onto the key")
+	})
+}
+
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 	ctx := context.Background()
 	mockStore := &storetest.MockStore[MyCustomClaims]{
