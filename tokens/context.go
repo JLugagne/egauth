@@ -58,8 +58,13 @@ func ContextMiddleware[C any](verifier Verifier[C], next http.Handler, opts ...A
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
+			actor := actorFromClaims(claims)
+			if !cfg.kindSatisfied(actor) {
+				wrongPrincipalKind(w)
+				return
+			}
 			ctx := context.WithValue(r.Context(), ctxKey{}, authContext[C]{
-				actorValue: actorFromClaims(claims),
+				actorValue: actor,
 				claims:     claims,
 			})
 			next.ServeHTTP(w, r.WithContext(ctx))

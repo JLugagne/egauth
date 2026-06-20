@@ -3,6 +3,7 @@ package tokens
 import (
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,13 @@ const (
 type Claims[C any] struct {
 	Subject  uuid.UUID
 	TenantID string
+	// Kind records the principal classification of the credential that produced this token.
+	// It is set by the issuer when minting API-key-backed tokens (PAT or Service) and is used
+	// by actorFromClaims to propagate the classification into the egauth.Actor so that the
+	// WithRequiredKind middleware gate can enforce it. Interactive tokens (IssueTokenPair)
+	// leave Kind at its zero value, which actorFromClaims treats as egauth.User (human).
+	// The zero value is therefore the safe default and fully backward-compatible.
+	Kind     egauth.PrincipalKind
 	IssuedAt time.Time
 	// AuthTime is when the subject last actually authenticated (OIDC "auth_time"). Unlike
 	// IssuedAt it is NOT advanced by a silent refresh — it is preserved across rotation within a
