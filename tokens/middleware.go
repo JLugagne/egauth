@@ -22,6 +22,7 @@ type authConfig[C any] struct {
 	readHeader             bool
 	persistRefresh         bool
 	requiredAMR            []string
+	requiredScopes         []string
 	maxAuthAge             time.Duration
 	passwordChangeGate     bool
 	passwordChangeResetURL string
@@ -94,6 +95,15 @@ func WithPersistentAutoRefresh[C any]() AuthOption[C] {
 // AMRMFA) so this gate can enforce, for example, WithRequiredAMR(AMRMFA) on sensitive routes.
 func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
+}
+
+// WithRequiredScopes gates the route on token scopes: the verified token's Scopes claim must
+// contain ALL of the given values, otherwise the request is rejected with 403
+// "insufficient_scope". No effect when no scopes are required (opt-in only).
+// Use this to restrict API-key-backed or PAT-backed routes to tokens carrying specific
+// capabilities (e.g. WithRequiredScopes("repo:write", "ci:trigger")).
+func WithRequiredScopes[C any](scopes ...string) AuthOption[C] {
+	return func(a *authConfig[C]) { a.requiredScopes = scopes }
 }
 
 // WithMaxAuthAge gates the route on step-up ("sudo mode") freshness: the subject must have
@@ -175,6 +185,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				stepUpRequired(w)
 				return
 			}
+			if !cfg.scopesSatisfied(claims) {
+				insufficientScope(w)
+				return
+			}
 			if cfg.passwordChangeBlocked(claims) {
 				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
 				return
@@ -217,6 +231,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
 			if !cfg.stepUpSatisfied(&pair.Claims) {
 				stepUpRequired(w)
+				return
+			}
+			if !cfg.scopesSatisfied(&pair.Claims) {
+				insufficientScope(w)
 				return
 			}
 			if cfg.passwordChangeBlocked(&pair.Claims) {
@@ -281,6 +299,24 @@ func (cfg *authConfig[C]) amrSatisfied(claims *Claims[C]) bool {
 	return true
 }
 
+// scopesSatisfied reports whether the claims carry every required scope. With no requirement
+// configured it always passes (opt-in gate).
+func (cfg *authConfig[C]) scopesSatisfied(claims *Claims[C]) bool {
+	if len(cfg.requiredScopes) == 0 {
+		return true
+	}
+	have := make(map[string]bool, len(claims.Scopes))
+	for _, s := range claims.Scopes {
+		have[s] = true
+	}
+	for _, req := range cfg.requiredScopes {
+		if !have[req] {
+			return false
+		}
+	}
+	return true
+}
+
 func unauthorized(w http.ResponseWriter) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
@@ -289,6 +325,12 @@ func unauthorized(w http.ResponseWriter) {
 // route (RFC 8176 AMR gate); the client should re-authenticate with the missing factor.
 func stepUpRequired(w http.ResponseWriter) {
 	http.Error(w, "step_up_required", http.StatusForbidden)
+}
+
+// insufficientScope signals that the verified token does not carry all scopes required by the
+// route (WithRequiredScopes gate). The subject is authenticated; the token simply lacks authority.
+func insufficientScope(w http.ResponseWriter) {
+	http.Error(w, "insufficient_scope", http.StatusForbidden)
 }
 
 // WithPasswordChangeGate enforces the soft password-change gate: after a request's access
