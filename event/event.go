@@ -35,7 +35,6 @@ const (
 	EmailChanged            Type = "email.changed"
 	PhoneVerified           Type = "phone.verified"
 	RecoveryChannelEnrolled Type = "recovery_channel.enrolled"
-	MagicLinkLogin          Type = "magic_link.login"
 	AccountDeleted          Type = "account.deleted"
 	Logout                  Type = "logout"           // a session was revoked (sign-out, "log out everywhere")
 	AccountBlocked          Type = "account.blocked"  // access denied by policy (rate limit, IP/geo, risk), distinct from account.locked

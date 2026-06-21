@@ -121,8 +121,11 @@ type Service interface {
 	// rather than touching a password.
 	RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 	// LoginWithMagicLink consumes a magic-link token (single-use) and returns the user it
-	// authenticates, so the caller can issue a session/token pair.
-	LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
+	// authenticates, so the caller can issue a session/token pair. An optional
+	// event.RequestContext supplies the client IP / User-Agent that egauth records in
+	// Event.Attrs on the resulting login.succeeded event; omitting it omits those attributes.
+	// Only the last supplied context is used.
+	LoginWithMagicLink(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*User, error)
 	// ChangePassword re-verifies the user's current password and, on success, validates the
 	// new password against the policy and replaces the stored hash. It is the authenticated
 	// self-service counterpart to ResetPassword (which is token-gated). It returns
@@ -1011,12 +1014,20 @@ func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email s
 // LoginWithMagicLink consumes a magic-link token and returns the user it authenticates. A
 // token for a since-deactivated account is rejected (ErrUserNotFound) so account suspension
 // reliably revokes pending passwordless logins.
-func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error) {
+func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*User, error) {
 	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindMagicLink)
 	if err != nil {
 		return nil, err
 	}
-	s.emit(ctx, event.Event{Type: event.MagicLinkLogin, UserID: user.ID.String(), TenantID: user.TenantID})
+	// A magic-link proves possession of the registered mailbox — the RFC 8176 AMR value is
+	// "otp" (one-time password / out-of-band authentication). method="magic_link" is the
+	// human-facing summary; amr=["otp"] is the canonical machine code per RFC 8176 §2.
+	reqCtx := event.RequestContextFrom(rc...)
+	attrs := reqCtx.ApplyTo(map[string]any{
+		"method": "magic_link",
+		"amr":    []string{"otp"},
+	})
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: user.TenantID, Attrs: attrs})
 	return user, nil
 }
 

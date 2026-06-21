@@ -74,9 +74,11 @@ func (s *SingleTenant) RequestMagicLink(ctx context.Context, email string) (toke
 	return s.svc.RequestMagicLink(ctx, "", email)
 }
 
-// LoginWithMagicLink calls Service.LoginWithMagicLink on the empty tenant.
-func (s *SingleTenant) LoginWithMagicLink(ctx context.Context, token string) (*User, error) {
-	return s.svc.LoginWithMagicLink(ctx, "", token)
+// LoginWithMagicLink calls Service.LoginWithMagicLink on the empty tenant. An optional
+// event.RequestContext (client IP / User-Agent) is forwarded so it lands in the
+// login.succeeded event Attrs.
+func (s *SingleTenant) LoginWithMagicLink(ctx context.Context, token string, rc ...event.RequestContext) (*User, error) {
+	return s.svc.LoginWithMagicLink(ctx, "", token, rc...)
 }
 
 // ChangePassword calls Service.ChangePassword on the empty tenant.

@@ -364,3 +364,77 @@ func TestLoginAuditMethod(t *testing.T) {
 		assert.Equal(t, ip, e.Attrs[event.AttrIP], "account.locked must carry the client IP from RequestContext")
 	})
 }
+
+// TestMagicLinkLoginAudit asserts that a successful magic-link login emits a uniform
+// login.succeeded (not the removed magic_link.login type) carrying the expected audit
+// attributes:
+//   - Attrs["method"] = "magic_link"  (human-readable summary)
+//   - Attrs["amr"]    = ["otp"]       (RFC 8176: possession of the registered mailbox)
+//   - Attrs[event.AttrIP] / Attrs[event.AttrUserAgent] when a RequestContext is supplied
+//   - no IP/UA attributes when no RequestContext is supplied
+func TestMagicLinkLoginAudit(t *testing.T) {
+	newMagicLinkSvc := func(sink event.Sink) (identity.Service, string) {
+		ctx := context.Background()
+		store := identitymemory.NewStore()
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(context.Context, string) (string, error) { return "h", nil },
+		}
+		svc := identity.NewService(store, hasher, okPolicy(), identity.WithEventSink(sink))
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		if err != nil {
+			panic(err)
+		}
+		token, _, err := svc.RequestMagicLink(ctx, "", "user@example.com")
+		if err != nil {
+			panic(err)
+		}
+		return svc, token
+	}
+
+	t.Run("login.succeeded carries method=magic_link and amr=[otp]", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc, token := newMagicLinkSvc(sink)
+
+		_, err := svc.LoginWithMagicLink(ctx, "", token)
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok, "a successful magic-link login must emit login.succeeded")
+		assert.Equal(t, "magic_link", e.Attrs["method"], "login.succeeded must carry method=magic_link")
+		amr, _ := e.Attrs["amr"].([]string)
+		assert.Equal(t, []string{"otp"}, amr, "login.succeeded must carry amr=[otp] for a magic-link (mailbox possession)")
+		assert.False(t, sink.has(event.Type("magic_link.login")), "the removed magic_link.login type must never be emitted")
+	})
+
+	t.Run("login.succeeded carries IP and UA when RequestContext supplied", func(t *testing.T) {
+		const ip, ua = "203.0.113.9", "Mozilla/5.0"
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc, token := newMagicLinkSvc(sink)
+
+		_, err := svc.LoginWithMagicLink(ctx, "", token, event.RequestContext{IP: ip, UserAgent: ua})
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok, "a successful magic-link login must emit login.succeeded")
+		assert.Equal(t, ip, e.Attrs[event.AttrIP], "the client IP must land in Attrs when RequestContext is supplied")
+		assert.Equal(t, ua, e.Attrs[event.AttrUserAgent], "the User-Agent must land in Attrs when RequestContext is supplied")
+	})
+
+	t.Run("login.succeeded omits IP and UA when no RequestContext supplied", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc, token := newMagicLinkSvc(sink)
+
+		_, err := svc.LoginWithMagicLink(ctx, "", token)
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok, "a successful magic-link login must emit login.succeeded")
+		_, hasIP := e.Attrs[event.AttrIP]
+		assert.False(t, hasIP, "absent RequestContext must omit the IP attribute")
+		_, hasUA := e.Attrs[event.AttrUserAgent]
+		assert.False(t, hasUA, "absent RequestContext must omit the User-Agent attribute")
+	})
+}

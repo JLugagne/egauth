@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/identity/servicetest"
 	"github.com/JLugagne/egauth/passwords"
@@ -241,7 +242,7 @@ func TestMagicLinkLoginHandler(t *testing.T) {
 	t.Run("success issues auth cookies", func(t *testing.T) {
 		uid := uuid.Must(uuid.NewV7())
 		svc := &servicetest.MockService{
-			LoginWithMagicLinkFunc: func(_ context.Context, _ string, token string) (*identity.User, error) {
+			LoginWithMagicLinkFunc: func(_ context.Context, _ string, token string, _ ...event.RequestContext) (*identity.User, error) {
 				assert.Equal(t, "sel.ver", token)
 				return &identity.User{ID: uid}, nil
 			},
@@ -257,7 +258,7 @@ func TestMagicLinkLoginHandler(t *testing.T) {
 
 	t.Run("invalid token is mapped", func(t *testing.T) {
 		svc := &servicetest.MockService{
-			LoginWithMagicLinkFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {
+			LoginWithMagicLinkFunc: func(_ context.Context, _ string, _ string, _ ...event.RequestContext) (*identity.User, error) {
 				return nil, identity.ErrVerificationTokenNotFound
 			},
 		}

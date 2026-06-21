@@ -726,7 +726,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		token := r.PostForm.Get(cfg.tokenField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.LoginWithMagicLink(r.Context(), cfg.tenant(r), token)
+		user, err := svc.LoginWithMagicLink(r.Context(), cfg.tenant(r), token, requestContext(r))
 		if err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)

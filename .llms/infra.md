@@ -161,7 +161,6 @@ EmailVerified           = "email.verified"
 EmailChanged            = "email.changed"
 PhoneVerified           = "phone.verified"
 RecoveryChannelEnrolled = "recovery_channel.enrolled"
-MagicLinkLogin          = "magic_link.login"
 AccountDeleted          = "account.deleted"
 Logout                  = "logout"                // session revoked
 AccountBlocked          = "account.blocked"       // policy denial (rate limit, IP/geo, risk)
