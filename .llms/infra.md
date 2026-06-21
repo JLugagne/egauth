@@ -155,25 +155,62 @@ LoginSucceeded          = "login.succeeded"
 LoginFailed             = "login.failed"
 AccountLocked           = "account.locked"
 UserRegistered          = "user.registered"
-PasswordReset           = "password.reset"        // completed via reset token
-PasswordChanged         = "password.changed"      // authenticated self-service
+PasswordReset           = "password.reset"          // completed via reset token
+PasswordChanged         = "password.changed"        // authenticated self-service
 EmailVerified           = "email.verified"
 EmailChanged            = "email.changed"
 PhoneVerified           = "phone.verified"
 RecoveryChannelEnrolled = "recovery_channel.enrolled"
 AccountDeleted          = "account.deleted"
-Logout                  = "logout"                // session revoked
-AccountBlocked          = "account.blocked"       // policy denial (rate limit, IP/geo, risk)
-AccountDisabled         = "account.disabled"      // reversible administrative suspension
-AccountEnabled          = "account.enabled"       // administrative re-activation
+Logout                  = "logout"                  // session/token revoked (see M9 logout section below)
+AccountBlocked          = "account.blocked"         // policy denial (rate limit, IP/geo, risk)
+AccountDisabled         = "account.disabled"        // reversible administrative suspension
+AccountEnabled          = "account.enabled"         // administrative re-activation
 RefreshReuseDetected    = "refresh.reuse_detected"
 TokenFamilyRevoked      = "token.family_revoked"
 MFAEnrolled             = "mfa.enrolled"
 MFAConfirmed            = "mfa.confirmed"
 MFAVerificationFailed   = "mfa.verification_failed"
 MFADisabled             = "mfa.disabled"
-DeliveryFailed          = "delivery.failed"       // swallowed mailer/delivery error
+DeliveryFailed          = "delivery.failed"         // swallowed mailer/delivery error
+InsecureCookieMisuse    = "cookies.insecure_misuse" // non-Secure cookies on a non-loopback plaintext host
 ```
+
+### M9 — login-method audit attributes
+
+`login.succeeded` carries two extra `Attrs` keys that identify how the user authenticated:
+
+| Auth path | `"method"` | `"amr"` (RFC 8176 list) | Notes |
+|---|---|---|---|
+| Password | `"password"` | `["pwd"]` | Emitted at first-factor success, BEFORE MFA. The second factor is covered by the separate `mfa.confirmed` event. |
+| Passkey (WebAuthn) | `"passkey"` | `["hwk"]` | Emitted by `passkey.Service` for both conditional-UI and cross-device flows. |
+| Magic link | `"magic_link"` | `["otp"]` | Emitted by `identity.Service.LoginWithMagicLink`. |
+
+`login.failed` carries `Attrs["method"]` (e.g. `"password"`) when the provider is determinable;
+the field is omitted when the rejection happens before the provider is known (e.g. a non-password
+provider presented on the credential path).
+
+`account.locked` carries `"ip"` and `"user_agent"` in `Attrs` when a `RequestContext` was
+supplied to the login entry point (same `ApplyTo` mechanic as other events).
+
+**Removed event type (M9):** `MagicLinkLogin` (`"magic_link.login"`) no longer exists. Magic-link
+login now emits `login.succeeded` with `method="magic_link"` / `amr=["otp"]`. The HTTP handler
+name `MagicLinkLoginHandler` is unchanged.
+
+### M9 — logout auditing
+
+Both auth-state models reuse the existing `event.Logout` (`"logout"`) type. The `Reason` field
+distinguishes the sub-case:
+
+| Source | `Event.Reason` | `Attrs` |
+|---|---|---|
+| `sessions.Service.RevokeSession` | `""` (empty) | `"ip"` / `"user_agent"` if `RequestContext` supplied |
+| `sessions.Service.RevokeAllForUser` | `"all_sessions"` | `"ip"` / `"user_agent"` if `RequestContext` supplied |
+| `tokens.LogoutHandler` | `"token_logout"` | `"ip"` / `"user_agent"` from `r.RemoteAddr` / `r.UserAgent()` |
+
+`tokens.LogoutHandler` emits on successful family revoke only; a double-logout (token already
+gone, `ErrRefreshTokenNotFound`) emits nothing. Register the sink via
+`tokens.WithEventSink(sink)` (also aliased as the deprecated `WithHandlerEventSink`).
 
 ## health
 import: `github.com/JLugagne/egauth/health`

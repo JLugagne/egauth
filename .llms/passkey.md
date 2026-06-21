@@ -235,6 +235,19 @@ assertion, session, err := svc.BeginDiscoverableLogin()
 cred, userID, err := svc.FinishDiscoverableLogin(ctx, tenant, session, r)
 ```
 
+## Audit events (M9 uniform login-method audit)
+
+Both login paths emit a `login.succeeded` event with uniform `Attrs`:
+
+| Method | `method` attr | `amr` attr | extra |
+|---|---|---|---|
+| `FinishLogin` (identified) | `"passkey"` | `["hwk"]` | — |
+| `FinishDiscoverableLogin` (usernameless) | `"passkey"` | `["hwk"]` | `Reason="passkey_discoverable"` |
+
+`"hwk"` is the RFC 8176 Authentication Method Reference for a hardware-key / WebAuthn authenticator. The `Reason` field on the discoverable path is kept alongside the uniform `Attrs` so consumers can distinguish the two passkey flows.
+
+The events are emitted on the `Config.Events` sink configured at `NewService`.
+
 ## Gotchas
 
 - **Discoverable vs identified login**: `BeginDiscoverableLogin` takes no userID; `allowCredentials` is empty so the authenticator selects the key. `FinishDiscoverableLogin` resolves the user from the credential's user handle (UUID bytes). Multi-tenant: pass `tenantID` derived from request (host/subdomain), not from the credential.

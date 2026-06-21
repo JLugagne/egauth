@@ -313,6 +313,43 @@ mux.Handle("/password-reset/request", identity.RequestPasswordResetHandler(svc, 
 mux.Handle("/password-reset/confirm", identity.ResetPasswordHandler(svc))
 ```
 
+## Audit events (M9 uniform login-method audit)
+
+All login paths now emit a `login.succeeded` event (type `"login.succeeded"`) with two additional `Attrs` keys so every authentication path is auditable in a uniform shape:
+
+| Auth path | `method` attr | `amr` attr |
+|---|---|---|
+| Password (`Authenticate`) | `"password"` | `["pwd"]` |
+| Magic-link (`LoginWithMagicLink`) | `"magic_link"` | `["otp"]` |
+
+**Important**: the `amr` on `login.succeeded` reflects only the credential verified at that step. Password login is a first-factor event — if the user has TOTP enrolled, the second factor is recorded by the separate `mfa.confirmed` event, not added to this `amr`.
+
+`login.failed` emits `Attrs["method"] = "password"` on the password-provider path; the non-password rejection path emits `method = ""` rather than mislabelling an OAuth-provider attempt as password.
+
+`account.locked` now carries `"ip"` / `"user_agent"` attrs when a `RequestContext` is supplied.
+
+### Signature changes (pre-v1)
+
+`Authenticate` and `LoginWithMagicLink` gained a trailing variadic `...event.RequestContext` parameter. Supply it to thread request IP / User-Agent into audit events:
+
+```go
+// Authenticate
+user, err := svc.Authenticate(ctx, tenant, "password", email, password,
+    event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()})
+
+// LoginWithMagicLink
+user, err := svc.LoginWithMagicLink(ctx, tenant, token,
+    event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()})
+```
+
+`MagicLinkLoginHandler` passes `requestContext(r)` internally — no extra wiring needed for the HTTP layer.
+
+`identity/servicetest.MockService.LoginWithMagicLinkFunc` was updated to match the new variadic signature.
+
+### Removed event type
+
+`MagicLinkLogin` (`"magic_link.login"`) was removed. Magic-link login now emits `login.succeeded` with `method="magic_link"`. The HTTP handler `MagicLinkLoginHandler` keeps its name unchanged.
+
 ## Gotchas
 
 - `tenantID=""` is a valid partition (the single-tenant default); it must still be passed explicitly to `Service` methods.

@@ -143,6 +143,31 @@ module because:
   etc., which all live in the core module.
 - A separate test-helper module would add friction with no benefit.
 
+## Principal / Actor classification (M8)
+
+Every authenticated request in egauth is represented by an `egauth.Actor`. The `Actor.Kind`
+field (`egauth.PrincipalKind`) lets the application know — without inspecting token internals —
+whether the request comes from a human or a machine:
+
+| Kind | Value | `IsHuman()` | `IsMachine()` | Subject |
+|---|---|---|---|---|
+| `User` | `"user"` | true | false | `Actor.UserID` (the account UUID) |
+| `PAT` | `"pat"` | true | false | `Actor.UserID` (the owning user) + `Actor.KeyID` (the key UUID) |
+| `Service` | `"service"` | false | true | `Actor.KeyID` (the key's own UUID; `UserID` is zero) |
+
+Zero-value `Kind` (`""`) is treated as `User` by both helpers, so a zero-value `Actor` (e.g. in
+tests that do not set `Kind`) is always safe.
+
+`Actor.Scopes` carries the permission scopes verbatim from the token. egauth never interprets or
+enforces scopes — that is deliberately left to application middleware (e.g.
+`tokens.WithRequiredScopes`). See [infra.md](infra.md) for the full `Actor` signature and API key
+type constants.
+
+**Minting API keys.** `tokens.Issuer.IssueAPIKey(ctx, prefix, keyType, createdBy, claims)` issues
+an opaque API key. `keyType` is `tokens.KeyTypePAT` or `tokens.KeyTypeService`; `createdBy` is the
+UUID of the human user performing the action (recorded in the `api_key.created` audit event). The
+resulting `Actor.Kind` at verification time mirrors the stored `keyType`.
+
 ## Security posture (summary)
 
 Secure-by-default: Argon2id hashing, enumeration-safe auth paths (uniform responses + decoy hashing),

@@ -34,10 +34,12 @@ type Service interface {
     Rotate(ctx context.Context, tenantID string, token string, duration time.Duration) (*Session, string, error)
 
     // Deletes session by token hash. Emits event.Logout via event.Sink if configured.
-    RevokeSession(ctx context.Context, tenantID string, token string) error
+    // rc (optional) carries client IP/UA into the audit event Attrs; only the last value is used.
+    RevokeSession(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) error
 
-    // Deletes ALL sessions for userID in tenantID. Idempotent. Emits event.Logout with Reason:"all_sessions".
-    RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+    // Deletes ALL sessions for userID in tenantID. Idempotent. Emits event.Logout with
+    // Reason="all_sessions". rc (optional) carries client IP/UA into the audit event Attrs.
+    RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID, rc ...event.RequestContext) error
 }
 ```
 
@@ -65,7 +67,7 @@ func NewService(store Store, opts ...ServiceOption) Service
 // ServiceOptions:
 func WithClock(now func() time.Time) ServiceOption       // override time source (tests)
 func WithMaxLifetime(d time.Duration) ServiceOption      // absolute cap; zero = disabled
-func WithEventSink(sink event.Sink) ServiceOption        // security-event sink for revocations
+func WithEventSink(sink event.Sink) ServiceOption        // security-event sink for revocations (see M9 below)
 
 // Single-tenant convenience wrapper — drops tenantID arg, always uses ""
 func NewSingleTenant(svc Service) *SingleTenant
@@ -75,13 +77,27 @@ func (s *SingleTenant) CreateSession(ctx, userID, userAgent, ip, duration) (*Ses
 func (s *SingleTenant) ValidateSession(ctx, token) (*Session, error)
 func (s *SingleTenant) Touch(ctx, token, duration) (*Session, error)
 func (s *SingleTenant) Rotate(ctx, token, duration) (*Session, string, error)
-func (s *SingleTenant) RevokeSession(ctx, token) error
-func (s *SingleTenant) RevokeAllForUser(ctx, userID) error
+func (s *SingleTenant) BindUser(ctx, token string, userID uuid.UUID, duration) (*Session, string, error)
+func (s *SingleTenant) RevokeSession(ctx, token string, rc ...event.RequestContext) error
+func (s *SingleTenant) RevokeAllForUser(ctx, userID uuid.UUID, rc ...event.RequestContext) error
 func (s *SingleTenant) Service() Service  // escape hatch: returns underlying multi-tenant Service
 
 // memory store
 func memory.NewStore() *memory.Store  // implements sessions.Store; in-memory, O(1) hash lookup
 ```
+
+## M9 — Logout audit events
+
+When `WithEventSink` is configured, both revocation paths emit `event.Logout` to the sink. The optional `rc ...event.RequestContext` argument added to `RevokeSession` and `RevokeAllForUser` forwards client IP and User-Agent into the event's `Attrs` field. These variadic parameters are backward-compatible: existing call sites with no `rc` continue to compile and behave unchanged (IP/UA fields are simply omitted from the event).
+
+| Revocation path | `event.Logout` fields |
+|---|---|
+| `RevokeSession` | `Type=Logout`, `UserID`, `TenantID`; `Attrs` includes IP/UA when `rc` is supplied |
+| `RevokeAllForUser` | `Type=Logout`, `UserID`, `TenantID`, `Reason="all_sessions"`; `Attrs` includes IP/UA when `rc` is supplied |
+
+`SingleTenant` wrappers forward the variadic unchanged, so single-tenant callers get the same audit coverage.
+
+The token-model counterpart (`tokens.LogoutHandler` with `WithEventSink`) emits the same `event.Logout` type with `Reason="token_logout"`, giving a unified logout audit stream regardless of session model (JWT-family or server-side session).
 
 ## Store contract
 
@@ -193,6 +209,7 @@ import (
 store := memory.NewStore()
 svc := sessions.NewService(store,
     sessions.WithMaxLifetime(7*24*time.Hour), // optional absolute cap
+    sessions.WithEventSink(myAuditSink),      // optional: emit event.Logout on revocation (M9)
 )
 
 // Create
@@ -212,11 +229,12 @@ svc.Touch(ctx, tenantID, token, 24*time.Hour)
 sess, newToken, err := svc.Rotate(ctx, tenantID, token, 24*time.Hour)
 // re-issue Set-Cookie with newToken
 
-// Logout
-svc.RevokeSession(ctx, tenantID, token)
+// Logout — pass RequestContext to stamp client IP/UA in the audit event (M9)
+rc := event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()}
+svc.RevokeSession(ctx, tenantID, token, rc)
 
 // "Log out everywhere" (password reset, compromise)
-svc.RevokeAllForUser(ctx, tenantID, userID)
+svc.RevokeAllForUser(ctx, tenantID, userID, rc)
 ```
 
 ## Gotchas
