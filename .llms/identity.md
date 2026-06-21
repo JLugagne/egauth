@@ -124,12 +124,16 @@ type Store interface {
     DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error)
 
     // Lockout
-    IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
+    // justLocked reports whether THIS atomic increment crossed the threshold (counter went from
+    // below lockThreshold to at/above it). Derived inside the same atomic op, so under concurrent
+    // failed logins exactly one caller sees true — the request that actually locked the account.
+    // The service emits the once-per-lock account.locked event off this, NOT a stale pre-read.
+    IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error)
     ResetFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID) error
 }
 ```
 
-Store is intentionally monolithic for v0.x; methods may be added in minor releases. External implementers must run `identity/storetest` conformance suite on upgrades.
+Store is intentionally monolithic for v0.x; methods may be added in minor releases. External implementers must run `identity/storetest` conformance suite on upgrades. The lockout/replay/single-use methods (`IncrementFailedAttempts`, refresh-token consume, TOTP mark-used) are **concurrency-critical**: implement them atomically (single-statement compare-and-set), never as read-then-write, or the service-layer guarantee silently breaks. Test custom adapters under parallel load with the contract suite.
 
 ## HTTP handlers
 
@@ -355,6 +359,8 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - `tenantID=""` is a valid partition (the single-tenant default); it must still be passed explicitly to `Service` methods.
 - `NewService` panics only on nil store; nil hasher/policy is legal for OAuth-only deployments — password ops return `ErrPasswordHasherRequired`/`ErrPasswordPolicyRequired` rather than panicking.
 - `Authenticate` with a nil hasher performs a decoy hash so a missing hasher is timing-indistinguishable from a wrong password; it always returns `ErrInvalidCredentials`.
+- `Authenticate` also spends a decoy hash on the **locked** (`ErrAccountLocked`) and **disabled** (`ErrAccountDisabled`) rejection branches, equalizing their response time with the unknown-user / wrong-password paths. (Locked/disabled are already disclosed at the status-code level — both → 429 by design — so the timing equalization is defence-in-depth: it keeps in-process timing uniform and survives a refactor that collapses 429→401.)
+- `account.locked` fires off the store's atomic `justLocked` result (the request whose `IncrementFailedAttempts` crossed the threshold), NOT a pre-increment prediction. Under concurrent failed logins it is emitted exactly once and attributed to the correct request; it is suppressed when the store call errored (no lock was persisted).
 - All `Request*` handlers (`RequestPasswordResetHandler`, `RequestMagicLinkHandler`, `RequestPasswordResetViaRecoveryHandler`, `RequestPhoneVerificationHandler`) are enumeration-safe: they always respond 204 regardless of account existence or delivery success.
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.

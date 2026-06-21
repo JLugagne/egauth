@@ -131,7 +131,16 @@ type VerificationTokenStore interface {
 type LockoutStore interface {
 	// IncrementFailedAttempts increments the failed-attempt counter for an identity.
 	// When the counter reaches/exceeds lockThreshold, LockedUntil is set to now + lockDuration.
-	IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
+	//
+	// justLocked reports whether THIS call's atomic increment is the one that crossed the
+	// threshold (the counter went from below lockThreshold to at/above it). It is derived from
+	// the post-increment counter inside the same atomic operation, so under concurrent failed
+	// logins exactly one caller observes justLocked == true — the request that actually locked
+	// the account. Callers use it to emit a once-per-lock audit event with correct attribution;
+	// a non-atomic read-then-predict would mis-fire under contention. It is false when
+	// lockThreshold <= 0 (lockout disabled) and on every attempt after the account is already
+	// locked.
+	IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error)
 
 	// ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.
 	ResetFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID) error

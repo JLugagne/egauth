@@ -521,15 +521,21 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			return nil, ErrInvalidCredentials
 		}
 
-		// If the account is currently locked, reject without comparing the password.
+		// If the account is currently locked, reject without comparing the password. Spend a
+		// decoy hash first so the response time matches the unknown-user / wrong-password paths:
+		// without it, a known-locked account answers measurably faster than an unknown one,
+		// reopening a user-enumeration timing oracle (PRD §108).
 		if ident.LockedUntil != nil && ident.LockedUntil.After(s.now()) {
+			s.decoyHash(ctx, password)
 			loginFailed(user.ID.String(), "account_locked", "password")
 			return nil, ErrAccountLocked
 		}
 
 		// An administratively disabled account is rejected without comparing the password, like a
 		// lockout. Unlike a lockout it does not clear on its own; only EnableUser re-activates it.
+		// The decoy hash equalizes timing with the unknown-user path for the same reason as above.
 		if user.DisabledAt != nil {
+			s.decoyHash(ctx, password)
 			loginFailed(user.ID.String(), "account_disabled", "password")
 			return nil, ErrAccountDisabled
 		}
@@ -543,14 +549,15 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 		if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
 			// Record the failed attempt (and possibly lock the account). The error is not
 			// propagated (the response stays uniform) but it gates the lockout event below.
-			incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
+			justLocked, incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
 			loginFailed(user.ID.String(), "invalid_credentials", "password")
-			// Surface the lockout as its own event — but only when the store actually persisted
-			// the attempt that crosses the threshold. Emitting on a pre-increment prediction even
-			// when the store call errored would assert a lock that never took effect, misleading a
-			// SIEM/audit consumer. (ident.FailedAttempts is the pre-increment count, so +1 is the
-			// value the store would persist; it matches both backends' lock condition.)
-			if incErr == nil && s.lockThreshold > 0 && ident.FailedAttempts+1 >= s.lockThreshold {
+			// Surface the lockout as its own event, driven by the store's atomic result rather
+			// than a pre-increment prediction. justLocked is true only on the request whose
+			// increment actually crossed the threshold, so under concurrent failed logins the
+			// event fires exactly once and is attributed to the correct request — a stale
+			// read-then-predict (ident.FailedAttempts+1) could mis-fire, double-fire, or miss
+			// the crossing request entirely.
+			if incErr == nil && justLocked {
 				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenantID, Attrs: reqCtx.ApplyTo(nil)})
 			}
 			return nil, ErrInvalidCredentials

@@ -48,6 +48,7 @@ func TestWithClock_DeterministicLockoutGate(t *testing.T) {
 	}
 
 	hasher := &hashertest.MockHasher{
+		HashFunc:    func(ctx context.Context, p string) (string, error) { return "decoy", nil },
 		CompareFunc: func(ctx context.Context, h, p string) error { return nil },
 	}
 

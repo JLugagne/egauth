@@ -379,8 +379,8 @@ func TestService_Authenticate(t *testing.T) {
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return &identity.Identity{PasswordHash: &hash}, nil
 			},
-			IncrementFailedAttemptsFunc: func(ctx context.Context, tenantID string, id uuid.UUID, threshold int, dur time.Duration) error {
-				return nil
+			IncrementFailedAttemptsFunc: func(ctx context.Context, tenantID string, id uuid.UUID, threshold int, dur time.Duration) (bool, error) {
+				return false, nil
 			},
 		}
 
@@ -616,6 +616,64 @@ func TestService_Authenticate_ConstantTime(t *testing.T) {
 	})
 }
 
+// TestService_Authenticate_TimingEqualization confirms that the locked and
+// administratively-disabled rejection paths spend an equivalent hashing cost
+// (decoyHash) before returning, exactly like the unknown-user / no-password
+// paths. Without it, a known-locked or known-disabled account answers measurably
+// faster than an unknown one, reopening a user-enumeration timing oracle
+// (distinguishing "exists but locked/disabled" from "does not exist").
+func TestService_Authenticate_TimingEqualization(t *testing.T) {
+	ctx := context.Background()
+	email := "timing@example.com"
+	hash := "hashed"
+
+	t.Run("locked account applies a decoy hash before rejecting", func(t *testing.T) {
+		future := time.Now().Add(10 * time.Minute)
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash, LockedUntil: &future}
+		var hashed, compared bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
+				return ident, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc:    func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+			CompareFunc: func(ctx context.Context, h, p string) error { compared = true; return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "", "password", email, "irrelevant")
+		assert.ErrorIs(t, err, identity.ErrAccountLocked)
+		assert.False(t, compared, "must not compare the password for a locked account")
+		assert.True(t, hashed, "locked path must apply a decoy hash to equalize timing with the unknown-user path")
+	})
+
+	t.Run("disabled account applies a decoy hash before rejecting", func(t *testing.T) {
+		disabledAt := time.Now().Add(-time.Hour)
+		ident := &identity.Identity{ID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: email, PasswordHash: &hash}
+		var hashed, compared bool
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), DisabledAt: &disabledAt}, nil
+			},
+			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
+				return ident, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc:    func(ctx context.Context, p string) (string, error) { hashed = true; return "decoy", nil },
+			CompareFunc: func(ctx context.Context, h, p string) error { compared = true; return nil },
+		}
+		svc := identity.NewService(store, hasher, nil)
+		_, err := svc.Authenticate(ctx, "", "password", email, "irrelevant")
+		assert.ErrorIs(t, err, identity.ErrAccountDisabled)
+		assert.False(t, compared, "must not compare the password for a disabled account")
+		assert.True(t, hashed, "disabled path must apply a decoy hash to equalize timing with the unknown-user path")
+	})
+}
+
 func TestService_Lockout(t *testing.T) {
 	ctx := context.Background()
 	email := "lock@example.com"
@@ -631,10 +689,10 @@ func TestService_Lockout(t *testing.T) {
 			FindIdentityByProviderFunc: func(ctx context.Context, tenantID string, p, pid string) (*identity.Identity, error) {
 				return ident, nil
 			},
-			IncrementFailedAttemptsFunc: func(ctx context.Context, tenantID string, id uuid.UUID, threshold int, dur time.Duration) error {
+			IncrementFailedAttemptsFunc: func(ctx context.Context, tenantID string, id uuid.UUID, threshold int, dur time.Duration) (bool, error) {
 				assert.Equal(t, ident.ID, id)
 				incremented = true
-				return nil
+				return false, nil
 			},
 		}
 		hasher := &hashertest.MockHasher{
@@ -659,6 +717,7 @@ func TestService_Lockout(t *testing.T) {
 			},
 		}
 		hasher := &hashertest.MockHasher{
+			HashFunc:    func(ctx context.Context, p string) (string, error) { return "decoy", nil },
 			CompareFunc: func(ctx context.Context, h, p string) error { compared = true; return nil },
 		}
 		svc := identity.NewService(store, hasher, nil)

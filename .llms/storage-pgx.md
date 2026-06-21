@@ -46,7 +46,7 @@ Methods:
 - `CreateUser`, `FindUserByID`, `FindUserByEmail`, `FindUserByPhone`, `UpdateUser`, `DeleteUser` (soft-delete + anonymise), `DisableUser`, `EnableUser`
 - `UpdateUserEmail`, `UpdateUserPhone`, `UpdateUserRecoveryEmail`
 - `AddIdentity`, `FindIdentityByProvider`, `FindIdentitiesByUserID`, `UpdateIdentityPassword`
-- `IncrementFailedAttempts(ctx, tenantID, identityID, lockThreshold int, lockDuration time.Duration) error`
+- `IncrementFailedAttempts(ctx, tenantID, identityID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error)` — atomic single-statement `UPDATE`; `justLocked` derived via `RETURNING` (pre-increment < threshold ≤ post-increment), so concurrent failed logins yield `justLocked=true` to exactly one caller. Drives the once-per-lock `account.locked` event.
 - `ResetFailedAttempts(ctx, tenantID, identityID) error`
 - `CreateVerificationToken(ctx, tenantID, userID, kind string, ttl time.Duration, metadata []byte) (string, error)`
 - `ConsumeVerificationToken(ctx, tenantID, token, kind string) (uuid.UUID, []byte, error)` — atomic single-use
