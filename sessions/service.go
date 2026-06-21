@@ -36,12 +36,15 @@ type Service interface {
 	// session without minting a new session row, while defeating session fixation. The session ID
 	// and CreatedAt are preserved. An unknown or already-expired session yields ErrSessionNotFound.
 	BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error)
-	RevokeSession(ctx context.Context, tenantID string, token string) error
+	// RevokeSession deletes the session identified by token and emits a Logout audit event. An
+	// optional event.RequestContext may be supplied to carry the client IP/UA into the audit record.
+	RevokeSession(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) error
 	// RevokeAllForUser deletes every session belonging to userID within tenantID — the
 	// "log out everywhere" primitive. Call it after a password reset or account compromise to
 	// kill an attacker's other live sessions, not just the current token. It is idempotent: a
-	// user with no sessions yields no error.
-	RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// user with no sessions yields no error. An optional event.RequestContext may be supplied to
+	// carry the client IP/UA into the audit record.
+	RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID, rc ...event.RequestContext) error
 }
 
 type service struct {
@@ -208,7 +211,7 @@ func (s *service) BindUser(ctx context.Context, tenantID string, token string, u
 	return session, newToken, nil
 }
 
-func (s *service) RevokeSession(ctx context.Context, tenantID string, token string) error {
+func (s *service) RevokeSession(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) error {
 	hash := s.hashToken(token)
 
 	session, err := s.store.FindSessionByHash(ctx, tenantID, hash)
@@ -219,7 +222,13 @@ func (s *service) RevokeSession(ctx context.Context, tenantID string, token stri
 	if err := s.store.DeleteSession(ctx, tenantID, session.ID); err != nil {
 		return err
 	}
-	s.emit(ctx, event.Event{Type: event.Logout, UserID: session.UserID.String(), TenantID: tenantID})
+	reqCtx := event.RequestContextFrom(rc...)
+	s.emit(ctx, event.Event{
+		Type:     event.Logout,
+		UserID:   session.UserID.String(),
+		TenantID: tenantID,
+		Attrs:    reqCtx.ApplyTo(nil),
+	})
 	return nil
 }
 
@@ -281,11 +290,18 @@ func (s *service) clampExpiry(session *Session, candidate time.Time) time.Time {
 
 // RevokeAllForUser deletes every session belonging to userID within tenantID by forwarding to
 // the store's DeleteSessionsByUserID. It is the "log out everywhere" primitive.
-func (s *service) RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+func (s *service) RevokeAllForUser(ctx context.Context, tenantID string, userID uuid.UUID, rc ...event.RequestContext) error {
 	if err := s.store.DeleteSessionsByUserID(ctx, tenantID, userID); err != nil {
 		return err
 	}
-	s.emit(ctx, event.Event{Type: event.Logout, UserID: userID.String(), TenantID: tenantID, Reason: "all_sessions"})
+	reqCtx := event.RequestContextFrom(rc...)
+	s.emit(ctx, event.Event{
+		Type:     event.Logout,
+		UserID:   userID.String(),
+		TenantID: tenantID,
+		Reason:   "all_sessions",
+		Attrs:    reqCtx.ApplyTo(nil),
+	})
 	return nil
 }
 

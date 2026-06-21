@@ -6,12 +6,65 @@ source: `actor.go`, `ratelimit/*.go`, `event/*.go`, `health/*.go`, `janitor/*.go
 import: `github.com/JLugagne/egauth`
 
 ```go
+// PrincipalKind classifies the authenticated entity: User (interactive login), PAT (personal access
+// token acting on behalf of a human), or Service (machine/service identity).
+type PrincipalKind string
+
+const (
+    User    PrincipalKind = "user"    // interactive login; IsHuman()=true
+    PAT     PrincipalKind = "pat"     // personal access token; IsHuman()=true
+    Service PrincipalKind = "service" // machine identity; IsMachine()=true
+)
+
 type Actor struct {
+    // UserID is set for User and PAT actors; empty for Service actors (their subject is KeyID).
     UserID   uuid.UUID
     TenantID string
+    // Kind classifies the actor. Zero value ("") is treated as User by IsHuman/IsMachine.
+    Kind     PrincipalKind
+    // KeyID is the API key UUID for PAT and Service actors; empty for User actors.
+    KeyID    uuid.UUID
+    // Scopes are the permission scopes carried by this actor's token. egauth does not
+    // enforce scopes — they are exposed for application middleware (e.g. WithRequiredScopes).
+    Scopes   []string
 }
+
+func (a Actor) IsHuman() bool   // true for User, PAT, and zero Kind
+func (a Actor) IsMachine() bool // true only for Service
 ```
 Authenticated principal. Passed explicitly to handlers — never via `context.Context`. `TenantID` empty string is the valid single-tenant partition.
+
+### API key types (`tokens.KeyType`)
+```go
+const (
+    KeyTypePAT     tokens.KeyType = "pat"     // personal access token (human actor)
+    KeyTypeService tokens.KeyType = "service" // machine/service identity
+)
+```
+Set at `IssueAPIKey` call time; persisted in the store; surfaced on the resulting `Actor.Kind`.
+
+### Audit events — API key lifecycle
+| Type | When | `Event.Reason` | Key `Attrs` |
+|------|------|----------------|-------------|
+| `api_key.created` | Key issued | — | `"key_type"` (pat/service), `"created_by"` |
+| `api_key.auth.succeeded` | Verify succeeded | — | `"key_type"`, `"ip"`, `"user_agent"` (if RequestContext set) |
+| `api_key.auth.failed` | Verify failed | `not_found` / `expired` / `tenant_mismatch` / `wrong_type` | — |
+| `api_key.purged` | GC sweep | — | `"count"` |
+
+Audit events never carry secrets, tokens, hashes, or raw user input — only the short machine codes above.
+
+### `event.RequestContext`
+```go
+type RequestContext struct {
+    IP        string // client IP; recorded as "ip" Attr on login.* and api_key.auth.* events
+    UserAgent string // recorded as "user_agent" Attr
+}
+// Thread in as a variadic option to auth entry points.
+func RequestContextFrom(opts ...RequestContext) RequestContext
+func (rc RequestContext) ApplyTo(attrs map[string]any) map[string]any
+const AttrIP        = "ip"
+const AttrUserAgent = "user_agent"
+```
 
 ## ratelimit
 import: `github.com/JLugagne/egauth/ratelimit`
@@ -102,26 +155,62 @@ LoginSucceeded          = "login.succeeded"
 LoginFailed             = "login.failed"
 AccountLocked           = "account.locked"
 UserRegistered          = "user.registered"
-PasswordReset           = "password.reset"        // completed via reset token
-PasswordChanged         = "password.changed"      // authenticated self-service
+PasswordReset           = "password.reset"          // completed via reset token
+PasswordChanged         = "password.changed"        // authenticated self-service
 EmailVerified           = "email.verified"
 EmailChanged            = "email.changed"
 PhoneVerified           = "phone.verified"
 RecoveryChannelEnrolled = "recovery_channel.enrolled"
-MagicLinkLogin          = "magic_link.login"
 AccountDeleted          = "account.deleted"
-Logout                  = "logout"                // session revoked
-AccountBlocked          = "account.blocked"       // policy denial (rate limit, IP/geo, risk)
-AccountDisabled         = "account.disabled"      // reversible administrative suspension
-AccountEnabled          = "account.enabled"       // administrative re-activation
+Logout                  = "logout"                  // session/token revoked (see M9 logout section below)
+AccountBlocked          = "account.blocked"         // policy denial (rate limit, IP/geo, risk)
+AccountDisabled         = "account.disabled"        // reversible administrative suspension
+AccountEnabled          = "account.enabled"         // administrative re-activation
 RefreshReuseDetected    = "refresh.reuse_detected"
 TokenFamilyRevoked      = "token.family_revoked"
 MFAEnrolled             = "mfa.enrolled"
 MFAConfirmed            = "mfa.confirmed"
 MFAVerificationFailed   = "mfa.verification_failed"
 MFADisabled             = "mfa.disabled"
-DeliveryFailed          = "delivery.failed"       // swallowed mailer/delivery error
+DeliveryFailed          = "delivery.failed"         // swallowed mailer/delivery error
+InsecureCookieMisuse    = "cookies.insecure_misuse" // non-Secure cookies on a non-loopback plaintext host
 ```
+
+### M9 — login-method audit attributes
+
+`login.succeeded` carries two extra `Attrs` keys that identify how the user authenticated:
+
+| Auth path | `"method"` | `"amr"` (RFC 8176 list) | Notes |
+|---|---|---|---|
+| Password | `"password"` | `["pwd"]` | Emitted at first-factor success, BEFORE MFA. The second factor is covered by the separate `mfa.confirmed` event. |
+| Passkey (WebAuthn) | `"passkey"` | `["hwk"]` | Emitted by `passkey.Service` for both conditional-UI and cross-device flows. |
+| Magic link | `"magic_link"` | `["otp"]` | Emitted by `identity.Service.LoginWithMagicLink`. |
+
+`login.failed` carries `Attrs["method"]` (e.g. `"password"`) when the provider is determinable;
+the field is omitted when the rejection happens before the provider is known (e.g. a non-password
+provider presented on the credential path).
+
+`account.locked` carries `"ip"` and `"user_agent"` in `Attrs` when a `RequestContext` was
+supplied to the login entry point (same `ApplyTo` mechanic as other events).
+
+**Removed event type (M9):** `MagicLinkLogin` (`"magic_link.login"`) no longer exists. Magic-link
+login now emits `login.succeeded` with `method="magic_link"` / `amr=["otp"]`. The HTTP handler
+name `MagicLinkLoginHandler` is unchanged.
+
+### M9 — logout auditing
+
+Both auth-state models reuse the existing `event.Logout` (`"logout"`) type. The `Reason` field
+distinguishes the sub-case:
+
+| Source | `Event.Reason` | `Attrs` |
+|---|---|---|
+| `sessions.Service.RevokeSession` | `""` (empty) | `"ip"` / `"user_agent"` if `RequestContext` supplied |
+| `sessions.Service.RevokeAllForUser` | `"all_sessions"` | `"ip"` / `"user_agent"` if `RequestContext` supplied |
+| `tokens.LogoutHandler` | `"token_logout"` | `"ip"` / `"user_agent"` from `r.RemoteAddr` / `r.UserAgent()` |
+
+`tokens.LogoutHandler` emits on successful family revoke only; a double-logout (token already
+gone, `ErrRefreshTokenNotFound`) emits nothing. Register the sink via
+`tokens.WithEventSink(sink)` (also aliased as the deprecated `WithHandlerEventSink`).
 
 ## health
 import: `github.com/JLugagne/egauth/health`

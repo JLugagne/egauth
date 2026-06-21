@@ -70,7 +70,7 @@ func TestVerifyAPIKeyMultiTenant(t *testing.T) {
 	const tenant = "tenant-a"
 	userID := uuid.Must(uuid.NewV7())
 
-	apiKey, err := svc.IssueAPIKey(ctx, "sk_test_", tokens.Claims[struct{}]{
+	apiKey, err := svc.IssueAPIKey(ctx, "sk_test_", tokens.KeyTypePAT, userID, tokens.Claims[struct{}]{
 		Subject:  userID,
 		TenantID: tenant,
 	})
@@ -109,7 +109,7 @@ func TestSingleTenantVerifyUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, userID, refClaims.Subject)
 
-	apiKey, err := st.IssueAPIKey(ctx, "sk_test_", tokens.Claims[struct{}]{Subject: userID})
+	apiKey, err := st.IssueAPIKey(ctx, "sk_test_", tokens.KeyTypePAT, userID, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 	keyClaims, err := st.VerifyAPIKey(ctx, apiKey.Token)
 	require.NoError(t, err)

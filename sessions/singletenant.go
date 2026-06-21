@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
@@ -57,11 +58,11 @@ func (s *SingleTenant) BindUser(ctx context.Context, token string, userID uuid.U
 }
 
 // RevokeSession calls Service.RevokeSession on the empty tenant.
-func (s *SingleTenant) RevokeSession(ctx context.Context, token string) error {
-	return s.svc.RevokeSession(ctx, "", token)
+func (s *SingleTenant) RevokeSession(ctx context.Context, token string, rc ...event.RequestContext) error {
+	return s.svc.RevokeSession(ctx, "", token, rc...)
 }
 
 // RevokeAllForUser calls Service.RevokeAllForUser on the empty tenant.
-func (s *SingleTenant) RevokeAllForUser(ctx context.Context, userID uuid.UUID) error {
-	return s.svc.RevokeAllForUser(ctx, "", userID)
+func (s *SingleTenant) RevokeAllForUser(ctx context.Context, userID uuid.UUID, rc ...event.RequestContext) error {
+	return s.svc.RevokeAllForUser(ctx, "", userID, rc...)
 }

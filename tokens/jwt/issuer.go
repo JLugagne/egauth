@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/golang-jwt/jwt/v5"
@@ -17,14 +18,18 @@ import (
 // claimsWrapper wraps the standard JWT claims and our custom generic claims.
 type claimsWrapper[C any] struct {
 	jwt.RegisteredClaims
-	TenantID           string   `json:"tenant_id,omitempty"`
-	AuthTime           int64    `json:"auth_time,omitempty"` // OIDC auth_time (unix seconds), preserved across refresh
-	Scopes             []string `json:"scopes,omitempty"`
-	Groups             []string `json:"groups,omitempty"`
-	Roles              []string `json:"roles,omitempty"`
-	AMR                []string `json:"amr,omitempty"`
-	MustChangePassword bool     `json:"must_change_password,omitempty"`
-	Custom             C        `json:"custom"`
+	TenantID string `json:"tenant_id,omitempty"`
+	AuthTime int64  `json:"auth_time,omitempty"` // OIDC auth_time (unix seconds), preserved across refresh
+	// Kind is the principal classification stamped at issuance for API-key-backed access tokens.
+	// It is omitted for plain interactive sessions (zero value round-trips as ""; the middleware
+	// actorFromClaims normalises "" to egauth.User so the WithRequiredKind gate behaves correctly).
+	Kind               egauth.PrincipalKind `json:"kind,omitempty"`
+	Scopes             []string             `json:"scopes,omitempty"`
+	Groups             []string             `json:"groups,omitempty"`
+	Roles              []string             `json:"roles,omitempty"`
+	AMR                []string             `json:"amr,omitempty"`
+	MustChangePassword bool                 `json:"must_change_password,omitempty"`
+	Custom             C                    `json:"custom"`
 }
 
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
@@ -427,6 +432,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		},
 		TenantID:           claims.TenantID,
 		AuthTime:           authTimeUnix,
+		Kind:               claims.Kind,
 		Scopes:             claims.Scopes,
 		Groups:             claims.Groups,
 		Roles:              claims.Roles,
@@ -491,8 +497,20 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}, nil
 }
 
-// IssueAPIKey generates a new API Key with the specified prefix and claims.
-func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+// IssueAPIKey generates a new API key of the given type, attributed to the human user
+// createdBy, carrying the authority (scopes/roles/audiences) supplied on claims verbatim.
+//
+// The caller is fully responsible for the key's authority: the issuer NEVER reads or copies
+// the creating user's stored roles/scopes. Whatever scopes a leaked key can exercise are
+// exactly the ones passed here, so callers should grant the narrowest set required.
+//
+// Claims.Subject is set per type and reflects what the key IS:
+//   - KeyTypePAT: the key acts on behalf of a human, so Subject is the user as supplied by the
+//     caller on claims.Subject (left untouched).
+//   - KeyTypeService: the key is a machine identity decoupled from any human, so Subject is
+//     overwritten with the newly generated key ID; createdBy remains the only link back to the
+//     human who minted it (recorded on APIKey.CreatedBy, not on the subject).
+func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
 	keyBytes := make([]byte, s.apiKeyLength)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)
@@ -503,24 +521,47 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, claims toke
 	// Hash the token for storage.
 	hashStr := tokens.HashToken(tokenStr)
 
+	keyID := uuid.Must(uuid.NewV7())
+
+	// A Service token is a machine identity decoupled from any human: its subject is its own
+	// key ID, not the creator. A PAT acts on behalf of a human, so its subject is left as the
+	// caller supplied (the user). The authority on claims (scopes/roles/audiences) is used as
+	// given for either type — never inflated from the creator's stored roles.
+	if keyType == tokens.KeyTypeService {
+		claims.Subject = keyID
+	}
+
 	var expiresAt *time.Time
 	if !claims.ExpiresAt.IsZero() {
 		expiresAt = &claims.ExpiresAt
 	}
 
 	key := &tokens.APIKey[C]{
-		ID:        uuid.Must(uuid.NewV7()),
+		ID:        keyID,
 		TenantID:  claims.TenantID,
 		Prefix:    prefix,
 		Token:     tokenStr,
 		Hash:      hashStr,
 		ExpiresAt: expiresAt,
+		Type:      keyType,
+		CreatedBy: createdBy,
 		Claims:    claims,
 	}
 
 	if err := s.store.SaveAPIKey(ctx, claims.TenantID, key); err != nil {
 		return nil, err
 	}
+
+	// Emit api_key.created. Attrs carry type and created_by for observability; the clear-text
+	// token and its hash are intentionally excluded (events carry no secrets).
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyCreated,
+		TenantID: key.TenantID,
+		Attrs: map[string]any{
+			"key_type":   string(key.Type),
+			"created_by": key.CreatedBy.String(),
+		},
+	})
 
 	return key, nil
 }
@@ -620,6 +661,7 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 	claims := tokens.Claims[C]{
 		Subject:            subject,
 		TenantID:           wrapper.TenantID,
+		Kind:               wrapper.Kind,
 		IssuedAt:           wrapper.IssuedAt.Time,
 		ExpiresAt:          wrapper.ExpiresAt.Time,
 		Audiences:          wrapper.Audience,
@@ -664,25 +706,6 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, tenantID string, to
 		TenantID:  rt.TenantID,
 		ExpiresAt: rt.ExpiresAt,
 	}, nil
-}
-
-// VerifyAPIKey validates an API key against the store and returns its claims.
-// tenantID scopes the store lookup to a single tenant's partition: a key saved under a
-// real tenant resolves only when the matching tenantID is passed, and verification fails
-// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
-func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
-	hash := tokens.HashToken(key)
-
-	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
-	if err != nil {
-		return nil, err
-	}
-
-	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
-		return nil, tokens.ErrTokenExpired
-	}
-
-	return &apiKey.Claims, nil
 }
 
 // Verify interface compliance.
@@ -810,4 +833,109 @@ func (s *Service[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID st
 		return nil, tokens.ErrTenantMismatch
 	}
 	return claims, nil
+}
+
+// VerifyAPIKey validates an API key against the store and returns its claims.
+// tenantID scopes the store lookup to a single tenant's partition: a key saved under a
+// real tenant resolves only when the matching tenantID is passed, and verification fails
+// closed (not-found) otherwise. Single-tenant callers pass "" (the default partition).
+//
+// It enforces expiry: a key past its ExpiresAt returns tokens.ErrTokenExpired. Use
+// VerifyAPIKeyActor when the caller needs the classified egauth.Actor (key type, key ID,
+// scopes, subject) in addition to the claims.
+func (s *Service[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key, rc...)
+	if err != nil {
+		return nil, err
+	}
+	return &apiKey.Claims, nil
+}
+
+// VerifyAPIKeyActor validates an API key exactly like VerifyAPIKey (same store lookup, same
+// fail-closed tenant scoping and the same tokens.ErrTokenExpired on an expired key) and, in
+// addition to the claims, returns the egauth.Actor that classifies the request the key
+// authenticates. The Actor carries the key's Kind (PAT→egauth.PAT, Service→egauth.Service),
+// its KeyID, its Scopes, and — for a PAT — the owning UserID; a Service key leaves UserID zero
+// since its subject is the key's own ID (held in KeyID). It is the entry point the audit and
+// middleware epics use so a verified key always yields the same Actor shape. No secret (the
+// presented key or its stored hash) is exposed on either return value.
+func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error) {
+	apiKey, err := s.verifyAPIKey(ctx, tenantID, key, rc...)
+	if err != nil {
+		return egauth.Actor{}, nil, err
+	}
+	return tokens.ActorFromAPIKey(apiKey), &apiKey.Claims, nil
+}
+
+// verifyAPIKey is the shared lookup + expiry check behind VerifyAPIKey and VerifyAPIKeyActor.
+// It returns the full stored APIKey (no clear-text token — the store never persists one) so the
+// callers can project it to claims and/or an Actor.
+func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*tokens.APIKey[C], error) {
+	// reqCtx is the (optional) caller-supplied client IP / User-Agent, copied into the Attrs of
+	// every api_key.auth.* event below so the audit trail carries the request's origin; when no
+	// context is supplied it contributes nothing.
+	reqCtx := event.RequestContextFrom(rc...)
+
+	hash := tokens.HashToken(key)
+
+	apiKey, err := s.store.FindAPIKeyByHash(ctx, tenantID, hash)
+	if err != nil {
+		// Map the store error to the correct audit reason. ErrAPIKeyNotFound covers both "no
+		// such key" and the tenant-scoped lookup finding nothing for this tenant (stores return
+		// ErrAPIKeyNotFound rather than ErrTenantMismatch on a cross-tenant hash hit, since the
+		// hash lookup is always tenant-scoped in the WHERE clause). We emit not_found for both;
+		// a tenant_mismatch distinction would require a cross-tenant secondary lookup which is
+		// out of scope for this iteration.
+		reason := event.ReasonAPIKeyNotFound
+		if errors.Is(err, tokens.ErrTenantMismatch) {
+			reason = event.ReasonAPIKeyTenantMismatch
+		}
+		event.Emit(ctx, s.events, event.Event{
+			Type:     event.APIKeyAuthFailed,
+			TenantID: tenantID,
+			Reason:   reason,
+			Attrs:    reqCtx.ApplyTo(nil),
+		})
+		return nil, err
+	}
+
+	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {
+		event.Emit(ctx, s.events, event.Event{
+			Type:     event.APIKeyAuthFailed,
+			TenantID: tenantID,
+			Reason:   event.ReasonAPIKeyExpired,
+			Attrs:    reqCtx.ApplyTo(nil),
+		})
+		return nil, tokens.ErrTokenExpired
+	}
+
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyAuthSucceeded,
+		TenantID: tenantID,
+		Attrs: reqCtx.ApplyTo(map[string]any{
+			"key_type": string(apiKey.Type),
+		}),
+	})
+
+	return apiKey, nil
+}
+
+// DeleteExpired delegates to the store's TokenReaper to purge expired refresh tokens and
+// API keys within tenantID, and emits api_key.purged with the deleted count in Attrs.
+// This method satisfies tokens.TokenReaper so callers can use the Service directly as the
+// schedulable sweeper rather than bypassing the event layer by calling the store directly.
+// A nil event sink is a safe no-op.
+func (s *Service[C]) DeleteExpired(ctx context.Context, tenantID string) (int64, error) {
+	n, err := s.store.DeleteExpired(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyPurged,
+		TenantID: tenantID,
+		Attrs: map[string]any{
+			"count": n,
+		},
+	})
+	return n, nil
 }

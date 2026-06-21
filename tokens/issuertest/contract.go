@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -14,7 +15,7 @@ import (
 // MockIssuer is a function-based mock implementation of the tokens.Issuer interface.
 type MockIssuer[C any] struct {
 	IssueTokenPairFunc func(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error)
-	IssueAPIKeyFunc    func(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error)
+	IssueAPIKeyFunc    func(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error)
 }
 
 func (m *MockIssuer[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error) {
@@ -24,11 +25,11 @@ func (m *MockIssuer[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims
 	return m.IssueTokenPairFunc(ctx, claims)
 }
 
-func (m *MockIssuer[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+func (m *MockIssuer[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
 	if m.IssueAPIKeyFunc == nil {
 		panic("called not defined IssueAPIKeyFunc")
 	}
-	return m.IssueAPIKeyFunc(ctx, prefix, claims)
+	return m.IssueAPIKeyFunc(ctx, prefix, keyType, createdBy, claims)
 }
 
 // MockRotator is a function-based mock implementation of the tokens.Rotator interface.
@@ -57,7 +58,7 @@ func (m *MockVerifier[C]) VerifyRefreshToken(ctx context.Context, tenantID strin
 	return m.VerifyRefreshTokenFunc(ctx, tenantID, token)
 }
 
-func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string) (*tokens.Claims[C], error) {
+func (m *MockVerifier[C]) VerifyAPIKey(ctx context.Context, tenantID string, key string, _ ...event.RequestContext) (*tokens.Claims[C], error) {
 	if m.VerifyAPIKeyFunc == nil {
 		panic("called not defined VerifyAPIKeyFunc")
 	}
@@ -98,17 +99,23 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 	})
 
 	t.Run("Contract: Issue and Verify API Key", func(t *testing.T) {
+		userID := uuid.Must(uuid.NewV7())
+		creatorID := uuid.Must(uuid.NewV7())
 		claims := tokens.Claims[C]{
-			Subject:  uuid.Must(uuid.NewV7()),
+			Subject:  userID,
 			TenantID: "tenant-123",
 			Custom:   customClaim,
 		}
 
-		apiKey, err := issuer.IssueAPIKey(ctx, "sk_test_", claims)
+		// Issue a PAT: it acts on behalf of the user, so its subject stays the user.
+		apiKey, err := issuer.IssueAPIKey(ctx, "sk_test_", tokens.KeyTypePAT, creatorID, claims)
 		require.NoError(t, err, "IssueAPIKey should succeed")
 		require.NotNil(t, apiKey, "APIKey must not be nil")
 		assert.True(t, len(apiKey.Token) > len("sk_test_"), "Token should be longer than the prefix")
 		assert.NotEmpty(t, apiKey.Hash, "Hash must not be empty")
+		assert.Equal(t, tokens.KeyTypePAT, apiKey.Type, "PAT type should be recorded on the key")
+		assert.Equal(t, creatorID, apiKey.CreatedBy, "creator should be recorded on the key")
+		assert.Equal(t, userID, apiKey.Claims.Subject, "a PAT's subject is the user")
 
 		// Verify API Key under the SAME (non-empty) tenant it was saved with: the store
 		// lookup is tenant-scoped, so the matching tenantID is what resolves it. (The

@@ -84,7 +84,11 @@ const (
 // legal tenant key (the single-tenant default partition); it must still be passed explicitly.
 type Service interface {
 	Register(ctx context.Context, tenantID string, email, password string) (*User, error)
-	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error)
+	// Authenticate verifies a credential login. An optional event.RequestContext supplies the
+	// client IP / User-Agent that egauth then records in Event.Attrs on the resulting
+	// login.succeeded / login.failed events; omitting it omits those attributes. Only the last
+	// supplied context is used.
+	Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, rc ...event.RequestContext) (*User, error)
 	// RequestPasswordReset mints a password-reset token for the account owning email. To
 	// avoid account enumeration it returns ("", nil, nil) when no such account exists, so the
 	// caller can present an identical response either way. When a token is returned the user
@@ -117,8 +121,11 @@ type Service interface {
 	// rather than touching a password.
 	RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 	// LoginWithMagicLink consumes a magic-link token (single-use) and returns the user it
-	// authenticates, so the caller can issue a session/token pair.
-	LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
+	// authenticates, so the caller can issue a session/token pair. An optional
+	// event.RequestContext supplies the client IP / User-Agent that egauth records in
+	// Event.Attrs on the resulting login.succeeded event; omitting it omits those attributes.
+	// Only the last supplied context is used.
+	LoginWithMagicLink(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*User, error)
 	// ChangePassword re-verifies the user's current password and, on success, validates the
 	// new password against the policy and replaces the stored hash. It is the authenticated
 	// self-service counterpart to ResetPassword (which is token-gated). It returns
@@ -464,12 +471,27 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 	_, _ = s.hasher.Hash(ctx, password)
 }
 
-func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error) {
+func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, rc ...event.RequestContext) (*User, error) {
+	// reqCtx is the (optional) caller-supplied client IP / User-Agent. It is copied into the
+	// Attrs of every login.* event below so the audit trail carries the request's origin; when
+	// no context is supplied it contributes nothing.
+	reqCtx := event.RequestContextFrom(rc...)
+
 	// loginFailed emits a uniform failure event. UserID is "" on the enumeration-safe paths
 	// (unknown account) where no user is resolved; the reason is deliberately uniform there so
 	// the audit log mirrors the uniform client response and is not itself an enumeration oracle.
-	loginFailed := func(userID, reason string) {
-		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenantID, Reason: reason})
+	// method is the attempted auth method (e.g. "password"); pass "" on paths where the provider
+	// is not determinable (e.g. rejected non-password provider, where recording "password" would
+	// be misleading).
+	loginFailed := func(userID, reason, method string) {
+		attrs := reqCtx.ApplyTo(nil)
+		if method != "" {
+			if attrs == nil {
+				attrs = make(map[string]any, 1)
+			}
+			attrs["method"] = method
+		}
+		s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: userID, TenantID: tenantID, Reason: reason, Attrs: attrs})
 	}
 
 	if provider == "password" {
@@ -478,7 +500,7 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			// Not a valid email: spend an equivalent hashing cost, then fail uniformly so a
 			// malformed identifier is indistinguishable from a wrong password.
 			s.decoyHash(ctx, password)
-			loginFailed("", "invalid_credentials")
+			loginFailed("", "invalid_credentials", "password")
 			return nil, ErrInvalidCredentials
 		}
 		providerID = normalized
@@ -488,33 +510,33 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			// Constant-time: apply an equivalent hashing cost so an attacker cannot
 			// distinguish a missing user from a wrong password by timing (PRD §108).
 			s.decoyHash(ctx, password)
-			loginFailed("", "invalid_credentials")
+			loginFailed("", "invalid_credentials", "password")
 			return nil, ErrInvalidCredentials
 		}
 
 		ident, err := s.store.FindIdentityByProvider(ctx, tenantID, provider, providerID)
 		if err != nil {
 			s.decoyHash(ctx, password)
-			loginFailed(user.ID.String(), "invalid_credentials")
+			loginFailed(user.ID.String(), "invalid_credentials", "password")
 			return nil, ErrInvalidCredentials
 		}
 
 		// If the account is currently locked, reject without comparing the password.
 		if ident.LockedUntil != nil && ident.LockedUntil.After(s.now()) {
-			loginFailed(user.ID.String(), "account_locked")
+			loginFailed(user.ID.String(), "account_locked", "password")
 			return nil, ErrAccountLocked
 		}
 
 		// An administratively disabled account is rejected without comparing the password, like a
 		// lockout. Unlike a lockout it does not clear on its own; only EnableUser re-activates it.
 		if user.DisabledAt != nil {
-			loginFailed(user.ID.String(), "account_disabled")
+			loginFailed(user.ID.String(), "account_disabled", "password")
 			return nil, ErrAccountDisabled
 		}
 
 		if ident.PasswordHash == nil {
 			s.decoyHash(ctx, password)
-			loginFailed(user.ID.String(), "invalid_credentials")
+			loginFailed(user.ID.String(), "invalid_credentials", "password")
 			return nil, ErrInvalidCredentials
 		}
 
@@ -522,14 +544,14 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			// Record the failed attempt (and possibly lock the account). The error is not
 			// propagated (the response stays uniform) but it gates the lockout event below.
 			incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
-			loginFailed(user.ID.String(), "invalid_credentials")
+			loginFailed(user.ID.String(), "invalid_credentials", "password")
 			// Surface the lockout as its own event — but only when the store actually persisted
 			// the attempt that crosses the threshold. Emitting on a pre-increment prediction even
 			// when the store call errored would assert a lock that never took effect, misleading a
 			// SIEM/audit consumer. (ident.FailedAttempts is the pre-increment count, so +1 is the
 			// value the store would persist; it matches both backends' lock condition.)
 			if incErr == nil && s.lockThreshold > 0 && ident.FailedAttempts+1 >= s.lockThreshold {
-				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenantID})
+				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenantID, Attrs: reqCtx.ApplyTo(nil)})
 			}
 			return nil, ErrInvalidCredentials
 		}
@@ -539,7 +561,14 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			_ = s.store.ResetFailedAttempts(ctx, tenantID, ident.ID)
 		}
 
-		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID})
+		// amr reflects the credential verified at this step (password first factor only).
+		// A second factor (if enrolled) is covered by the separate mfa.confirmed event; do
+		// not claim a fuller AMR list here that has not yet been verified.
+		attrs := reqCtx.ApplyTo(map[string]any{
+			"method": "password",
+			"amr":    []string{"pwd"},
+		})
+		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID, Attrs: attrs})
 		return user, nil
 	}
 
@@ -552,7 +581,7 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 	// uniformly with ErrInvalidCredentials, after a decoy hash so the rejection is
 	// indistinguishable by timing from a wrong-password failure on the password path.
 	s.decoyHash(ctx, password)
-	loginFailed("", "invalid_credentials")
+	loginFailed("", "invalid_credentials", "")
 	return nil, ErrInvalidCredentials
 }
 
@@ -985,12 +1014,20 @@ func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email s
 // LoginWithMagicLink consumes a magic-link token and returns the user it authenticates. A
 // token for a since-deactivated account is rejected (ErrUserNotFound) so account suspension
 // reliably revokes pending passwordless logins.
-func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error) {
+func (s *service) LoginWithMagicLink(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*User, error) {
 	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindMagicLink)
 	if err != nil {
 		return nil, err
 	}
-	s.emit(ctx, event.Event{Type: event.MagicLinkLogin, UserID: user.ID.String(), TenantID: user.TenantID})
+	// A magic-link proves possession of the registered mailbox — the RFC 8176 AMR value is
+	// "otp" (one-time password / out-of-band authentication). method="magic_link" is the
+	// human-facing summary; amr=["otp"] is the canonical machine code per RFC 8176 §2.
+	reqCtx := event.RequestContextFrom(rc...)
+	attrs := reqCtx.ApplyTo(map[string]any{
+		"method": "magic_link",
+		"amr":    []string{"otp"},
+	})
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: user.TenantID, Attrs: attrs})
 	return user, nil
 }
 

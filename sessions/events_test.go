@@ -87,3 +87,60 @@ func TestSessionsEvents_NilSinkSafe(t *testing.T) {
 	svc := sessions.NewService(store)
 	require.NoError(t, svc.RevokeAllForUser(ctx, "t", uuid.Must(uuid.NewV7())))
 }
+
+// TestSessionLogoutAuditIP verifies that both logout paths carry IP and UserAgent
+// from a supplied event.RequestContext into the emitted Logout event Attrs.
+func TestSessionLogoutAuditIP(t *testing.T) {
+	ctx := context.Background()
+	tenantID := "tenant-1"
+	userID := uuid.Must(uuid.NewV7())
+	reqCtx := event.RequestContext{IP: "203.0.113.42", UserAgent: "Mozilla/5.0"}
+
+	t.Run("RevokeSession carries IP and UserAgent", func(t *testing.T) {
+		sink := &captureSink{}
+		store := &storetest.MockStore{
+			FindSessionByHashFunc: func(_ context.Context, _ string, _ string) (*sessions.Session, error) {
+				return &sessions.Session{ID: uuid.Must(uuid.NewV7()), TenantID: tenantID, UserID: userID, ExpiresAt: time.Now().Add(time.Hour)}, nil
+			},
+			DeleteSessionFunc: func(_ context.Context, _ string, _ uuid.UUID) error { return nil },
+		}
+
+		svc := sessions.NewService(store, sessions.WithEventSink(sink))
+		require.NoError(t, svc.RevokeSession(ctx, tenantID, "some-token", reqCtx))
+
+		e, ok := sink.find(event.Logout)
+		require.True(t, ok, "expected a Logout event on RevokeSession")
+		assert.Equal(t, "203.0.113.42", e.Attrs["ip"], "Logout event must carry client IP")
+		assert.Equal(t, "Mozilla/5.0", e.Attrs["user_agent"], "Logout event must carry User-Agent")
+	})
+
+	t.Run("RevokeAllForUser carries IP and UserAgent", func(t *testing.T) {
+		sink := &captureSink{}
+		store := &storetest.MockStore{
+			DeleteSessionsByUserIDFunc: func(_ context.Context, _ string, _ uuid.UUID) error { return nil },
+		}
+
+		svc := sessions.NewService(store, sessions.WithEventSink(sink))
+		require.NoError(t, svc.RevokeAllForUser(ctx, tenantID, userID, reqCtx))
+
+		e, ok := sink.find(event.Logout)
+		require.True(t, ok, "expected a Logout event on RevokeAllForUser")
+		assert.Equal(t, "all_sessions", e.Reason)
+		assert.Equal(t, "203.0.113.42", e.Attrs["ip"], "Logout event must carry client IP")
+		assert.Equal(t, "Mozilla/5.0", e.Attrs["user_agent"], "Logout event must carry User-Agent")
+	})
+
+	t.Run("absent RequestContext omits IP attrs", func(t *testing.T) {
+		sink := &captureSink{}
+		store := &storetest.MockStore{
+			DeleteSessionsByUserIDFunc: func(_ context.Context, _ string, _ uuid.UUID) error { return nil },
+		}
+
+		svc := sessions.NewService(store, sessions.WithEventSink(sink))
+		require.NoError(t, svc.RevokeAllForUser(ctx, tenantID, userID)) // no rc supplied
+
+		e, ok := sink.find(event.Logout)
+		require.True(t, ok, "expected a Logout event on RevokeAllForUser")
+		assert.Nil(t, e.Attrs, "no RequestContext means Attrs must be nil")
+	})
+}

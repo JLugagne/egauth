@@ -15,20 +15,22 @@ All core types are generic over `C` — the application's custom claims payload 
 ```go
 type Issuer[C any] interface {
     IssueTokenPair(ctx context.Context, claims Claims[C]) (*TokenPair[C], error)
-    IssueAPIKey(ctx context.Context, prefix string, claims Claims[C]) (*APIKey[C], error)
+    // IssueAPIKey issues a long-lived key of the given type attributed to createdBy.
+    // The issuer NEVER copies the creating user's live roles — authority is only what is
+    // passed on claims. For KeyTypeService the Claims.Subject is overwritten with the new
+    // key ID (machine identity); for KeyTypePAT it stays as the caller-supplied user UUID.
+    IssueAPIKey(ctx context.Context, prefix string, keyType KeyType, createdBy uuid.UUID, claims Claims[C]) (*APIKey[C], error)
 }
 
 type Verifier[C any] interface {
-    // DEPRECATED, no tenant binding. With jwt.Config.MultiTenant=true it fails closed
-    // (ErrTenantBindingRequired); use VerifyAccessTokenForTenant instead.
-    VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
     // Tenant-bound access-token verification; rejects ErrTenantMismatch unless the signed
     // tenant_id == tenantID. tenantID="" for single-tenant. RequireAuth uses this when a
     // tenant resolver is configured (WithAuthTenantResolver).
     VerifyAccessTokenForTenant(ctx context.Context, tenantID string, token string) (*Claims[C], error)
     // tenantID="" for single-tenant
     VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*Claims[C], error)
-    VerifyAPIKey(ctx context.Context, tenantID string, key string) (*Claims[C], error)
+    // rc carries optional client IP/UA stamped into audit-event Attrs; only the last value is used.
+    VerifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*Claims[C], error)
 }
 
 type Rotator[C any] interface {
@@ -69,6 +71,11 @@ type FamilyRevoker interface {
 type Claims[C any] struct {
     Subject   uuid.UUID
     TenantID  string
+    // Kind records the principal classification stamped at issuance for API-key-backed tokens
+    // (PAT or Service). Interactive tokens (IssueTokenPair) leave Kind at its zero value,
+    // which the middleware normalises to egauth.User (the safe human default). Stamped into
+    // the JWT "kind" claim (omitempty) and decoded back by the verify path.
+    Kind      egauth.PrincipalKind
     IssuedAt  time.Time
     // AuthTime: when subject last authenticated (OIDC auth_time). NOT reset by silent refresh.
     // Anchors step-up freshness. Defaults to IssuedAt at issuance; preserved across rotation.
@@ -131,13 +138,43 @@ type APIKey[C any] struct {
     ID        uuid.UUID
     TenantID  string
     Prefix    string     // e.g. "sk_live_"
-    Token     string     // clear-text, only at creation
+    Token     string     // clear-text, only at creation; NEVER persisted
     Hash      string     // SHA-256 hex stored in DB
     ExpiresAt *time.Time // nil = never expires
+    // Type identifies whether this is a PAT or a service token. Chosen at IssueAPIKey call;
+    // persisted in the store; surfaced on Actor.Kind at the auth boundary.
+    Type      tokens.KeyType  // KeyTypePAT | KeyTypeService
+    // CreatedBy is the UUID of the human user who issued this key. For PATs it is the owning
+    // user; for service tokens it is the operator who provisioned the key (the service token's
+    // Subject is its own ID, so CreatedBy is the only back-link to the creating human).
+    CreatedBy uuid.UUID
     Claims    Claims[C]
 }
 // String/GoString/LogValue redact Token.
+
+// IssueAPIKey does NOT copy the creating user's live roles into the key.
+// Pass Scopes explicitly — the key's authority is only what you set at issuance.
 ```
+
+### `tokens.KeyType`
+```go
+type KeyType string
+const (
+    KeyTypePAT     KeyType = "pat"     // personal access token (IsHuman actor)
+    KeyTypeService KeyType = "service" // machine/service identity (IsMachine actor)
+)
+```
+
+### `tokens.ActorFromAPIKey`
+```go
+func ActorFromAPIKey[C any](key *APIKey[C]) egauth.Actor
+```
+The single seam for turning a verified API key into an `egauth.Actor`. Mapping rules:
+- `KeyTypePAT` → `Kind=egauth.PAT`, `UserID=key.Claims.Subject`; `IsHuman()` is true.
+- `KeyTypeService` → `Kind=egauth.Service`, `UserID` is zero (`KeyID` carries the key's identity); `IsMachine()` is true. The human who provisioned it is on `APIKey.CreatedBy`, not on the Actor.
+- Any other / empty `Type` → `Kind=egauth.User`, `UserID=key.Claims.Subject` (fail-safe: an unclassified key is never silently treated as a machine).
+
+`KeyID` is always the key's own ID; `Scopes` are taken verbatim from the key's claims. No secret or hash is copied onto the Actor.
 
 ### `jwt.Config[C any]`
 ```go
@@ -262,8 +299,13 @@ func DefaultCookies() Cookies
 // Issue a new access+refresh pair (starts a fresh rotation family).
 (*jwt.Service[C]).IssueTokenPair(ctx context.Context, claims Claims[C]) (*TokenPair[C], error)
 
-// Issue a long-lived API key with the given prefix and claims.
-(*jwt.Service[C]).IssueAPIKey(ctx context.Context, prefix string, claims Claims[C]) (*APIKey[C], error)
+// Issue a long-lived API key. keyType selects PAT or Service; createdBy is the human operator
+// who provisions the key. For KeyTypeService the Claims.Subject is overwritten with the new key ID.
+// The issuer NEVER copies the creating user's live roles — the key's authority is exactly the
+// scopes you pass on claims.
+(*jwt.Service[C]).IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error)
+// SingleTenant passthrough (same signature, drops tenantID from Rotate only):
+(*jwt.SingleTenant[C]).IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error)
 
 // Rotate refresh token: consume old, issue new pair in same family.
 // Replay (already-consumed token) → revokes whole family + ErrRefreshTokenReused.
@@ -271,20 +313,25 @@ func DefaultCookies() Cookies
 // SingleTenant variant drops tenantID:
 (*jwt.SingleTenant[C]).Rotate(ctx context.Context, refreshToken string) (*TokenPair[C], error)
 
-// DEPRECATED: validate JWT access token (per-kid alg-pinned, exp/nbf/iss/aud checked) WITHOUT
-// tenant binding. With Config.MultiTenant=true it fails closed (ErrTenantBindingRequired).
-// Single-tenant only.
-(*jwt.Service[C]).VerifyAccessToken(ctx context.Context, token string) (*Claims[C], error)
-
 // Validate JWT access token AND bind it to tenantID (signed tenant_id claim must equal tenantID,
 // else ErrTenantMismatch). Use this in multi-tenant deployments under a shared signing key.
+// Single-tenant callers pass "".
 (*jwt.Service[C]).VerifyAccessTokenForTenant(ctx context.Context, tenantID string, token string) (*Claims[C], error)
 
 // Validate opaque refresh token against store (tenant-scoped).
 (*jwt.Service[C]).VerifyRefreshToken(ctx context.Context, tenantID string, token string) (*Claims[C], error)
 
-// Validate API key against store (tenant-scoped).
-(*jwt.Service[C]).VerifyAPIKey(ctx context.Context, tenantID string, key string) (*Claims[C], error)
+// Validate API key against store (tenant-scoped). rc carries optional client IP/UA for audit events.
+(*jwt.Service[C]).VerifyAPIKey(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (*Claims[C], error)
+// SingleTenant variant (no tenantID):
+(*jwt.SingleTenant[C]).VerifyAPIKey(ctx context.Context, key string, rc ...event.RequestContext) (*Claims[C], error)
+
+// Like VerifyAPIKey but also returns the classified egauth.Actor (Kind, KeyID, Scopes,
+// UserID for PATs). This is the preferred entry point when the middleware needs to enforce
+// kind or scope gates. No secret is exposed on the returned Actor.
+(*jwt.Service[C]).VerifyAPIKeyActor(ctx context.Context, tenantID string, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error)
+// SingleTenant variant:
+(*jwt.SingleTenant[C]).VerifyAPIKeyActor(ctx context.Context, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error)
 
 // Hash any token/key to SHA-256 hex (for store lookups or manual comparisons).
 func HashToken(token string) string
@@ -312,6 +359,7 @@ func basic.RefreshHandler(rotator tokens.Rotator[struct{}], opts ...tokens.Handl
 - **POST** (any path)
 - Reads refresh token from cookie; revokes whole rotation family via `FamilyRevoker`; always clears cookies.
 - Idempotent: `204` even if token absent or already revoked.
+- **M9 audit**: when `WithEventSink` is configured and a family is successfully revoked, emits `event.Logout` with `Reason="token_logout"` carrying the client IP/User-Agent derived from the request. A double-logout (token already gone) emits nothing. Emission never changes the client-visible response.
 
 ```go
 func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFunc
@@ -324,7 +372,7 @@ func basic.LogoutHandler(revoker tokens.FamilyRevoker, opts ...tokens.HandlerOpt
 - On success: calls `next(w, r, egauth.Actor{UserID, TenantID}, customClaims C)`.
 - On failure: `401 unauthorized`.
 - Step-up gates: `403 step_up_required` (AMR or auth age not satisfied).
-- Tenant-aware when `WithAuthTenantResolver` is set: resolves the request tenant and verifies via `VerifyAccessTokenForTenant` (fail-closed). A resolver returning `""` → `401` (never falls back to the tenant-unaware path); a token whose `tenant_id` mismatches → `401`. With no resolver the middleware stays single-tenant (verifies via `VerifyAccessToken`), so single-tenant callers are unchanged.
+- Tenant-aware when `WithAuthTenantResolver` is set: resolves the request tenant and verifies via `VerifyAccessTokenForTenant` (fail-closed). A resolver returning `""` → `401` (never falls back to the tenant-unaware path); a token whose `tenant_id` mismatches → `401`. With no resolver the middleware calls `VerifyAccessTokenForTenant` with `""` (the single-tenant default partition), so single-tenant callers are unchanged.
 
 ```go
 func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], opts ...AuthOption[C]) http.HandlerFunc
@@ -337,9 +385,14 @@ type basic.AuthenticatedHandlerFunc = tokens.AuthenticatedHandlerFunc[struct{}]
 **`egauth.Actor` injected on success:**
 ```go
 type egauth.Actor struct {
-    UserID   uuid.UUID
+    UserID   uuid.UUID      // set for User and PAT; empty for Service (use KeyID)
     TenantID string
+    Kind     egauth.PrincipalKind // User | PAT | Service; zero behaves as User
+    KeyID    uuid.UUID      // API key UUID for PAT and Service actors
+    Scopes   []string       // scopes carried by the token; never interpreted by egauth
 }
+func (a Actor) IsHuman() bool   // User or PAT
+func (a Actor) IsMachine() bool // Service only
 ```
 
 ### `AuthOption[C]` — middleware options
@@ -354,6 +407,10 @@ type egauth.Actor struct {
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
 | `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
+| `WithRequiredScopes[C](scopes ...string)` | Require ALL listed scopes present in `Claims.Scopes`; rejects with `403 insufficient_scope`. Opt-in only — no default scope policy. |
+| `WithRequiredKind[C](kinds ...egauth.PrincipalKind)` | Require the credential's `Actor.Kind` to be one of the listed values; rejects with `403 wrong_principal_kind`. Opt-in only — no default kind policy. |
+| `RequireMachine[C]()` | Convenience: `WithRequiredKind(egauth.Service)` — admits Service tokens only. |
+| `RequireHuman[C]()` | Convenience: `WithRequiredKind(egauth.User, egauth.PAT)` — admits User and PAT tokens only. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -369,6 +426,7 @@ type egauth.Actor struct {
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
 | `WithFailureRedirect(url)` | 303 to url?error=<code> on failure |
 | `WithPersistentRefresh()` | Re-issue persistent refresh cookie |
+| `WithEventSink(sink event.Sink)` | Register audit sink: `LogoutHandler` emits `event.Logout` (Reason=`"token_logout"`) on successful family revocation; also gates the `WithInsecureCookies` misuse warning. Nil sink is a no-op. (`WithHandlerEventSink` is a deprecated alias.) |
 
 ### Cookie helpers (on `Cookies`)
 ```go

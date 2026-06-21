@@ -1,8 +1,9 @@
 // Package event defines egauth's optional security-event seam. Services emit lifecycle and
 // security events — login success/failure, account lockout, refresh-token reuse, MFA changes,
-// delivery failures, ... — to a Sink the application supplies. It is entirely optional (a nil
-// Sink disables emission) and dependency-free, so any module can emit without coupling to a
-// particular logging or telemetry implementation.
+// API-key lifecycle (creation, successful auth, failed auth, expiry purge), delivery failures,
+// ... — to a Sink the application supplies. It is entirely optional (a nil Sink disables
+// emission) and dependency-free, so any module can emit without coupling to a particular
+// logging or telemetry implementation.
 //
 // A ready-made slog adapter (NewSlogSink) covers the common "just log it" case, giving the
 // injectable *slog.Logger seam; richer consumers implement Sink to feed a SIEM, metrics pipeline,
@@ -34,7 +35,6 @@ const (
 	EmailChanged            Type = "email.changed"
 	PhoneVerified           Type = "phone.verified"
 	RecoveryChannelEnrolled Type = "recovery_channel.enrolled"
-	MagicLinkLogin          Type = "magic_link.login"
 	AccountDeleted          Type = "account.deleted"
 	Logout                  Type = "logout"           // a session was revoked (sign-out, "log out everywhere")
 	AccountBlocked          Type = "account.blocked"  // access denied by policy (rate limit, IP/geo, risk), distinct from account.locked
@@ -48,6 +48,22 @@ const (
 	MFADisabled             Type = "mfa.disabled"
 	DeliveryFailed          Type = "delivery.failed"         // a swallowed mailer/delivery error (outage signal)
 	InsecureCookieMisuse    Type = "cookies.insecure_misuse" // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
+
+	// API-key lifecycle events.
+	APIKeyCreated       Type = "api_key.created"        // a new API key (PAT or service token) was issued; carries type and created_by in Attrs
+	APIKeyAuthSucceeded Type = "api_key.auth.succeeded" // an API key was verified successfully; carries key type in Attrs
+	APIKeyAuthFailed    Type = "api_key.auth.failed"    // an API key verification failed; Reason carries the failure code (see ReasonAPIKey* constants)
+	APIKeyPurged        Type = "api_key.purged"         // expired keys were hard-deleted by the sweep; Attrs carries "count"
+)
+
+// Reason codes for APIKeyAuthFailed events. These are the only valid values for Event.Reason
+// when Type is APIKeyAuthFailed. They are intentionally short machine codes: no secrets,
+// tokens or raw attacker input.
+const (
+	ReasonAPIKeyNotFound       = "not_found"       // no key matched the provided token hash
+	ReasonAPIKeyExpired        = "expired"         // the key exists but its expiry has passed
+	ReasonAPIKeyTenantMismatch = "tenant_mismatch" // the key belongs to a different tenant
+	ReasonAPIKeyWrongType      = "wrong_type"      // the caller required a specific key type (PAT or service) but got the other
 )
 
 // Event is a single security-relevant occurrence.
@@ -105,8 +121,8 @@ type slogSink struct{ logger *slog.Logger }
 
 // NewSlogSink returns a Sink that logs events to logger (slog.Default() when nil). An event
 // carrying an Err is logged at Error; known failure/anomaly events (failed login, lockout,
-// refresh reuse, family revoke, MFA verification failure, delivery failure, insecure-cookie
-// misuse) at Warn; the rest at Info.
+// refresh reuse, family revoke, MFA verification failure, API-key auth failure, delivery
+// failure, insecure-cookie misuse) at Warn; the rest at Info.
 func NewSlogSink(logger *slog.Logger) Sink {
 	if logger == nil {
 		logger = slog.Default()
@@ -140,9 +156,70 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelError
 	}
 	switch e.Type {
-	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, DeliveryFailed, InsecureCookieMisuse:
+	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse:
 		return slog.LevelWarn
 	default:
 		return slog.LevelInfo
 	}
+}
+
+// RequestContext carries optional, caller-supplied transport metadata about the request that
+// triggered an authentication event — the client IP and User-Agent. The library cannot discover
+// these on its own (they live on the inbound HTTP request, which the auth core never sees), so
+// the application threads a RequestContext into the auth entry points (login and API-key verify)
+// and egauth copies its non-empty fields into Event.Attrs ("ip" / "user_agent") on the resulting
+// login.* and api_key.auth.* events.
+//
+// It is entirely optional: the entry points accept it as a variadic option, so omitting it simply
+// omits the corresponding Attrs. Both fields are plain strings and may be left empty individually
+// (an empty field is never written to Attrs). RequestContext carries no secrets — an IP and a
+// User-Agent are not credentials — so it is consistent with the event package's no-secrets
+// contract.
+type RequestContext struct {
+	// IP is the client IP address as the application observed it (e.g. from RemoteAddr or a
+	// trusted proxy header). egauth does not parse, validate or trust it — it is recorded verbatim
+	// under the "ip" attribute when non-empty.
+	IP string
+	// UserAgent is the client's User-Agent string, recorded verbatim under the "user_agent"
+	// attribute when non-empty.
+	UserAgent string
+}
+
+// Attr keys used by RequestContext.ApplyTo.
+const (
+	AttrIP        = "ip"
+	AttrUserAgent = "user_agent"
+)
+
+// RequestContextFrom collapses a variadic RequestContext option into a single value. Auth entry
+// points accept the context as a trailing variadic argument so it is optional and existing callers
+// keep compiling; this helper gives them one uniform way to interpret it. When several are passed
+// the last one wins (so a wrapper can supply a default that an inner call overrides); when none are
+// passed the zero RequestContext is returned (both fields empty), which contributes no Attrs.
+func RequestContextFrom(opts ...RequestContext) RequestContext {
+	if len(opts) == 0 {
+		return RequestContext{}
+	}
+	return opts[len(opts)-1]
+}
+
+// ApplyTo copies rc's non-empty fields into attrs under the AttrIP / AttrUserAgent keys and
+// returns the (possibly newly allocated) map. A nil attrs is allocated only when rc has at least
+// one non-empty field, so a zero RequestContext applied to a nil map returns nil and adds nothing —
+// the emit site then carries no IP/User-Agent attribute. Existing entries in attrs are preserved;
+// only the IP/User-Agent keys are set.
+func (rc RequestContext) ApplyTo(attrs map[string]any) map[string]any {
+	if rc.IP == "" && rc.UserAgent == "" {
+		return attrs
+	}
+	if attrs == nil {
+		attrs = make(map[string]any, 2)
+	}
+	if rc.IP != "" {
+		attrs[AttrIP] = rc.IP
+	}
+	if rc.UserAgent != "" {
+		attrs[AttrUserAgent] = rc.UserAgent
+	}
+	return attrs
 }

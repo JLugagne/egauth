@@ -142,6 +142,80 @@ For **asymmetric signing** (so verifiers hold only a public key), set `jwt.Confi
 the public keys from `Service.PublicJWKS()`. The default `tokens/basic` facade stays HS256-only;
 asymmetric signing uses the generic `tokens/jwt` API.
 
+## API keys: PAT and service tokens
+
+egauth issues two kinds of long-lived key through `IssueAPIKey`.
+
+| Kind | `Actor.Kind` | `IsHuman()` | Subject | Typical use |
+|------|-------------|-------------|---------|-------------|
+| **PAT** (Personal Access Token) | `egauth.PAT` | `true` | The owning user's ID | CI tokens, script automation acting on behalf of a specific user |
+| **Service token** | `egauth.Service` | `false` (`IsMachine()` true) | The key's own ID | Background jobs, inter-service calls with no human owner |
+
+Set the type at issuance:
+
+```go
+// PAT — acts on behalf of user alice
+pat, err := issuer.IssueAPIKey(ctx, "sk_", tokens.KeyTypePAT, alice.ID, tokens.Claims[C]{
+    Subject:  alice.ID,
+    TenantID: tenant,
+    Scopes:   []string{"repo:read", "issues:write"},
+})
+
+// Service token — machine identity; Subject becomes the key's own ID after issuance
+svcToken, err := issuer.IssueAPIKey(ctx, "svc_", tokens.KeyTypeService, operator.ID, tokens.Claims[C]{
+    TenantID: tenant,
+    Scopes:   []string{"metrics:ingest"},
+})
+```
+
+**Authority model — `IssueAPIKey` does not copy the issuing user's roles.**
+The key's authority is **only the scopes you pass** at issuance. egauth never silently inherits the
+creating user's live roles: a PAT with `Scopes: ["repo:read"]` can only read repositories even if
+the user can do far more. This is the safe default (a leaked PAT is bounded); if you want a richer
+scope set, pass it explicitly. See [SECURITY.md](SECURITY.md) for
+the full security model.
+
+### Opt-in route gates
+
+`RequireAuth` accepts additional `AuthOption`s that gate routes on the principal's kind or scopes.
+All gates are **opt-in** — the library imposes no default authority policy.
+
+```go
+// Restrict a route to machine (Service) callers only:
+mux.Handle("/internal/ingest", basic.RequireAuth(issuer, ingestHandler,
+    tokens.WithRequiredKind[struct{}](egauth.Service),
+))
+
+// Restrict a route to callers carrying a specific scope:
+mux.Handle("/api/admin", basic.RequireAuth(issuer, adminHandler,
+    tokens.WithRequiredScopes[struct{}]("admin:write"),
+))
+
+// Convenience wrappers for kind gating:
+tokens.RequireMachine[C]() // equivalent to WithRequiredKind(egauth.Service)
+tokens.RequireHuman[C]()   // equivalent to WithRequiredKind(egauth.User, egauth.PAT)
+```
+
+On a kind or scope mismatch the middleware returns `403 wrong_principal_kind` or `403 insufficient_scope`
+respectively — the caller is authenticated but not allowed on this route. The `egauth.Actor`
+injected into the handler carries `Kind`, `KeyID`, and `Scopes` so the application can also branch
+or enforce policy directly without middleware gates.
+
+### Audit events for key lifecycle
+
+Wire `event.Sink` to observe the full key lifecycle:
+
+| Event | When | Key `Attrs` |
+|-------|------|-------------|
+| `api_key.created` | Key issued | `"key_type"` (pat/service), `"created_by"` (user UUID) |
+| `api_key.auth.succeeded` | Key verified successfully | `"key_type"`, `"ip"`, `"user_agent"` (if `RequestContext` supplied) |
+| `api_key.auth.failed` | Verification failed | `Event.Reason` = `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
+| `api_key.purged` | Expired keys swept by `DeleteExpired` | `"count"` (number of rows deleted) |
+
+`login.succeeded` and `login.failed` carry `"ip"` / `"user_agent"` when the handler receives a
+`event.RequestContext`. Audit events never carry secrets, tokens, hashes or raw input — only short
+machine `Reason` codes and safe metadata. See [SECURITY.md](SECURITY.md).
+
 ## Multi-tenancy
 
 Every tenant-scoped operation takes an explicit `tenantID string` argument. An empty string

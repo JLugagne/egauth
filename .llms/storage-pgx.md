@@ -96,12 +96,26 @@ Migrations:
 003_add_refresh_token_auth_time.sql
 004_add_expires_at_index.sql
 005_add_refresh_token_must_change_password.sql
+006_add_api_key_type_and_created_by.sql
 ```
 
 Migration `005_add_refresh_token_must_change_password.sql` adds `must_change_password` (boolean, NOT
 NULL DEFAULT false) to the `tokens` table. It records the forced-password-change gate on a refresh
 family and is carried verbatim onto every rotated descendant, so a flagged session stays gated
 across silent refresh (a user cannot escape by waiting for the access token to expire).
+
+Migration `006_add_api_key_type_and_created_by.sql` adds two columns to the `tokens` table (API-key rows only):
+- `type TEXT NOT NULL DEFAULT 'service'` — classifies the key as `'pat'` (personal access token,
+  human principal) or `'service'` (machine identity). The default is `'service'` so legacy rows
+  before this migration are never silently promoted to a human principal; they keep the more
+  restricted machine identity. The store round-trips this as `tokens.KeyType` and `APIKey.Type`.
+- `created_by UUID NULL` — the UUID of the human user who provisioned the key. `NULL` for legacy
+  rows and for keys whose creator is not tracked. For service tokens this is the only back-link to
+  a human, since the token's `Claims.Subject` is the key's own ID.
+
+`SaveAPIKey` and `FindAPIKeyByHash` both round-trip `type` and `created_by`. The `created_by` column
+stores `NULL` when `APIKey.CreatedBy` is the zero UUID. `DeleteExpired` still hard-deletes expired
+rows and there are no soft-delete or per-key revoke columns.
 
 ---
 

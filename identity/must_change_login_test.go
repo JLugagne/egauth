@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"testing"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/identity/servicetest"
 	"github.com/JLugagne/egauth/tokens"
@@ -103,7 +104,7 @@ func TestLoginHandler_MustChange_MFAEnrolledCarriesFlag(t *testing.T) {
 func TestMagicLinkLoginHandler_MustChange_RenewableFlagged(t *testing.T) {
 	uid := uuid.Must(uuid.NewV7())
 	svc := &servicetest.MockService{
-		LoginWithMagicLinkFunc: func(ctx context.Context, tenantID string, token string) (*identity.User, error) {
+		LoginWithMagicLinkFunc: func(ctx context.Context, tenantID string, token string, _ ...event.RequestContext) (*identity.User, error) {
 			return &identity.User{ID: uid}, nil
 		},
 		PasswordChangeRequiredFunc: func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
@@ -128,7 +129,7 @@ func TestMagicLinkLoginHandler_MustChange_RenewableFlagged(t *testing.T) {
 // still yields the full access+refresh pair.
 func TestMagicLinkLoginHandler_MustChange_NormalUserFullPair(t *testing.T) {
 	svc := &servicetest.MockService{
-		LoginWithMagicLinkFunc: func(ctx context.Context, tenantID string, token string) (*identity.User, error) {
+		LoginWithMagicLinkFunc: func(ctx context.Context, tenantID string, token string, _ ...event.RequestContext) (*identity.User, error) {
 			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 		},
 		PasswordChangeRequiredFunc: func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {

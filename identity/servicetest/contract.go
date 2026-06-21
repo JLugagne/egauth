@@ -3,6 +3,7 @@ package servicetest
 import (
 	"context"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/google/uuid"
 )
@@ -17,7 +18,7 @@ type MockService struct {
 	VerifyEmailFunc                     func(ctx context.Context, tenantID string, token string) (*identity.User, error)
 	LinkOrCreateIdentityFunc            func(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
 	RequestMagicLinkFunc                func(ctx context.Context, tenantID string, email string) (string, *identity.User, error)
-	LoginWithMagicLinkFunc              func(ctx context.Context, tenantID string, token string) (*identity.User, error)
+	LoginWithMagicLinkFunc              func(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*identity.User, error)
 	ChangePasswordFunc                  func(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
 	RequestEmailChangeFunc              func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (string, error)
 	ConfirmEmailChangeFunc              func(ctx context.Context, tenantID string, token string) (*identity.User, error)
@@ -70,11 +71,11 @@ func (m *MockService) RequestMagicLink(ctx context.Context, tenantID string, ema
 	return m.RequestMagicLinkFunc(ctx, tenantID, email)
 }
 
-func (m *MockService) LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*identity.User, error) {
+func (m *MockService) LoginWithMagicLink(ctx context.Context, tenantID string, token string, rc ...event.RequestContext) (*identity.User, error) {
 	if m.LoginWithMagicLinkFunc == nil {
 		panic("called not defined LoginWithMagicLinkFunc")
 	}
-	return m.LoginWithMagicLinkFunc(ctx, tenantID, token)
+	return m.LoginWithMagicLinkFunc(ctx, tenantID, token, rc...)
 }
 
 var _ identity.Service = (*MockService)(nil)
@@ -121,7 +122,7 @@ func (m *MockService) Register(ctx context.Context, tenantID string, email, pass
 	return m.RegisterFunc(ctx, tenantID, email, password)
 }
 
-func (m *MockService) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+func (m *MockService) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, _ ...event.RequestContext) (*identity.User, error) {
 	if m.AuthenticateFunc == nil {
 		panic("called not defined AuthenticateFunc")
 	}

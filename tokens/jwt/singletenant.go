@@ -3,7 +3,10 @@ package jwt
 import (
 	"context"
 
+	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
 // SingleTenant is a convenience wrapper around *Service[C] for applications that run with
@@ -38,8 +41,8 @@ func (s *SingleTenant[C]) IssueTokenPair(ctx context.Context, claims tokens.Clai
 }
 
 // IssueAPIKey calls Service.IssueAPIKey (tenant, if any, is carried on claims).
-func (s *SingleTenant[C]) IssueAPIKey(ctx context.Context, prefix string, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
-	return s.svc.IssueAPIKey(ctx, prefix, claims)
+func (s *SingleTenant[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+	return s.svc.IssueAPIKey(ctx, prefix, keyType, createdBy, claims)
 }
 
 // VerifyRefreshToken calls Service.VerifyRefreshToken on the empty tenant. Its signature
@@ -52,8 +55,15 @@ func (s *SingleTenant[C]) VerifyRefreshToken(ctx context.Context, token string) 
 // VerifyAPIKey calls Service.VerifyAPIKey on the empty tenant. Its signature keeps the
 // single-tenant convenience contract (no tenantID): the underlying lookup is scoped to the
 // default partition ("").
-func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string) (*tokens.Claims[C], error) {
-	return s.svc.VerifyAPIKey(ctx, "", key)
+func (s *SingleTenant[C]) VerifyAPIKey(ctx context.Context, key string, rc ...event.RequestContext) (*tokens.Claims[C], error) {
+	return s.svc.VerifyAPIKey(ctx, "", key, rc...)
+}
+
+// VerifyAPIKeyActor calls Service.VerifyAPIKeyActor on the empty tenant, returning the
+// classified egauth.Actor alongside the claims. Like VerifyAPIKey it drops the tenantID
+// (the lookup is scoped to the default partition "").
+func (s *SingleTenant[C]) VerifyAPIKeyActor(ctx context.Context, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error) {
+	return s.svc.VerifyAPIKeyActor(ctx, "", key, rc...)
 }
 
 // Rotate calls Service.Rotate on the empty tenant.
@@ -64,4 +74,11 @@ func (s *SingleTenant[C]) Rotate(ctx context.Context, refreshToken string) (*tok
 // VerifyAccessTokenForTenant calls Service.VerifyAccessTokenForTenant.
 func (s *SingleTenant[C]) VerifyAccessTokenForTenant(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
 	return s.svc.VerifyAccessTokenForTenant(ctx, tenantID, tokenStr)
+}
+
+// DeleteExpired calls Service.DeleteExpired on the empty tenant (the single-tenant default
+// partition) and emits api_key.purged with the deleted count. See Service.DeleteExpired for
+// the event contract.
+func (s *SingleTenant[C]) DeleteExpired(ctx context.Context) (int64, error) {
+	return s.svc.DeleteExpired(ctx, "")
 }

@@ -266,15 +266,63 @@ Details: [storage-pgx.md](storage-pgx.md), [infra.md](infra.md), [passwords.md](
 
 ---
 
-## 9. API keys
+## 9. API keys (PATs and service tokens)
 
-`tokens` issues long-lived API keys alongside JWTs; only a SHA-256 hash is stored.
+`tokens` (M8) issues two kinds of long-lived API keys alongside JWTs; only a SHA-256 hash is stored.
+
+- **`tokens.KeyTypePAT`** (`"pat"`) — acts on behalf of a human. `Actor.Kind = egauth.PAT`, `IsHuman()` true, `Actor.UserID` = owning user.
+- **`tokens.KeyTypeService`** (`"service"`) — machine identity. `Actor.Kind = egauth.Service`, `IsMachine()` true, `Actor.KeyID` = key UUID, `Actor.UserID` = zero (creator is on `APIKey.CreatedBy`, not on the Actor).
+
+The key's authority is **only** the scopes you embed in `claims` — it never inherits the user's live roles.
 
 ```go
-apiKey, _ := issuer.IssueAPIKey(ctx, "sk_live", basic.Claims{Subject: user.ID, TenantID: tenant})
-// apiKey.Key is shown ONCE to the user; verify later:
-claims, err := verifier.VerifyAPIKey(ctx, tenant, presentedKey)
+import (
+    egauth "github.com/JLugagne/egauth"
+    "github.com/JLugagne/egauth/tokens"
+    "github.com/JLugagne/egauth/tokens/basic"
+    "github.com/JLugagne/egauth/event"
+)
+
+// --- Issue a PAT (human, scoped) ---
+pat, err := issuer.IssueAPIKey(ctx, "pat_", tokens.KeyTypePAT, user.ID,
+    basic.Claims{Subject: user.ID, TenantID: tenant, Scopes: []string{"repo:read"}})
+// pat.Token is the cleartext key — show it ONCE, never log it.
+// pat.Hash is the stored value; pat.ID is the key UUID.
+
+// --- Issue a service token (machine) ---
+svcKey, err := issuer.IssueAPIKey(ctx, "svc_", tokens.KeyTypeService, adminUser.ID,
+    basic.Claims{TenantID: tenant, Scopes: []string{"metrics:write"}})
+// svcKey.Claims.Subject is the key's own ID (machine identity).
+
+// --- Verify → Actor (preferred; use concrete *jwt.Service, not Verifier interface) ---
+// issuer here is a *jwt.Service[basic.Claims]
+actor, claims, err := issuer.VerifyAPIKeyActor(ctx, tenant, presentedKey,
+    event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()})
+if err != nil { /* tokens.ErrTokenExpired, tokens.ErrNotFound, ... */ }
+
+// actor.IsHuman()   → true for PAT / User
+// actor.IsMachine() → true for Service
+// actor.KeyID       → key UUID (always set for API keys)
+// actor.UserID      → owner for PAT; zero for Service
+
+// --- Gate a route on principal kind and scopes ---
+mux.Handle("GET /api/data", tokens.RequireAuth(issuer, handler,
+    tokens.WithRequiredScopes[basic.Claims]("repo:read"),
+    tokens.RequireHuman[basic.Claims]()))   // 403 "wrong_principal_kind" for Service tokens
+
+mux.Handle("POST /metrics", tokens.RequireAuth(issuer, handler,
+    tokens.WithRequiredScopes[basic.Claims]("metrics:write"),
+    tokens.RequireMachine[basic.Claims]())) // 403 for PAT / User tokens
 ```
+
+**Audit events** emitted automatically (via `WithEventSink` on the issuer):
+
+| Event | Trigger | Key `Attrs` |
+|---|---|---|
+| `api_key.created` | `IssueAPIKey` | `key_type`, `created_by` |
+| `api_key.auth.succeeded` | successful `VerifyAPIKey*` | `key_type` [+ `ip`, `user_agent`] |
+| `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
+| `api_key.purged` | expired-key sweep | `count` |
 
 Details: [tokens.md](tokens.md).
 

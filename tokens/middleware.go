@@ -16,12 +16,16 @@ type AuthenticatedHandlerFunc[C any] func(w http.ResponseWriter, r *http.Request
 
 // authConfig holds the optional behavior of RequireAuth, configured via AuthOption.
 type authConfig[C any] struct {
-	cookies                *Cookies
-	rotator                Rotator[C]
-	tenantResolver         func(*http.Request) string
-	readHeader             bool
-	persistRefresh         bool
-	requiredAMR            []string
+	cookies        *Cookies
+	rotator        Rotator[C]
+	tenantResolver func(*http.Request) string
+	readHeader     bool
+	persistRefresh bool
+	requiredAMR    []string
+	requiredScopes []string
+	// requiredKinds is the set of egauth.PrincipalKind values permitted by WithRequiredKind.
+	// When non-empty, a verified credential whose Actor.Kind is not in the set is rejected.
+	requiredKinds          []egauth.PrincipalKind
 	maxAuthAge             time.Duration
 	passwordChangeGate     bool
 	passwordChangeResetURL string
@@ -96,6 +100,43 @@ func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
 }
 
+// WithRequiredScopes gates the route on token scopes: the verified token's Scopes claim must
+// contain ALL of the given values, otherwise the request is rejected with 403
+// "insufficient_scope". No effect when no scopes are required (opt-in only).
+// Use this to restrict API-key-backed or PAT-backed routes to tokens carrying specific
+// capabilities (e.g. WithRequiredScopes("repo:write", "ci:trigger")).
+func WithRequiredScopes[C any](scopes ...string) AuthOption[C] {
+	return func(a *authConfig[C]) { a.requiredScopes = scopes }
+}
+
+// WithRequiredKind gates the route on principal kind: the verified credential's
+// egauth.Actor.Kind must be one of the supplied kinds, otherwise the request is rejected
+// with 403 "wrong_principal_kind". An empty kind list has no effect (opt-in gate).
+//
+// The principal kind is taken from Claims.Kind, which is stamped by the issuer when minting
+// API-key-backed tokens (PAT or Service). Interactive access tokens (IssueTokenPair) leave
+// Kind at its zero value, which the gate treats as egauth.User (human). Use RequireMachine
+// and RequireHuman for the two common cases. Use this directly when a more specific subset
+// is needed (e.g. only egauth.PAT, not all human principals).
+func WithRequiredKind[C any](kinds ...egauth.PrincipalKind) AuthOption[C] {
+	return func(a *authConfig[C]) { a.requiredKinds = kinds }
+}
+
+// RequireMachine is a convenience AuthOption that restricts the route to Service (machine)
+// actors. PAT and User (interactive) tokens are rejected with 403 "wrong_principal_kind".
+// It is equivalent to WithRequiredKind(egauth.Service).
+func RequireMachine[C any]() AuthOption[C] {
+	return WithRequiredKind[C](egauth.Service)
+}
+
+// RequireHuman is a convenience AuthOption that restricts the route to human actors: User
+// (interactive session) and PAT (personal access token acting on behalf of a user). Service
+// (machine) tokens are rejected with 403 "wrong_principal_kind".
+// It is equivalent to WithRequiredKind(egauth.User, egauth.PAT).
+func RequireHuman[C any]() AuthOption[C] {
+	return WithRequiredKind[C](egauth.User, egauth.PAT)
+}
+
 // WithMaxAuthAge gates the route on step-up ("sudo mode") freshness: the subject must have
 // authenticated within d, measured from the token's auth_time (OIDC) claim — NOT its issue time,
 // so a silent auto-refresh does not reset the clock. A subject whose authentication is older than
@@ -132,7 +173,12 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
-			next(w, r, actorFromClaims(claims), claims.Custom)
+			actor := actorFromClaims(claims)
+			if !cfg.kindSatisfied(actor) {
+				wrongPrincipalKind(w)
+				return
+			}
+			next(w, r, actor, claims.Custom)
 		})
 	}
 }
@@ -173,6 +219,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 		if err == nil {
 			if !cfg.stepUpSatisfied(claims) {
 				stepUpRequired(w)
+				return
+			}
+			if !cfg.scopesSatisfied(claims) {
+				insufficientScope(w)
 				return
 			}
 			if cfg.passwordChangeBlocked(claims) {
@@ -219,6 +269,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				stepUpRequired(w)
 				return
 			}
+			if !cfg.scopesSatisfied(&pair.Claims) {
+				insufficientScope(w)
+				return
+			}
 			if cfg.passwordChangeBlocked(&pair.Claims) {
 				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
 				return
@@ -249,10 +303,15 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 	return "", false
 }
 
+// actorFromClaims builds the egauth.Actor from verified claims. Kind is propagated verbatim
+// from Claims.Kind so that API-key-backed tokens (PAT, Service) carry the right principal
+// classification through to the WithRequiredKind gate. Interactive tokens leave Kind at the
+// zero value, which egauth.IsHuman treats as User (the safe human default).
 func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
 	return egauth.Actor{
 		UserID:   claims.Subject,
 		TenantID: claims.TenantID,
+		Kind:     claims.Kind,
 	}
 }
 
@@ -281,6 +340,47 @@ func (cfg *authConfig[C]) amrSatisfied(claims *Claims[C]) bool {
 	return true
 }
 
+// scopesSatisfied reports whether the claims carry every required scope. With no requirement
+// configured it always passes (opt-in gate).
+func (cfg *authConfig[C]) scopesSatisfied(claims *Claims[C]) bool {
+	if len(cfg.requiredScopes) == 0 {
+		return true
+	}
+	have := make(map[string]bool, len(claims.Scopes))
+	for _, s := range claims.Scopes {
+		have[s] = true
+	}
+	for _, req := range cfg.requiredScopes {
+		if !have[req] {
+			return false
+		}
+	}
+	return true
+}
+
+// kindSatisfied reports whether the actor's principal kind is in the required set. With no
+// requirement configured it always passes (opt-in gate). A zero Kind (interactive session token)
+// is matched against egauth.User so it passes RequireHuman but fails RequireMachine.
+func (cfg *authConfig[C]) kindSatisfied(actor egauth.Actor) bool {
+	if len(cfg.requiredKinds) == 0 {
+		return true
+	}
+	// Normalise the zero Kind to egauth.User: an interactive JWT access token carries no
+	// explicit Kind, which actorFromClaims leaves zero. The zero value behaves as User per
+	// egauth.IsHuman documentation, so we apply the same normalisation here so that
+	// RequireHuman passes and RequireMachine fails for plain interactive tokens.
+	kind := actor.Kind
+	if kind == "" {
+		kind = egauth.User
+	}
+	for _, allowed := range cfg.requiredKinds {
+		if kind == allowed {
+			return true
+		}
+	}
+	return false
+}
+
 func unauthorized(w http.ResponseWriter) {
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 }
@@ -289,6 +389,19 @@ func unauthorized(w http.ResponseWriter) {
 // route (RFC 8176 AMR gate); the client should re-authenticate with the missing factor.
 func stepUpRequired(w http.ResponseWriter) {
 	http.Error(w, "step_up_required", http.StatusForbidden)
+}
+
+// insufficientScope signals that the verified token does not carry all scopes required by the
+// route (WithRequiredScopes gate). The subject is authenticated; the token simply lacks authority.
+func insufficientScope(w http.ResponseWriter) {
+	http.Error(w, "insufficient_scope", http.StatusForbidden)
+}
+
+// wrongPrincipalKind signals that the verified credential's principal kind is not in the set
+// allowed by the route (WithRequiredKind gate). The credential is authentic but the wrong type
+// for this endpoint.
+func wrongPrincipalKind(w http.ResponseWriter) {
+	http.Error(w, "wrong_principal_kind", http.StatusForbidden)
 }
 
 // WithPasswordChangeGate enforces the soft password-change gate: after a request's access

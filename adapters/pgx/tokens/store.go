@@ -165,7 +165,7 @@ func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID u
 	return err
 }
 
-// SaveAPIKey persists an API key.
+// SaveAPIKey persists an API key, including its type and created_by fields.
 func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error {
 	if key.TenantID != "" && key.TenantID != tenantID {
 		return tokens.ErrTenantMismatch
@@ -177,20 +177,38 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 		return fmt.Errorf("failed to marshal claims: %w", err)
 	}
 
+	// Resolve the key type; default to service when not set (safe, restricted default).
+	keyType := key.Type
+	if keyType == "" {
+		keyType = tokens.KeyTypeService
+	}
+
+	// created_by is nullable: store nil when the zero UUID is supplied so the column stays NULL.
+	var createdBy *uuid.UUID
+	if key.CreatedBy != uuid.Nil {
+		createdBy = &key.CreatedBy
+	}
+
 	query := `
-		INSERT INTO tokens (id, tenant_id, token_hash, user_id, prefix, claims, expires_at, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO tokens (id, tenant_id, token_hash, user_id, prefix, claims, expires_at, created_at, type, created_by)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
-		SET id = EXCLUDED.id, user_id = EXCLUDED.user_id, prefix = EXCLUDED.prefix, claims = EXCLUDED.claims, expires_at = EXCLUDED.expires_at
+		SET id = EXCLUDED.id, user_id = EXCLUDED.user_id, prefix = EXCLUDED.prefix,
+			claims = EXCLUDED.claims, expires_at = EXCLUDED.expires_at,
+			type = EXCLUDED.type, created_by = EXCLUDED.created_by
 	`
-	_, err = s.db.Exec(ctx, query, key.ID, key.TenantID, key.Hash, key.Claims.Subject, key.Prefix, claimsJSON, key.ExpiresAt, time.Now().UTC())
+	_, err = s.db.Exec(ctx, query,
+		key.ID, key.TenantID, key.Hash, key.Claims.Subject, key.Prefix,
+		claimsJSON, key.ExpiresAt, time.Now().UTC(),
+		string(keyType), createdBy,
+	)
 	return err
 }
 
-// FindAPIKeyByHash retrieves an API key by its hash.
+// FindAPIKeyByHash retrieves an API key by its hash, including its type and created_by fields.
 func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error) {
 	query := `
-		SELECT id, tenant_id, token_hash, user_id, prefix, claims, expires_at
+		SELECT id, tenant_id, token_hash, user_id, prefix, claims, expires_at, type, created_by
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NOT NULL
 	`
@@ -198,12 +216,19 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 
 	var key tokens.APIKey[C]
 	var claimsJSON []byte
-	err := row.Scan(&key.ID, &key.TenantID, &key.Hash, &key.Claims.Subject, &key.Prefix, &claimsJSON, &key.ExpiresAt)
+	var keyType string
+	var createdBy *uuid.UUID
+	err := row.Scan(&key.ID, &key.TenantID, &key.Hash, &key.Claims.Subject, &key.Prefix, &claimsJSON, &key.ExpiresAt, &keyType, &createdBy)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrAPIKeyNotFound
 		}
 		return nil, err
+	}
+
+	key.Type = tokens.KeyType(keyType)
+	if createdBy != nil {
+		key.CreatedBy = *createdBy
 	}
 
 	if err := json.Unmarshal(claimsJSON, &key.Claims); err != nil {

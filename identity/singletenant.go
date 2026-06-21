@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
 )
 
@@ -37,9 +38,10 @@ func (s *SingleTenant) Register(ctx context.Context, email, password string) (*U
 	return s.svc.Register(ctx, "", email, password)
 }
 
-// Authenticate calls Service.Authenticate on the empty tenant.
-func (s *SingleTenant) Authenticate(ctx context.Context, provider, providerID, password string) (*User, error) {
-	return s.svc.Authenticate(ctx, "", provider, providerID, password)
+// Authenticate calls Service.Authenticate on the empty tenant. An optional event.RequestContext
+// (client IP / User-Agent) is forwarded so it lands in the login.* event Attrs.
+func (s *SingleTenant) Authenticate(ctx context.Context, provider, providerID, password string, rc ...event.RequestContext) (*User, error) {
+	return s.svc.Authenticate(ctx, "", provider, providerID, password, rc...)
 }
 
 // RequestPasswordReset calls Service.RequestPasswordReset on the empty tenant.
@@ -72,9 +74,11 @@ func (s *SingleTenant) RequestMagicLink(ctx context.Context, email string) (toke
 	return s.svc.RequestMagicLink(ctx, "", email)
 }
 
-// LoginWithMagicLink calls Service.LoginWithMagicLink on the empty tenant.
-func (s *SingleTenant) LoginWithMagicLink(ctx context.Context, token string) (*User, error) {
-	return s.svc.LoginWithMagicLink(ctx, "", token)
+// LoginWithMagicLink calls Service.LoginWithMagicLink on the empty tenant. An optional
+// event.RequestContext (client IP / User-Agent) is forwarded so it lands in the
+// login.succeeded event Attrs.
+func (s *SingleTenant) LoginWithMagicLink(ctx context.Context, token string, rc ...event.RequestContext) (*User, error) {
+	return s.svc.LoginWithMagicLink(ctx, "", token, rc...)
 }
 
 // ChangePassword calls Service.ChangePassword on the empty tenant.
