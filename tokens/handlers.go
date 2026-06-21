@@ -220,8 +220,15 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 					cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
 					return
 				}
+				// Audit the user sign-out. Reuse the existing logout event type with
+				// Reason="token_logout" (symmetric with sessions/service.go), carrying the client
+				// IP/User-Agent. A nil sink is a no-op and emission never alters the response.
+				cfg.emitLogout(r, tenantID, rt.UserID.String())
 			case errors.Is(err, ErrRefreshTokenNotFound):
-				// Token already gone: idempotent success — fall through.
+				// Token already gone: idempotent success — fall through. The double-logout path
+				// emits nothing: there is no family to revoke and no fresh sign-out to record, and
+				// a benign event here would let a client manufacture spurious logout records by
+				// replaying the call.
 			default:
 				// Unexpected store error: clear cookies but report failure so the
 				// client knows the server-side revocation did not happen.
@@ -272,6 +279,37 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
+// emitLogout records a successful token-model sign-out on the configured sink (a nil sink is a
+// no-op via event.Emit). It reuses the existing event.Logout type with Reason="token_logout" so
+// the token/refresh logout joins the same logout stream as sessions/service.go, and threads the
+// client IP/User-Agent derived from the request. The event carries no token, hash or raw input —
+// only the tenant, the user UUID and the transport metadata.
+func (cfg handlerConfig) emitLogout(r *http.Request, tenantID, userID string) {
+	rc := requestContext(r)
+	event.Emit(r.Context(), cfg.events, event.Event{
+		Type:     event.Logout,
+		TenantID: tenantID,
+		UserID:   userID,
+		Reason:   "token_logout",
+		Attrs:    rc.ApplyTo(nil),
+	})
+}
+
+// requestContext builds the optional event.RequestContext that the logout handler stamps onto the
+// emitted event.Logout, so the client IP and User-Agent land in the event Attrs.
+//
+// The IP is taken from r.RemoteAddr (host part only) — the address of the immediate peer. egauth
+// deliberately does NOT trust X-Forwarded-For / Forwarded here: those headers are spoofable unless
+// a trusted reverse proxy terminates them, and egauth cannot know the deployment's proxy topology.
+// This mirrors identity.requestContext and the untrusted-RemoteAddr stance of ratelimit.ClientIP.
+func requestContext(r *http.Request) event.RequestContext {
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip = host
+	}
+	return event.RequestContext{IP: ip, UserAgent: r.UserAgent()}
+}
+
 func refreshErrorCode(err error) string {
 	switch {
 	case errors.Is(err, ErrRefreshConcurrent):
@@ -306,13 +344,28 @@ func WithInsecureNoOriginCheck() HandlerOption {
 	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
 }
 
-// WithHandlerEventSink registers a security-event sink (see the event package) for the tokens
-// handlers. Its main purpose is the WithInsecureCookies guard: when insecure cookies are served
-// to a host that is not localhost/loopback over a non-TLS request — a likely production
-// misconfiguration — the handler emits a WARN-level event.InsecureCookieMisuse (once per handler)
-// so the otherwise-silent mistake becomes observable. A nil sink (the default) makes this a no-op.
-func WithHandlerEventSink(sink event.Sink) HandlerOption {
+// WithEventSink registers a security-event sink (see the event package) for the tokens handlers.
+// It serves two purposes:
+//
+//   - LogoutHandler emits event.Logout (Reason="token_logout") after it successfully revokes the
+//     rotation family, carrying the client IP/User-Agent so the token-model sign-out is audited
+//     symmetrically with the session-model logout in sessions/service.go.
+//   - The WithInsecureCookies guard emits a WARN-level event.InsecureCookieMisuse (once per
+//     handler) when insecure cookies are served to a non-loopback host over a non-TLS request.
+//
+// A nil sink (the default) makes every emission a no-op, and emission never changes the handler's
+// client-visible behaviour. This is the handler-level counterpart to the service-level
+// WithEventSink found on the other egauth packages.
+func WithEventSink(sink event.Sink) HandlerOption {
 	return func(h *handlerConfig) { h.events = sink }
+}
+
+// WithHandlerEventSink is a deprecated alias for WithEventSink, kept so existing call sites keep
+// compiling. Prefer WithEventSink.
+//
+// Deprecated: use WithEventSink.
+func WithHandlerEventSink(sink event.Sink) HandlerOption {
+	return WithEventSink(sink)
 }
 
 // warnIfInsecureMisuse emits a one-shot WARN event when the handler is configured with insecure
