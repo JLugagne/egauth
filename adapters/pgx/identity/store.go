@@ -447,7 +447,13 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the new count reaches the threshold. It is performed
 // atomically in a single UPDATE statement.
-func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error {
+//
+// justLocked is derived inside the same atomic statement via RETURNING: it is true only
+// when this increment crossed the threshold (the post-increment counter reaches it while
+// the pre-increment counter was below it). Under concurrent failed logins the database
+// serializes the UPDATEs, so exactly one caller sees justLocked == true — see the
+// LockoutStore interface contract.
+func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error) {
 	query := `
 		UPDATE identities
 		SET failed_attempts = failed_attempts + 1,
@@ -457,15 +463,18 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, id
 			END,
 			updated_at = now()
 		WHERE id = $1 AND tenant_id = $2
+		RETURNING $3 > 0 AND failed_attempts >= $3 AND failed_attempts - 1 < $3
 	`
-	tag, err := s.db.Exec(ctx, query, identityID, tenantID, lockThreshold, lockDuration.Milliseconds())
-	if err != nil {
-		return err
+	// failed_attempts in RETURNING is the post-update (incremented) value, so the predicate
+	// reduces to "pre-increment < threshold <= post-increment": the crossing transition only.
+	row := s.db.QueryRow(ctx, query, identityID, tenantID, lockThreshold, lockDuration.Milliseconds())
+	if err := row.Scan(&justLocked); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, identity.ErrIdentityNotFound
+		}
+		return false, err
 	}
-	if tag.RowsAffected() == 0 {
-		return identity.ErrIdentityNotFound
-	}
-	return nil
+	return justLocked, nil
 }
 
 // ResetFailedAttempts zeroes the failed-attempt counter and clears LockedUntil.

@@ -151,8 +151,8 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 			// increment below errors, so no lock is actually persisted.
 			return &identity.Identity{ID: uuid.Must(uuid.NewV7()), UserID: uid, Provider: provider, ProviderID: providerID, PasswordHash: &hash, FailedAttempts: 1}, nil
 		},
-		IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) error {
-			return errors.New("store unavailable")
+		IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) (bool, error) {
+			return false, errors.New("store unavailable")
 		},
 	}
 	hasher := &hashertest.MockHasher{
@@ -167,6 +167,57 @@ func TestEvents_NoAccountLockedWhenIncrementFails(t *testing.T) {
 	assert.True(t, sink.has(event.LoginFailed), "the failed attempt is still recorded")
 	assert.False(t, sink.has(event.AccountLocked),
 		"AccountLocked must not be emitted when the store never persisted the lock")
+}
+
+// TestEvents_AccountLockedFollowsStoreResult is the regression test for the lockout-event
+// attribution fix: account.locked must be driven by the store's atomic justLocked result, not
+// by a stale pre-increment prediction (ident.FailedAttempts+1 >= threshold). It models the
+// concurrent case where this request reads a counter that predicts a crossing, but a racing
+// request already crossed the threshold first — so the store reports justLocked=false for this
+// one. The old prediction-based code would (wrongly) double-emit account.locked here.
+func TestEvents_AccountLockedFollowsStoreResult(t *testing.T) {
+	ctx := context.Background()
+	uid := uuid.Must(uuid.NewV7())
+	hash := "h"
+
+	newSvc := func(justLocked bool) (identity.Service, *captureSink) {
+		sink := &captureSink{}
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(_ context.Context, _ string, email string) (*identity.User, error) {
+				return &identity.User{ID: uid, Email: email}, nil
+			},
+			FindIdentityByProviderFunc: func(_ context.Context, _ string, provider, providerID string) (*identity.Identity, error) {
+				// Pre-increment count predicts a crossing at threshold 2 (1+1 >= 2): the old
+				// code would emit account.locked off this prediction alone.
+				return &identity.Identity{ID: uuid.Must(uuid.NewV7()), UserID: uid, Provider: provider, ProviderID: providerID, PasswordHash: &hash, FailedAttempts: 1}, nil
+			},
+			IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) (bool, error) {
+				return justLocked, nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			HashFunc:    func(context.Context, string) (string, error) { return "h", nil },
+			CompareFunc: func(context.Context, string, string) error { return errors.New("wrong") },
+		}
+		svc := identity.NewService(store, hasher, okPolicy(),
+			identity.WithEventSink(sink), identity.WithLockout(2, time.Hour))
+		return svc, sink
+	}
+
+	t.Run("store reports this request locked the account -> emit", func(t *testing.T) {
+		svc, sink := newSvc(true)
+		_, err := svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.True(t, sink.has(event.AccountLocked), "account.locked must fire when the store reports justLocked")
+	})
+
+	t.Run("store reports this request did NOT cross (racing lock) -> no emit", func(t *testing.T) {
+		svc, sink := newSvc(false)
+		_, err := svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.False(t, sink.has(event.AccountLocked),
+			"account.locked must NOT fire on a stale pre-increment prediction when the store reports justLocked=false")
+	})
 }
 
 // failMailer fails every delivery, to exercise the swallowed-delivery-error path.

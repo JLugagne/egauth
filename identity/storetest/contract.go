@@ -32,7 +32,7 @@ type MockStore struct {
 	AddIdentityFunc                     func(ctx context.Context, tenantID string, ident *identity.Identity) error
 	FindIdentitiesByUserIDFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) ([]*identity.Identity, error)
 	FindIdentityByProviderFunc          func(ctx context.Context, tenantID string, provider, providerID string) (*identity.Identity, error)
-	IncrementFailedAttemptsFunc         func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error
+	IncrementFailedAttemptsFunc         func(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (bool, error)
 	ResetFailedAttemptsFunc             func(ctx context.Context, tenantID string, identityID uuid.UUID) error
 	UpdateIdentityPasswordFunc          func(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error
 	CreateVerificationTokenFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
@@ -70,7 +70,7 @@ func (m *MockStore) DeleteExpiredVerificationTokens(ctx context.Context, tenantI
 	return m.DeleteExpiredVerificationTokensFunc(ctx, tenantID)
 }
 
-func (m *MockStore) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) error {
+func (m *MockStore) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (bool, error) {
 	if m.IncrementFailedAttemptsFunc == nil {
 		panic("called not defined IncrementFailedAttemptsFunc")
 	}
@@ -329,10 +329,11 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		}
 		require.NoError(t, store.AddIdentity(ctx, tenantA, ident))
 
-		// Increment below threshold: counter rises, no lock.
+		// Increment below threshold: counter rises, no lock, and justLocked stays false.
 		for i := 1; i < defaultTestLockThreshold; i++ {
-			err = store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
+			justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
 			require.NoError(t, err)
+			assert.False(t, justLocked, "must not report justLocked below threshold")
 
 			found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
 			require.NoError(t, err)
@@ -340,15 +341,22 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 			assert.Nil(t, found.LockedUntil, "must not be locked below threshold")
 		}
 
-		// Crossing the threshold sets LockedUntil.
-		err = store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
+		// Crossing the threshold sets LockedUntil and reports justLocked exactly once.
+		justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
 		require.NoError(t, err)
+		assert.True(t, justLocked, "the increment that crosses the threshold must report justLocked")
 
 		found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
 		require.NoError(t, err)
 		assert.Equal(t, defaultTestLockThreshold, found.FailedAttempts)
 		require.NotNil(t, found.LockedUntil, "must be locked at threshold")
 		assert.True(t, found.LockedUntil.After(time.Now()), "lock must be in the future")
+
+		// A further failed attempt on an already-locked account must NOT report justLocked
+		// again — the lock event fires only on the crossing transition.
+		justLocked, err = store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
+		require.NoError(t, err)
+		assert.False(t, justLocked, "must not re-report justLocked once already locked")
 
 		// Reset clears both counter and lock.
 		err = store.ResetFailedAttempts(ctx, tenantA, ident.ID)
@@ -375,7 +383,8 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, store.AddIdentity(ctx, tenantA, ident))
 
 		// Lock the account, then update the password: lockout must be cleared atomically.
-		require.NoError(t, store.IncrementFailedAttempts(ctx, tenantA, ident.ID, 1, defaultTestLockDuration))
+		_, err = store.IncrementFailedAttempts(ctx, tenantA, ident.ID, 1, defaultTestLockDuration)
+		require.NoError(t, err)
 
 		changedAt := time.Now().UTC().Truncate(time.Second)
 		err = store.UpdateIdentityPassword(ctx, tenantA, user.ID, "new_hash", changedAt, true)

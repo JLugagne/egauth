@@ -122,6 +122,8 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error)
 
 Only the first 5 hex chars of SHA-1(password) leave the process. Default fail posture: **fail closed** (upstream error propagates). Default HTTP timeout: 10s. Default threshold: 1 (any appearance = breached).
 
+**Fail-open vs fail-closed is ultimately the consumer's posture decision, not just the client's.** `BreachChecker` is a hook — egauth makes no network calls itself, and the password policy **propagates a checker error unchanged**. So the *handler's* error handling decides the end-to-end posture: rejecting on any policy error = fail-closed (a breach-service outage blocks every registration/password-change); special-casing only `ErrPasswordBreached` and letting other errors pass = fail-open (an outage silently disables screening, can go unnoticed for months). No safe default — decide deliberately, wrap `IsBreached` in a **timeout**, and **log/alert on error** so a silent fail-open is observable. The hibp client's `WithFailOpen()` only sets the client's own posture; a custom checker or the handler's error mapping still governs the real outcome. Treat breach screening as advisory defence-in-depth on top of length+denylist, never the primary control.
+
 Options:
 ```go
 func WithHTTPClient(c *http.Client) Option   // custom transport/timeouts/proxies

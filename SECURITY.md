@@ -394,6 +394,25 @@ redaction is in any case only a backstop. Therefore the consumer must:
   hatch for deployments that genuinely cannot satisfy the `__Host-` requirements (e.g. a
   path-scoped cookie or local plain-HTTP development); overriding to a name without the prefix
   forfeits the host-lock hardening and is the consumer's explicit choice.
+- **OAuth state cookie carries secrets in plaintext.** The short-lived OAuth `state` cookie
+  (default name `oauth_state`) is a plain concatenation of the CSRF state, the **PKCE code
+  verifier**, the **OIDC nonce**, the provider name and the tenant — it is *not* signed or
+  encrypted. Its integrity model is "the attacker cannot read or write the cookie," resting on
+  `HttpOnly` + `Secure` + `SameSite=Lax` (set automatically) plus a constant-time `state`
+  comparison on callback — **not** on the cookie being tamper-evident. Two consequences for the
+  consumer:
+  - **Never log or mirror request cookies.** The verifier and nonce sit in the cookie in
+    plaintext; any infra that logs cookies, ships them to an observability backend, or proxies
+    them through something that persists headers is recording sensitive material.
+  - **Do not move `state` out of the cookie without re-deriving the guarantee.** If you refactor
+    it to a server-side handle, a header, or a differently-prefixed cookie, you can silently
+    lose the read/write protection the current scheme depends on.
+  Unlike the `tokens`/`sessions` cookies, the state cookie name is **not** `__Host-` prefixed by
+  default (it must survive the provider's top-level redirect, which `SameSite=Lax` already
+  handles; `__Host-` is independently compatible). For defence against subdomain cookie-tossing,
+  set a `__Host-`-prefixed name via `oauth.WithStateCookieName("__Host-oauth_state")` **when your
+  deployment serves OAuth over HTTPS with no cookie `Domain`** (the `__Host-` prefix requires
+  `Secure`, `Path=/`, and no `Domain`).
 - **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
   lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
   timeout). Regardless of how recently `Touch` was called, a session is rejected once
@@ -513,6 +532,46 @@ The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.Toke
 See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
 persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
 
+## Breach-check fail-open vs fail-closed (consumer responsibility)
+
+`passwords.BreachChecker` is a **hook** — egauth ships the interface and makes no network calls
+itself. When you wire a HIBP (or other) client into the password policy and that client errors
+(service down, timeout, rate-limited), the policy propagates the **raw error unchanged**. How
+your handler reacts to that error is an explicit security-posture decision with no safe default,
+and it is invisible unless you look for it:
+
+- **Reject on any policy error → fail-closed.** A breach-service outage blocks every registration
+  and password change (an availability hit), but no unscreened password is ever accepted.
+- **Special-case only `ErrPasswordBreached` and let other errors pass → fail-open.** An outage
+  silently disables breach screening and weak/known-breached passwords sail through — and because
+  nothing fails loudly, a fail-open can go unnoticed for months.
+
+Neither is wrong; the choice depends on whether you value availability or screening guarantees
+more. **Consumer guidance:** decide deliberately, wrap your `IsBreached` implementation in a
+**timeout** so a hung upstream cannot stall the auth path, and **log/alert when it errors** so a
+silent fail-open is observable. Treat the breach check as advisory defence-in-depth on top of the
+length/denylist policy, not as the primary control.
+
+## Custom store adapters: atomicity is on you (consumer responsibility)
+
+The library's most important runtime guarantees — refresh-token single-use (replay detection),
+TOTP single-use, and failed-attempt lockout — are *enforced in the service layer but depend on
+the store implementing specific methods atomically*. The bundled `pgx` adapters do this correctly
+(`ConsumeRefreshToken` is an `UPDATE … WHERE consumed_at IS NULL`; `MarkTOTPUsed` is a
+compare-and-set on a strictly increasing step; `IncrementFailedAttempts` is a single atomic
+`UPDATE` whose post-increment result drives the lock decision and the `account.locked` event).
+
+These contracts are documented in the store **interface comments**, not enforced by the compiler.
+If you write your own adapter (or modify the bundled one) and implement any of these as a
+non-atomic read-then-write, you **silently break the guarantee** — replay detection stops working,
+a TOTP code becomes reusable, or the lockout audit event mis-fires — and nothing fails loudly.
+
+**Consumer guidance:** treat those methods as concurrency-critical and test them under parallel
+load. The repo ships contract test suites for exactly this — run `identity/storetest`,
+`tokens/storetest`, `mfa/storetest`, and the equivalent per-module suites against your adapter;
+they assert the atomic behaviours (including that `IncrementFailedAttempts` reports the locking
+transition exactly once) that the service layer relies on.
+
 ## Account-existence disclosure (by design)
 
 Three responses intentionally reveal that an account exists; this is an accepted trade-off,
@@ -521,6 +580,11 @@ not a bug:
 - **`ErrAccountLocked` / `ErrAccountDisabled` → 429** on login: lockout and administrative
   suspension are both meant to be observable (PRD §105–106). Both map to the same 429 response
   so suspended accounts are indistinguishable from locked ones to an external observer.
+  Note this disclosure is at the **status-code** level by design. The login path additionally
+  spends a decoy Argon2id hash on the locked and disabled rejection branches (matching the
+  unknown-user / wrong-password paths) so the *response time* of those branches does not become
+  a second, redundant enumeration oracle — keeping all in-process timing uniform and robust
+  against a future refactor that collapses the 429 back to a generic 401.
 - **`email_taken` → 409** on registration: standard registration UX. If your threat model
   requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
   `400` (note that `Register` already hashes before the uniqueness check, so the timing
