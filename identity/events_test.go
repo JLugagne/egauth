@@ -280,3 +280,87 @@ func TestAuthRequestContextIP(t *testing.T) {
 		assert.False(t, hasUA, "absent RequestContext must omit the User-Agent attribute")
 	})
 }
+
+// TestLoginAuditMethod asserts that the password login path stamps the expected
+// audit attributes on every event it emits:
+//   - login.succeeded carries Attrs["method"]="password" and Attrs["amr"]=["pwd"]
+//   - login.failed carries Attrs["method"]="password"
+//   - account.locked carries the client IP (when a RequestContext is supplied)
+func TestLoginAuditMethod(t *testing.T) {
+	const ip = "203.0.113.42"
+	rc := event.RequestContext{IP: ip}
+
+	// newAuditSvc returns a service wired to sink with the given password-comparison result.
+	newAuditSvc := func(sink event.Sink, passwordMatches bool) identity.Service {
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(context.Context, string) (string, error) { return "h", nil },
+			CompareFunc: func(context.Context, string, string) error {
+				if passwordMatches {
+					return nil
+				}
+				return errors.New("wrong")
+			},
+		}
+		return identity.NewService(
+			identitymemory.NewStore(), hasher, okPolicy(),
+			identity.WithEventSink(sink),
+			identity.WithLockout(2, time.Hour),
+		)
+	}
+
+	t.Run("login.succeeded carries method and amr", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newAuditSvc(sink, true)
+
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		e, ok := sink.last(event.LoginSucceeded)
+		require.True(t, ok, "a successful password login must emit login.succeeded")
+		assert.Equal(t, "password", e.Attrs["method"], "login.succeeded must carry method=password")
+		amr, _ := e.Attrs["amr"].([]string)
+		assert.Equal(t, []string{"pwd"}, amr, "login.succeeded must carry amr=[pwd]")
+	})
+
+	t.Run("login.failed carries method", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newAuditSvc(sink, false)
+
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong")
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+
+		e, ok := sink.last(event.LoginFailed)
+		require.True(t, ok, "a failed password login must emit login.failed")
+		assert.Equal(t, "password", e.Attrs["method"], "login.failed must carry method=password")
+	})
+
+	t.Run("account.locked carries client IP", func(t *testing.T) {
+		ctx := context.Background()
+		sink := &captureSink{}
+		svc := newAuditSvc(sink, false) // wrong password always -> triggers lockout at threshold 2
+
+		_, err := svc.Register(ctx, "", "user@example.com", "pw")
+		require.NoError(t, err)
+
+		// First failure: not yet locked.
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong", rc)
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+		assert.False(t, sink.has(event.AccountLocked), "no lockout event before threshold")
+
+		// Second failure: crosses the threshold -> account.locked emitted.
+		_, err = svc.Authenticate(ctx, "", "password", "user@example.com", "wrong", rc)
+		require.ErrorIs(t, err, identity.ErrInvalidCredentials)
+
+		e, ok := sink.last(event.AccountLocked)
+		require.True(t, ok, "account.locked must be emitted when the lockout threshold is crossed")
+		assert.Equal(t, ip, e.Attrs[event.AttrIP], "account.locked must carry the client IP from RequestContext")
+	})
+}
