@@ -269,7 +269,14 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 	if err := s.applyLoginMetadata(ctx, tenantID, existing, stored); err != nil {
 		return nil, err
 	}
-	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: userID.String(), TenantID: tenantID, Reason: "passkey"})
+	// amr=["hwk"] (hardware-key authenticator per RFC 8176) + method="passkey" for uniform
+	// login.succeeded audit trail across all authentication paths (M9 SC-1).
+	s.emit(ctx, event.Event{
+		Type:     event.LoginSucceeded,
+		UserID:   userID.String(),
+		TenantID: tenantID,
+		Attrs:    map[string]any{"amr": []string{"hwk"}, "method": "passkey"},
+	})
 	return stored, nil
 }
 
@@ -323,7 +330,16 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 	if err := s.applyLoginMetadata(ctx, tenantID, existing, stored); err != nil {
 		return nil, uuid.Nil, err
 	}
-	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_discoverable"})
+	// amr=["hwk"] (hardware-key authenticator per RFC 8176) + method="passkey" for uniform
+	// login.succeeded audit trail. Reason="passkey_discoverable" is kept alongside so consumers
+	// can distinguish the usernameless flow from the username-based passkey flow.
+	s.emit(ctx, event.Event{
+		Type:     event.LoginSucceeded,
+		UserID:   resolvedID.String(),
+		TenantID: tenantID,
+		Reason:   "passkey_discoverable",
+		Attrs:    map[string]any{"amr": []string{"hwk"}, "method": "passkey"},
+	})
 	return stored, resolvedID, nil
 }
 
