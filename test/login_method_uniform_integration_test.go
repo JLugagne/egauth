@@ -25,13 +25,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// loginMethodSink is a minimal capturing Sink for TestLoginMethodUniform.
-// It is distinct from auditSink in audit_trail_integration_test.go to keep each
-// integration-test file self-contained with no implicit coupling between tests.
-type loginMethodSink struct {
-	auditSink // embed the shared helper for EmitEvent / reset / find / findReason
-}
-
 // uniformLoginPolicy is a permissive password policy for integration tests:
 // the audit behaviour, not password strength, is the subject of these tests.
 type uniformLoginPolicy struct{}
