@@ -324,6 +324,8 @@ mux.Handle("POST /metrics", tokens.RequireAuth(issuer, handler,
 | `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
 | `api_key.purged` | expired-key sweep | `count` |
 
+**Revoke on disable:** to kill every credential a user holds when an account is suspended, wire `tokens.NewAccountRevoker(store)` (revokes all their refresh tokens + API keys) into `identity.WithDisableRevokers(...)` so `identity.DisableUser` cascades the revocation. See [identity.md](identity.md) and [tokens.md](tokens.md).
+
 Details: [tokens.md](tokens.md).
 
 ---

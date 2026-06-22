@@ -101,6 +101,8 @@ err := tokenService.RevokeAPIKey(ctx, "tenant-123", apiKey.ID)
 
 After revocation, any call to `VerifyAPIKey` or `VerifyAPIKeyActor` for that key returns `tokens.ErrAPIKeyRevoked` — a distinct error from `ErrAPIKeyNotFound`, so callers can tell the difference between "unknown key" and "key was deliberately disabled". The revoked record is retained and remains visible in management listings; it is not deleted.
 
+To revoke **every** credential a user holds at once — all their refresh tokens and all the API keys they issued — use `tokens.NewAccountRevoker(store)`. Its main use is wiring into `identity.WithDisableRevokers` so disabling an account automatically revokes its tokens and keys (see [Identity & Passwords]({{< ref "identity-and-passwords" >}})); the underlying store also exposes `RevokeAllRefreshTokensForUser` and `RevokeAllAPIKeysForUser` directly.
+
 ### Listing a user's keys
 
 ```go

@@ -62,6 +62,10 @@ type Store[C any] interface {
     ConsumeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error
     RevokeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error
     RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
+    // RevokeAllRefreshTokensForUser deletes EVERY refresh token a user holds, across all
+    // families — the "kill every session" primitive used on account disable. Idempotent
+    // (no live tokens → nil, never ErrRefreshTokenNotFound).
+    RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     SaveAPIKey(ctx context.Context, tenantID string, key *APIKey[C]) error
     // FindAPIKeyByHash returns a soft-revoked key (RevokedAt populated) as well as an active
     // one; the verify layer turns RevokedAt into ErrAPIKeyRevoked. Clear-text token is never
@@ -73,6 +77,10 @@ type Store[C any] interface {
     // ListAPIKeysByCreator returns every key (active + revoked) for createdBy. Token field
     // is always blank; RevokedAt is set for revoked keys. Empty slice (not error) when none.
     ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
+    // RevokeAllAPIKeysForUser soft-revokes EVERY key created by userID (by created_by),
+    // mirroring RevokeAPIKey semantics (revoked keys stay visible, original RevokedAt kept).
+    // The "kill every key this user issued" primitive used on account disable. Idempotent.
+    RevokeAllAPIKeysForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     // GC reaper: purge expired rows (consumed tokens kept until expiry for replay detection).
     DeleteExpired(ctx context.Context, tenantID string) (int64, error)
 }
@@ -205,6 +213,17 @@ The single seam for turning a verified API key into an `egauth.Actor`. Mapping r
 - Any other / empty `Type` → `Kind=egauth.User`, `UserID=key.Claims.Subject` (fail-safe: an unclassified key is never silently treated as a machine).
 
 `KeyID` is always the key's own ID; `Scopes` are taken verbatim from the key's claims. No secret or hash is copied onto the Actor.
+
+### `tokens.NewAccountRevoker`
+```go
+func NewAccountRevoker[C any](store Store[C]) func(ctx context.Context, tenantID string, userID uuid.UUID) error
+```
+Cross-module revocation hook that kills every credential a user holds: revokes all their refresh tokens (`RevokeAllRefreshTokensForUser`) and soft-revokes every API key they issued (`RevokeAllAPIKeysForUser`). Wire it into `identity.WithDisableRevokers` so `identity.DisableUser` cascades into the tokens module without coupling the two packages:
+```go
+svc := identity.NewService(store, hasher, policy,
+    identity.WithDisableRevokers(tokens.NewAccountRevoker(tokenStore)))
+```
+Both revocations run even if the first errors (errors are joined). Idempotent — safe to retry, which matters because disable may be re-attempted. The signature also fits `identity.WithAccountErasers` if you want the same fan-out on `DeleteAccount`.
 
 ### `jwt.Config[C any]`
 ```go

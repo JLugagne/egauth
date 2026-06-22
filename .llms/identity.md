@@ -74,6 +74,7 @@ type Service interface {
   - `Kind string`, `Metadata []byte`, `ExpiresAt time.Time`, `CreatedAt time.Time`
 
 - `AccountEraser` — `func(ctx context.Context, tenantID string, userID uuid.UUID) error`; registered via `WithAccountErasers`, run by `DeleteAccount` before soft-deleting
+- `AccountRevoker` — `func(ctx context.Context, tenantID string, userID uuid.UUID) error`; registered via `WithDisableRevokers`, run by `DisableUser` to invalidate active, re-establishable credentials (refresh tokens, API keys, sessions). Distinct from `AccountEraser`: disable is reversible, so revokers must NOT destroy enrollment data (MFA, passkeys) the account needs again after `EnableUser`.
 
 - `ClaimsBuilder[C any]` — `func(*User) tokens.Claims[C]`; maps an authenticated user to token claims for the handler layer
 
@@ -93,6 +94,7 @@ type Service interface {
 - `func WithPhoneVerificationTTL(d time.Duration) ServiceOption` — default 15 min
 - `func WithRecoveryEmailTTL(d time.Duration) ServiceOption` — default 24h
 - `func WithAccountErasers(erasers ...AccountEraser) ServiceOption` — cross-module revocation hooks for `DeleteAccount`
+- `func WithDisableRevokers(revokers ...AccountRevoker) ServiceOption` — cross-module revocation hooks for `DisableUser` (refresh tokens, API keys, sessions). Use `tokens.NewAccountRevoker(tokenStore)` for tokens/keys and `sessions.Service.RevokeAllForUser` for sessions.
 - `func WithEventSink(sink event.Sink) ServiceOption` — service-level security events
 - `func WithClock(now func() time.Time) ServiceOption` — override time source (tests)
 
@@ -365,7 +367,7 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.
 - `DeleteAccount` runs all `AccountErasers` first; a revocation failure aborts before the soft-delete (cleanly retriable). Erasers should be idempotent.
-- `DisableUser` does NOT run `AccountErasers` and does NOT revoke sessions; call session revocation separately if needed.
+- `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued tokens valid until expiry — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately.
 - A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts.
 - `LinkOrCreateIdentity` refuses silent email-based account linking (returns `ErrEmailAlreadyExists` if provider email matches an existing account); explicit linking from an authenticated session is required.
 - Verification token scheme is selector/verifier: selector stored in clear for O(1) lookup; only SHA-256 of verifier stored. Helpers: `GenerateVerificationToken()`, `SplitVerificationToken()`, `HashVerifier()`, `CompareVerifier()`.

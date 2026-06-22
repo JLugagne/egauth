@@ -79,6 +79,7 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
   `otp` (email/SMS one-time codes, also usable as passwordless primary).
 - **Step-up** = `tokens` carries `AuthTime`/`AMR`; `Claims.FreshAuth(maxAge)` gates sensitive ops.
 - **Account deletion fan-out** = `identity.WithAccountErasers(...)` runs cross-module revocation hooks before soft-delete.
+- **Account disable fan-out** = `identity.WithDisableRevokers(...)` runs cross-module revocation hooks on `DisableUser` to kill a suspended user's refresh tokens, API keys (`tokens.NewAccountRevoker`) and sessions — re-establishable credentials only, leaving MFA/passkey enrollment intact for `EnableUser`.
 - **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
   flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
   `tokens.Claims.MustChangePassword=true`. The flag is recorded on the refresh-token family and `Rotate` replays it
