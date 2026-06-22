@@ -205,10 +205,21 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 	return err
 }
 
-// FindAPIKeyByHash retrieves an API key by its hash, including its type and created_by fields.
+
+// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
+// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
+// backend is unreachable and honors ctx for cancellation/deadline.
+func (s *Store[C]) Ping(ctx context.Context) error {
+	var ok int
+	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}
+
+// FindAPIKeyByHash retrieves an API key by its hash, including revoked_at so callers can
+// distinguish active keys from revoked ones. Revoked keys are returned (not filtered); the
+// verify layer maps a non-nil RevokedAt to ErrAPIKeyRevoked.
 func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error) {
 	query := `
-		SELECT id, tenant_id, token_hash, user_id, prefix, claims, expires_at, type, created_by
+		SELECT id, tenant_id, token_hash, user_id, prefix, claims, expires_at, type, created_by, revoked_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NOT NULL
 	`
@@ -218,7 +229,7 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	var claimsJSON []byte
 	var keyType string
 	var createdBy *uuid.UUID
-	err := row.Scan(&key.ID, &key.TenantID, &key.Hash, &key.Claims.Subject, &key.Prefix, &claimsJSON, &key.ExpiresAt, &keyType, &createdBy)
+	err := row.Scan(&key.ID, &key.TenantID, &key.Hash, &key.Claims.Subject, &key.Prefix, &claimsJSON, &key.ExpiresAt, &keyType, &createdBy, &key.RevokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrAPIKeyNotFound
@@ -238,10 +249,77 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	return &key, nil
 }
 
-// Ping reports backend connectivity by issuing a trivial round-trip query over the store's
-// handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
-// backend is unreachable and honors ctx for cancellation/deadline.
-func (s *Store[C]) Ping(ctx context.Context) error {
-	var ok int
-	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+// RevokeAPIKey soft-revokes the key identified by keyID within the given tenant by setting
+// revoked_at = now(). The update is conditional on revoked_at IS NULL so it is idempotent:
+//   - 0 rows updated AND the key does not exist at all → ErrAPIKeyNotFound
+//   - 0 rows updated AND the key already has revoked_at set → no-op success (idempotent)
+//   - 1 row updated → success
+func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error {
+	updateQuery := `
+		UPDATE tokens
+		SET revoked_at = now()
+		WHERE id = $1 AND tenant_id = $2 AND claims IS NOT NULL AND revoked_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, updateQuery, keyID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		// No row updated: either the key doesn't exist or it was already revoked.
+		// Distinguish the two cases with an existence check.
+		existsQuery := `
+			SELECT 1 FROM tokens
+			WHERE id = $1 AND tenant_id = $2 AND claims IS NOT NULL
+		`
+		var dummy int
+		err := s.db.QueryRow(ctx, existsQuery, keyID, tenantID).Scan(&dummy)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return tokens.ErrAPIKeyNotFound
+		}
+		if err != nil {
+			return err
+		}
+		// Key exists but was already revoked — idempotent no-op.
+	}
+	return nil
+}
+
+// ListAPIKeysByCreator returns all API keys created by the given user within the tenant.
+// Revoked keys are included (with RevokedAt populated). Token (clear-text) is never populated.
+// An unknown creator returns an empty, non-nil slice with no error.
+func (s *Store[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error) {
+	query := `
+		SELECT id, tenant_id, token_hash, user_id, prefix, claims, expires_at, type, created_by, revoked_at
+		FROM tokens
+		WHERE tenant_id = $1 AND created_by = $2 AND claims IS NOT NULL
+		ORDER BY created_at ASC
+	`
+	rows, err := s.db.Query(ctx, query, tenantID, createdBy)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make([]*tokens.APIKey[C], 0)
+	for rows.Next() {
+		var key tokens.APIKey[C]
+		var claimsJSON []byte
+		var keyType string
+		var createdByPtr *uuid.UUID
+		if err := rows.Scan(&key.ID, &key.TenantID, &key.Hash, &key.Claims.Subject, &key.Prefix, &claimsJSON, &key.ExpiresAt, &keyType, &createdByPtr, &key.RevokedAt); err != nil {
+			return nil, err
+		}
+		key.Type = tokens.KeyType(keyType)
+		if createdByPtr != nil {
+			key.CreatedBy = *createdByPtr
+		}
+		if err := json.Unmarshal(claimsJSON, &key.Claims); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal claims: %w", err)
+		}
+		result = append(result, &key)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
 }

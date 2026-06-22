@@ -57,8 +57,24 @@ type APIKeyStore[C any] interface {
 	// differs from tenantID, it returns ErrTenantMismatch.
 	SaveAPIKey(ctx context.Context, tenantID string, key *APIKey[C]) error
 
-	// FindAPIKeyByHash retrieves an API key by its hash.
+	// FindAPIKeyByHash retrieves an API key by its hash. A soft-revoked key is STILL returned,
+	// with its RevokedAt populated; the verify layer decides whether to reject it.
 	FindAPIKeyByHash(ctx context.Context, tenantID string, tokenHash string) (*APIKey[C], error)
+
+	// RevokeAPIKey soft-revokes the API key identified by keyID within tenantID by stamping its
+	// RevokedAt. A missing key returns ErrAPIKeyNotFound; a key that belongs to a different
+	// tenant is treated as missing and also returns ErrAPIKeyNotFound. Revoking an
+	// already-revoked key is a no-op and returns nil (RevokedAt is not advanced). Revocation is
+	// by ID, never by hash, because the clear-text token is unrecoverable by design. The store
+	// stays policy-free: it only stamps RevokedAt and FindAPIKeyByHash continues to return the
+	// revoked key with RevokedAt set.
+	RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error
+
+	// ListAPIKeysByCreator returns every API key — active and revoked — created by createdBy
+	// within tenantID. The Token field is always blank because the clear-text value exists only
+	// at creation. It returns an empty (non-nil) slice when the creator has no keys, never
+	// ErrAPIKeyNotFound.
+	ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
 }
 
 // TokenReaper is the optional GC capability of a tokens backend: the schedulable sweep that purges

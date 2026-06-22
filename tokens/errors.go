@@ -18,6 +18,11 @@ var (
 	// ErrAPIKeyNotFound is returned when an API key cannot be found by its hash.
 	ErrAPIKeyNotFound = errors.New("tokens: api key not found")
 
+	// ErrAPIKeyRevoked is returned by the verify layer when an API key has been soft-revoked
+	// (its RevokedAt is set). The store itself does not return this error: it returns the
+	// revoked key with RevokedAt populated and leaves the policy decision to the verify layer.
+	ErrAPIKeyRevoked = errors.New("tokens: api key revoked")
+
 	// ErrRefreshTokenNotFound is returned when a refresh token cannot be found by its hash.
 	ErrRefreshTokenNotFound = errors.New("tokens: refresh token not found")
 

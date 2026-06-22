@@ -82,3 +82,19 @@ func (s *SingleTenant[C]) VerifyAccessTokenForTenant(ctx context.Context, tenant
 func (s *SingleTenant[C]) DeleteExpired(ctx context.Context) (int64, error) {
 	return s.svc.DeleteExpired(ctx, "")
 }
+
+// RevokeAPIKey calls Service.RevokeAPIKey on the empty tenant (the single-tenant default
+// partition). Its signature keeps the single-tenant convenience contract (no tenantID): the
+// underlying revoke is scoped to the default partition (""). See Service.RevokeAPIKey for the
+// error/no-op and audit-event contract.
+func (s *SingleTenant[C]) RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error {
+	return s.svc.RevokeAPIKey(ctx, "", keyID)
+}
+
+// ListAPIKeysByCreator calls Service.ListAPIKeysByCreator on the empty tenant (the single-tenant
+// default partition). Its signature keeps the single-tenant convenience contract (no tenantID):
+// the underlying listing is scoped to the default partition (""). See Service.ListAPIKeysByCreator
+// for the returned-key contract.
+func (s *SingleTenant[C]) ListAPIKeysByCreator(ctx context.Context, createdBy uuid.UUID) ([]*tokens.APIKey[C], error) {
+	return s.svc.ListAPIKeysByCreator(ctx, "", createdBy)
+}

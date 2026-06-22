@@ -867,6 +867,44 @@ func (s *Service[C]) VerifyAPIKeyActor(ctx context.Context, tenantID string, key
 	return tokens.ActorFromAPIKey(apiKey), &apiKey.Claims, nil
 }
 
+// RevokeAPIKey soft-revokes the API key identified by keyID within tenantID by delegating to the
+// store, then emits an api_key.revoked audit event when the store reports success.
+//
+// Error/no-op semantics follow the store contract: a missing or cross-tenant key returns
+// tokens.ErrAPIKeyNotFound (no event is emitted); revoking an already-revoked key is a store-level
+// no-op that returns nil and still emits, since the administrative intent succeeded.
+//
+// The audit event mirrors api_key.created's no-secret contract — it carries the affected key_id and
+// never the clear-text token or its hash. It does NOT carry key_type/created_by: the store's revoke
+// is by ID and returns no row, and the APIKeyStore exposes no by-ID read, so sourcing those fields
+// would require either a creator-scoped re-listing (the creator UUID is not known here) or a hash
+// lookup (the hash is unrecoverable by design). key_id alone unambiguously identifies the revoked
+// key for the audit trail without an extra read.
+func (s *Service[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error {
+	if err := s.store.RevokeAPIKey(ctx, tenantID, keyID); err != nil {
+		return err
+	}
+
+	event.Emit(ctx, s.events, event.Event{
+		Type:     event.APIKeyRevoked,
+		TenantID: tenantID,
+		Attrs: map[string]any{
+			"key_id": keyID.String(),
+		},
+	})
+
+	return nil
+}
+
+// ListAPIKeysByCreator returns every API key — active and revoked — created by createdBy within
+// tenantID, delegating to the store. The returned keys carry a blank Token (the clear-text value
+// exists only at creation) and a populated RevokedAt on any soft-revoked key, so management tooling
+// can distinguish active from revoked keys. An empty (non-nil) slice is returned when the creator
+// has no keys; this is not an error.
+func (s *Service[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error) {
+	return s.store.ListAPIKeysByCreator(ctx, tenantID, createdBy)
+}
+
 // verifyAPIKey is the shared lookup + expiry check behind VerifyAPIKey and VerifyAPIKeyActor.
 // It returns the full stored APIKey (no clear-text token — the store never persists one) so the
 // callers can project it to claims and/or an Actor.
@@ -897,6 +935,22 @@ func (s *Service[C]) verifyAPIKey(ctx context.Context, tenantID string, key stri
 			Attrs:    reqCtx.ApplyTo(nil),
 		})
 		return nil, err
+	}
+
+	// Reject a soft-revoked key BEFORE the expiry check so revocation produces its own distinct
+	// error (ErrAPIKeyRevoked) rather than being masked by expiry, and before any claims are
+	// projected. The store still returns revoked keys (RevokedAt populated) so management tooling
+	// can see them; this verify layer is the single chokepoint that turns RevokedAt into a
+	// rejection, so no verify path (VerifyAPIKey / VerifyAPIKeyActor and their wrappers) can
+	// forget to filter.
+	if apiKey.RevokedAt != nil {
+		event.Emit(ctx, s.events, event.Event{
+			Type:     event.APIKeyAuthFailed,
+			TenantID: tenantID,
+			Reason:   event.ReasonAPIKeyRevoked,
+			Attrs:    reqCtx.ApplyTo(nil),
+		})
+		return nil, tokens.ErrAPIKeyRevoked
 	}
 
 	if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(s.now()) {

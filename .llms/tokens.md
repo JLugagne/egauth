@@ -20,6 +20,17 @@ type Issuer[C any] interface {
     // passed on claims. For KeyTypeService the Claims.Subject is overwritten with the new
     // key ID (machine identity); for KeyTypePAT it stays as the caller-supplied user UUID.
     IssueAPIKey(ctx context.Context, prefix string, keyType KeyType, createdBy uuid.UUID, claims Claims[C]) (*APIKey[C], error)
+    // RevokeAPIKey soft-revokes the key identified by keyID within tenantID, stamping its
+    // RevokedAt. A missing key returns ErrAPIKeyNotFound. Revoking an already-revoked key
+    // is a no-op (returns nil). Revocation is by ID because the clear-text token is
+    // unrecoverable by design (only SHA-256 hash stored). On success emits an
+    // api_key.revoked audit event carrying only the key_id — never the token or hash.
+    RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error
+    // ListAPIKeysByCreator returns every key — active and revoked — created by createdBy
+    // within tenantID. The Token field is always blank (clear-text exists only at creation).
+    // RevokedAt is populated for soft-revoked keys. Returns an empty (non-nil) slice when
+    // the creator has no keys; never ErrAPIKeyNotFound.
+    ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
 }
 
 type Verifier[C any] interface {
@@ -52,7 +63,16 @@ type Store[C any] interface {
     RevokeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error
     RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
     SaveAPIKey(ctx context.Context, tenantID string, key *APIKey[C]) error
+    // FindAPIKeyByHash returns a soft-revoked key (RevokedAt populated) as well as an active
+    // one; the verify layer turns RevokedAt into ErrAPIKeyRevoked. Clear-text token is never
+    // stored and is always blank on the returned value.
     FindAPIKeyByHash(ctx context.Context, tenantID string, tokenHash string) (*APIKey[C], error)
+    // RevokeAPIKey soft-revokes by keyID (never by hash — clear-text is unrecoverable).
+    // Missing key → ErrAPIKeyNotFound. Already-revoked → no-op, nil.
+    RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error
+    // ListAPIKeysByCreator returns every key (active + revoked) for createdBy. Token field
+    // is always blank; RevokedAt is set for revoked keys. Empty slice (not error) when none.
+    ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
     // GC reaper: purge expired rows (consumed tokens kept until expiry for replay detection).
     DeleteExpired(ctx context.Context, tenantID string) (int64, error)
 }
@@ -149,11 +169,21 @@ type APIKey[C any] struct {
     // Subject is its own ID, so CreatedBy is the only back-link to the creating human).
     CreatedBy uuid.UUID
     Claims    Claims[C]
+    // RevokedAt is the soft-revoke marker: nil means the key is active. When set, the key has
+    // been administratively revoked via RevokeAPIKey. The store returns a revoked key from
+    // FindAPIKeyByHash with RevokedAt populated; the verify layer (VerifyAPIKey /
+    // VerifyAPIKeyActor) rejects it with ErrAPIKeyRevoked before any claims are projected.
+    // Revoked keys remain visible to management tooling via ListAPIKeysByCreator.
+    RevokedAt *time.Time
 }
 // String/GoString/LogValue redact Token.
 
 // IssueAPIKey does NOT copy the creating user's live roles into the key.
 // Pass Scopes explicitly — the key's authority is only what you set at issuance.
+//
+// The clear-text key value (Token) is returned ONLY at issuance and NEVER persisted or
+// retrievable afterwards. Revocation is always by key ID (RevokeAPIKey), not by hash,
+// because the original token is unrecoverable by design.
 ```
 
 ### `tokens.KeyType`
@@ -333,6 +363,23 @@ func DefaultCookies() Cookies
 // SingleTenant variant:
 (*jwt.SingleTenant[C]).VerifyAPIKeyActor(ctx context.Context, key string, rc ...event.RequestContext) (egauth.Actor, *tokens.Claims[C], error)
 
+// Soft-revoke an API key by ID. The clear-text token is unrecoverable (only hash stored),
+// so revocation is always by key UUID, never by token value. A missing key returns
+// ErrAPIKeyNotFound. Revoking an already-revoked key is idempotent (no-op, nil error).
+// On success an api_key.revoked audit event is emitted (carrying key_id only — no token/hash).
+// After revocation, VerifyAPIKey / VerifyAPIKeyActor return ErrAPIKeyRevoked (not ErrAPIKeyNotFound).
+(*jwt.Service[C]).RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error
+// SingleTenant variant (no tenantID, scoped to the default "" partition):
+(*jwt.SingleTenant[C]).RevokeAPIKey(ctx context.Context, keyID uuid.UUID) error
+
+// List every API key — active and revoked — attributed to the given creator within a tenant.
+// The Token field is always blank (clear-text exists only at issuance).
+// RevokedAt is populated for soft-revoked keys, so callers can distinguish active from revoked.
+// Returns an empty (non-nil) slice when the creator has no keys; never ErrAPIKeyNotFound.
+(*jwt.Service[C]).ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error)
+// SingleTenant variant:
+(*jwt.SingleTenant[C]).ListAPIKeysByCreator(ctx context.Context, createdBy uuid.UUID) ([]*tokens.APIKey[C], error)
+
 // Hash any token/key to SHA-256 hex (for store lookups or manual comparisons).
 func HashToken(token string) string
 
@@ -393,6 +440,12 @@ type egauth.Actor struct {
 }
 func (a Actor) IsHuman() bool   // User or PAT
 func (a Actor) IsMachine() bool // Service only
+
+// Scope helpers — thin, allocation-free. egauth never enforces scopes itself;
+// these are provided so handlers and gates can inspect them without reimplementing iteration.
+func (a Actor) HasScope(s string) bool             // true iff s is in Scopes; false for nil/empty
+func (a Actor) HasAllScopes(scopes ...string) bool // true iff every scope is present; vacuously true for 0 args
+func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scope is present; false for 0 args
 ```
 
 ### `AuthOption[C]` — middleware options
@@ -411,6 +464,7 @@ func (a Actor) IsMachine() bool // Service only
 | `WithRequiredKind[C](kinds ...egauth.PrincipalKind)` | Require the credential's `Actor.Kind` to be one of the listed values; rejects with `403 wrong_principal_kind`. Opt-in only — no default kind policy. |
 | `RequireMachine[C]()` | Convenience: `WithRequiredKind(egauth.Service)` — admits Service tokens only. |
 | `RequireHuman[C]()` | Convenience: `WithRequiredKind(egauth.User, egauth.PAT)` — admits User and PAT tokens only. |
+| `WithGate[C](fn func(egauth.Actor, C) error)` | Attach an application-supplied predicate that runs after all built-in gates (kind, scopes, AMR, auth-age, password-change). If it returns non-nil the request is rejected `403 Forbidden`; the error text is NOT echoed to the client. A nil fn is a no-op. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -456,6 +510,7 @@ var ErrInvalidToken          = errors.New("tokens: invalid token")
 var ErrTokenExpired          = errors.New("tokens: token expired")
 var ErrInvalidClaims         = errors.New("tokens: invalid claims")
 var ErrAPIKeyNotFound        = errors.New("tokens: api key not found")
+var ErrAPIKeyRevoked         = errors.New("tokens: api key revoked")        // soft-revoked key presented at VerifyAPIKey
 var ErrRefreshTokenNotFound  = errors.New("tokens: refresh token not found")
 var ErrRefreshTokenReused    = errors.New("tokens: refresh token reused")   // triggers family revoke
 var ErrNoClaimsProvider      = errors.New("tokens: no claims provider configured for rotation")
@@ -466,7 +521,7 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 
 - **Per-kid alg-pinning**: the access-token verifier resolves the signer by `kid` then pins its algorithm — a token is rejected unless `token.alg == signer.Method().Alg()`. This rejects `alg=none` and alg-confusion/downgrade (e.g. an `RS256`-keyed `kid` presented as `HS256`) for both symmetric (HS256) and asymmetric (RS256/ES256/ES384/ES512/EdDSA) signing.
 - **Publishable JWKS**: `Service.PublicJWKS()` returns an RFC 7517 key set. Asymmetric public keys are safe to serve at `/.well-known/jwks.json`; HMAC keys are emitted metadata-only (`kty:"oct"`) and the secret (`k`) is NEVER published.
-- **SHA-256 at rest**: refresh tokens and API keys stored as `HashToken(raw)` (SHA-256 hex); clear-text never persisted.
+- **SHA-256 at rest / no clear-text retrieval**: refresh tokens and API keys are stored as `HashToken(raw)` (SHA-256 hex); the clear-text value is never persisted and is unrecoverable after issuance. `IssueAPIKey` returns `APIKey.Token` exactly once; subsequent reads (e.g. via `ListAPIKeysByCreator`) always return a blank `Token` field. Revocation is therefore always by key ID (`RevokeAPIKey`), not by token value.
 - **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
 - **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
