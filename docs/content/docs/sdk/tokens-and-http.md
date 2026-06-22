@@ -69,6 +69,54 @@ if err != nil {
 }
 ```
 
+## API Keys
+
+API keys are long-lived credentials suitable for machine-to-machine calls, CI pipelines, or personal access tokens issued to developers. Unlike JWT access tokens they do not expire on a short TTL — they remain valid until explicitly revoked or until their optional `ExpiresAt` is reached.
+
+### Issuing a key
+
+```go
+apiKey, err := tokenService.IssueAPIKey(ctx, "sk_live_", tokens.KeyTypeService, operatorUserID,
+    tokens.Claims[MyClaims]{
+        TenantID: "tenant-123",
+        Scopes:   []string{"metrics:read", "deploys:write"},
+    },
+)
+// apiKey.Token is the only moment the clear-text value is available.
+// Store it nowhere — give it to the caller once and discard.
+fmt.Println("Your API key:", apiKey.Token)
+```
+
+> **Security:** The clear-text token is returned **once** at issuance and is **never stored or retrievable** afterwards. Only the SHA-256 hash is persisted. Management operations (revoke, list) use the key's UUID (`apiKey.ID`), not the token value. For the full security rationale see [SECURITY.md]({{< ref "security" >}}).
+
+`KeyTypePAT` issues a personal access token tied to a human user (`actor.IsHuman()` returns true). `KeyTypeService` issues a machine identity whose `Actor.UserID` is empty — use `actor.KeyID` to identify the service principal.
+
+### Revoking a key
+
+```go
+err := tokenService.RevokeAPIKey(ctx, "tenant-123", apiKey.ID)
+// errors.Is(err, tokens.ErrAPIKeyNotFound) if the key does not exist.
+// Revoking an already-revoked key is idempotent (returns nil).
+```
+
+After revocation, any call to `VerifyAPIKey` or `VerifyAPIKeyActor` for that key returns `tokens.ErrAPIKeyRevoked` — a distinct error from `ErrAPIKeyNotFound`, so callers can tell the difference between "unknown key" and "key was deliberately disabled". The revoked record is retained and remains visible in management listings; it is not deleted.
+
+### Listing a user's keys
+
+```go
+keys, err := tokenService.ListAPIKeysByCreator(ctx, "tenant-123", operatorUserID)
+for _, k := range keys {
+    status := "active"
+    if k.RevokedAt != nil {
+        status = "revoked"
+    }
+    fmt.Printf("%s  %s  %s\n", k.ID, k.Prefix, status)
+    // k.Token is always blank — the clear-text is unrecoverable after issuance.
+}
+```
+
+`ListAPIKeysByCreator` returns both active and revoked keys. The `RevokedAt` field is set on soft-revoked entries. The `Token` field is always empty; if you need to look up a key during authentication use `VerifyAPIKey` (which hashes the raw value before the store lookup).
+
 ## Protecting HTTP Routes
 
 `tokens.RequireAuth` wraps an `AuthenticatedHandlerFunc` to enforce access-token verification. Rather than hiding the identity in the request context, the verified `egauth.Actor` and your custom claims are passed **explicitly** as handler arguments.
@@ -107,6 +155,41 @@ handler := tokens.RequireAuth(
 A resolved token whose signed `tenant_id` does not match the request tenant is rejected (`tokens.ErrTenantMismatch` → 401). The same resolver scopes any auto-refresh rotation. `tokens.WithRefreshTenantResolver` is retained as a deprecated alias.
 
 The `tokens` package also provides ready-made HTTP handlers for the refresh and logout endpoints: `tokens.RefreshHandler` and `tokens.LogoutHandler`, both configurable with options such as `tokens.WithCookies`, `tokens.WithTrustedOrigins`, and `tokens.WithTenantResolver`.
+
+### Inspecting scopes on the Actor
+
+The `egauth.Actor` value passed to every `AuthenticatedHandlerFunc` carries the token's `Scopes` slice verbatim. Three helper methods let you check scopes without writing your own loop:
+
+```go
+actor.HasScope("reports:read")                        // true iff that one scope is present
+actor.HasAllScopes("reports:read", "reports:write")   // true iff every listed scope is present
+actor.HasAnyScope("admin", "reports:read")            // true iff at least one is present
+```
+
+`HasAllScopes` with no arguments returns `true` (vacuous truth). `HasAnyScope` with no arguments returns `false`. Both are allocation-free. `egauth` does not enforce scopes on its own — use `WithRequiredScopes` for a declarative per-route gate, or call the helpers directly when the logic is conditional.
+
+### Custom gates with `WithGate`
+
+`WithGate` lets you attach an application-supplied predicate that runs **after** all built-in gates (kind, required scopes, AMR, auth-age, forced-password-change) and **before** the protected handler. If the predicate returns a non-nil error the request is rejected with `403 Forbidden`. The error message is **not** echoed to the client.
+
+```go
+handler := tokens.RequireAuth(
+    tokenService,
+    myHandler,
+    // Reject callers whose token does not cover the requested resource.
+    tokens.WithGate[MyClaims](func(actor egauth.Actor, custom MyClaims) error {
+        if !actor.HasScope("invoices:write") {
+            return errors.New("missing invoices:write scope")
+        }
+        if custom.OrgID != expectedOrgID {
+            return errors.New("org mismatch")
+        }
+        return nil
+    }),
+)
+```
+
+Use `WithGate` when your access rule depends on both the actor identity and the decoded custom claims, or when the condition is too dynamic for the static `WithRequiredScopes` list. For simple scope requirements `WithRequiredScopes` is terser and its rejection reason (`insufficient_scope`) is standard.
 
 ### CSRF same-origin check (on by default)
 

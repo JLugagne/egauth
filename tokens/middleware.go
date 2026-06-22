@@ -29,6 +29,8 @@ type authConfig[C any] struct {
 	maxAuthAge             time.Duration
 	passwordChangeGate     bool
 	passwordChangeResetURL string
+	// gate is the application-supplied predicate invoked after all built-in gates. A nil gate is a no-op.
+	gate func(egauth.Actor, C) error
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -229,6 +231,12 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
 				return
 			}
+			if cfg.gate != nil {
+				if gateErr := cfg.gate(actorFromClaims(claims), claims.Custom); gateErr != nil {
+					forbidden(w)
+					return
+				}
+			}
 			onAuth(w, r, claims)
 			return
 		}
@@ -277,6 +285,12 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
 				return
 			}
+			if cfg.gate != nil {
+				if gateErr := cfg.gate(actorFromClaims(&pair.Claims), pair.Claims.Custom); gateErr != nil {
+					forbidden(w)
+					return
+				}
+			}
 			onAuth(w, r, &pair.Claims)
 			return
 		}
@@ -307,11 +321,14 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 // from Claims.Kind so that API-key-backed tokens (PAT, Service) carry the right principal
 // classification through to the WithRequiredKind gate. Interactive tokens leave Kind at the
 // zero value, which egauth.IsHuman treats as User (the safe human default).
+// Scopes are copied verbatim from the claims so that application predicates (e.g. those
+// passed to WithGate) can call actor.HasAllScopes without having to inspect the raw claims.
 func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
 	return egauth.Actor{
 		UserID:   claims.Subject,
 		TenantID: claims.TenantID,
 		Kind:     claims.Kind,
+		Scopes:   claims.Scopes,
 	}
 }
 
@@ -400,9 +417,6 @@ func insufficientScope(w http.ResponseWriter) {
 // wrongPrincipalKind signals that the verified credential's principal kind is not in the set
 // allowed by the route (WithRequiredKind gate). The credential is authentic but the wrong type
 // for this endpoint.
-func wrongPrincipalKind(w http.ResponseWriter) {
-	http.Error(w, "wrong_principal_kind", http.StatusForbidden)
-}
 
 // WithPasswordChangeGate enforces the soft password-change gate: after a request's access
 // token has been successfully verified (and any step-up / AMR checks have passed), if the
@@ -436,4 +450,29 @@ func (cfg *authConfig[C]) passwordChangeBlocked(claims *Claims[C]) bool {
 // code. It mirrors the WithFailureRedirect style by delegating to httputil.Fail.
 func passwordChangeRequired(w http.ResponseWriter, r *http.Request, resetURL string) {
 	httputil.Fail(w, r, resetURL, http.StatusForbidden, "password_change_required")
+}
+
+// wrongPrincipalKind signals that the verified credential's principal kind is not in the set
+// allowed by the route (WithRequiredKind gate). The credential is authentic but the wrong type
+// for this endpoint.
+func wrongPrincipalKind(w http.ResponseWriter) {
+	http.Error(w, "wrong_principal_kind", http.StatusForbidden)
+}
+
+// forbidden signals that the application-supplied gate predicate (WithGate) rejected the
+// request. The credential is authentic, but the gate's policy denies access. The predicate's
+// error text is intentionally not echoed to avoid leaking internal policy detail.
+func forbidden(w http.ResponseWriter) {
+	http.Error(w, "forbidden", http.StatusForbidden)
+}
+
+// WithGate attaches an application-supplied predicate that runs after all built-in gates
+// (kind, scopes, AMR, auth-age, password-change) and before the protected handler.
+// The predicate receives the verified Actor (basic identity + scopes) and the decoded
+// custom claims C. If it returns a non-nil error the request is rejected with 403 Forbidden;
+// the error text is NOT echoed to the client. A nil fn is a no-op (equivalent to no gate).
+func WithGate[C any](fn func(egauth.Actor, C) error) AuthOption[C] {
+	return func(a *authConfig[C]) {
+		a.gate = fn
+	}
 }

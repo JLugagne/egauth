@@ -51,6 +51,7 @@ const (
 
 	// API-key lifecycle events.
 	APIKeyCreated       Type = "api_key.created"        // a new API key (PAT or service token) was issued; carries type and created_by in Attrs
+	APIKeyRevoked       Type = "api_key.revoked"        // an API key was administratively soft-revoked; carries type and created_by in Attrs (mirrors api_key.created; no secret)
 	APIKeyAuthSucceeded Type = "api_key.auth.succeeded" // an API key was verified successfully; carries key type in Attrs
 	APIKeyAuthFailed    Type = "api_key.auth.failed"    // an API key verification failed; Reason carries the failure code (see ReasonAPIKey* constants)
 	APIKeyPurged        Type = "api_key.purged"         // expired keys were hard-deleted by the sweep; Attrs carries "count"
@@ -62,6 +63,7 @@ const (
 const (
 	ReasonAPIKeyNotFound       = "not_found"       // no key matched the provided token hash
 	ReasonAPIKeyExpired        = "expired"         // the key exists but its expiry has passed
+	ReasonAPIKeyRevoked        = "revoked"         // the key exists but has been administratively soft-revoked
 	ReasonAPIKeyTenantMismatch = "tenant_mismatch" // the key belongs to a different tenant
 	ReasonAPIKeyWrongType      = "wrong_type"      // the caller required a specific key type (PAT or service) but got the other
 )

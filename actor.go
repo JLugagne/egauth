@@ -59,3 +59,38 @@ func (a Actor) IsHuman() bool {
 func (a Actor) IsMachine() bool {
 	return a.Kind == Service
 }
+
+// HasScope reports whether scope s is present in the actor's Scopes list.
+// It returns false for a nil or empty Scopes slice.
+func (a Actor) HasScope(s string) bool {
+	for _, sc := range a.Scopes {
+		if sc == s {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAllScopes reports whether every requested scope is present in the actor's Scopes list.
+// Vacuous truth: calling with no arguments always returns true.
+// It returns false for a nil or empty Scopes slice when at least one scope is requested.
+func (a Actor) HasAllScopes(scopes ...string) bool {
+	for _, s := range scopes {
+		if !a.HasScope(s) {
+			return false
+		}
+	}
+	return true
+}
+
+// HasAnyScope reports whether at least one of the requested scopes is present in the actor's
+// Scopes list. Calling with no arguments always returns false (no scope can satisfy an empty
+// requirement set). It returns false for a nil or empty Scopes slice.
+func (a Actor) HasAnyScope(scopes ...string) bool {
+	for _, s := range scopes {
+		if a.HasScope(s) {
+			return true
+		}
+	}
+	return false
+}

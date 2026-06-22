@@ -113,6 +113,12 @@ type APIKey[C any] struct {
 	// the only field tying the key back to the creating user.
 	CreatedBy uuid.UUID
 	Claims    Claims[C]
+	// RevokedAt is the soft-revoke marker: nil means the key is active. When set, the key has
+	// been administratively revoked. The store still returns a revoked key from
+	// FindAPIKeyByHash with RevokedAt populated; the verify layer decides to reject it (mapping
+	// RevokedAt to ErrAPIKeyRevoked) so revoked keys stay visible to management tooling and
+	// produce a distinct error from not-found.
+	RevokedAt *time.Time
 }
 
 // RefreshToken represents a single-use refresh token belonging to a rotation family.

@@ -13,14 +13,16 @@ import (
 
 // MockStore is a functional mock of the tokens.Store interface.
 type MockStore[C any] struct {
-	SaveRefreshTokenFunc    func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error
-	FindRefreshTokenFunc    func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error)
-	ConsumeRefreshTokenFunc func(ctx context.Context, tenantID string, tokenHash string) error
-	RevokeRefreshTokenFunc  func(ctx context.Context, tenantID string, tokenHash string) error
-	RevokeFamilyFunc        func(ctx context.Context, tenantID string, familyID uuid.UUID) error
-	SaveAPIKeyFunc          func(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error
-	FindAPIKeyByHashFunc    func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error)
-	DeleteExpiredFunc       func(ctx context.Context, tenantID string) (int64, error)
+	SaveRefreshTokenFunc     func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error
+	FindRefreshTokenFunc     func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error)
+	ConsumeRefreshTokenFunc  func(ctx context.Context, tenantID string, tokenHash string) error
+	RevokeRefreshTokenFunc   func(ctx context.Context, tenantID string, tokenHash string) error
+	RevokeFamilyFunc         func(ctx context.Context, tenantID string, familyID uuid.UUID) error
+	SaveAPIKeyFunc           func(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error
+	FindAPIKeyByHashFunc     func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error)
+	DeleteExpiredFunc        func(ctx context.Context, tenantID string) (int64, error)
+	RevokeAPIKeyFunc         func(ctx context.Context, tenantID string, keyID uuid.UUID) error
+	ListAPIKeysByCreatorFunc func(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error)
 }
 
 func (m *MockStore[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
@@ -292,6 +294,108 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound)
 	})
 
+	t.Run("Contract: API key revoke", func(t *testing.T) {
+		creator := uuid.Must(uuid.NewV7())
+		key := &tokens.APIKey[C]{
+			ID:        uuid.Must(uuid.NewV7()),
+			TenantID:  tenantA,
+			Prefix:    "pk_",
+			Hash:      "revoke_me_hash",
+			CreatedBy: creator,
+			Claims: tokens.Claims[C]{
+				Subject: uuid.Must(uuid.NewV7()),
+				Custom:  customClaim,
+			},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, key))
+
+		// Freshly saved key is active (RevokedAt nil).
+		found, err := store.FindAPIKeyByHash(ctx, tenantA, "revoke_me_hash")
+		require.NoError(t, err)
+		assert.Nil(t, found.RevokedAt, "a freshly saved key must be active")
+
+		// Revoke by ID.
+		err = store.RevokeAPIKey(ctx, tenantA, key.ID)
+		require.NoError(t, err)
+
+		// FindAPIKeyByHash STILL returns the key, now with RevokedAt set (NOT filtered out): the
+		// store stays policy-free and the verify layer is the one that rejects revoked keys.
+		found, err = store.FindAPIKeyByHash(ctx, tenantA, "revoke_me_hash")
+		require.NoError(t, err, "a revoked key must still be returned by FindAPIKeyByHash")
+		require.NotNil(t, found.RevokedAt, "a revoked key must report RevokedAt")
+
+		// Revoking a missing id -> ErrAPIKeyNotFound.
+		err = store.RevokeAPIKey(ctx, tenantA, uuid.Must(uuid.NewV7()))
+		assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound, "revoking an unknown key id must report not found")
+
+		// Revoking an already-revoked key is a no-op success (RevokedAt is not advanced).
+		firstRevokedAt := *found.RevokedAt
+		err = store.RevokeAPIKey(ctx, tenantA, key.ID)
+		require.NoError(t, err, "re-revoking an already-revoked key must be a no-op success")
+		found, err = store.FindAPIKeyByHash(ctx, tenantA, "revoke_me_hash")
+		require.NoError(t, err)
+		require.NotNil(t, found.RevokedAt)
+		assert.WithinDuration(t, firstRevokedAt, *found.RevokedAt, time.Second, "re-revoking must not advance RevokedAt")
+	})
+
+	t.Run("Contract: API key list by creator", func(t *testing.T) {
+		creatorX := uuid.Must(uuid.NewV7())
+		creatorY := uuid.Must(uuid.NewV7())
+
+		x1 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "list_x1",
+			CreatedBy: creatorX, Token: "should-not-be-persisted-x1",
+			Claims: tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		x2 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "list_x2",
+			CreatedBy: creatorX, Token: "should-not-be-persisted-x2",
+			Claims: tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		y1 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "list_y1",
+			CreatedBy: creatorY, Token: "should-not-be-persisted-y1",
+			Claims: tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, x1))
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, x2))
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, y1))
+
+		// ListAPIKeysByCreator(X) returns exactly X's keys, never Y's.
+		listX, err := store.ListAPIKeysByCreator(ctx, tenantA, creatorX)
+		require.NoError(t, err)
+		gotIDs := make(map[uuid.UUID]bool, len(listX))
+		for _, k := range listX {
+			gotIDs[k.ID] = true
+			// SECURITY: the clear-text token must never be returned by a list operation.
+			assert.Empty(t, k.Token, "SECURITY: listed key must not carry a clear-text Token")
+		}
+		assert.True(t, gotIDs[x1.ID], "creator X's first key must be listed")
+		assert.True(t, gotIDs[x2.ID], "creator X's second key must be listed")
+		assert.False(t, gotIDs[y1.ID], "creator Y's key must not appear in creator X's listing")
+		assert.Len(t, listX, 2, "creator X has exactly two keys")
+
+		// Revoked keys are still listed, with RevokedAt set.
+		require.NoError(t, store.RevokeAPIKey(ctx, tenantA, x1.ID))
+		listX, err = store.ListAPIKeysByCreator(ctx, tenantA, creatorX)
+		require.NoError(t, err)
+		assert.Len(t, listX, 2, "revoking a key must not drop it from the listing")
+		var sawRevoked bool
+		for _, k := range listX {
+			if k.ID == x1.ID {
+				sawRevoked = true
+				assert.NotNil(t, k.RevokedAt, "the revoked key must be listed with RevokedAt set")
+			}
+			assert.Empty(t, k.Token, "SECURITY: listed key must not carry a clear-text Token")
+		}
+		assert.True(t, sawRevoked, "the revoked key must still appear in the listing")
+
+		// Unknown creator -> empty, non-nil slice, no error.
+		listUnknown, err := store.ListAPIKeysByCreator(ctx, tenantA, uuid.Must(uuid.NewV7()))
+		require.NoError(t, err, "an unknown creator must not be an error")
+		assert.Empty(t, listUnknown, "an unknown creator must yield an empty slice")
+	})
+
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_hash"
@@ -328,16 +432,51 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 			assert.NoError(t, err, "Tenant A's token must survive Tenant B's family revoke")
 
 			// API key isolation.
+			creatorA := uuid.Must(uuid.NewV7())
 			keyA := &tokens.APIKey[C]{
-				ID:       uuid.Must(uuid.NewV7()),
-				TenantID: tenantA,
-				Hash:     "api_shared",
+				ID:        uuid.Must(uuid.NewV7()),
+				TenantID:  tenantA,
+				Hash:      "api_shared",
+				CreatedBy: creatorA,
 			}
 			err = store.SaveAPIKey(ctx, tenantA, keyA)
 			require.NoError(t, err)
 
 			_, err = store.FindAPIKeyByHash(ctx, tenantB, "api_shared")
 			assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound)
+
+			// Tenant B cannot revoke Tenant A's key: cross-tenant is treated as not found.
+			err = store.RevokeAPIKey(ctx, tenantB, keyA.ID)
+			assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound, "Tenant B must not be able to revoke Tenant A's key")
+
+			// Tenant A's key must remain active after Tenant B's failed revoke.
+			foundA, err := store.FindAPIKeyByHash(ctx, tenantA, "api_shared")
+			require.NoError(t, err)
+			assert.Nil(t, foundA.RevokedAt, "Tenant A's key must stay active after Tenant B's failed revoke")
+
+			// ListAPIKeysByCreator under Tenant B for a creator whose keys live in Tenant A is empty.
+			listB, err := store.ListAPIKeysByCreator(ctx, tenantB, creatorA)
+			require.NoError(t, err)
+			assert.Empty(t, listB, "Tenant B must not see Tenant A's keys via ListAPIKeysByCreator")
+
+			// And Tenant A still sees its own key.
+			listA, err := store.ListAPIKeysByCreator(ctx, tenantA, creatorA)
+			require.NoError(t, err)
+			assert.Len(t, listA, 1, "Tenant A must see its own creator's key")
 		})
 	}
+}
+
+func (m *MockStore[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error {
+	if m.RevokeAPIKeyFunc == nil {
+		panic("called not defined RevokeAPIKeyFunc")
+	}
+	return m.RevokeAPIKeyFunc(ctx, tenantID, keyID)
+}
+
+func (m *MockStore[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error) {
+	if m.ListAPIKeysByCreatorFunc == nil {
+		panic("called not defined ListAPIKeysByCreatorFunc")
+	}
+	return m.ListAPIKeysByCreatorFunc(ctx, tenantID, createdBy)
 }

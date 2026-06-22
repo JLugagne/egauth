@@ -109,3 +109,89 @@ func TestActorKind(t *testing.T) {
 		}
 	})
 }
+
+func TestActorScopeHelpers(t *testing.T) {
+	t.Run("HasScope present", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data", "write:data"}}
+		if !a.HasScope("read:data") {
+			t.Error("HasScope(present) = false, want true")
+		}
+	})
+
+	t.Run("HasScope absent", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data"}}
+		if a.HasScope("write:data") {
+			t.Error("HasScope(absent) = true, want false")
+		}
+	})
+
+	t.Run("HasScope empty scopes", func(t *testing.T) {
+		a := egauth.Actor{}
+		if a.HasScope("read:data") {
+			t.Error("HasScope on empty Scopes = true, want false")
+		}
+	})
+
+	t.Run("HasAllScopes all present", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data", "write:data", "admin"}}
+		if !a.HasAllScopes("read:data", "write:data") {
+			t.Error("HasAllScopes(all present) = false, want true")
+		}
+	})
+
+	t.Run("HasAllScopes superset — actor has more than requested", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data", "write:data", "admin"}}
+		if !a.HasAllScopes("read:data") {
+			t.Error("HasAllScopes(superset) = false, want true")
+		}
+	})
+
+	t.Run("HasAllScopes one absent", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data"}}
+		if a.HasAllScopes("read:data", "write:data") {
+			t.Error("HasAllScopes(one absent) = true, want false")
+		}
+	})
+
+	t.Run("HasAllScopes no args — vacuous true", func(t *testing.T) {
+		a := egauth.Actor{}
+		if !a.HasAllScopes() {
+			t.Error("HasAllScopes() with no args = false, want true (vacuous)")
+		}
+	})
+
+	t.Run("HasAllScopes empty scopes with args", func(t *testing.T) {
+		a := egauth.Actor{}
+		if a.HasAllScopes("read:data") {
+			t.Error("HasAllScopes on empty Scopes with args = true, want false")
+		}
+	})
+
+	t.Run("HasAnyScope one present", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data", "write:data"}}
+		if !a.HasAnyScope("write:data", "admin") {
+			t.Error("HasAnyScope(one present) = false, want true")
+		}
+	})
+
+	t.Run("HasAnyScope none present", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data"}}
+		if a.HasAnyScope("write:data", "admin") {
+			t.Error("HasAnyScope(none present) = true, want false")
+		}
+	})
+
+	t.Run("HasAnyScope no args — always false", func(t *testing.T) {
+		a := egauth.Actor{Scopes: []string{"read:data"}}
+		if a.HasAnyScope() {
+			t.Error("HasAnyScope() with no args = true, want false")
+		}
+	})
+
+	t.Run("HasAnyScope empty scopes", func(t *testing.T) {
+		a := egauth.Actor{}
+		if a.HasAnyScope("read:data") {
+			t.Error("HasAnyScope on empty Scopes = true, want false")
+		}
+	})
+}

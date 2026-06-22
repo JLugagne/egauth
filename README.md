@@ -34,7 +34,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 | Module       | What it does                                                                 |
 |--------------|------------------------------------------------------------------------------|
 | `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; forced-password-change for temporary credentials (`AdminCreateUser`, `SetTemporaryPassword`) |
-| `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys. Reference impl in `tokens/jwt` |
+| `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys (PAT & service tokens) with a full lifecycle — issue, list, revoke. Reference impl in `tokens/jwt` |
 | `sessions`   | Server-side, revocable sessions with idle-timeout (`Touch`) and fixation defense (`Rotate`) |
 | `passwords`  | Hashing/policy/breach **seams** + references: `argon2`, `policy`, `breach/hibp`, `breach/offline` |
 | `mfa`        | TOTP (RFC 6238) with recovery codes                                          |
@@ -175,6 +175,27 @@ the user can do far more. This is the safe default (a leaked PAT is bounded); if
 scope set, pass it explicitly. See [SECURITY.md](SECURITY.md) for
 the full security model.
 
+### Listing and revoking keys
+
+Keys have a full server-side lifecycle, and the clear-text key value is **never retrievable after
+issuance** — egauth stores only a SHA-256 hash, so a leaked database never yields a usable key.
+
+```go
+// List every key a user created — active and revoked — for a management UI.
+// Listed keys carry a blank Token (the secret only ever exists at creation) and a
+// populated RevokedAt on revoked keys.
+keys, err := issuer.ListAPIKeysByCreator(ctx, tenant, alice.ID)
+
+// Revoke a key by its ID — you never need to hold the secret to revoke it.
+err = issuer.RevokeAPIKey(ctx, tenant, keys[0].ID)
+```
+
+Revocation is a **soft-revoke**: the row is kept (so the key stays visible to audit/management with
+a `RevokedAt` timestamp) and `VerifyAPIKey` returns `tokens.ErrAPIKeyRevoked` for it from then on —
+a distinct outcome from expiry (`ErrTokenExpired`) and from a missing key (`ErrAPIKeyNotFound`).
+The in-memory and PostgreSQL backends enforce identical behaviour through one shared contract suite,
+so neither can silently diverge.
+
 ### Opt-in route gates
 
 `RequireAuth` accepts additional `AuthOption`s that gate routes on the principal's kind or scopes.
@@ -198,8 +219,25 @@ tokens.RequireHuman[C]()   // equivalent to WithRequiredKind(egauth.User, egauth
 
 On a kind or scope mismatch the middleware returns `403 wrong_principal_kind` or `403 insufficient_scope`
 respectively — the caller is authenticated but not allowed on this route. The `egauth.Actor`
-injected into the handler carries `Kind`, `KeyID`, and `Scopes` so the application can also branch
-or enforce policy directly without middleware gates.
+injected into the handler carries `Kind`, `KeyID`, and `Scopes`, plus `HasScope` / `HasAllScopes` /
+`HasAnyScope` helpers, so the application can also branch or enforce policy directly without
+middleware gates.
+
+For authorization the fixed gates don't cover, `WithGate` runs an application-supplied predicate
+over the verified `egauth.Actor` **and** your custom claims `C` — one flexible evaluator instead of
+a fixed policy vocabulary. It is opt-in like every other gate, and egauth still assigns no meaning to
+your scopes or claims; your function decides.
+
+```go
+mux.Handle("/api/reports", basic.RequireAuth(issuer, reportsHandler,
+    tokens.WithGate[struct{}](func(actor egauth.Actor, _ struct{}) error {
+        if !actor.HasAllScopes("reports:read") {
+            return errors.New("missing reports:read")
+        }
+        return nil // nil = allowed; any error → 403
+    }),
+))
+```
 
 ### Audit events for key lifecycle
 
@@ -208,8 +246,9 @@ Wire `event.Sink` to observe the full key lifecycle:
 | Event | When | Key `Attrs` |
 |-------|------|-------------|
 | `api_key.created` | Key issued | `"key_type"` (pat/service), `"created_by"` (user UUID) |
+| `api_key.revoked` | Key revoked via `RevokeAPIKey` | `"key_id"` (the revoked key's UUID) |
 | `api_key.auth.succeeded` | Key verified successfully | `"key_type"`, `"ip"`, `"user_agent"` (if `RequestContext` supplied) |
-| `api_key.auth.failed` | Verification failed | `Event.Reason` = `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
+| `api_key.auth.failed` | Verification failed | `Event.Reason` = `not_found` / `expired` / `revoked` / `tenant_mismatch` / `wrong_type` |
 | `api_key.purged` | Expired keys swept by `DeleteExpired` | `"count"` (number of rows deleted) |
 
 `login.succeeded` and `login.failed` carry `"ip"` / `"user_agent"` when the handler receives a

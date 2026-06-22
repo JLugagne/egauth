@@ -176,3 +176,41 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 
 // Verify interface compliance
 var _ tokens.Store[any] = (*Store[any])(nil)
+
+// RevokeAPIKey soft-revokes the API key identified by keyID within tenantID.
+func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, key := range s.apiKeys {
+		if key.ID == keyID && key.TenantID == tenantID {
+			if key.RevokedAt != nil {
+				return nil // idempotent
+			}
+			now := time.Now()
+			key.RevokedAt = &now
+			return nil
+		}
+	}
+	return tokens.ErrAPIKeyNotFound
+}
+
+// ListAPIKeysByCreator returns every API key created by createdBy within tenantID.
+// The Token field is always blank; the clear-text value exists only at creation.
+func (s *Store[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	var result []*tokens.APIKey[C]
+	for _, key := range s.apiKeys {
+		if key.TenantID == tenantID && key.CreatedBy == createdBy {
+			kCopy := *key
+			kCopy.Token = ""
+			result = append(result, &kCopy)
+		}
+	}
+	if result == nil {
+		result = []*tokens.APIKey[C]{}
+	}
+	return result, nil
+}
