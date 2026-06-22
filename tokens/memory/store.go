@@ -142,6 +142,21 @@ func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID u
 	return nil
 }
 
+// RevokeAllRefreshTokensForUser revokes EVERY refresh token belonging to userID within tenantID.
+// Idempotent: a user with no live refresh tokens is a no-op returning nil.
+func (s *Store[C]) RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for hash, rt := range s.refreshTokens {
+		if rt.TenantID == tenantID && rt.UserID == userID {
+			delete(s.refreshTokens, hash)
+		}
+	}
+
+	return nil
+}
+
 // SaveAPIKey persists an API key.
 func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error {
 	s.mu.Lock()
@@ -193,6 +208,23 @@ func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid
 		}
 	}
 	return tokens.ErrAPIKeyNotFound
+}
+
+// RevokeAllAPIKeysForUser soft-revokes EVERY API key created by userID within tenantID. Already
+// -revoked keys keep their original RevokedAt. Idempotent: a user with no keys is a no-op.
+func (s *Store[C]) RevokeAllAPIKeysForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	for _, key := range s.apiKeys {
+		if key.TenantID == tenantID && key.CreatedBy == userID && key.RevokedAt == nil {
+			revoked := now
+			key.RevokedAt = &revoked
+		}
+	}
+
+	return nil
 }
 
 // ListAPIKeysByCreator returns every API key created by createdBy within tenantID.

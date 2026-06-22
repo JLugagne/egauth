@@ -2,6 +2,7 @@ package identity_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/JLugagne/egauth/event"
@@ -81,6 +82,62 @@ func TestDisableUser_RevokesMagicLink(t *testing.T) {
 	// The pending magic-link token must not grant a session for a disabled account.
 	_, err = svc.LoginWithMagicLink(ctx, "", token)
 	assert.Error(t, err, "a disabled account's pending magic link must be revoked")
+}
+
+// TestDisableUser_RunsDisableRevokers verifies that DisableUser invokes every registered
+// AccountRevoker (WithDisableRevokers) with the disabled user's tenant and id, AFTER the account
+// has been stamped disabled — this is the seam that cascades into the tokens/sessions modules to
+// kill a disabled user's refresh tokens, API keys and sessions.
+func TestDisableUser_RunsDisableRevokers(t *testing.T) {
+	ctx := context.Background()
+
+	type call struct {
+		tenantID string
+		userID   uuid.UUID
+	}
+	var calls []call
+	revoker := identity.AccountRevoker(func(_ context.Context, tenantID string, userID uuid.UUID) error {
+		calls = append(calls, call{tenantID, userID})
+		return nil
+	})
+
+	svc, _ := newVerificationService(t, identity.WithDisableRevokers(revoker, revoker))
+
+	user, err := svc.Register(ctx, "", "revoke-hook@example.com", "OldPassw0rd!")
+	require.NoError(t, err)
+
+	require.NoError(t, svc.DisableUser(ctx, "", user.ID))
+
+	require.Len(t, calls, 2, "every registered disable revoker must run, in order")
+	for _, c := range calls {
+		assert.Equal(t, "", c.tenantID)
+		assert.Equal(t, user.ID, c.userID)
+	}
+}
+
+// TestDisableUser_RevokerErrorIsReturnedButAccountStaysDisabled verifies the fail-closed contract:
+// a revoker failure is surfaced (joined across revokers) yet the account is authoritatively
+// disabled regardless, so a downstream revocation hiccup never leaves a still-active account.
+func TestDisableUser_RevokerErrorIsReturnedButAccountStaysDisabled(t *testing.T) {
+	ctx := context.Background()
+
+	boom := errors.New("token store unavailable")
+	failing := identity.AccountRevoker(func(_ context.Context, _ string, _ uuid.UUID) error { return boom })
+
+	svc, _ := newVerificationService(t, identity.WithDisableRevokers(failing))
+
+	const email = "revoke-fail@example.com"
+	const password = "OldPassw0rd!"
+	user, err := svc.Register(ctx, "", email, password)
+	require.NoError(t, err)
+
+	err = svc.DisableUser(ctx, "", user.ID)
+	require.ErrorIs(t, err, boom, "a revoker failure must be surfaced to the caller")
+
+	// Despite the revoker error, the account is disabled (fail-closed).
+	_, err = svc.Authenticate(ctx, "", "password", email, password)
+	assert.ErrorIs(t, err, identity.ErrAccountDisabled,
+		"the account must stay disabled even when a revoker fails")
 }
 
 // TestDisableUser_UnknownUser reports ErrUserNotFound for an unknown account.

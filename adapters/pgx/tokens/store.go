@@ -165,6 +165,15 @@ func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID u
 	return err
 }
 
+// RevokeAllRefreshTokensForUser revokes EVERY refresh token belonging to userID within tenantID,
+// across all families. Refresh-token rows are identified by claims IS NULL. Idempotent: zero
+// matching rows returns nil (never ErrRefreshTokenNotFound).
+func (s *Store[C]) RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	query := `DELETE FROM tokens WHERE tenant_id = $1 AND user_id = $2 AND claims IS NULL`
+	_, err := s.db.Exec(ctx, query, tenantID, userID)
+	return err
+}
+
 // SaveAPIKey persists an API key, including its type and created_by fields.
 func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error {
 	if key.TenantID != "" && key.TenantID != tenantID {
@@ -282,6 +291,20 @@ func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid
 		// Key exists but was already revoked — idempotent no-op.
 	}
 	return nil
+}
+
+// RevokeAllAPIKeysForUser soft-revokes EVERY active API key created by userID within tenantID by
+// stamping revoked_at = now() on rows where revoked_at IS NULL. API-key rows are identified by
+// claims IS NOT NULL. Already-revoked keys are left untouched (their original revoked_at stands).
+// Idempotent: zero matching rows returns nil (never ErrAPIKeyNotFound).
+func (s *Store[C]) RevokeAllAPIKeysForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	query := `
+		UPDATE tokens
+		SET revoked_at = now()
+		WHERE tenant_id = $1 AND created_by = $2 AND claims IS NOT NULL AND revoked_at IS NULL
+	`
+	_, err := s.db.Exec(ctx, query, tenantID, userID)
+	return err
 }
 
 // ListAPIKeysByCreator returns all API keys created by the given user within the tenant.

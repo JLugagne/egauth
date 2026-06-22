@@ -245,6 +245,15 @@ type Service interface {
 // partial failure.
 type AccountEraser func(ctx context.Context, tenantID string, userID uuid.UUID) error
 
+// AccountRevoker invalidates a user's active, RE-ESTABLISHABLE credentials — sessions, refresh
+// tokens, API keys — as part of DisableUser, WITHOUT destroying re-usable enrollment data such as
+// MFA secrets or passkeys (those survive so the account works again on EnableUser). This is the
+// key distinction from AccountEraser, which runs on permanent DeleteAccount and may destroy
+// everything. egauth keeps its modules decoupled, so the identity service cannot reach the
+// tokens/sessions stores itself; wire those modules' revocation here via WithDisableRevokers.
+// Each revoker SHOULD be idempotent, since disable may be retried after a partial failure.
+type AccountRevoker func(ctx context.Context, tenantID string, userID uuid.UUID) error
+
 type service struct {
 	store                Store
 	hasher               passwords.Hasher
@@ -258,6 +267,7 @@ type service struct {
 	phoneVerificationTTL time.Duration
 	recoveryEmailTTL     time.Duration
 	erasers              []AccountEraser
+	disableRevokers      []AccountRevoker
 	events               event.Sink
 	now                  func() time.Time
 }
@@ -325,6 +335,17 @@ func WithRecoveryEmailTTL(d time.Duration) ServiceOption {
 // those itself; wire your other modules' revocation here. Erasers SHOULD be idempotent.
 func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
 	return func(s *service) { s.erasers = append(s.erasers, erasers...) }
+}
+
+// WithDisableRevokers registers cross-module revocation hooks run by DisableUser, in the order
+// given, to invalidate a disabled user's active credentials — refresh tokens, API keys, sessions.
+// Unlike WithAccountErasers (which runs on permanent deletion), these run on a reversible disable,
+// so wire only revocation of re-establishable credentials here, never destruction of enrollment
+// data (MFA, passkeys) that the account needs again after EnableUser. Use tokens.NewAccountRevoker
+// to revoke refresh tokens and API keys, and sessions.Service.RevokeAllForUser for sessions.
+// Revokers SHOULD be idempotent.
+func WithDisableRevokers(revokers ...AccountRevoker) ServiceOption {
+	return func(s *service) { s.disableRevokers = append(s.disableRevokers, revokers...) }
 }
 
 // WithEventSink registers a security-event sink (see the event package) that receives login
@@ -1265,14 +1286,36 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 }
 
 // DisableUser administratively suspends a live account: it stamps DisabledAt (so Authenticate
-// returns ErrAccountDisabled and pending token-gated actions are revoked). It does not run the
-// AccountErasers — active sessions/refresh tokens are not revoked by this call.
+// returns ErrAccountDisabled and new tokens can no longer be issued), then runs every registered
+// AccountRevoker (see WithDisableRevokers) to invalidate the user's already-issued credentials —
+// refresh tokens, API keys and sessions — so a disabled user cannot keep acting through tokens
+// minted before the disable.
+//
+// The DisabledAt stamp is written FIRST and the AccountDisabled event emitted before revocation,
+// so the account is authoritatively blocked even if a downstream revoker fails (fail-closed); a
+// revoker error is returned (joined across all revokers) so the caller can retry. Revokers are
+// expected to be idempotent, making that retry safe. Unlike DeleteAccount this does NOT run the
+// AccountErasers: disable is reversible, so re-establishable credentials are revoked while
+// enrollment data (MFA, passkeys) is preserved for EnableUser.
 func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
 	if err := s.store.DisableUser(ctx, tenantID, userID, s.now()); err != nil {
 		return err
 	}
 	s.emit(ctx, event.Event{Type: event.AccountDisabled, UserID: userID.String(), TenantID: tenantID})
-	return nil
+
+	var errs []error
+	for _, revoke := range s.disableRevokers {
+		if revoke == nil {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := revoke(ctx, tenantID, userID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // EnableUser re-activates an administratively disabled account by clearing DisabledAt.

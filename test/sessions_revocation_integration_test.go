@@ -77,9 +77,11 @@ func TestDeleteAccount_RevokesLiveSessions(t *testing.T) {
 		"session must be invalidated after DeleteAccount; got: %v", err)
 }
 
-// TestDisableAccount_WithSessionRevocation verifies the recommended pattern for
-// disable-account flows: disable the identity account AND revoke sessions in sequence,
-// driven by the caller rather than by an AccountEraser (since DisableUser has no eraser hook).
+// TestDisableAccount_WithSessionRevocation verifies the caller-driven disable-account flow:
+// disable the identity account AND revoke sessions in sequence from the caller. This remains a
+// valid pattern; the wired-in alternative is to register sessionsSvc.RevokeAllForUser via
+// identity.WithDisableRevokers so DisableUser cascades the revocation automatically (see
+// TestDisableUser_RevokesRefreshTokensAndAPIKeys for the wired tokens equivalent).
 //
 // This confirms that RevokeAllForUser can be called independently from the sessions service
 // and sessions created before the call become invalid.

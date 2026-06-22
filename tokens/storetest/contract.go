@@ -13,16 +13,18 @@ import (
 
 // MockStore is a functional mock of the tokens.Store interface.
 type MockStore[C any] struct {
-	SaveRefreshTokenFunc     func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error
-	FindRefreshTokenFunc     func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error)
-	ConsumeRefreshTokenFunc  func(ctx context.Context, tenantID string, tokenHash string) error
-	RevokeRefreshTokenFunc   func(ctx context.Context, tenantID string, tokenHash string) error
-	RevokeFamilyFunc         func(ctx context.Context, tenantID string, familyID uuid.UUID) error
-	SaveAPIKeyFunc           func(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error
-	FindAPIKeyByHashFunc     func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error)
-	DeleteExpiredFunc        func(ctx context.Context, tenantID string) (int64, error)
-	RevokeAPIKeyFunc         func(ctx context.Context, tenantID string, keyID uuid.UUID) error
-	ListAPIKeysByCreatorFunc func(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error)
+	SaveRefreshTokenFunc              func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error
+	FindRefreshTokenFunc              func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error)
+	ConsumeRefreshTokenFunc           func(ctx context.Context, tenantID string, tokenHash string) error
+	RevokeRefreshTokenFunc            func(ctx context.Context, tenantID string, tokenHash string) error
+	RevokeFamilyFunc                  func(ctx context.Context, tenantID string, familyID uuid.UUID) error
+	RevokeAllRefreshTokensForUserFunc func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	SaveAPIKeyFunc                    func(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error
+	FindAPIKeyByHashFunc              func(ctx context.Context, tenantID string, tokenHash string) (*tokens.APIKey[C], error)
+	DeleteExpiredFunc                 func(ctx context.Context, tenantID string) (int64, error)
+	RevokeAPIKeyFunc                  func(ctx context.Context, tenantID string, keyID uuid.UUID) error
+	ListAPIKeysByCreatorFunc          func(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*tokens.APIKey[C], error)
+	RevokeAllAPIKeysForUserFunc       func(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 func (m *MockStore[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
@@ -58,6 +60,13 @@ func (m *MockStore[C]) RevokeFamily(ctx context.Context, tenantID string, family
 		panic("called not defined RevokeFamilyFunc")
 	}
 	return m.RevokeFamilyFunc(ctx, tenantID, familyID)
+}
+
+func (m *MockStore[C]) RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if m.RevokeAllRefreshTokensForUserFunc == nil {
+		panic("called not defined RevokeAllRefreshTokensForUserFunc")
+	}
+	return m.RevokeAllRefreshTokensForUserFunc(ctx, tenantID, userID)
 }
 
 func (m *MockStore[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error {
@@ -266,6 +275,48 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.NoError(t, err)
 	})
 
+	t.Run("Contract: RevokeAllRefreshTokensForUser", func(t *testing.T) {
+		expiresAt := time.Now().Add(time.Hour)
+		victim := uuid.Must(uuid.NewV7())
+		bystander := uuid.Must(uuid.NewV7())
+
+		// The victim holds two refresh tokens in two different families.
+		for i, h := range []string{"ru_victim_1", "ru_victim_2"} {
+			require.NoError(t, store.SaveRefreshToken(ctx, tenantA, &tokens.RefreshToken{
+				Hash:      h,
+				FamilyID:  uuid.Must(uuid.NewV7()),
+				UserID:    victim,
+				TenantID:  tenantA,
+				ExpiresAt: expiresAt.Add(time.Duration(i) * time.Minute),
+				CreatedAt: time.Now(),
+			}))
+		}
+		// A bystander's token must survive.
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantA, &tokens.RefreshToken{
+			Hash:      "ru_bystander",
+			FamilyID:  uuid.Must(uuid.NewV7()),
+			UserID:    bystander,
+			TenantID:  tenantA,
+			ExpiresAt: expiresAt,
+			CreatedAt: time.Now(),
+		}))
+
+		// Revoke every refresh token the victim holds.
+		require.NoError(t, store.RevokeAllRefreshTokensForUser(ctx, tenantA, victim))
+
+		_, err := store.FindRefreshToken(ctx, tenantA, "ru_victim_1")
+		assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
+		_, err = store.FindRefreshToken(ctx, tenantA, "ru_victim_2")
+		assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
+
+		// The bystander is untouched.
+		_, err = store.FindRefreshToken(ctx, tenantA, "ru_bystander")
+		assert.NoError(t, err, "another user's refresh token must survive")
+
+		// A user with no live tokens is a no-op, never an error.
+		assert.NoError(t, store.RevokeAllRefreshTokensForUser(ctx, tenantA, uuid.Must(uuid.NewV7())))
+	})
+
 	t.Run("Contract: API Keys", func(t *testing.T) {
 		tokenHash := "api_key_hash"
 		key := &tokens.APIKey[C]{
@@ -396,6 +447,62 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.Empty(t, listUnknown, "an unknown creator must yield an empty slice")
 	})
 
+	t.Run("Contract: RevokeAllAPIKeysForUser", func(t *testing.T) {
+		victim := uuid.Must(uuid.NewV7())
+		bystander := uuid.Must(uuid.NewV7())
+
+		// The victim issued two keys; one is already revoked beforehand.
+		v1 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "rau_v1",
+			CreatedBy: victim,
+			Claims:    tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		v2 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "rau_v2",
+			CreatedBy: victim,
+			Claims:    tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		// A bystander's key must stay active.
+		b1 := &tokens.APIKey[C]{
+			ID: uuid.Must(uuid.NewV7()), TenantID: tenantA, Prefix: "pk_", Hash: "rau_b1",
+			CreatedBy: bystander,
+			Claims:    tokens.Claims[C]{Subject: uuid.Must(uuid.NewV7()), Custom: customClaim},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, v1))
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, v2))
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, b1))
+
+		// Pre-revoke v1 so we can prove its RevokedAt is preserved (not advanced).
+		require.NoError(t, store.RevokeAPIKey(ctx, tenantA, v1.ID))
+		preRevoked, err := store.FindAPIKeyByHash(ctx, tenantA, "rau_v1")
+		require.NoError(t, err)
+		require.NotNil(t, preRevoked.RevokedAt)
+		firstRevokedAt := *preRevoked.RevokedAt
+
+		// Revoke every key the victim issued.
+		require.NoError(t, store.RevokeAllAPIKeysForUser(ctx, tenantA, victim))
+
+		// v2 (was active) is now revoked.
+		got, err := store.FindAPIKeyByHash(ctx, tenantA, "rau_v2")
+		require.NoError(t, err)
+		assert.NotNil(t, got.RevokedAt, "a previously active key must be revoked")
+
+		// v1's original RevokedAt is preserved, not advanced.
+		got, err = store.FindAPIKeyByHash(ctx, tenantA, "rau_v1")
+		require.NoError(t, err)
+		require.NotNil(t, got.RevokedAt)
+		assert.WithinDuration(t, firstRevokedAt, *got.RevokedAt, time.Second,
+			"an already-revoked key must keep its original RevokedAt")
+
+		// The bystander's key stays active.
+		got, err = store.FindAPIKeyByHash(ctx, tenantA, "rau_b1")
+		require.NoError(t, err)
+		assert.Nil(t, got.RevokedAt, "another user's key must stay active")
+
+		// A user with no keys is a no-op, never an error.
+		assert.NoError(t, store.RevokeAllAPIKeysForUser(ctx, tenantA, uuid.Must(uuid.NewV7())))
+	})
+
 	if useMultiTenant {
 		t.Run("Contract: Multi-Tenant Isolation", func(t *testing.T) {
 			sharedHash := "shared_hash"
@@ -479,4 +586,11 @@ func (m *MockStore[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string
 		panic("called not defined ListAPIKeysByCreatorFunc")
 	}
 	return m.ListAPIKeysByCreatorFunc(ctx, tenantID, createdBy)
+}
+
+func (m *MockStore[C]) RevokeAllAPIKeysForUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if m.RevokeAllAPIKeysForUserFunc == nil {
+		panic("called not defined RevokeAllAPIKeysForUserFunc")
+	}
+	return m.RevokeAllAPIKeysForUserFunc(ctx, tenantID, userID)
 }

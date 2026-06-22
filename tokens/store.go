@@ -48,6 +48,12 @@ type RefreshTokenStore interface {
 
 	// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
 	RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
+
+	// RevokeAllRefreshTokensForUser revokes EVERY refresh token belonging to userID within
+	// tenantID, across all families — the "kill every session this user holds" primitive used
+	// when an account is disabled. It is idempotent: a user with no live refresh tokens is a
+	// no-op that returns nil (never ErrRefreshTokenNotFound).
+	RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 // APIKeyStore is the API-key capability of a tokens backend, generic over the custom-claims type C
@@ -75,6 +81,14 @@ type APIKeyStore[C any] interface {
 	// at creation. It returns an empty (non-nil) slice when the creator has no keys, never
 	// ErrAPIKeyNotFound.
 	ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
+
+	// RevokeAllAPIKeysForUser soft-revokes EVERY API key created by userID within tenantID by
+	// stamping RevokedAt on each still-active key, mirroring RevokeAPIKey's soft-revoke semantics
+	// (revoked keys remain visible to ListAPIKeysByCreator with RevokedAt set). It is the
+	// "kill every key this user issued" primitive used when an account is disabled. It is
+	// idempotent: a user with no keys, or whose keys are already revoked, is a no-op returning nil
+	// (never ErrAPIKeyNotFound). Already-revoked keys keep their original RevokedAt.
+	RevokeAllAPIKeysForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 // TokenReaper is the optional GC capability of a tokens backend: the schedulable sweep that purges
