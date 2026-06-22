@@ -87,7 +87,7 @@ apiKey, err := tokenService.IssueAPIKey(ctx, "sk_live_", tokens.KeyTypeService, 
 fmt.Println("Your API key:", apiKey.Token)
 ```
 
-> **Security:** The clear-text token is returned **once** at issuance and is **never stored or retrievable** afterwards. Only the SHA-256 hash is persisted. Management operations (revoke, list) use the key's UUID (`apiKey.ID`), not the token value. For the full security rationale see [SECURITY.md]({{< ref "security" >}}).
+> **Security:** The clear-text token is returned **once** at issuance and is **never stored or retrievable** afterwards. Only the SHA-256 hash is persisted. Management operations (revoke, list) use the key's UUID (`apiKey.ID`), not the token value. For the full security rationale see [SECURITY.md](https://github.com/JLugagne/egauth/blob/main/SECURITY.md).
 
 `KeyTypePAT` issues a personal access token tied to a human user (`actor.IsHuman()` returns true). `KeyTypeService` issues a machine identity whose `Actor.UserID` is empty — use `actor.KeyID` to identify the service principal.
 
