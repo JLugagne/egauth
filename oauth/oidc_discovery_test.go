@@ -84,25 +84,6 @@ func TestOIDCDiscovery_HappyPath(t *testing.T) {
 	assert.Equal(t, d.srv.URL+"/jwks", v.jwks.url, "verifier must resolve jwks_uri from discovery")
 }
 
-// TestOIDCDiscovery_JWKSHostMismatchRejected covers a discovery document whose jwks_uri points at
-// a different host than the issuer: the keys must not be trusted.
-func TestOIDCDiscovery_JWKSHostMismatchRejected(t *testing.T) {
-	d := newDiscoveryServer(t)
-	iss := d.srv.URL
-	d.docJWKSURI = "https://evil.example.net/jwks" // foreign host
-
-	v, err := newOIDCVerifier(OIDCConfig{
-		Issuer:            iss,
-		Audience:          "cid",
-		HTTPClient:        d.srv.Client(),
-		AllowInsecureURLs: true,
-	}, "cid")
-	require.NoError(t, err)
-
-	_, err = v.verify(context.Background(), d.signedToken(t, iss, "n"), "n")
-	require.ErrorIs(t, err, ErrJWKSHostMismatch)
-}
-
 // TestOIDCDiscovery_DocIssuerMismatchRejected covers a discovery document whose own "issuer"
 // field does not equal the configured issuer (OIDC discovery forbids this).
 func TestOIDCDiscovery_DocIssuerMismatchRejected(t *testing.T) {
@@ -138,17 +119,6 @@ func TestOIDCDiscovery_MissingJWKSURIRejected(t *testing.T) {
 
 	_, err = v.verify(context.Background(), d.signedToken(t, iss, "n"), "n")
 	require.ErrorIs(t, err, ErrIDTokenInvalid)
-}
-
-// TestOIDCConfig_ExplicitJWKSHostMismatchRejected covers SEC-07's other arm: an explicitly
-// supplied JWKSURL whose host differs from the issuer host is rejected at construction.
-func TestOIDCConfig_ExplicitJWKSHostMismatchRejected(t *testing.T) {
-	_, err := newOIDCVerifier(OIDCConfig{
-		Issuer:   "https://idp.example.com",
-		JWKSURL:  "https://evil.example.net/jwks",
-		Audience: "cid",
-	}, "cid")
-	require.ErrorIs(t, err, ErrJWKSHostMismatch)
 }
 
 // TestOIDCConfig_ExplicitJWKSHostMatchAccepted covers the supported override: a JWKSURL on the

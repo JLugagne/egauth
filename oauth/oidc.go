@@ -65,10 +65,10 @@ type OIDCConfig struct {
 	Issuer string
 	// JWKSURL is an OPTIONAL override of the issuer's JSON Web Key Set endpoint. Leave it empty
 	// to let the verifier discover the authoritative jwks_uri from the issuer's OIDC discovery
-	// document (<issuer>/.well-known/openid-configuration) — this binds the verification keys to
-	// the issuer and prevents a trusted issuer from being paired with an attacker-controlled key
-	// set. When set, it is only accepted if its host equals the issuer host (defence in depth);
-	// any other host is rejected.
+	// document (<issuer>/.well-known/openid-configuration), where the trust chain is the exact
+	// issuer match the discovery step enforces. When set, it is trusted developer configuration
+	// and may point at a host other than the issuer (as Google does: accounts.google.com issues
+	// tokens whose keys are served from www.googleapis.com), per the OIDC spec.
 	JWKSURL string
 	// Audience is the expected "aud" claim. Defaults to the Provider's clientID when empty.
 	Audience string
@@ -113,17 +113,15 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 	if err := validateOIDCEndpointURL(cfg.Issuer, cfg.AllowInsecureURLs); err != nil {
 		return nil, fmt.Errorf("invalid issuer: %w", err)
 	}
-	// SEC-07: JWKSURL is now an optional override of the discovered jwks_uri. When supplied it is
-	// accepted only if it is a valid endpoint URL AND its host matches the issuer host, so a
-	// trusted issuer can never be bound to attacker-controlled keys; otherwise the jwks_uri is
-	// discovered from the issuer's openid-configuration.
+	// SEC-07: JWKSURL is an optional override of the discovered jwks_uri. It is trusted developer
+	// configuration (not attacker input), so it is accepted as long as it is a valid endpoint URL.
+	// The OIDC spec permits jwks_uri on a host other than the issuer (as Google does), so no
+	// host-equality binding is imposed. When empty the jwks_uri is discovered from the issuer's
+	// openid-configuration, where the trust chain is the exact issuer match on the document.
 	jwksOverride := strings.TrimSpace(cfg.JWKSURL)
 	if jwksOverride != "" {
 		if err := validateOIDCEndpointURL(jwksOverride, cfg.AllowInsecureURLs); err != nil {
 			return nil, fmt.Errorf("invalid JWKSURL: %w", err)
-		}
-		if !sameHost(jwksOverride, cfg.Issuer) {
-			return nil, fmt.Errorf("%w: JWKSURL host does not match issuer host", ErrJWKSHostMismatch)
 		}
 	}
 	audience := cfg.Audience
@@ -273,12 +271,10 @@ func defaultOIDCClaimsMapper(claims map[string]any) (*UserInfo, error) {
 
 // jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
 // cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
-// jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
-// cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
 //
-// The JWKS endpoint is bound to the issuer: when url is empty it is resolved once, lazily, via
-// OIDC discovery (<issuer>/.well-known/openid-configuration) and the resolved jwks_uri must
-// belong to the issuer host. An explicitly-provided url is treated as a pre-validated override.
+// When url is empty it is resolved once, lazily, via OIDC discovery
+// (<issuer>/.well-known/openid-configuration), whose document must claim the configured issuer
+// exactly. An explicitly-provided url is treated as a pre-validated override.
 type jwksCache struct {
 	url           string // resolved (or override) jwks_uri; empty until discovery runs
 	issuer        string // configured issuer, used to derive and bind the discovery document
@@ -353,9 +349,9 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 
 // resolveURL returns the JWKS endpoint, performing OIDC discovery once and caching the result
 // when no explicit url override was supplied. Discovery fetches the issuer's
-// .well-known/openid-configuration over the configured client, verifies the document's own
-// "issuer" matches the configured issuer exactly (per OIDC discovery), and binds the resolved
-// jwks_uri to the issuer host so a trusted issuer can never be paired with foreign keys.
+// .well-known/openid-configuration over the configured client and verifies the document's own
+// "issuer" matches the configured issuer exactly (per OIDC discovery) — that exact match, over
+// a document fetched from the issuer's own origin, is the trust chain binding the jwks_uri.
 func (c *jwksCache) resolveURL(ctx context.Context) (string, error) {
 	c.mu.RLock()
 	cached := c.url
@@ -530,9 +526,8 @@ func decodeBigInt(s string) (*big.Int, error) {
 	return new(big.Int).SetBytes(b), nil
 }
 
-// ErrJWKSHostMismatch is returned when an OIDC JWKS source does not belong to the issuer:
-// either an explicitly-supplied JWKSURL whose host differs from the issuer host, or a
-// discovery document whose jwks_uri host (or its own "issuer" field) does not match the
-// configured issuer. Binding the keys to the issuer closes the trusted-issuer / attacker-keys
-// confused-deputy class of attack.
+// ErrJWKSHostMismatch is returned when an OIDC discovery document's own "issuer" field does not
+// equal the configured issuer. The exact issuer match closes the trusted-issuer / attacker-keys
+// confused-deputy class of attack; the jwks_uri it points to may legitimately live on another
+// host (as Google's does).
 var ErrJWKSHostMismatch = errors.New("oauth: JWKS source does not match issuer")

@@ -387,9 +387,10 @@ func TestNewOIDCVerifier_Validation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "https://x.example.com/jwks", v.jwks.url)
 	})
-	t.Run("jwks override with mismatched host rejected", func(t *testing.T) {
-		_, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x.example.com", JWKSURL: "https://evil.example.net/jwks"}, "cid")
-		require.ErrorIs(t, err, ErrJWKSHostMismatch)
+	t.Run("jwks override on a different host accepted", func(t *testing.T) {
+		v, err := newOIDCVerifier(OIDCConfig{Issuer: "https://accounts.google.com", JWKSURL: "https://www.googleapis.com/oauth2/v3/certs"}, "cid")
+		require.NoError(t, err)
+		assert.Equal(t, "https://www.googleapis.com/oauth2/v3/certs", v.jwks.url)
 	})
 	t.Run("audience required when no clientID", func(t *testing.T) {
 		_, err := newOIDCVerifier(OIDCConfig{Issuer: "https://x", JWKSURL: "https://x/jwks"}, "")

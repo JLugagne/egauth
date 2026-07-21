@@ -47,21 +47,6 @@ func ValidateOIDCEndpointURL(rawURL string, allowInsecure bool) error {
 	return validateOIDCEndpointURL(rawURL, allowInsecure)
 }
 
-// sameHost reports whether two URLs share the same host (case-insensitive, port-insensitive).
-// It is the defence-in-depth check that binds a JWKS / jwks_uri to its issuer.
-func sameHost(a, b string) bool {
-	ua, err := url.Parse(strings.TrimSpace(a))
-	if err != nil {
-		return false
-	}
-	ub, err := url.Parse(strings.TrimSpace(b))
-	if err != nil {
-		return false
-	}
-	ha, hb := ua.Hostname(), ub.Hostname()
-	return ha != "" && strings.EqualFold(ha, hb)
-}
-
 // oidcDiscoveryDocument is the subset of the OIDC discovery metadata we consume.
 type oidcDiscoveryDocument struct {
 	Issuer  string `json:"issuer"`
@@ -69,9 +54,10 @@ type oidcDiscoveryDocument struct {
 }
 
 // discoverJWKSURL resolves an issuer's authoritative jwks_uri via OIDC discovery. It fetches
-// <issuer>/.well-known/openid-configuration over client, requires the document's "issuer" to
-// equal the configured issuer exactly (OIDC discovery rule), and binds the returned jwks_uri to
-// the issuer host. The supplied client is the SSRF-safe client on the untrusted/dynamic path.
+// <issuer>/.well-known/openid-configuration over client and requires the document's "issuer" to
+// equal the configured issuer exactly (OIDC discovery rule) — that exact match is the trust
+// chain, so the returned jwks_uri may legitimately live on another host (as Google's does). The
+// supplied client is the SSRF-safe client on the untrusted/dynamic path.
 func discoverJWKSURL(ctx context.Context, client *http.Client, issuer string, allowInsecure bool) (string, error) {
 	if err := validateOIDCEndpointURL(issuer, allowInsecure); err != nil {
 		return "", fmt.Errorf("invalid issuer: %w", err)
@@ -109,10 +95,6 @@ func discoverJWKSURL(ctx context.Context, client *http.Client, issuer string, al
 	}
 	if err := validateOIDCEndpointURL(doc.JWKSURI, allowInsecure); err != nil {
 		return "", fmt.Errorf("invalid jwks_uri: %w", err)
-	}
-	// Defence in depth: the keys must come from the issuer's own host.
-	if !sameHost(doc.JWKSURI, issuer) {
-		return "", fmt.Errorf("%w: jwks_uri host does not match issuer host", ErrJWKSHostMismatch)
 	}
 	return doc.JWKSURI, nil
 }
