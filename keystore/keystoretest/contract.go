@@ -52,6 +52,7 @@ func StoreContractTesting(t *testing.T, newStore StoreFactory) {
 	t.Run("RenewContinuity", func(t *testing.T) { testRenewContinuity(t, newStore) })
 	t.Run("RetireExpired", func(t *testing.T) { testRetireExpired(t, newStore) })
 	t.Run("RevokeKeys", func(t *testing.T) { testRevokeKeys(t, newStore) })
+	t.Run("ReprovisionAfterRevoke", func(t *testing.T) { testReprovisionAfterRevoke(t, newStore) })
 	t.Run("DeleteTenant", func(t *testing.T) { testDeleteTenant(t, newStore) })
 	t.Run("CrossTenantIsolation", func(t *testing.T) { testCrossTenantIsolation(t, newStore) })
 	t.Run("LifecycleIsolation", func(t *testing.T) { testLifecycleIsolation(t, newStore) })
@@ -224,6 +225,26 @@ func testRevokeKeys(t *testing.T, newStore StoreFactory) {
 	}
 	if len(verify) != 0 {
 		t.Fatalf("revoke must leave no verification keys, got %d", len(verify))
+	}
+}
+
+func testReprovisionAfterRevoke(t *testing.T, newStore StoreFactory) {
+	ctx := context.Background()
+	_, mgr := newPair(t, newStore, time.Now)
+	if err := mgr.ProvisionTenant(ctx, "acme"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := mgr.RevokeTenantKeys(ctx, "acme"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if _, err := mgr.ActiveSigningKey(ctx, "acme"); err == nil {
+		t.Fatal("after revoke there must be no active key")
+	}
+	if err := mgr.ProvisionTenant(ctx, "acme"); err != nil {
+		t.Fatalf("re-provision after revoke: %v", err)
+	}
+	if _, err := mgr.ActiveSigningKey(ctx, "acme"); err != nil {
+		t.Fatalf("re-provision must restore an active signing key: %v", err)
 	}
 }
 

@@ -104,31 +104,44 @@ type ProvisionOptions struct {
 	Alg string
 }
 
-// ProvisionTenant creates a tenant with a fresh active signing key. It is idempotent: if the
-// tenant already exists it is a no-op success (no second key, no duplicate event). On a genuine
-// first provision it emits EventTenantProvisioned.
+// ProvisionTenant ensures a tenant has a fresh active signing key. Idempotency is keyed on the
+// presence of an active key, not on the tenant record: if the tenant already has one it is a
+// no-op success (no second key, no duplicate event), but a tenant whose keys were revoked is
+// re-provisioned so the documented "re-provision to restore signing" recovery actually mints a
+// key. It emits EventTenantProvisioned whenever it installs a key.
 func (m *Manager) ProvisionTenant(ctx context.Context, tenantID string, opts ...func(*ProvisionOptions)) error {
 	var o ProvisionOptions
 	for _, fn := range opts {
 		fn(&o)
 	}
-	exists, err := m.store.TenantExists(ctx, tenantID)
-	if err != nil {
-		return fmt.Errorf("keystore: checking tenant: %w", err)
+	_, err := m.store.ActiveSigningKey(ctx, tenantID)
+	if err == nil {
+		return nil // already has an active key: idempotent
 	}
-	if exists {
-		return nil // idempotent
+	if !errors.Is(err, ErrNoActiveKey) && !errors.Is(err, ErrTenantNotFound) {
+		return fmt.Errorf("keystore: checking tenant: %w", err)
 	}
 	key, err := m.newKey(tenantID, o.KeyID, o.Alg, o.KeyTTL)
 	if err != nil {
 		return err
 	}
-	if err := m.store.CreateTenant(ctx, tenantID, key); err != nil {
-		// A concurrent provision may have won the race; treat ErrTenantExists as success.
-		if errors.Is(err, ErrTenantExists) {
-			return nil
-		}
+	err = m.store.CreateTenant(ctx, tenantID, key)
+	if err == nil {
+		m.emit(ctx, EventTenantProvisioned, tenantID, "")
+		return nil
+	}
+	if !errors.Is(err, ErrTenantExists) {
 		return fmt.Errorf("keystore: creating tenant: %w", err)
+	}
+	// The record exists but had no active key. Either a concurrent provision installed one (then
+	// this is an idempotent no-op) or the tenant's keys were revoked (then install ours).
+	if _, aerr := m.store.ActiveSigningKey(ctx, tenantID); aerr == nil {
+		return nil
+	} else if !errors.Is(aerr, ErrNoActiveKey) {
+		return fmt.Errorf("keystore: checking tenant: %w", aerr)
+	}
+	if err := m.store.PutSigningKey(ctx, tenantID, key); err != nil {
+		return fmt.Errorf("keystore: restoring signing key: %w", err)
 	}
 	m.emit(ctx, EventTenantProvisioned, tenantID, "")
 	return nil
