@@ -186,6 +186,70 @@ func TestWithMaxLifetime_ZeroKeepsDefault(t *testing.T) {
 		"WithMaxLifetime(0) must keep the 30-day default cap, not disable it")
 }
 
+// TestMaxLifetimeOptionOrdering_LastWins locks the documented "last option wins" semantics for
+// the absolute-cap options: WithNoMaxLifetime followed by WithMaxLifetime(1h) must ENFORCE a 1h
+// cap, and the reverse order must disable the cap. Before the fix the first ordering silently
+// dropped the cap because WithMaxLifetime did not clear the noMaxLifetime disable flag.
+func TestMaxLifetimeOptionOrdering_LastWins(t *testing.T) {
+	ctx := context.Background()
+
+	frozen := time.Date(2030, 1, 1, 12, 0, 0, 0, time.UTC)
+	const idle = time.Minute
+	const maxLifetime = time.Hour
+
+	t.Run("NoMaxLifetime then MaxLifetime enforces the cap", func(t *testing.T) {
+		now := frozen
+		clock := func() time.Time { return now }
+
+		svc := sessions.NewService(
+			memory.NewStore(),
+			sessions.WithClock(clock),
+			sessions.WithNoMaxLifetime(),
+			sessions.WithMaxLifetime(maxLifetime),
+		)
+
+		_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
+		require.NoError(t, err)
+
+		var rejected bool
+		for range 200 {
+			now = now.Add(30 * time.Second)
+			_, touchErr := svc.Touch(ctx, "", token, idle)
+			if touchErr != nil {
+				require.ErrorIs(t, touchErr, sessions.ErrSessionNotFound)
+				rejected = true
+				break
+			}
+			require.Less(t, now.Sub(frozen), maxLifetime+idle,
+				"session extended past the 1h absolute cap: WithMaxLifetime must re-enable the cap after WithNoMaxLifetime")
+		}
+		require.True(t, rejected,
+			"WithNoMaxLifetime then WithMaxLifetime(1h) must enforce the 1h absolute cap (last option wins)")
+	})
+
+	t.Run("MaxLifetime then NoMaxLifetime disables the cap", func(t *testing.T) {
+		now := frozen
+		clock := func() time.Time { return now }
+
+		svc := sessions.NewService(
+			memory.NewStore(),
+			sessions.WithClock(clock),
+			sessions.WithMaxLifetime(maxLifetime),
+			sessions.WithNoMaxLifetime(),
+		)
+
+		_, token, err := svc.CreateSession(ctx, "", uuid.Must(uuid.NewV7()), "UA", "1.1.1.1", idle)
+		require.NoError(t, err)
+
+		for range 200 {
+			now = now.Add(30 * time.Second)
+			_, err := svc.Touch(ctx, "", token, idle)
+			require.NoError(t, err,
+				"WithMaxLifetime then WithNoMaxLifetime must disable the cap (last option wins)")
+		}
+	})
+}
+
 // TestRevokeAllForUser verifies SEC-09: revoking all sessions for a user stops every one of
 // that user's sessions from validating, while another user's session is untouched.
 func TestRevokeAllForUser(t *testing.T) {

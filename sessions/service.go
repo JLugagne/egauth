@@ -251,8 +251,8 @@ func WithMaxLifetime(d time.Duration) ServiceOption {
 	return func(s *service) {
 		if d > 0 {
 			s.maxLifetime = d
+			s.noMaxLifetime = false
 		}
-		// zero → keep the default set in NewService; callers that want no cap must use WithNoMaxLifetime.
 	}
 }
 
