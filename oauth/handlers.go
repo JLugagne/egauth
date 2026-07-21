@@ -365,7 +365,11 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 		// so that the state cookie binding operates on the same value that was used to look
 		// up the provider above.
 		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
-		BeginHandler(p, append(opts, fixedTenantOpt)...)(w, r)
+		// Copy opts into a fresh slice before appending. opts is the closure-captured variadic
+		// shared across every request; appending into its spare capacity would race concurrent
+		// requests on the same backing array and could leak one tenant's resolver into another's.
+		reqOpts := append(append([]HandlerOption(nil), opts...), fixedTenantOpt)
+		BeginHandler(p, reqOpts...)(w, r)
 	}
 }
 
@@ -389,6 +393,10 @@ func DynamicCallbackHandler[C any](store ProviderStore, providerName string, lin
 		// causing the identity to be linked into a different partition than the one whose
 		// provider minted the token (TASK-092 / 2026-06 audit INFO).
 		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
-		CallbackHandler(p, linker, issuer, claimsOf, append(opts, fixedTenantOpt)...)(w, r)
+		// Copy opts into a fresh slice before appending (see DynamicBeginHandler): the captured
+		// variadic is shared across requests, so appending into its spare capacity would race
+		// concurrent callbacks and could cross tenants at the link/provision step.
+		reqOpts := append(append([]HandlerOption(nil), opts...), fixedTenantOpt)
+		CallbackHandler(p, linker, issuer, claimsOf, reqOpts...)(w, r)
 	}
 }
