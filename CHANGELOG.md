@@ -67,6 +67,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Post-v1, any security-relevant change re-discloses its review status here (see AUDIT.md's
   re-disclosure policy). (#19)
 
+## [0.7.0] - 2026-07-21
+
+Security-hardening batch: CSRF coverage is completed across the state-changing handler families,
+audit coverage is broadened to the OAuth and admin paths, and a set of concurrency/correctness
+bugs are fixed.
+
+### BREAKING
+
+- **tokens/jwt (PAT subject):** `IssueAPIKey` for `KeyTypePAT` now pins the token's `Claims.Subject`
+  to `createdBy`. A caller-supplied `Subject` naming a different user is rejected with the new
+  `ErrPATSubjectMismatch` (previously it was honored verbatim). This guarantees a PAT is severed by
+  `DisableUser` → `RevokeAllAPIKeysForUser`, which is scoped by `CreatedBy`. Leave `Subject` unset to
+  default it.
+
+### Added
+
+- New audit events on previously SIEM-dark paths: OAuth login (`login.succeeded` /
+  `login.failed{account_disabled}` with `method=oauth`), JIT provisioning
+  (`user.registered{oauth_provision}`), and admin credential operations
+  (`password.changed{admin_temporary_password}`, `user.registered{admin_created}`), mirroring the
+  password path.
+- New `event.Type` values: `mfa.verified`, `mfa.unlocked`, `credential.added`, `credential.removed`.
+- CI coverage for the `adapters/otel` module (`go vet` + `go test -race`).
+
+### Changed
+
+- **CSRF secure-by-default documentation.** `tokens.WithTrustedOrigins` and `mfa.WithTrustedOrigins`
+  are documented as *wideners* of an on-by-default strict same-origin check; disabling requires the
+  explicit `WithInsecureNoOriginCheck` opt-out. `SECURITY.md` updated to match.
+
+### Fixed
+
+- **identity (CSRF gap):** `VerifyEmailHandler` and `RequestEmailVerificationHandler` now enforce the
+  strict same-origin check their siblings apply; a cross-origin POST is rejected with `403
+  cross_site_blocked` (previously processed).
+- **internal/httputil:** an opaque `"null"` `Origin` is treated as untrusted rather than falling back
+  to the weaker, more-spoofable `Referer`.
+- **tokens/jwt (key cache):** an `Invalidate`/`InvalidateAll` racing an in-flight cache fill is no
+  longer lost; the stale pre-rotation keyset is dropped instead of being re-cached for a full TTL.
+- **oauth:** `DynamicBeginHandler` / `DynamicCallbackHandler` no longer mutate the shared
+  closure-captured `opts` slice, so concurrent requests for different tenants can no longer alias one
+  another's resolver.
+- **mfa:** `NewService` rejects a sub-second `WithPeriod` at construction (previously a divide-by-zero
+  panic on first use); `ConfirmTOTP` resets the failed-attempt budget on success so failed
+  confirmations are not carried into the user's first-login budget.
+- **passkey:** a per-handler `WithCookieKey` override shorter than `MinCookieKeyLength` now fails
+  closed with `500 server_misconfigured`.
+- **event:** a panicking `Sink` is contained (and logged) so a misbehaving audit sink cannot change a
+  handler's client-visible behavior; `MultiSink` continues its fan-out past a panicking member.
+- **adapters/pgx:** `AddIdentity` gates the insert on a live, same-tenant user (`ErrUserNotFound`
+  otherwise), matching the memory store and closing a cross-tenant / soft-deleted linkage hole.
+
 ## [0.3.0] - 2026-06-06
 
 Public-release hardening: secure-by-default behavior changes, a PostgreSQL storage-adapter
