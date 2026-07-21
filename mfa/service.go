@@ -140,8 +140,11 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	switch {
 	case s.digits < 6 || s.digits > 8:
 		panic("mfa: digits must be between 6 and 8 (RFC 6238)")
-	case s.period <= 0:
-		panic("mfa: period must be positive")
+	case s.period < time.Second:
+		// timeStep divides by int64(period.Seconds()); a sub-second period truncates that
+		// divisor to 0 and panics on the first Verify/Confirm/GenerateCode. Reject at
+		// construction so the misconfiguration fails fast rather than at request time.
+		panic("mfa: period must be at least 1 second")
 	case s.skew < 0:
 		panic("mfa: skew must not be negative")
 	case s.recoveryCodeCount <= 0:
@@ -233,6 +236,12 @@ func (s *service) ConfirmTOTP(ctx context.Context, tenantID string, userID uuid.
 	now := s.now()
 	enrollment.ConfirmedAt = &now
 	enrollment.LastUsedStep = step // the confirming code cannot be replayed for login
+	// Clear the attempt budget on successful confirmation (mirroring MarkTOTPUsed on a
+	// successful verify): the enrollment snapshot was read before reserveAttempt incremented
+	// the counter, so persisting it as-is would carry failed-confirm attempts into the user's
+	// first-login budget — leaving a freshly enrolled user one wrong code away from a lockout.
+	enrollment.FailedAttempts = 0
+	enrollment.LastAttemptAt = time.Time{}
 	if err := s.store.SaveTOTP(ctx, tenantID, enrollment); err != nil {
 		return nil, err
 	}

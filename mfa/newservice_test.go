@@ -20,6 +20,15 @@ func TestNewService_Validation(t *testing.T) {
 	t.Run("non-positive period panics", func(t *testing.T) {
 		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithPeriod(0)) })
 	})
+	// A sub-second period truncates to 0 in timeStep (at.Unix()/int64(period.Seconds())),
+	// causing an integer divide-by-zero panic on the first Verify/Confirm/GenerateCode.
+	// NewService must reject it at construction (fail fast) rather than defer the panic.
+	t.Run("sub-second period panics", func(t *testing.T) {
+		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithPeriod(500*time.Millisecond)) })
+	})
+	t.Run("one-second period succeeds", func(t *testing.T) {
+		require.NotPanics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithPeriod(time.Second)) })
+	})
 	t.Run("negative skew panics", func(t *testing.T) {
 		assert.Panics(t, func() { mfa.NewService(mfamemory.NewStore(), mfa.WithSkew(-1)) })
 	})
