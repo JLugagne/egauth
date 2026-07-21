@@ -55,15 +55,22 @@ func (s *Store) CreateTenant(ctx context.Context, tenantID string, initial keyst
 	if err := guardTenant(tenantID, initial); err != nil {
 		return err
 	}
-	exists, err := s.TenantExists(ctx, tenantID)
+	beginner, ok := s.db.(txBeginner)
+	if !ok {
+		return s.createTenantChecked(ctx, s, tenantID, initial)
+	}
+	tx, err := beginner.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	if exists {
-		return keystore.ErrTenantExists
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, tenantID); err != nil {
+		return err
 	}
-	initial.TenantID = tenantID
-	return s.PutSigningKey(ctx, tenantID, initial)
+	if err := s.createTenantChecked(ctx, &Store{db: tx}, tenantID, initial); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // TenantExists reports whether the tenant has any key material.
@@ -272,4 +279,20 @@ func algOrDefault(a string) string {
 		return "HS256"
 	}
 	return a
+}
+
+func (s *Store) createTenantChecked(ctx context.Context, q *Store, tenantID string, initial keystore.SigningKey) error {
+	exists, err := q.TenantExists(ctx, tenantID)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return keystore.ErrTenantExists
+	}
+	initial.TenantID = tenantID
+	return q.PutSigningKey(ctx, tenantID, initial)
+}
+
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
 }

@@ -118,6 +118,10 @@ bugs are fixed.
   handler's client-visible behavior; `MultiSink` continues its fan-out past a panicking member.
 - **adapters/pgx:** `AddIdentity` gates the insert on a live, same-tenant user (`ErrUserNotFound`
   otherwise), matching the memory store and closing a cross-tenant / soft-deleted linkage hole.
+- **adapters/pgx (keystore):** `CreateTenant` is now atomic per tenant. Its check-then-insert ran
+  unserialized, so concurrent calls for the same new tenant (with distinct key ids) could all win
+  and insert multiple active signing keys; it now runs inside a transaction guarded by a per-tenant
+  `pg_advisory_xact_lock`, so exactly one call wins and the rest get `ErrTenantExists`.
 
 ## [0.3.0] - 2026-06-06
 
