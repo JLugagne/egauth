@@ -369,6 +369,10 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the threshold is reached. justLocked reports whether this
 // call is the one that crossed the threshold (see the LockoutStore interface contract).
+//
+// When the identity's prior lock has already expired at entry (LockedUntil is set but not
+// after now), the counter is reset to zero and LockedUntil cleared before the increment, so a
+// new lockout cycle begins and re-crossing the threshold reports justLocked again.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -378,14 +382,18 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, id
 		return false, identity.ErrIdentityNotFound
 	}
 
+	now := time.Now()
+	if ident.LockedUntil != nil && !ident.LockedUntil.After(now) {
+		ident.FailedAttempts = 0
+		ident.LockedUntil = nil
+	}
+
 	before := ident.FailedAttempts
 	ident.FailedAttempts++
-	ident.UpdatedAt = time.Now()
+	ident.UpdatedAt = now
 	if lockThreshold > 0 && ident.FailedAttempts >= lockThreshold {
-		lockedUntil := time.Now().Add(lockDuration)
+		lockedUntil := now.Add(lockDuration)
 		ident.LockedUntil = &lockedUntil
-		// Crossing transition only: this call locked the account iff it was below the
-		// threshold before the increment.
 		justLocked = before < lockThreshold
 	}
 

@@ -399,6 +399,44 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.Nil(t, found.LockedUntil)
 	})
 
+	t.Run("Contract: Re-lock after lock expiry re-reports justLocked", func(t *testing.T) {
+		email := "test_relock@example.com"
+		user, err := store.CreateUser(ctx, tenantA, email)
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, tenantA, ident))
+
+		// First lockout with an already-elapsed duration: the crossing reports justLocked and
+		// leaves LockedUntil in the past, standing in for a lock whose window has expired.
+		justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, 1, -time.Minute)
+		require.NoError(t, err)
+		require.True(t, justLocked, "the first crossing must report justLocked")
+
+		found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		require.NotNil(t, found.LockedUntil, "the account must be locked after the first crossing")
+		require.False(t, found.LockedUntil.After(time.Now()), "the first lock must already be expired for this case")
+
+		// Once the prior lock has expired, a fresh failed attempt that re-crosses the threshold
+		// must report justLocked AGAIN, restart the counter and produce a new live lock.
+		justLocked, err = store.IncrementFailedAttempts(ctx, tenantA, ident.ID, 1, defaultTestLockDuration)
+		require.NoError(t, err)
+		assert.True(t, justLocked, "re-crossing the threshold after an expired lock must re-report justLocked")
+
+		found, err = store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		assert.Equal(t, 1, found.FailedAttempts, "an expired lock must restart the failed-attempt counter")
+		require.NotNil(t, found.LockedUntil, "a fresh lock must be set")
+		assert.True(t, found.LockedUntil.After(time.Now()), "the fresh lock must be in the future")
+	})
+
 	t.Run("Contract: Password Update", func(t *testing.T) {
 		email := "test_pwupdate@example.com"
 		user, err := store.CreateUser(ctx, tenantA, email)

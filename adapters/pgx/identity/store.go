@@ -464,20 +464,33 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 // the pre-increment counter was below it). Under concurrent failed logins the database
 // serializes the UPDATEs, so exactly one caller sees justLocked == true — see the
 // LockoutStore interface contract.
+//
+// When the row's prior lock has already expired at entry (locked_until is set but not after
+// now()), the counter is restarted from zero (this attempt makes it 1) and the stale lock
+// cleared in the same statement, so a new lockout cycle begins and re-crossing the threshold
+// reports justLocked again.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error) {
 	query := `
 		UPDATE identities
-		SET failed_attempts = failed_attempts + 1,
+		SET failed_attempts = CASE
+				WHEN locked_until IS NOT NULL AND locked_until <= now() THEN 1
+				ELSE failed_attempts + 1
+			END,
 			locked_until = CASE
-				WHEN failed_attempts + 1 >= $3 THEN now() + ($4::bigint * interval '1 millisecond')
+				WHEN $3 > 0 AND (CASE
+						WHEN locked_until IS NOT NULL AND locked_until <= now() THEN 1
+						ELSE failed_attempts + 1
+					END) >= $3 THEN now() + ($4::bigint * interval '1 millisecond')
+				WHEN locked_until IS NOT NULL AND locked_until <= now() THEN NULL
 				ELSE locked_until
 			END,
 			updated_at = now()
 		WHERE id = $1 AND tenant_id = $2
 		RETURNING $3 > 0 AND failed_attempts >= $3 AND failed_attempts - 1 < $3
 	`
-	// failed_attempts in RETURNING is the post-update (incremented) value, so the predicate
-	// reduces to "pre-increment < threshold <= post-increment": the crossing transition only.
+	// failed_attempts in RETURNING is the post-update value: after an expired lock it is 1
+	// (the restarted count), otherwise pre-increment + 1. The predicate therefore reduces to
+	// "effective pre-increment < threshold <= post-increment": the crossing transition only.
 	row := s.db.QueryRow(ctx, query, identityID, tenantID, lockThreshold, lockDuration.Milliseconds())
 	if err := row.Scan(&justLocked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
