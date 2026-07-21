@@ -112,15 +112,16 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
 
-// WithTrustedOrigins enables a CSRF origin check on the cookie-driven token endpoints
-// (RefreshHandler, LogoutHandler).
+// WithTrustedOrigins widens the same-origin CSRF check on the cookie-driven token endpoints
+// (RefreshHandler, LogoutHandler) to additional hosts.
 //
 // These are state-changing POSTs authenticated purely by the refresh cookie, so SameSite=Lax
-// alone does not fully prevent a forged cross-site refresh/logout. When trusted origins are
-// configured, a request whose Origin — or, failing that, Referer — host is neither the
-// request's own Host nor one of the supplied hosts is rejected with 403. Supply hosts WITHOUT
-// scheme, e.g. "app.example.com". When left unset the check is disabled and CSRF protection is
-// the consumer's responsibility (see SECURITY.md).
+// alone does not fully prevent a forged cross-site refresh/logout. The check is ON BY DEFAULT
+// (secure-by-default): even with no trusted origins configured, a request whose Origin — or,
+// failing that, Referer — host is not the request's own Host is rejected with 403, and a POST
+// carrying neither header is treated as untrusted. This option adds further allowed hosts (e.g. a
+// front-end served from another subdomain). Supply hosts WITHOUT scheme, e.g. "app.example.com".
+// To disable the check entirely use the explicit WithInsecureNoOriginCheck opt-out.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -243,11 +244,10 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 	}
 }
 
-// originAllowed reports whether the request passes the CSRF origin check. When no trusted
-// origins are configured the check is disabled (the consumer's responsibility, per
-// SECURITY.md). A configured check rejects any request whose Origin (or Referer fallback)
-// host is neither the request's own Host nor an allowlisted host; a POST carrying neither
-// header is treated as untrusted.
+// originAllowed reports whether the request passes the CSRF origin check. The check is ON BY
+// DEFAULT: a request is allowed only when its Origin (or Referer fallback) host is the request's
+// own Host or an allowlisted host, and a POST carrying neither header is treated as untrusted.
+// The explicit WithInsecureNoOriginCheck opt-out restores the pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	// Secure-by-default CSRF check (TASK-025): allowed only when the Origin/Referer host matches
 	// the request Host or an explicitly trusted origin; a missing origin host is rejected.

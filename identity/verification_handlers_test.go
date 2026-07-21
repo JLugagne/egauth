@@ -295,3 +295,54 @@ func TestRequestEmailVerificationHandler_RequiresResolvedUser(t *testing.T) {
 		assert.Equal(t, "sel.ver", requireMail(t, mailer.verifyCh).token)
 	})
 }
+
+// crossOriginForm builds a POST whose Origin does not match the request Host, exercising the
+// strict-same-origin CSRF check that every state-changing identity handler applies by default.
+func crossOriginForm(values url.Values) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(values.Encode()))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://evil.example.com") // Host is example.com
+	return req
+}
+
+// TestEmailVerificationHandlers_CSRFBlocksCrossOriginByDefault is a regression test: the two
+// email-verification handlers must apply the same strict same-origin check as their siblings
+// (SECURITY.md lists "phone/email verification" as protected by default). Before the fix both
+// handlers omitted the origin gate and processed a cross-origin POST.
+func TestEmailVerificationHandlers_CSRFBlocksCrossOriginByDefault(t *testing.T) {
+	t.Run("VerifyEmailHandler rejects cross-origin", func(t *testing.T) {
+		called := false
+		svc := &servicetest.MockService{
+			VerifyEmailFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {
+				called = true
+				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+			},
+		}
+		h := identity.VerifyEmailHandler(svc)
+		rec := httptest.NewRecorder()
+		h(rec, crossOriginForm(url.Values{"token": {"sel.ver"}}))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+		assert.False(t, called, "service must not be reached on a cross-origin request")
+	})
+
+	t.Run("RequestEmailVerificationHandler rejects cross-origin", func(t *testing.T) {
+		user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}
+		called := false
+		svc := &servicetest.MockService{
+			RequestEmailVerificationFunc: func(_ context.Context, _ string, _ uuid.UUID) (string, error) {
+				called = true
+				return "sel.ver", nil
+			},
+		}
+		mailer := newMockMailer()
+		h := identity.RequestEmailVerificationHandler(svc, mailer.asMailer(),
+			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+		rec := httptest.NewRecorder()
+		h(rec, crossOriginForm(url.Values{}))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+		assert.False(t, called, "service must not be reached on a cross-origin request")
+		requireNoMail(t, mailer.verifyCh)
+	})
+}

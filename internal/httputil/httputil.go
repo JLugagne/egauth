@@ -33,7 +33,14 @@ func WithErrorParam(rawURL, code string) string {
 // falls back to the Referer header.  Returns "" when neither header is present or parseable,
 // and when Origin is the special value "null" (opaque origin).
 func RequestOriginHost(r *http.Request) string {
-	if o := r.Header.Get("Origin"); o != "" && o != "null" {
+	if o := r.Header.Get("Origin"); o != "" {
+		// A present Origin is authoritative. The opaque "null" origin (sandboxed iframe, some
+		// redirect / privacy contexts) is treated as untrusted and does NOT fall back to Referer:
+		// a request that declines to assert an origin must not be validated via the weaker,
+		// more-spoofable Referer.
+		if o == "null" {
+			return ""
+		}
 		if u, err := url.Parse(o); err == nil {
 			return u.Host
 		}
