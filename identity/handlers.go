@@ -618,6 +618,10 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -654,6 +658,10 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
 		if !cfg.parseLimitedForm(w, r) {

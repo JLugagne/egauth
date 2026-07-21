@@ -29,7 +29,8 @@ type handlerConfig struct {
 	// cookies controls how StepUpHandler writes the re-issued access+refresh pair. The other
 	// handlers do not mint tokens and ignore it. It defaults to tokens.DefaultCookies().
 	cookies tokens.Cookies
-	// trustedOrigins, when non-empty, enables CSRF Origin/Referer enforcement (see WithTrustedOrigins).
+	// trustedOrigins widens the strict same-origin CSRF allowlist (see WithTrustedOrigins); the
+	// check itself is ON by default even when this is empty (see insecureNoOriginCheck).
 	trustedOrigins map[string]bool
 	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
 	insecureNoOriginCheck bool

@@ -463,14 +463,16 @@ preset exposes.
 
 The **`mfa` handlers** (`EnrollHandler`, `ConfirmHandler`, `VerifyHandler`,
 `VerifyRecoveryHandler`, `RegenerateRecoveryCodesHandler`, `DisableHandler`,
-`StepUpHandler`) are also state-changing POST endpoints. If the session cookie they rely
-on is `SameSite=None` (e.g. in a cross-subdomain or embedded app), a cross-site form POST
-could silently strip a victim's second factor (MFA downgrade via `DisableHandler`) or
-invalidate their recovery codes (`RegenerateRecoveryCodesHandler`). Use
-**`mfa.WithTrustedOrigins(...)`** to apply the same `Origin`/`Referer` host allowlist
-check on all MFA handlers. Supply hostnames without scheme, e.g.
-`mfa.WithTrustedOrigins("app.example.com")`. When unset (the default), no origin check
-is performed — CSRF protection remains the consumer's responsibility.
+`StepUpHandler`) are also state-changing POST endpoints, and — like the identity and token
+handler families — they enforce the strict same-origin check **by default**. Even with no
+configuration, a cross-site form POST that would otherwise silently strip a victim's second
+factor (MFA downgrade via `DisableHandler`) or invalidate their recovery codes
+(`RegenerateRecoveryCodesHandler`) is rejected with `403 cross_site_blocked`. Use
+**`mfa.WithTrustedOrigins(...)`** to *widen* the `Origin`/`Referer` host allowlist to additional
+hosts when the MFA endpoints are reachable from a browser session on another origin (e.g. a
+cross-subdomain or embedded app); supply hostnames without scheme, e.g.
+`mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
+`mfa.WithInsecureNoOriginCheck()` opt-out.
 
 ## Observability and idempotency (consumer responsibility)
 
