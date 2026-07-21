@@ -217,6 +217,64 @@ func TestCachingKeyStore_VerificationKeysReturnsCopy(t *testing.T) {
 	}
 }
 
+// blockingVerifyKeyStore wraps a countingKeyStore and blocks the FIRST VerificationKeys call
+// (the second delegate read of a fill) until released, so a test can inject an Invalidate while a
+// cache fill is in flight. Subsequent calls pass straight through.
+type blockingVerifyKeyStore struct {
+	backing *countingKeyStore
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (s *blockingVerifyKeyStore) ActiveSigningKey(ctx context.Context, tenantID string) (Signer, error) {
+	return s.backing.ActiveSigningKey(ctx, tenantID)
+}
+
+func (s *blockingVerifyKeyStore) VerificationKeys(ctx context.Context, tenantID string) (map[string]Signer, error) {
+	s.once.Do(func() {
+		close(s.entered)
+		<-s.release
+	})
+	return s.backing.VerificationKeys(ctx, tenantID)
+}
+
+// TestCachingKeyStore_InvalidateDuringFillIsNotLost is a regression test: an Invalidate (rotation/
+// revocation/deletion event) that fires while a cache fill is reading the delegate must not be
+// lost. Before the fix, store() wrote unconditionally, so the in-flight fill re-cached the
+// pre-rotation keyset for a full TTL — silently defeating the event sink's zero-staleness promise
+// for a compromise-response key revocation.
+func TestCachingKeyStore_InvalidateDuringFillIsNotLost(t *testing.T) {
+	backing := newCountingKeyStore()
+	del := &blockingVerifyKeyStore{
+		backing: backing,
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	cache := NewCachingKeyStore(del, time.Hour) // long TTL so only invalidation can refresh
+	ctx := context.Background()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = cache.ActiveSigningKey(ctx, "tenant-a") // fill: reads active=k1, blocks in VerificationKeys
+	}()
+
+	<-del.entered                    // the fill has read the (old) active key and is mid-read
+	backing.rotate("tenant-a", "k2") // the key is rotated/revoked in the backing store
+	cache.Invalidate("tenant-a")     // ...and the invalidation event fires while the fill is open
+	close(del.release)               // let the fill run store()
+	<-done                           // fill finished (cached the stale keyset, or correctly dropped it)
+
+	k, err := cache.ActiveSigningKey(ctx, "tenant-a")
+	if err != nil {
+		t.Fatalf("ActiveSigningKey: %v", err)
+	}
+	if k.KeyID() != "k2" {
+		t.Fatalf("invalidation during fill was lost: serving stale kid %q, want k2", k.KeyID())
+	}
+}
+
 // TestCachingKeyStore_NilDelegatePanics documents the fail-fast contract.
 func TestCachingKeyStore_NilDelegatePanics(t *testing.T) {
 	defer func() {

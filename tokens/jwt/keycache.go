@@ -56,6 +56,10 @@ type CachingKeyStore struct {
 
 	mu      sync.Mutex
 	entries map[string]cachedKeyset
+	// gen is bumped on every Invalidate/InvalidateAll. A fill captures it before reading the
+	// delegate and store() writes only if it is unchanged, so an invalidation that races an
+	// in-flight fill is never lost (it would otherwise re-cache a pre-invalidation keyset).
+	gen uint64
 }
 
 // CachingKeyStoreOption configures a CachingKeyStore.
@@ -109,11 +113,24 @@ func (c *CachingKeyStore) lookup(tenantID string) (cachedKeyset, bool) {
 	return e, true
 }
 
-// store records a resolved keyset for tenantID. Both fields are populated together so the active
-// key and the verification set served from cache are always from the same backing read.
-func (c *CachingKeyStore) store(tenantID string, active Signer, verify map[string]Signer) {
+// generation returns the current invalidation counter, captured by a fill before it reads the
+// delegate so store can detect an invalidation that raced the fill.
+func (c *CachingKeyStore) generation() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.gen
+}
+
+// store records a resolved keyset for tenantID. Both fields are populated together so the active
+// key and the verification set served from cache are always from the same backing read. seenGen is
+// the invalidation counter observed before the delegate read; if it has since changed, an
+// Invalidate landed mid-fill and this (now-stale) keyset is dropped rather than cached.
+func (c *CachingKeyStore) store(tenantID string, active Signer, verify map[string]Signer, seenGen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen != seenGen {
+		return
+	}
 	c.entries[tenantID] = cachedKeyset{active: active, verify: verify, cachedAt: c.now()}
 }
 
@@ -124,6 +141,7 @@ func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string)
 	if e, ok := c.lookup(tenantID); ok {
 		return e.active, nil
 	}
+	seenGen := c.generation()
 	active, err := c.delegate.ActiveSigningKey(ctx, tenantID)
 	if err != nil {
 		return nil, err
@@ -132,7 +150,7 @@ func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string)
 	if err != nil {
 		return nil, err
 	}
-	c.store(tenantID, active, verify)
+	c.store(tenantID, active, verify, seenGen)
 	return active, nil
 }
 
@@ -143,6 +161,7 @@ func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string)
 	if e, ok := c.lookup(tenantID); ok {
 		return cloneKeys(e.verify), nil
 	}
+	seenGen := c.generation()
 	active, err := c.delegate.ActiveSigningKey(ctx, tenantID)
 	if err != nil {
 		return nil, err
@@ -151,7 +170,7 @@ func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string)
 	if err != nil {
 		return nil, err
 	}
-	c.store(tenantID, active, verify)
+	c.store(tenantID, active, verify, seenGen)
 	return cloneKeys(verify), nil
 }
 
@@ -160,6 +179,7 @@ func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string)
 func (c *CachingKeyStore) Invalidate(tenantID string) {
 	c.mu.Lock()
 	delete(c.entries, tenantID)
+	c.gen++
 	c.mu.Unlock()
 }
 
@@ -167,6 +187,7 @@ func (c *CachingKeyStore) Invalidate(tenantID string) {
 func (c *CachingKeyStore) InvalidateAll() {
 	c.mu.Lock()
 	c.entries = make(map[string]cachedKeyset)
+	c.gen++
 	c.mu.Unlock()
 }
 
