@@ -100,22 +100,21 @@ func IssuerVerifierContractTesting[C any](t *testing.T, issuer tokens.Issuer[C],
 
 	t.Run("Contract: Issue and Verify API Key", func(t *testing.T) {
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 		claims := tokens.Claims[C]{
 			Subject:  userID,
 			TenantID: "tenant-123",
 			Custom:   customClaim,
 		}
 
-		// Issue a PAT: it acts on behalf of the user, so its subject stays the user.
-		apiKey, err := issuer.IssueAPIKey(ctx, "sk_test_", tokens.KeyTypePAT, creatorID, claims)
+		// Issue a PAT: it acts as its creator, so createdBy and Subject are the same user.
+		apiKey, err := issuer.IssueAPIKey(ctx, "sk_test_", tokens.KeyTypePAT, userID, claims)
 		require.NoError(t, err, "IssueAPIKey should succeed")
 		require.NotNil(t, apiKey, "APIKey must not be nil")
 		assert.True(t, len(apiKey.Token) > len("sk_test_"), "Token should be longer than the prefix")
 		assert.NotEmpty(t, apiKey.Hash, "Hash must not be empty")
 		assert.Equal(t, tokens.KeyTypePAT, apiKey.Type, "PAT type should be recorded on the key")
-		assert.Equal(t, creatorID, apiKey.CreatedBy, "creator should be recorded on the key")
-		assert.Equal(t, userID, apiKey.Claims.Subject, "a PAT's subject is the user")
+		assert.Equal(t, userID, apiKey.CreatedBy, "creator should be recorded on the key")
+		assert.Equal(t, userID, apiKey.Claims.Subject, "a PAT's subject is the creating user")
 
 		// Verify API Key under the SAME (non-empty) tenant it was saved with: the store
 		// lookup is tenant-scoped, so the matching tenantID is what resolves it. (The

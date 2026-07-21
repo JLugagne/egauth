@@ -97,13 +97,13 @@ func TestIssueAPIKey(t *testing.T) {
 	ctx := context.Background()
 	const tenant = "tenant-abc"
 
-	t.Run("PAT subject is the user", func(t *testing.T) {
+	t.Run("PAT subject is the creating user", func(t *testing.T) {
 		svc, saved := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 
-		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  userID,
+		// A PAT acts as its creator: the user issues their own token (Subject defaults to createdBy
+		// when left unset), so Subject == CreatedBy == the user.
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, userID, tokens.Claims[MyCustomClaims]{
 			TenantID: tenant,
 			Scopes:   []string{"repo:read"},
 		})
@@ -111,15 +111,29 @@ func TestIssueAPIKey(t *testing.T) {
 		require.NotNil(t, key)
 
 		assert.Equal(t, tokens.KeyTypePAT, key.Type)
-		assert.Equal(t, creatorID, key.CreatedBy)
-		assert.Equal(t, userID, key.Claims.Subject, "a PAT acts on behalf of the user, so its subject is the user")
+		assert.Equal(t, userID, key.CreatedBy)
+		assert.Equal(t, userID, key.Claims.Subject, "a PAT acts as its creator, so its subject is the creating user")
 
 		// The persisted row mirrors the returned key.
 		stored := saved[key.Hash]
 		require.NotNil(t, stored)
 		assert.Equal(t, tokens.KeyTypePAT, stored.Type)
-		assert.Equal(t, creatorID, stored.CreatedBy)
+		assert.Equal(t, userID, stored.CreatedBy)
 		assert.Equal(t, userID, stored.Claims.Subject)
+	})
+
+	t.Run("PAT with Subject different from createdBy is rejected", func(t *testing.T) {
+		svc, _ := newIssueKeyService(t)
+		creatorID := uuid.Must(uuid.NewV7())
+		otherUser := uuid.Must(uuid.NewV7())
+
+		_, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
+			Subject:  otherUser, // names a different user than the creator
+			TenantID: tenant,
+			Scopes:   []string{"repo:read"},
+		})
+		require.ErrorIs(t, err, jwt.ErrPATSubjectMismatch,
+			"a PAT naming a different user than its creator must be rejected (else it would survive that user's DisableUser)")
 	})
 
 	t.Run("Service subject is the key's own ID, distinct from the creator", func(t *testing.T) {
@@ -149,13 +163,11 @@ func TestIssueAPIKey(t *testing.T) {
 	t.Run("no silent role copy: only caller-supplied scopes are used", func(t *testing.T) {
 		svc, _ := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 
 		// The user is powerful (admin), but the PAT is issued with a deliberately narrow set.
 		// The issuer must NOT widen the key's authority to the user's roles.
 		narrow := []string{"repo:read"}
-		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  userID,
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, userID, tokens.Claims[MyCustomClaims]{
 			TenantID: tenant,
 			Scopes:   narrow,
 			Roles:    []string{"viewer"},

@@ -30,11 +30,10 @@ func TestAPIKeyRoundTrip(t *testing.T) {
 	t.Run("IC-1 PAT: Actor.Kind==PAT, IsHuman, Subject==user, Scopes==issued", func(t *testing.T) {
 		svc, _ := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 		issuedScopes := []string{"repo:read", "repo:write"}
 
-		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  userID,
+		// A PAT acts as its creator; Subject defaults to createdBy (the user).
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, userID, tokens.Claims[MyCustomClaims]{
 			TenantID: tenant,
 			Scopes:   issuedScopes,
 			// Even if the caller inadvertently passes broader roles, only Scopes drive
@@ -110,12 +109,10 @@ func TestAPIKeyRoundTrip(t *testing.T) {
 	t.Run("IC-1 PAT: narrow scope set is preserved exactly (no silent role copy)", func(t *testing.T) {
 		svc, _ := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 
 		narrowScopes := []string{"repo:read"}
 
-		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  userID,
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, userID, tokens.Claims[MyCustomClaims]{
 			TenantID: tenant,
 			Scopes:   narrowScopes,
 			// Simulate a user with wider privileges: the issuer must not propagate these

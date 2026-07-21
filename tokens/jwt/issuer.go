@@ -497,6 +497,11 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}, nil
 }
 
+// ErrPATSubjectMismatch is returned by IssueAPIKey when a KeyTypePAT is issued with a
+// Claims.Subject that names a different user than createdBy. A PAT acts as its creator, and its
+// revocation is scoped by CreatedBy, so the two must agree (leave Subject unset to default it).
+var ErrPATSubjectMismatch = errors.New("jwt: a PAT's Claims.Subject must equal createdBy")
+
 // IssueAPIKey generates a new API key of the given type, attributed to the human user
 // createdBy, carrying the authority (scopes/roles/audiences) supplied on claims verbatim.
 //
@@ -523,12 +528,20 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tok
 
 	keyID := uuid.Must(uuid.NewV7())
 
-	// A Service token is a machine identity decoupled from any human: its subject is its own
-	// key ID, not the creator. A PAT acts on behalf of a human, so its subject is left as the
-	// caller supplied (the user). The authority on claims (scopes/roles/audiences) is used as
+	// A Service token is a machine identity decoupled from any human: its subject is its own key
+	// ID, not the creator. A PAT acts on behalf of a human and MUST act as its creator: its
+	// subject is pinned to createdBy so that revocation scoped by CreatedBy (DisableUser →
+	// RevokeAllAPIKeysForUser) always severs it. A caller-supplied Subject naming a different user
+	// is rejected rather than silently honored (that divergence would let a PAT outlive the
+	// disable of the user it acts as). The authority on claims (scopes/roles/audiences) is used as
 	// given for either type — never inflated from the creator's stored roles.
 	if keyType == tokens.KeyTypeService {
 		claims.Subject = keyID
+	} else {
+		if claims.Subject != uuid.Nil && claims.Subject != createdBy {
+			return nil, ErrPATSubjectMismatch
+		}
+		claims.Subject = createdBy
 	}
 
 	var expiresAt *time.Time
@@ -557,6 +570,7 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tok
 	event.Emit(ctx, s.events, event.Event{
 		Type:     event.APIKeyCreated,
 		TenantID: key.TenantID,
+		UserID:   key.CreatedBy.String(),
 		Attrs: map[string]any{
 			"key_type":   string(key.Type),
 			"created_by": key.CreatedBy.String(),

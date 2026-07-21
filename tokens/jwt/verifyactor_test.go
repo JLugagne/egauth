@@ -22,10 +22,9 @@ func TestVerifyAPIKeyActor(t *testing.T) {
 	t.Run("PAT maps to a human Actor anchored on the user", func(t *testing.T) {
 		svc, _ := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())
-		creatorID := uuid.Must(uuid.NewV7())
 
-		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  userID,
+		// A PAT acts as its creator; Subject defaults to createdBy (the user).
+		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, userID, tokens.Claims[MyCustomClaims]{
 			TenantID: tenant,
 			Scopes:   []string{"repo:read", "repo:write"},
 		})
@@ -78,7 +77,6 @@ func TestVerifyAPIKeyActor(t *testing.T) {
 
 		// Issue a key whose ExpiresAt is already in the past, so verification must reject it.
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:   uuid.Must(uuid.NewV7()),
 			TenantID:  tenant,
 			ExpiresAt: time.Now().Add(-time.Hour),
 		})

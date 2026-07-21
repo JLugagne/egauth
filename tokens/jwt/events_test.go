@@ -139,10 +139,8 @@ func TestAPIKeyAuditEmits(t *testing.T) {
 		svc, _ := newAuditService(t, sink)
 
 		creatorID := uuid.Must(uuid.NewV7())
-		userID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[struct{}]{
-			Subject:  userID,
 			TenantID: tenant,
 			Scopes:   []string{"read"},
 		})
@@ -205,7 +203,6 @@ func TestAPIKeyAuditEmits(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[struct{}]{
 			TenantID:  tenant,
-			Subject:   uuid.Must(uuid.NewV7()),
 			ExpiresAt: time.Now().Add(-time.Hour), // already expired
 		})
 		require.NoError(t, err)
