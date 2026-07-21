@@ -323,13 +323,24 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 // zero value, which egauth.IsHuman treats as User (the safe human default).
 // Scopes are copied verbatim from the claims so that application predicates (e.g. those
 // passed to WithGate) can call actor.HasAllScopes without having to inspect the raw claims.
+//
+// The subject mapping mirrors ActorFromAPIKey's per-Kind model: for a Service token the subject
+// is the key's own identity, so it lands on KeyID and UserID is left zero (IsMachine true); for
+// PAT and User (including the zero Kind) the subject is the owning/authenticated user, so it
+// lands on UserID. Unlike ActorFromAPIKey, the JWT wire format (Claims) carries no separate
+// api-key-id claim, so a PAT's KeyID is unavailable on this path and stays zero.
 func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
-	return egauth.Actor{
-		UserID:   claims.Subject,
+	actor := egauth.Actor{
 		TenantID: claims.TenantID,
 		Kind:     claims.Kind,
 		Scopes:   claims.Scopes,
 	}
+	if claims.Kind == egauth.Service {
+		actor.KeyID = claims.Subject
+	} else {
+		actor.UserID = claims.Subject
+	}
+	return actor
 }
 
 // stepUpSatisfied reports whether the claims clear BOTH step-up gates: the required AMR factors
