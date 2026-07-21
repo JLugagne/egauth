@@ -159,6 +159,18 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		return nil, err
 	}
 
+	// Cache check with updated_at: if the database row hasn't changed since we built the
+	// cached provider, we can safely reuse it to preserve the JWKS cache. This runs before the
+	// client_secret decrypt so a cache hit never performs a KEK round-trip — a transient KEK
+	// failure cannot take down a login the warm cache should have served, and cached logins
+	// avoid the decrypt entirely.
+	s.mu.RLock()
+	if cp, ok := s.providerCache[key]; ok && cp.updatedAt.Equal(updatedAt) {
+		s.mu.RUnlock()
+		return cp.provider, nil
+	}
+	s.mu.RUnlock()
+
 	var clientSecret string
 	if clientSecretEnc != "" {
 		sealed, decErr := base64.StdEncoding.DecodeString(clientSecretEnc)
@@ -171,15 +183,6 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		}
 		clientSecret = string(dec)
 	}
-
-	// Cache check with updated_at: if the database row hasn't changed since we built the
-	// cached provider, we can safely reuse it to preserve the JWKS cache.
-	s.mu.RLock()
-	if cp, ok := s.providerCache[key]; ok && cp.updatedAt.Equal(updatedAt) {
-		s.mu.RUnlock()
-		return cp.provider, nil
-	}
-	s.mu.RUnlock()
 
 	// Defence in depth: reject a stored issuer that is no longer on the operator allowlist.
 	if err := s.checkIssuerAllowed(issuer); err != nil {
