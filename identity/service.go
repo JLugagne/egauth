@@ -970,8 +970,13 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 			return nil, ErrUserNotFound
 		}
 		if user.DisabledAt != nil {
+			// Audit the rejected OAuth login of a suspended account, mirroring the password path
+			// (Authenticate emits login.failed{account_disabled}); without this the OAuth login
+			// path is invisible to a SIEM for this branch.
+			s.emit(ctx, event.Event{Type: event.LoginFailed, UserID: user.ID.String(), TenantID: tenantID, Reason: "account_disabled", Attrs: map[string]any{"method": "oauth", "provider": provider}})
 			return nil, ErrAccountDisabled
 		}
+		s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID, Attrs: map[string]any{"method": "oauth", "provider": provider}})
 		return user, nil
 	}
 	if !errors.Is(err, ErrIdentityNotFound) {
@@ -1014,6 +1019,10 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
 		return nil, err
 	}
+	// Audit the JIT provisioning and the resulting OAuth login, mirroring the password path
+	// (Register→UserRegistered, Authenticate→LoginSucceeded) so the OAuth flow is not SIEM-dark.
+	s.emit(ctx, event.Event{Type: event.UserRegistered, UserID: user.ID.String(), TenantID: tenantID, Reason: "oauth_provision", Attrs: map[string]any{"provider": provider}})
+	s.emit(ctx, event.Event{Type: event.LoginSucceeded, UserID: user.ID.String(), TenantID: tenantID, Attrs: map[string]any{"method": "oauth", "provider": provider}})
 	return user, nil
 }
 
@@ -1371,6 +1380,9 @@ func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, use
 	if err := s.store.UpdateIdentityPassword(ctx, tenantID, userID, hash, s.now(), true); err != nil {
 		return err
 	}
+	// Audit the privileged credential override (like ChangePassword/ResetPassword). The Reason
+	// distinguishes it from a self-service change so a SIEM can flag admin-initiated resets.
+	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID, Reason: "admin_temporary_password"})
 	var errs []error
 	for _, erase := range s.erasers {
 		if erase == nil {
@@ -1426,5 +1438,7 @@ func (s *service) AdminCreateUser(ctx context.Context, tenantID string, email, t
 		_ = s.store.DeleteUser(ctx, tenantID, user.ID)
 		return nil, err
 	}
+	// Audit the admin-initiated account provisioning (parity with Register's UserRegistered).
+	s.emit(ctx, event.Event{Type: event.UserRegistered, UserID: user.ID.String(), TenantID: tenantID, Reason: "admin_created"})
 	return user, nil
 }
