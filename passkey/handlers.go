@@ -583,7 +583,7 @@ func WithTenantCookieKeys(resolver CookieKeyResolver) HandlerOption {
 // fail-closed behavior for an unconfigured key — never silently downgrading to a shared key.
 func (cfg handlerConfig) cookieKeyFor(w http.ResponseWriter, ctx context.Context, tenant string) ([]byte, bool) {
 	if cfg.cookieKeys == nil {
-		if len(cfg.cookieKey) == 0 {
+		if len(cfg.cookieKey) < MinCookieKeyLength {
 			http.Error(w, "server_misconfigured", http.StatusInternalServerError)
 			return nil, false
 		}

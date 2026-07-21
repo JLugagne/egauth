@@ -82,6 +82,19 @@ func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T
 	assert.Nil(t, findCookie(rec.Result().Cookies(), passkey.DefaultSessionCookieName))
 }
 
+func TestBeginRegistrationHandler_ShortCookieKeyOverrideFailsClosed(t *testing.T) {
+	svc, _ := testService(t)
+	// A per-handler WithCookieKey override shorter than MinCookieKeyLength must fail closed,
+	// exactly like the per-tenant resolver branch — NewService's construction-time length
+	// guarantee must not be silently bypassable at the handler layer with a weak HMAC key.
+	short := make([]byte, passkey.MinCookieKeyLength-1)
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(short))
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Nil(t, findCookie(rec.Result().Cookies(), passkey.DefaultSessionCookieName))
+}
+
 func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	svc, _ := testService(t)
 	uid := uuid.Must(uuid.NewV7())
