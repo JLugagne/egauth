@@ -20,10 +20,10 @@ import (
 // RevokedAt populated, exactly as the real adapters do). It is the minimum store needed to exercise
 // the issuer's revoke/list passthrough and the verify-layer rejection.
 type revokeTestStore struct {
-	mu       sync.Mutex
-	byHash   map[string]*tokens.APIKey[MyCustomClaims]
-	byID     map[uuid.UUID]*tokens.APIKey[MyCustomClaims]
-	now      func() time.Time
+	mu     sync.Mutex
+	byHash map[string]*tokens.APIKey[MyCustomClaims]
+	byID   map[uuid.UUID]*tokens.APIKey[MyCustomClaims]
+	now    func() time.Time
 }
 
 func newRevokeTestStore(now func() time.Time) *revokeTestStore {
@@ -140,7 +140,6 @@ func TestVerifyAPIKeyRejectsRevoked(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:  uuid.Must(uuid.NewV7()),
 			TenantID: tenant,
 			Scopes:   []string{"repo:read"},
 		})
@@ -176,11 +175,11 @@ func TestVerifyAPIKeyRejectsRevoked(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		toRevoke, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject: uuid.Must(uuid.NewV7()), TenantID: tenant, Scopes: []string{"repo:read"},
+			TenantID: tenant, Scopes: []string{"repo:read"},
 		})
 		require.NoError(t, err)
 		active, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject: uuid.Must(uuid.NewV7()), TenantID: tenant, Scopes: []string{"repo:read"},
+			TenantID: tenant, Scopes: []string{"repo:read"},
 		})
 		require.NoError(t, err)
 
@@ -203,7 +202,6 @@ func TestRevokedVsExpiredAreDistinct(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:   uuid.Must(uuid.NewV7()),
 			TenantID:  tenant,
 			Scopes:    []string{"repo:read"},
 			ExpiresAt: now.Add(-time.Hour), // already expired against the frozen clock
@@ -220,7 +218,6 @@ func TestRevokedVsExpiredAreDistinct(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:   uuid.Must(uuid.NewV7()),
 			TenantID:  tenant,
 			Scopes:    []string{"repo:read"},
 			ExpiresAt: now.Add(time.Hour), // still valid
@@ -238,7 +235,6 @@ func TestRevokedVsExpiredAreDistinct(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject:   uuid.Must(uuid.NewV7()),
 			TenantID:  tenant,
 			Scopes:    []string{"repo:read"},
 			ExpiresAt: now.Add(-time.Hour), // expired
@@ -263,7 +259,7 @@ func TestRevokeAPIKeyEmitsAuditEvent(t *testing.T) {
 		creatorID := uuid.Must(uuid.NewV7())
 
 		key, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-			Subject: uuid.Must(uuid.NewV7()), TenantID: tenant, Scopes: []string{"repo:read"},
+			TenantID: tenant, Scopes: []string{"repo:read"},
 		})
 		require.NoError(t, err)
 
@@ -302,7 +298,7 @@ func TestListAPIKeysByCreator(t *testing.T) {
 	otherCreator := uuid.Must(uuid.NewV7())
 
 	k1, err := svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-		Subject: uuid.Must(uuid.NewV7()), TenantID: tenant, Scopes: []string{"repo:read"},
+		TenantID: tenant, Scopes: []string{"repo:read"},
 	})
 	require.NoError(t, err)
 	k2, err := svc.IssueAPIKey(ctx, "sk_svc_", tokens.KeyTypeService, creatorID, tokens.Claims[MyCustomClaims]{
@@ -311,7 +307,7 @@ func TestListAPIKeysByCreator(t *testing.T) {
 	require.NoError(t, err)
 	// A key from a different creator must not appear in creatorID's listing.
 	_, err = svc.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, otherCreator, tokens.Claims[MyCustomClaims]{
-		Subject: uuid.Must(uuid.NewV7()), TenantID: tenant, Scopes: []string{"repo:read"},
+		TenantID: tenant, Scopes: []string{"repo:read"},
 	})
 	require.NoError(t, err)
 
@@ -351,7 +347,7 @@ func TestSingleTenantRevokeAndList(t *testing.T) {
 
 	// Empty TenantID on claims => the single-tenant default partition.
 	key, err := st.IssueAPIKey(ctx, "sk_pat_", tokens.KeyTypePAT, creatorID, tokens.Claims[MyCustomClaims]{
-		Subject: uuid.Must(uuid.NewV7()), Scopes: []string{"repo:read"},
+		Scopes: []string{"repo:read"},
 	})
 	require.NoError(t, err)
 
