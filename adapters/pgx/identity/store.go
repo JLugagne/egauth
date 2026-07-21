@@ -245,17 +245,28 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 		changedAt = &t
 	}
 
+	// The INSERT is gated on the target being a LIVE user in the SAME tenant. The bare user_id
+	// foreign key alone would accept a cross-tenant or soft-deleted user, so this EXISTS guard
+	// matches the memory store's invariant exactly (mirrors CreateVerificationToken). Explicit
+	// casts are required because $2/$3 appear both in the (untyped) SELECT list and the EXISTS
+	// comparison.
 	query := `
 		INSERT INTO identities (id, user_id, tenant_id, provider, provider_id, password_hash, password_changed_at, must_change_password, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		SELECT $1::uuid, $2::uuid, $3::varchar, $4::varchar, $5::varchar, $6::varchar, $7::timestamptz, $8::boolean, $9::timestamptz, $10::timestamptz
+		WHERE EXISTS (SELECT 1 FROM users WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL)
 	`
-	_, err := s.db.Exec(ctx, query,
+	tag, err := s.db.Exec(ctx, query,
 		ident.ID, ident.UserID, ident.TenantID, ident.Provider, ident.ProviderID,
 		ident.PasswordHash, changedAt, ident.MustChangePassword,
 		ident.CreatedAt, ident.UpdatedAt,
 	)
 	if err != nil {
 		return mapError(err)
+	}
+	if tag.RowsAffected() == 0 {
+		// No live, same-tenant user matched the EXISTS guard (cross-tenant, soft-deleted or
+		// unknown UserID).
+		return identity.ErrUserNotFound
 	}
 
 	return nil
