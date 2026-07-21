@@ -157,6 +157,30 @@ jobs:
         working-directory: adapters/pgx
         run: go test -short ./...
 
+  test-adapters-otel:
+    name: Test adapters/otel
+    runs-on: ubuntu-latest
+    # adapters/otel is a separate module (an OpenTelemetry event.Sink) in the go.work workspace that
+    # otherwise had no CI coverage. It carries no Docker/testcontainers dependency, so vet + test is
+    # sufficient; it resolves the core module from the workspace.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: adapters/otel — go vet
+        working-directory: adapters/otel
+        run: go vet ./...
+
+      - name: adapters/otel — go test -race
+        working-directory: adapters/otel
+        run: go test -race ./...
+
   fuzz:
     name: Fuzz (short pass on untrusted-input parsers)
     runs-on: ubuntu-latest
