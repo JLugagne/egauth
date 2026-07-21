@@ -44,8 +44,12 @@ const (
 	TokenFamilyRevoked      Type = "token.family_revoked"
 	MFAEnrolled             Type = "mfa.enrolled"
 	MFAConfirmed            Type = "mfa.confirmed"
+	MFAVerified             Type = "mfa.verified" // a second factor (TOTP or recovery code) was successfully verified
 	MFAVerificationFailed   Type = "mfa.verification_failed"
 	MFADisabled             Type = "mfa.disabled"
+	MFAUnlocked             Type = "mfa.unlocked"            // an operator reset a locked-out second factor (UnlockMFA)
+	CredentialAdded         Type = "credential.added"        // a passkey/WebAuthn credential was registered
+	CredentialRemoved       Type = "credential.removed"      // a passkey/WebAuthn credential was deleted
 	DeliveryFailed          Type = "delivery.failed"         // a swallowed mailer/delivery error (outage signal)
 	InsecureCookieMisuse    Type = "cookies.insecure_misuse" // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
 
@@ -99,11 +103,26 @@ type SinkFunc func(ctx context.Context, e Event)
 func (f SinkFunc) EmitEvent(ctx context.Context, e Event) { f(ctx, e) }
 
 // Emit sends e to sink when sink is non-nil. Services call it so a nil (unconfigured) sink is a
-// cheap no-op and call sites stay free of nil checks.
+// cheap no-op and call sites stay free of nil checks. A panic in the sink is recovered (see
+// safeEmit) so a misbehaving audit sink can never change a handler's client-visible behavior — the
+// invariant this package documents.
 func Emit(ctx context.Context, sink Sink, e Event) {
 	if sink != nil {
-		sink.EmitEvent(ctx, e)
+		safeEmit(ctx, sink, e)
 	}
+}
+
+// safeEmit delivers e to a single sink, recovering any panic so it cannot unwind into the caller's
+// auth path. A recovered panic is logged (not silently swallowed) because a broken audit sink is
+// itself a security-relevant condition. Blocking sinks remain the implementation's responsibility
+// (the Sink contract requires non-blocking dispatch); this only contains panics.
+func safeEmit(ctx context.Context, sink Sink, e Event) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Default().Error("egauth: event sink panicked", "event", string(e.Type), "panic", r)
+		}
+	}()
+	sink.EmitEvent(ctx, e)
 }
 
 type multiSink []Sink
@@ -114,7 +133,9 @@ func MultiSink(sinks ...Sink) Sink { return multiSink(sinks) }
 func (m multiSink) EmitEvent(ctx context.Context, e Event) {
 	for _, s := range m {
 		if s != nil {
-			s.EmitEvent(ctx, e)
+			// Contain each member's panic so one misbehaving sink cannot stop the fan-out to the
+			// others (or unwind into the caller).
+			safeEmit(ctx, s, e)
 		}
 	}
 }
