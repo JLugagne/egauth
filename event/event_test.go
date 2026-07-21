@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"testing"
 
@@ -36,6 +37,38 @@ func TestMultiSink_FansOut(t *testing.T) {
 	event.Emit(context.Background(), sink, event.Event{Type: event.UserRegistered})
 	assert.Equal(t, 1, a)
 	assert.Equal(t, 1, b)
+}
+
+func TestEmit_RecoversPanickingSink(t *testing.T) {
+	// event.go promises emitting never changes a handler's client-visible behavior; a panicking
+	// Sink must therefore be contained rather than propagated up the auth path. Route the
+	// recovery log to a buffer to assert it is recorded (not silently swallowed).
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, nil)))
+	defer slog.SetDefault(orig)
+
+	panicSink := event.SinkFunc(func(context.Context, event.Event) { panic("boom") })
+	assert.NotPanics(t, func() {
+		event.Emit(context.Background(), panicSink, event.Event{Type: event.LoginSucceeded})
+	}, "a panicking sink must not propagate to the caller")
+	assert.Contains(t, buf.String(), "panicked", "a recovered sink panic must be logged, not silently swallowed")
+}
+
+func TestMultiSink_ContinuesPastPanickingMember(t *testing.T) {
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	defer slog.SetDefault(orig)
+
+	var reached bool
+	sink := event.MultiSink(
+		event.SinkFunc(func(context.Context, event.Event) { panic("boom") }),
+		event.SinkFunc(func(context.Context, event.Event) { reached = true }),
+	)
+	assert.NotPanics(t, func() {
+		event.Emit(context.Background(), sink, event.Event{Type: event.UserRegistered})
+	})
+	assert.True(t, reached, "a panicking sink must not prevent later fan-out sinks from receiving the event")
 }
 
 func TestSlogSink_LevelsAndAttrs(t *testing.T) {
