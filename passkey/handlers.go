@@ -354,6 +354,8 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 		http.Error(w, "credential_not_found", http.StatusNotFound)
 	case errors.Is(err, ErrCredentialExists):
 		http.Error(w, "credential_exists", http.StatusConflict)
+	case errors.Is(err, ErrAttestationRejected):
+		http.Error(w, "attestation_rejected", http.StatusForbidden)
 	case errors.As(err, &protoErr):
 		// A WebAuthn protocol error is a bad/invalid attestation or assertion from the client.
 		http.Error(w, "verification_failed", http.StatusBadRequest)

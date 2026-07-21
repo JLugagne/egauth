@@ -166,6 +166,36 @@ func TestPasskeyHandlers_StoreErrorIs500(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+func TestFinishRegistrationHandler_AttestationRejectedIs403(t *testing.T) {
+	prohibited := uuid.MustParse("33333333-3333-3333-3333-333333333333")
+	svc, _, _ := newAttestationService(t, passkey.AttestationConfig{
+		ProhibitedAAGUIDs: []uuid.UUID{prohibited},
+	})
+	uid := uuid.Must(uuid.NewV7())
+	opts := []passkey.HandlerOption{resolver(uid), passkey.WithCookieKey(testCookieKey)}
+
+	beginRec := httptest.NewRecorder()
+	passkey.BeginRegistrationHandler(svc, opts...)(beginRec, httptest.NewRequest(http.MethodPost, "/register/begin", nil))
+	require.Equal(t, http.StatusOK, beginRec.Code)
+	cookie := findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
+	require.NotNil(t, cookie)
+	challenge := challengeFromAssertion(t, beginRec.Body.Bytes())
+
+	auth := newSoftAuthenticator(t, testRPID, testOrigin)
+	prohibitedBytes, err := prohibited.MarshalBinary()
+	require.NoError(t, err)
+	auth.aaguid = prohibitedBytes
+
+	finishReq := auth.registrationRequest(t, challenge)
+	finishReq.AddCookie(cookie)
+	finishRec := httptest.NewRecorder()
+	passkey.FinishRegistrationHandler(svc, opts...)(finishRec, finishReq)
+
+	assert.Equal(t, http.StatusForbidden, finishRec.Code,
+		"a policy-rejected attestation is a client/policy condition, not a 500 server fault")
+	assert.Contains(t, finishRec.Body.String(), "attestation_rejected")
+}
+
 func TestBeginLoginHandler_NoCredentials(t *testing.T) {
 	svc, _ := testService(t)
 	h := passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())))
