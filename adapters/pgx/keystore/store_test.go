@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -178,4 +180,59 @@ func TestPgxKeystore_DefaultAlgForLegacyRow(t *testing.T) {
 	active, err := store.ActiveSigningKey(ctx, "legacy")
 	require.NoError(t, err)
 	require.Equal(t, "HS256", active.Alg)
+}
+
+// TestPgxKeystore_CreateTenant_ConcurrentRace fires N concurrent CreateTenant calls for the SAME
+// new tenant id (distinct key ids) and asserts the check-then-insert is atomic: exactly one call
+// wins with nil, and every other call observes the tenant already exists (ErrTenantExists) rather
+// than both racing past TenantExists and inserting two active signing keys for one tenant.
+func TestPgxKeystore_CreateTenant_ConcurrentRace(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	store := pgxkeystore.NewStore(pool)
+
+	const tenantID = "race-tenant"
+	const n = 6
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	results := make([]error, n)
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			key := keystore.SigningKey{
+				KeyID:     fmt.Sprintf("k%d", i),
+				Secret:    []byte("sealed-secret-material-stand-in"),
+				CreatedAt: time.Now(),
+			}
+			results[i] = store.CreateTenant(ctx, tenantID, key)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	var successes, conflicts int
+	for _, err := range results {
+		switch {
+		case err == nil:
+			successes++
+		case errors.Is(err, keystore.ErrTenantExists):
+			conflicts++
+		default:
+			t.Fatalf("unexpected error from concurrent CreateTenant: %v", err)
+		}
+	}
+	require.Equal(t, 1, successes, "exactly one concurrent CreateTenant must win")
+	require.Equal(t, n-1, conflicts, "every other concurrent CreateTenant must see ErrTenantExists")
+
+	// The tenant must end up with a single, deterministic active signing key (no duplicate
+	// active keys from a lost race).
+	key1, err := store.ActiveSigningKey(ctx, tenantID)
+	require.NoError(t, err)
+	key2, err := store.ActiveSigningKey(ctx, tenantID)
+	require.NoError(t, err)
+	require.Equal(t, key1.KeyID, key2.KeyID, "ActiveSigningKey must be deterministic")
 }

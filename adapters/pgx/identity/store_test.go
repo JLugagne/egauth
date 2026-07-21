@@ -61,4 +61,5 @@ func TestPgxStore_Contract(t *testing.T) {
 	storetest.StoreContractTesting(t, store, true)
 	storetest.StoreDisableEnableContract(t, store, "tenant-A")
 	storetest.StoreUpdateUserSoftDeleteContract(t, store, "tenant-A")
+	storetest.StoreDeleteAuthGateContract(t, store, "tenant-A")
 }

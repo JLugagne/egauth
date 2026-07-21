@@ -187,6 +187,37 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.Equal(t, user.ID, uid)
 	})
 
+	t.Run("Contract: AddIdentity requires a live, same-tenant user", func(t *testing.T) {
+		// AddIdentity must reject an identity whose UserID is not a live user in the target tenant.
+		// Otherwise a cross-tenant or soft-deleted UserID could acquire a linked identity,
+		// corrupting tenant isolation of the identities table. The memory backend enforces this;
+		// the pgx backend must match (a bare foreign key only proves the user exists SOMEWHERE, not
+		// that it is live and in this tenant).
+		hash := "h"
+
+		if useMultiTenant {
+			// (a) UserID owned by another tenant.
+			foreignUser, err := store.CreateUser(ctx, tenantB, "foreign_owner@example.com")
+			require.NoError(t, err)
+			crossIdent := &identity.Identity{UserID: foreignUser.ID, Provider: "password", ProviderID: "cross_tenant@example.com", PasswordHash: &hash}
+			assert.ErrorIs(t, store.AddIdentity(ctx, tenantA, crossIdent), identity.ErrUserNotFound,
+				"AddIdentity must reject a UserID owned by another tenant")
+		}
+
+		// (b) UserID of a soft-deleted user in the same tenant.
+		delUser, err := store.CreateUser(ctx, tenantA, "to_delete@example.com")
+		require.NoError(t, err)
+		require.NoError(t, store.DeleteUser(ctx, tenantA, delUser.ID))
+		delIdent := &identity.Identity{UserID: delUser.ID, Provider: "password", ProviderID: "after_delete@example.com", PasswordHash: &hash}
+		assert.ErrorIs(t, store.AddIdentity(ctx, tenantA, delIdent), identity.ErrUserNotFound,
+			"AddIdentity must reject a soft-deleted user's UserID")
+
+		// (c) Unknown UserID.
+		unknownIdent := &identity.Identity{UserID: uuid.Must(uuid.NewV7()), Provider: "password", ProviderID: "unknown_owner@example.com", PasswordHash: &hash}
+		assert.ErrorIs(t, store.AddIdentity(ctx, tenantA, unknownIdent), identity.ErrUserNotFound,
+			"AddIdentity must reject an unknown UserID")
+	})
+
 	t.Run("Contract: ErrTenantMismatch when record tenant differs", func(t *testing.T) {
 		// A Save/Create path that receives a record already carrying a non-empty TenantID that
 		// differs from the tenantID argument must reject it with ErrTenantMismatch rather than
