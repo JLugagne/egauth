@@ -608,18 +608,20 @@ redaction is in any case only a backstop. Therefore the consumer must:
   cookies (the HTTP handlers set these flags by default).
 - **Access-token tenant binding (fail-closed when multi-tenant).** When one `tokens/jwt.Service`
   signs for every tenant under a shared key, a token minted for tenant A is cryptographically
-  valid in tenant B's context. The tenant-unaware `VerifyAccessToken` performs **no** tenant
-  comparison and is **deprecated**. Set `tokens/jwt.Config.MultiTenant = true` so that
-  `VerifyAccessToken` fails closed with `tokens.ErrTenantBindingRequired`, and call
-  `Service.VerifyAccessTokenForTenant(ctx, tenantID, token)` — it binds the signed `tenant_id`
-  claim to the request tenant and rejects a mismatch with `tokens.ErrTenantMismatch`. The HTTP
-  middleware exposes the same guarantee: `tokens.RequireAuth` with `tokens.WithAuthTenantResolver`
-  resolves the request's tenant and verifies through `VerifyAccessTokenForTenant`. The resolver is
-  fail-closed — returning `""` (tenant could not be resolved) rejects the request with `401` and
-  never falls back to the tenant-unaware path, so a multi-tenant verifier is never reached
-  unbound. Genuinely single-tenant deployments leave `MultiTenant` false (every token is issued
-  under the empty tenant), configure no resolver, and may keep using `VerifyAccessToken` or the
-  `SingleTenant` wrapper.
+  valid in tenant B's context. `Service` does not expose a tenant-unaware access-token verifier at
+  all: `Service.VerifyAccessTokenForTenant(ctx, tenantID, token)` is the only entry point, and it
+  binds the signed `tenant_id` claim to the request tenant, rejecting a mismatch with
+  `tokens.ErrTenantMismatch`. The HTTP middleware exposes the same guarantee: `tokens.RequireAuth`
+  with `tokens.WithAuthTenantResolver` resolves the request's tenant up front and verifies through
+  `VerifyAccessTokenForTenant` with that resolved tenant ID. The resolver is fail-closed —
+  returning `""` (tenant could not be resolved) rejects the request with `401` and never falls
+  back to a tenant-unaware path, so a multi-tenant verifier is never reached unbound. Genuinely
+  single-tenant deployments configure no resolver at all: `RequireAuth` then calls
+  `VerifyAccessTokenForTenant` with the empty tenant `""` on every request — every token is issued
+  under that same empty tenant, so binding is still enforced, just against a single, fixed
+  partition. The `SingleTenant` wrapper is the convenience form of exactly this: it forwards
+  `VerifyAccessTokenForTenant` (and the other `Verifier`/`Issuer` methods) so single-tenant callers
+  never have to pass `tenantID` explicitly.
 - **Tenant resolution is fail-closed on every HTTP surface.** Every `WithTenantResolver` /
   `WithAuthTenantResolver` option in the library (`identity`, `tokens`, `otp`, `oauth`, `sessions`)
   obeys one contract: a **configured** resolver MUST return a non-empty tenant ID for any request
@@ -756,8 +758,11 @@ handler families by default**:
   from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
   against classic CSRF on an existing session.
 - **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`) **widens** the
-  same-origin allowlist to additional hosts — e.g. a front-end served from another subdomain.
-  Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+  same-origin allowlist to additional origins — e.g. a front-end served from another subdomain.
+  Each entry may be a bare host, e.g. `identity.WithTrustedOrigins("app.example.com")` (matched
+  against the request origin's host only), or a scheme-qualified origin, e.g.
+  `identity.WithTrustedOrigins("https://app.example.com")` (matched against scheme AND host —
+  the stricter form: a request presenting the same host under a different scheme is rejected).
 - **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`) is the explicit,
   loudly-named opt-out: it disables the same-origin check entirely, restoring the pre-v1
   accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g. a
@@ -777,11 +782,12 @@ handler families — they enforce the strict same-origin check **by default**. E
 configuration, a cross-site form POST that would otherwise silently strip a victim's second
 factor (MFA downgrade via `DisableHandler`) or invalidate their recovery codes
 (`RegenerateRecoveryCodesHandler`) is rejected with `403 cross_site_blocked`. Use
-**`mfa.WithTrustedOrigins(...)`** to *widen* the `Origin`/`Referer` host allowlist to additional
-hosts when the MFA endpoints are reachable from a browser session on another origin (e.g. a
-cross-subdomain or embedded app); supply hostnames without scheme, e.g.
-`mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
-`mfa.WithInsecureNoOriginCheck()` opt-out.
+**`mfa.WithTrustedOrigins(...)`** to *widen* the `Origin`/`Referer` allowlist to additional
+origins when the MFA endpoints are reachable from a browser session on another origin (e.g. a
+cross-subdomain or embedded app); each entry may be a bare host, e.g.
+`mfa.WithTrustedOrigins("app.example.com")` (matched on host only), or a scheme-qualified origin,
+e.g. `mfa.WithTrustedOrigins("https://app.example.com")` (matched on scheme AND host — stricter).
+The check is turned off only via the explicit `mfa.WithInsecureNoOriginCheck()` opt-out.
 
 The **`passkey` handlers** (`BeginRegistrationHandler`, `FinishRegistrationHandler`,
 `BeginLoginHandler`, `FinishLoginHandler`, `BeginDiscoverableLoginHandler`,
@@ -829,15 +835,25 @@ how rate limiting and CSRF tokens are positioned.
 
 ## Evicting in-memory stores in production (consumer responsibility)
 
-The in-memory store backends (`sessions/memory`, `otp/memory`) and the `ratelimit.TokenBucket`
+The in-memory store backends (`sessions/memory`, `otp/memory`, `tokens/memory`) and the
+identity/tokens **verification-token and refresh-token tables — in memory AND on `pgx`** —
 accumulate entries until a caller explicitly invokes `DeleteExpired` / `Cleanup`. This is an
-intentional design choice (the in-memory stores are primarily for tests and single-process apps),
-but it is an **operational footgun** if overlooked:
+intentional design choice (the in-memory stores are primarily for tests and single-process apps,
+and the SQL tables trade unbounded row growth for the durability a periodic reaper is expected to
+prune), but it is an **operational footgun** if overlooked:
 
-- A flood of short-lived sessions, OTP codes, or unique rate-limit keys will grow the internal
-  maps indefinitely, exhausting heap memory and creating a denial-of-service vector.
+- A flood of short-lived sessions, OTP codes, refresh/API-key rows, verification tokens (password
+  reset, email verification, magic link, email change, phone/recovery-email verification), or
+  unique rate-limit keys will grow the internal maps (or SQL tables) indefinitely, exhausting heap
+  memory (in-memory backends) or disk/index size (Postgres), and creating a denial-of-service
+  vector.
 - The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
   it is O(1) on the hot path and is **not** a substitute for a full sweep.
+- `passkey/memory.ChallengeStore` is the one exception that does **not** need scheduled GC: it is
+  hard-capped (`DefaultMaxChallengeEntries`, FIFO eviction of the oldest challenge) and prunes
+  expired entries opportunistically on every `Put`, so it cannot grow past its cap even if never
+  swept. The `pgx` `passkey.ChallengeStore` still needs its `DeleteExpired` scheduled like every
+  other SQL-backed store.
 
 **Mitigation (consumer responsibility):** schedule periodic eviction using the optional
 `janitor` helper shipped with egauth:
@@ -851,9 +867,14 @@ j := janitor.Start(ctx, 5*time.Minute, func() {
 defer j.Stop()
 ```
 
-The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.TokenBucket.Cleanup`.
-See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
-persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
+The same pattern applies to every other `DeleteExpired`/`Cleanup` this library ships, in-memory or
+Postgres: `otp/memory.Store.DeleteExpired`, `ratelimit.TokenBucket.Cleanup`,
+`tokens/memory.Store.DeleteExpired` / `adapters/pgx/tokens` (refresh tokens + API keys),
+`identity/memory.Store.DeleteExpiredVerificationTokens` / `adapters/pgx/identity` (same), and
+`adapters/pgx/passkey.ChallengeStore.DeleteExpired`. See package `janitor` for multi-tenant and
+multi-store usage examples. Deployments that need persistence or horizontal scaling should use the
+`pgx` backends instead of the in-memory stores — but the `pgx` backends still need the reaper
+scheduled; durability does not imply automatic eviction.
 
 ## Breach-check fail-open vs fail-closed (consumer responsibility)
 
@@ -891,14 +912,19 @@ a TOTP code becomes reusable, or the lockout audit event mis-fires — and nothi
 
 **Consumer guidance:** treat those methods as concurrency-critical and test them under parallel
 load. The repo ships contract test suites for exactly this — run `identity/storetest`,
-`tokens/storetest`, `mfa/storetest`, and the equivalent per-module suites against your adapter;
-they assert the atomic behaviours (including that `IncrementFailedAttempts` reports the locking
-transition exactly once) that the service layer relies on.
+`tokens/storetest`, `mfa/storetest`, and the equivalent per-module suites against your adapter.
+Each of the three guarantees named above has a dedicated parallel-load case that fires `-race`-clean
+goroutines at the same record and asserts exactly one winner: `identity/storetest` runs
+`ConsumeVerificationToken` and `IncrementFailedAttempts` concurrently (asserting single-use
+consumption and that the locking transition — `justLocked` — is reported exactly once, never zero
+or more than once); `tokens/storetest` runs `ConsumeRefreshToken` concurrently (asserting exactly
+one caller observes success); `mfa/storetest` does the same for `IncrementTOTPAttempts`. A
+deliberately non-atomic adapter fails these cases, not just the sequential ones.
 
 ## Account-existence disclosure (by design)
 
-Three responses intentionally reveal that an account exists; this is an accepted trade-off,
-not a bug:
+Five responses intentionally reveal that an account (or a contact address it holds) exists;
+this is an accepted trade-off, not a bug:
 
 - **`ErrAccountLocked` / `ErrAccountDisabled` → 429** on login: lockout and administrative
   suspension are both meant to be observable (PRD §105–106). Both map to the same 429 response
@@ -920,6 +946,14 @@ not a bug:
   conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
   time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
   the interim).
+- **`phone_taken` → 409** on the authenticated phone-verification request
+  (`RequestPhoneVerificationHandler`): the caller is told up front when the requested phone number
+  already belongs to another account, mirroring the email_taken disclosures above. This is a
+  TENANT-WIDE phone-number enumeration oracle (any authenticated user can probe whether a given
+  number is already registered by any other account in the tenant), gated behind authentication
+  only — there is no step-up bar here, since a phone number is a lower-assurance contact channel,
+  not a login-identifier change. If your threat model forbids it, drop the pre-flight uniqueness
+  check in `RequestPhoneVerification` and rely solely on the store's unique index at confirm time.
 - **`no_credentials` → 400** on `BeginLoginHandler`: when the resolved user has no registered
   passkeys, `BeginLogin` returns `ErrNoCredentials`, which `BeginLoginHandler` maps to HTTP 400
   `no_credentials`. A user with at least one passkey receives HTTP 200 plus a challenge. A
@@ -935,7 +969,7 @@ not a bug:
   without the `no_credentials` body.
 
 The login path itself is hardened against enumeration (generic `ErrInvalidCredentials` +
-decoy hashing); the four disclosures above are the only intentional exceptions.
+decoy hashing); the five disclosures above are the only intentional exceptions.
 
 ### Residual enumeration timing after raising Argon2id cost (rehash-on-login)
 
@@ -963,8 +997,14 @@ The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by c
 deliberately uniform: it returns the same response for a known account, an unknown account, an
 OAuth-only account (no password to reset), and even a backend error — and it dispatches email
 delivery off the response path so the Mailer's latency is not a timing oracle. Account existence
-must not be inferable from this endpoint. (Residual in-process timing — one extra indexed DB
-read for an existing account — is left to the consumer's rate limiting, per the non-objectives.)
+must not be inferable from this endpoint's RESPONSE, but the work done to produce it is not
+symmetric: an unknown email costs one indexed read (`FindUserByEmail`, not found). A known
+account with a password costs that same read PLUS `FindIdentitiesByUserID` (a second indexed
+read, to confirm a password identity exists) PLUS minting the token itself
+(`CreateVerificationToken`) — `crypto/rand` generation, a SHA-256 hash of the verifier, and an
+indexed insert. This asymmetry is real, measurable in-process work, not just DB latency variance;
+it is left to the consumer's rate limiting on this endpoint, per the non-objectives, the same as
+every other residual in-process timing this document documents.
 
 ## Reporting a vulnerability
 

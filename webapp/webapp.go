@@ -84,8 +84,10 @@ type Config struct {
 	// cookies.
 	CookieDomain string
 	// TrustedOrigins, when non-empty, enables the CSRF origin check on every cookie-bearing
-	// POST endpoint (login, register, refresh, logout). List the exact origins your forms
-	// are served from, e.g. "https://app.example.com".
+	// POST endpoint (login, register, refresh, logout). List the exact origins your forms are
+	// served from, scheme-qualified, e.g. "https://app.example.com" — a scheme-qualified entry
+	// is matched against the request's Origin scheme AND host, the stricter form (a bare host
+	// without scheme, e.g. "app.example.com", is also accepted and matched against host only).
 	TrustedOrigins []string
 	// InsecureNoOriginCheck opts out of the preset's CSRF-by-default guarantee. NewWebApp refuses
 	// to build when TrustedOrigins is empty unless this is set; when set, it wires
@@ -220,7 +222,7 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		identity.WithHandlerEventSink(sink),
 		identity.WithCookies(cookies),
 	}
-	tkOpts := []tokens.HandlerOption{tokens.WithCookies(cookies)}
+	tkOpts := []tokens.HandlerOption{tokens.WithCookies(cookies), tokens.WithEventSink(sink)}
 	if len(cfg.TrustedOrigins) > 0 {
 		idOpts = append(idOpts, identity.WithTrustedOrigins(cfg.TrustedOrigins...))
 		tkOpts = append(tkOpts, tokens.WithTrustedOrigins(cfg.TrustedOrigins...))

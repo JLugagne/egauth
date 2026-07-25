@@ -2,6 +2,8 @@ package storetest
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -217,6 +219,42 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		// Revoking a missing token -> ErrRefreshTokenNotFound.
 		err = store.RevokeRefreshToken(ctx, tenantA, tokenHash)
 		assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
+	})
+
+	t.Run("Contract: ConsumeRefreshToken single-use is atomic under concurrency", func(t *testing.T) {
+		tokenHash := "concurrent_refresh_token_hash"
+		rt := &tokens.RefreshToken{
+			Hash:            tokenHash,
+			FamilyID:        uuid.Must(uuid.NewV7()),
+			UserID:          uuid.Must(uuid.NewV7()),
+			TenantID:        tenantA,
+			ExpiresAt:       time.Now().Add(time.Hour),
+			CreatedAt:       time.Now(),
+			FamilyCreatedAt: time.Now(),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantA, rt))
+
+		const goroutines = 64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		successes := make([]int32, goroutines)
+		for i := range goroutines {
+			wg.Go(func() {
+				<-start
+				if err := store.ConsumeRefreshToken(ctx, tenantA, tokenHash); err == nil {
+					atomic.StoreInt32(&successes[i], 1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		var successCount int32
+		for i := range goroutines {
+			successCount += successes[i]
+		}
+		assert.Equal(t, int32(1), successCount,
+			"exactly one concurrent ConsumeRefreshToken call must succeed; a non-atomic consume lets more than one through")
 	})
 
 	t.Run("Contract: SaveRefreshToken rejects a record whose tenant differs from the argument", func(t *testing.T) {

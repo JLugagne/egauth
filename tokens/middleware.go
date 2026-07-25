@@ -184,10 +184,11 @@ func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
 // RequireAuth wraps an AuthenticatedHandlerFunc to enforce access-token verification.
 //
 // By default it reads a Bearer token from the Authorization header (backward-compatible) and
-// verifies it without tenant binding — correct for single-tenant deployments, where every token
-// is issued under the empty tenant. Options enable reading from a cookie (WithCookieAuth), opt-in
-// transparent rotation (WithAutoRefresh) and, for multi-tenant deployments, per-request tenant
-// resolution (WithTenantResolver).
+// verifies the token through Verifier.VerifyAccessTokenForTenant bound to the empty tenant ("") —
+// correct for single-tenant deployments, where every token is issued under the empty tenant. It
+// never skips tenant binding: with no resolver configured, "" IS the request's tenant. Options
+// enable reading from a cookie (WithCookieAuth), opt-in transparent rotation (WithAutoRefresh)
+// and, for multi-tenant deployments, per-request tenant resolution (WithTenantResolver).
 //
 // When a tenant resolver is configured the middleware becomes tenant-aware: it resolves the
 // request's tenant up front and verifies the access token through Verifier.VerifyAccessTokenForTenant,

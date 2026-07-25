@@ -151,7 +151,10 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 // (secure-by-default): even with no trusted origins configured, a request whose Origin — or,
 // failing that, Referer — host is not the request's own Host is rejected with 403, and a POST
 // carrying neither header is treated as untrusted. This option adds further allowed hosts (e.g. a
-// front-end served from another subdomain). Supply hosts WITHOUT scheme, e.g. "app.example.com".
+// front-end served from another subdomain). Each entry may be a bare host, e.g.
+// "app.example.com" (matched against the request origin's host only), or a scheme-qualified
+// origin, e.g. "https://app.example.com" (matched against scheme AND host — the stricter form: a
+// request presenting the same host under a different scheme is rejected).
 // To disable the check entirely use the explicit WithInsecureNoOriginCheck opt-out.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
@@ -283,23 +286,21 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 }
 
 // originAllowed reports whether the request passes the CSRF origin check. The check is ON BY
-// DEFAULT: a request is allowed only when its Origin (or Referer fallback) host is the request's
-// own Host or an allowlisted host, and a POST carrying neither header is treated as untrusted.
-// The explicit WithInsecureNoOriginCheck opt-out restores the pre-v1 accept-all behavior.
+// DEFAULT: a request is allowed only when its Origin (or Referer fallback) matches the request's
+// own Host, a bare-host allowlist entry, or a scheme-qualified allowlist entry (scheme AND host
+// — the stricter form, see httputil.OriginMatchesTrusted), and a POST carrying neither header is
+// treated as untrusted. The explicit WithInsecureNoOriginCheck opt-out restores the pre-v1
+// accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	// Secure-by-default CSRF check (TASK-025): allowed only when the Origin/Referer host matches
+	// Secure-by-default CSRF check (TASK-025): allowed only when the Origin/Referer matches
 	// the request Host or an explicitly trusted origin; a missing origin host is rejected.
-	// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. Origin-host parsing is
-	// shared via httputil (TASK-024), but the strict allow/deny policy is enforced here — NOT
+	// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. Matching is shared via
+	// httputil (TASK-024), but the strict allow/deny policy is enforced here — NOT
 	// httputil.OriginAllowed, whose empty-allowlist default is permissive.
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginMatchesTrusted(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {

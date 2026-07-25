@@ -579,7 +579,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithSameSite(http.SameSite)` | Override SameSite |
 | `WithInsecureCookies()` | Disable Secure (dev only); DEMOTES both names to their bare form |
 | `WithTenantResolver(func(*http.Request) string)` | Resolve tenantID for multi-tenant (allowlist-mapped, resolved once per request). `""` return → `401 tenant_unresolved` (fail-closed); no resolver configured → `""` (single-tenant partition) |
-| `WithTrustedOrigins(hosts ...string)` | Enable CSRF origin check (hosts without scheme) |
+| `WithTrustedOrigins(origins ...string)` | CSRF same-origin check is ON by default; ADDS origins to its allowlist beyond the request's own `Host` — a bare host matches on host only, a scheme-qualified origin (e.g. `"https://app.example.com"`) matches on scheme AND host (stricter) |
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
 | `WithFailureRedirect(url)` | 303 to url?error=<code> on failure |
 | `WithPersistentRefresh()` | Re-issue persistent refresh cookie |
@@ -640,7 +640,7 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it. `WithMaxAuthAge` ALONE is not a step-up gate: a pre-MFA interim credential is freshly issued, so its freshness window passes trivially — pair it with `WithRequiredAMR(AMRMFA)`.
 - **Interim (pre-step-up) credentials**: `Claims.Interim` is refused by `RequireAuth`/`ContextMiddleware` with `403 step_up_required` on every route without `WithInterimAllowed()`. `AssuranceFromContext` / `AssuranceResolverFromContext` expose the assurance (`Assurance{StepUp, Interim}`) non-generically so `identity` and `mfa` handlers can enforce it themselves; both fail closed when no assurance is available.
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
-- **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
+- **CSRF**: the same-origin check is ON by default on `RefreshHandler`/`LogoutHandler` POSTs — a request whose `Origin`/`Referer` is neither absent nor the request's own `Host` is rejected `403 cross_site_blocked`. `WithTrustedOrigins` only ADDS hosts to that allowlist.
 - **Cookie security**: always `HttpOnly`; `Secure` is opt-out (`Insecure bool`, defaults false = secure); `SameSite=Lax` by default.
 - **Forced-password-change gate** (`WithPasswordChangeGate`): after successful token verification,
   if `Claims.MustChangePassword` is `true`, the wrapped handler is bypassed and the request is

@@ -141,11 +141,11 @@ mux.Handle("/api/private", handler)
 
 By default `RequireAuth` reads a Bearer token from the `Authorization` header. Use `tokens.WithCookieAuth` to read from a cookie and `tokens.WithAutoRefresh` for opt-in transparent rotation.
 
-**Multi-tenant routes.** By default `RequireAuth` verifies the token without tenant binding — correct for single-tenant apps, where every token is issued under the empty tenant. For a multi-tenant deployment served by a single shared signing key, add `tokens.WithAuthTenantResolver`, which makes the middleware resolve each request's tenant and verify through `VerifyAccessTokenForTenant`, so a token minted for tenant A cannot be replayed against tenant B:
+**Multi-tenant routes.** By default `RequireAuth` verifies the token through `VerifyAccessTokenForTenant` bound to the empty tenant (`""`) — correct for single-tenant apps, where every token is issued under the empty tenant. For a multi-tenant deployment served by a single shared signing key, add `tokens.WithAuthTenantResolver`, which makes the middleware resolve each request's tenant and verify through `VerifyAccessTokenForTenant` with that resolved tenant, so a token minted for tenant A cannot be replayed against tenant B:
 
 ```go
 handler := tokens.RequireAuth(
-	tokenService, // a verifier built with jwt.Config{MultiTenant: true}
+	tokenService, // any tokens.Verifier[MyClaims]; VerifyAccessTokenForTenant is the only verify entry point
 	myHandler,
 	// Map the request to its tenant (Host, path segment, upstream-set context...).
 	// Returning "" means "tenant could not be resolved" → the request is rejected
@@ -200,5 +200,5 @@ Use `WithGate` when your access rule depends on both the actor identity and the 
 These endpoints are state-changing `POST`s authenticated purely by the refresh cookie, so `SameSite=Lax` alone does not fully prevent a forged cross-site refresh/logout. Both handlers therefore apply a **same-origin check by default**: a request whose `Origin` (or, failing that, `Referer`) host is neither the request's own `Host` nor an explicitly trusted origin is rejected with `403` and the code `cross_site_blocked`, and a `POST` carrying neither header is treated as untrusted.
 
 - For a single-origin app this is zero-config: a same-origin browser `POST` just works.
-- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")` — supply hosts without scheme.
+- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")` (bare host, matched on host only) or `tokens.WithTrustedOrigins("https://app.example.com")` (scheme-qualified, matched on scheme AND host — the stricter form).
 - To turn the check off entirely (restoring the pre-v1 accept-every-origin behavior), pass `tokens.WithInsecureNoOriginCheck()`. Only do this when CSRF is handled by a separate layer; the name is deliberately loud.

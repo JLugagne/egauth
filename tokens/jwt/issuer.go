@@ -779,9 +779,9 @@ func (s *Service[C]) resolveVerifySigner(token *jwt.Token) (Signer, error) {
 }
 
 // verifyAccessToken runs the full signature/expiry/issuer/audience validation of an access
-// token and returns its claims WITHOUT any tenant binding. It is the shared core used by the
-// public VerifyAccessToken (single-tenant) and VerifyAccessTokenForTenant (which adds the tenant
-// comparison). It is unexported precisely so the tenant binding cannot be bypassed by callers.
+// token and returns its claims WITHOUT any tenant binding. It is the unexported core used by
+// VerifyAccessTokenForTenant, which adds the tenant comparison. It is unexported precisely so
+// the tenant binding cannot be bypassed by callers: there is no public entry point that skips it.
 func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tokenStr string) (*tokens.Claims[C], error) {
 	var wrapper claimsWrapper[C]
 
@@ -1079,8 +1079,10 @@ func (s *Service[C]) shortenSupersededWindow(ctx context.Context, tenantID strin
 
 // VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring
 // the fail-closed tenant scoping of VerifyRefreshToken / VerifyAPIKey. It first runs the full
-// signature/expiry/issuer/audience validation of VerifyAccessToken, then rejects the token with
-// ErrTenantMismatch unless its signed tenant_id claim equals tenantID. Multi-tenant callers
+// signature/expiry/issuer/audience validation shared with the unexported verifyAccessToken core,
+// then rejects the token with ErrTenantMismatch unless its signed tenant_id claim equals
+// tenantID. This is the ONLY access-token verification entry point the Service exposes: there is
+// no tenant-unaware VerifyAccessToken, so every caller goes through this comparison. Multi-tenant callers
 // served by a single shared signing key MUST use this entry point (or perform the equivalent
 // comparison themselves): a token minted for tenant A is otherwise cryptographically valid in
 // tenant B's context, since the signing key is shared. Single-tenant callers issue under the

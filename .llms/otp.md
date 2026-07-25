@@ -223,5 +223,5 @@ mux.Handle("/otp/verify", otp.VerifyHandler(svc,
 - `WithSubjectResolver` returning `ok=false` still produces a uniform `401 invalid_code` on `VerifyHandler` (not a different status).
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
 - `NewService` panics on nil store; invalid `digits`/`ttl`/`maxAttempts` values are silently clamped to defaults (not panics).
-- `WithTrustedOrigins` is disabled by default. When set, requests with an unrecognized or missing Origin/Referer are rejected `403`.
+- The CSRF same-origin check is ON by default — even with `WithTrustedOrigins` unset, a request whose `Origin`/`Referer` is neither absent nor the request's own `Host` is rejected `403 cross_site_blocked`. `WithTrustedOrigins` only ADDS hosts to that allowlist.
 - The `deliver` callback in `IssueHandler` runs in a goroutine; errors are silently discarded. Instrument delivery failures in the callback itself.

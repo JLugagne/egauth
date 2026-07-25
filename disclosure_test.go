@@ -21,8 +21,9 @@ const canonicalDisclosure = "egauth's security review to date is an AI-driven au
 
 // disclosureSurfaces are the files whose first point of contact must carry the canonical
 // disclosure. These are the four surfaces named in the Definition of Done (README, doc.go,
-// llms.txt, SECURITY.md). AUDIT.md and the CHANGELOG also carry it and are checked separately so
-// the four-surface DoD contract stays explicit.
+// llms.txt, SECURITY.md). AUDIT.md and the CHANGELOG also carry it and are each checked by their
+// own dedicated test (TestDisclosureLedgerPresent, TestDisclosureChangelogPresent) so the
+// four-surface DoD contract stays explicit.
 var disclosureSurfaces = []string{
 	"README.md",
 	"doc.go",
@@ -91,5 +92,20 @@ func TestDisclosureLedgerPresent(t *testing.T) {
 	}
 	if !strings.Contains(content, "Independent human audits") {
 		t.Error("AUDIT.md must keep an \"Independent human audits\" section (the empty ledger of external audits)")
+	}
+}
+
+// TestDisclosureChangelogPresent guards the v1.0.0 CHANGELOG entry: it must carry the canonical
+// audit-status sentence verbatim, matching the claim in AUDIT.md that the CHANGELOG is one of the
+// surfaces the sentence is reused across.
+func TestDisclosureChangelogPresent(t *testing.T) {
+	raw, err := os.ReadFile("CHANGELOG.md")
+	if err != nil {
+		t.Fatalf("reading CHANGELOG.md: %v", err)
+	}
+	content := string(raw)
+
+	if !strings.Contains(normalizeDisclosureText(content), normalizeDisclosureText(canonicalDisclosure)) {
+		t.Errorf("CHANGELOG.md is missing the canonical audit-status sentence:\n\n  %s", canonicalDisclosure)
 	}
 }

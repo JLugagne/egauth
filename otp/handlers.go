@@ -121,7 +121,9 @@ func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
 // trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
 // own Host is rejected with 403. This option WIDENS that allowlist to permit additional hosts.
-// Supply hosts WITHOUT scheme, e.g. "app.example.com". To turn the check off entirely, use
+// Each entry may be a bare host, e.g. "app.example.com" (matched against the request origin's
+// host only), or a scheme-qualified origin, e.g. "https://app.example.com" (matched against
+// scheme AND host — the stricter form). To turn the check off entirely, use
 // WithInsecureNoOriginCheck. See the identity/tokens handlers for the same behavior.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
@@ -365,11 +367,7 @@ func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginMatchesTrusted(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {

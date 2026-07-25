@@ -265,8 +265,11 @@ func WithHandlerEventSink(sink event.Sink) HandlerOption {
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with
 // no trusted origins configured, a request whose Origin — or, failing that, Referer — host is
 // not the request's own Host is rejected with 403. This option WIDENS that allowlist to permit
-// additional hosts (e.g. a separate front-end origin on another subdomain). Supply hosts WITHOUT
-// scheme, e.g. "app.example.com". To turn the check off entirely, use WithInsecureNoOriginCheck.
+// additional hosts (e.g. a separate front-end origin on another subdomain). Each entry may be a
+// bare host, e.g. "app.example.com" (matched against the request origin's host only), or a
+// scheme-qualified origin, e.g. "https://app.example.com" (matched against scheme AND host — the
+// stricter form: a request presenting the same host under a different scheme is rejected). To
+// turn the check off entirely, use WithInsecureNoOriginCheck.
 //
 // Login and registration are state-changing endpoints driven purely by the request body, so
 // SameSite=Lax cookies alone do not prevent login-CSRF / session fixation (the attack needs no
@@ -687,19 +690,17 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, tenant, userID string
 // originAllowed reports whether the request passes the CSRF same-origin check. The check is
 // ON by default — even with an empty trustedOrigins allowlist — to match the tokens handlers
 // and make "CSRF-by-default" mean the same thing across handler families. A request is allowed
-// only when its Origin (or Referer fallback) host equals the request's own Host or an explicitly
-// allowlisted host; a browser-driven POST that carries neither header is treated as untrusted.
-// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. The strict allow/deny
-// policy is enforced here — NOT httputil.OriginAllowed, whose empty-allowlist default is permissive.
+// only when its Origin (or Referer fallback) matches the request's own Host, a bare-host
+// allowlist entry (host only), or a scheme-qualified allowlist entry (scheme AND host — the
+// stricter form, see httputil.OriginMatchesTrusted); a browser-driven POST that carries neither
+// header is treated as untrusted. WithInsecureNoOriginCheck restores the pre-v1 accept-all
+// behavior. The strict allow/deny policy is enforced here — NOT httputil.OriginAllowed, whose
+// empty-allowlist default is permissive.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginMatchesTrusted(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {

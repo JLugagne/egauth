@@ -108,9 +108,11 @@ func WithCookies(c tokens.Cookies) HandlerOption {
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
 // trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
 // own Host is rejected with 403 "cross_site_blocked". This option WIDENS that allowlist to permit
-// additional hosts. Supply hosts WITHOUT scheme, e.g. "app.example.com". Use it whenever the MFA
-// endpoints are reachable from a browser session on another origin (e.g. cross-subdomain or
-// embedded apps). To turn the check off entirely, use WithInsecureNoOriginCheck.
+// additional hosts. Each entry may be a bare host, e.g. "app.example.com" (matched against the
+// request origin's host only), or a scheme-qualified origin, e.g. "https://app.example.com"
+// (matched against scheme AND host — the stricter form). Use it whenever the MFA endpoints are
+// reachable from a browser session on another origin (e.g. cross-subdomain or embedded apps). To
+// turn the check off entirely, use WithInsecureNoOriginCheck.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -418,11 +420,7 @@ func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginMatchesTrusted(r, cfg.trustedOrigins)
 }
 
 func mapMFAError(err error) (int, string) {

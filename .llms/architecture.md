@@ -189,8 +189,10 @@ admin action (revoke their token families, e.g. via `SetTemporaryPassword`'s era
 deliberately does NOT force periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval
 expiry). Zero behavior change unless a credential is explicitly flagged.
 
-Consumer responsibilities (NOT provided by egauth): CSRF tokens (origin check available via
-`WithTrustedOrigins`), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.
+Consumer responsibilities (NOT provided by egauth): CSRF tokens, rate-limit policy, mail/SMS
+transport, metrics/tracing, request idempotency. The CSRF same-origin check itself IS provided and
+is ON by default on every handler family (`identity`, `tokens`, `otp`, `mfa`, `passkey`);
+`WithTrustedOrigins` only extends its allowlist beyond the request's own `Host`.
 
 Full threat model + explicit trade-offs: `SECURITY.md`.
 NOTE: security review to date is an AI-driven audit, not an independent third-party human audit (pre-1.0).

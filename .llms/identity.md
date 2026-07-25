@@ -288,7 +288,7 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 - `func WithTokenField(name string) HandlerOption` — override token field name (default `"token"`)
 - `func WithUserResolver(f func(*http.Request) (*User, bool)) HandlerOption` — supply authenticated user to authenticated handlers
 - `func WithHandlerEventSink(sink event.Sink) HandlerOption` — handler-level security events (e.g. delivery failures)
-- `func WithTrustedOrigins(origins ...string) HandlerOption` — enable CSRF origin check; pass hosts without scheme
+- `func WithTrustedOrigins(origins ...string) HandlerOption` — the CSRF same-origin check is ON by default; this ADDS extra trusted origins to its allowlist beyond the request's own `Host`; each entry may be a bare host (matched on host only) or a scheme-qualified origin like `"https://app.example.com"` (matched on scheme AND host — stricter)
 - `func WithPasswordChangeFields(current, newField string) HandlerOption` — override `ChangePasswordHandler` field names
 - `func WithEmailChangeField(name string) HandlerOption` — override `new_email` field name
 - `func WithPhoneField(name string) HandlerOption` — override `phone` field name
@@ -361,7 +361,11 @@ svc := identity.NewService(
     store,
     argon2.NewHasher(),
     policy.NewDefaultPolicy(),
-    identity.WithAccountErasers(sessions.NewEraser(sessionStore)),
+    // AccountEraser is func(ctx, tenantID, userID) error; wrap sessions.Service.RevokeAllForUser
+    // (there is no sessions.NewEraser constructor).
+    identity.WithAccountErasers(func(ctx context.Context, tenantID string, userID uuid.UUID) error {
+        return sessionSvc.RevokeAllForUser(ctx, tenantID, userID)
+    }),
 )
 
 // Single-tenant shorthand
@@ -452,6 +456,6 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - Token kind constants: `KindPasswordReset`, `KindEmailVerification`, `KindMagicLink`, `KindEmailChange`, `KindPhoneVerification`, `KindRecoveryEmailVerification`.
 - Phone is a lower-assurance contact channel; the `mfa` module does not accept SMS as an authentication factor (NIST SP 800-63B).
 - Recovery email uniqueness is NOT enforced (multiple accounts may share a recovery contact); it is intentionally not a login key.
-- `WithTrustedOrigins` is disabled by default; CSRF protection is the consumer's responsibility when not set.
+- The CSRF same-origin check is ON by default — even with `WithTrustedOrigins` unset, a request whose `Origin`/`Referer` is neither absent nor the request's own `Host` is rejected `403 cross_site_blocked`. `WithTrustedOrigins` only ADDS hosts to that allowlist; `WithInsecureNoOriginCheck` is the explicit, named opt-out.
 - Default body cap is 4 KiB to bound pre-auth argon2 DoS; disabling it (`WithMaxBodyBytes(0)`) requires an upstream body-size limit.
 - `Store` interface is intentionally monolithic for v0.x; new methods may be added in minor releases without a major bump — run `identity/storetest` on every upgrade.

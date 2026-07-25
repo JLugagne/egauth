@@ -29,6 +29,47 @@ func WithErrorParam(rawURL, code string) string {
 	return u.String()
 }
 
+// OriginMatchesTrusted reports whether the request's Origin (or Referer fallback) matches
+// r.Host or an entry in trustedOrigins. An entry may be a bare host ("app.example.com"),
+// matched against the request origin's host only, or a scheme-qualified origin
+// ("https://app.example.com"), matched against the request origin's scheme AND host — the
+// stricter form, since it distinguishes http from https on the same host. Returns false when
+// the request carries neither header (or an opaque "null" Origin).
+func OriginMatchesTrusted(r *http.Request, trustedOrigins map[string]bool) bool {
+	host := RequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	if host == r.Host || trustedOrigins[host] {
+		return true
+	}
+	if full := requestOriginFull(r); full != "" && trustedOrigins[full] {
+		return true
+	}
+	return false
+}
+
+// requestOriginFull returns the scheme+host ("https://app.example.com") of the request's
+// Origin header, falling back to Referer. Returns "" on the same conditions as
+// RequestOriginHost (missing/unparseable header, opaque "null" origin).
+func requestOriginFull(r *http.Request) string {
+	if o := r.Header.Get("Origin"); o != "" {
+		if o == "null" {
+			return ""
+		}
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+		return ""
+	}
+	if ref := r.Header.Get("Referer"); ref != "" {
+		if u, err := url.Parse(ref); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	return ""
+}
+
 // RequestOriginHost returns the hostname (host:port) from the request's Origin header, or
 // falls back to the Referer header.  Returns "" when neither header is present or parseable,
 // and when Origin is the special value "null" (opaque origin).
@@ -61,11 +102,7 @@ func OriginAllowed(r *http.Request, trustedOrigins map[string]bool) bool {
 	if len(trustedOrigins) == 0 {
 		return true
 	}
-	host := RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || trustedOrigins[host]
+	return OriginMatchesTrusted(r, trustedOrigins)
 }
 
 // Fail writes an error response: it redirects to failureURL (with an ?error= parameter) when

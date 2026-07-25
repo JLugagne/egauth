@@ -129,9 +129,11 @@ var _ Limiter = (*TokenBucket)(nil)
 
 // WithMaxKeys sets a hard cap on the number of distinct keys the TokenBucket
 // tracks simultaneously. When [TokenBucket.Allow] is called with a new key and
-// the cap is already reached, the bucket that has refilled the most (i.e. is
-// least under pressure — closest to burst capacity) is evicted to make room.
-// Fully-refilled buckets are always preferred for eviction.
+// the cap is already reached, evictOne samples up to 5 keys (map iteration order
+// is randomized) and evicts whichever of those has refilled the most (i.e. is
+// least under pressure — closest to burst capacity). This is a bounded, O(1)
+// approximation, NOT a global scan: a fully-refilled bucket outside the sample
+// is not guaranteed to be preferred over a partially-refilled one inside it.
 //
 // n must be >= 1; values below 1 are silently floored to 1.
 // If WithMaxKeys is not called (or n == 0), the bucket map is unbounded and

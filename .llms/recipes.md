@@ -313,7 +313,7 @@ svcKey, err := issuer.IssueAPIKey(ctx, "svc_", tokens.KeyTypeService, adminUser.
 // issuer here is a *jwt.Service[basic.Claims]
 actor, claims, err := issuer.VerifyAPIKeyActor(ctx, tenant, presentedKey,
     event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()})
-if err != nil { /* tokens.ErrTokenExpired, tokens.ErrNotFound, ... */ }
+if err != nil { /* tokens.ErrTokenExpired, tokens.ErrAPIKeyNotFound, tokens.ErrAPIKeyRevoked, ... */ }
 
 // actor.IsHuman()   → true for PAT / User
 // actor.IsMachine() → true for Service

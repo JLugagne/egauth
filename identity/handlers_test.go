@@ -352,6 +352,43 @@ func TestLoginHandler_CSRFOriginAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+func TestLoginHandler_CSRFSchemeQualifiedOriginAllowed(t *testing.T) {
+	// A scheme-qualified WithTrustedOrigins entry ("https://app.example.com") must actually
+	// match a request whose Origin is exactly that scheme+host, not silently never-match (the
+	// bug: the allowlist stored the literal scheme-qualified string, while the lookup key was
+	// always the bare host extracted from the request's Origin header).
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
+		identity.WithTrustedOrigins("https://app.example.com"))
+
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Header.Set("Origin", "https://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestLoginHandler_CSRFSchemeQualifiedOriginRejectsWrongScheme(t *testing.T) {
+	// A scheme-qualified trusted origin is a STRICTER allowlist entry than a bare host: a
+	// request presenting the same host under a different scheme must still be rejected.
+	svc := &servicetest.MockService{}
+	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(),
+		identity.WithTrustedOrigins("https://app.example.com"))
+
+	req := loginForm(t, "/login", "user@example.com", "secret", "")
+	req.Header.Set("Origin", "http://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+}
+
 func TestLoginHandler_CSRFMissingOriginRejected(t *testing.T) {
 	// With the check enabled, a browser POST lacking both Origin and Referer is untrusted.
 	svc := &servicetest.MockService{}

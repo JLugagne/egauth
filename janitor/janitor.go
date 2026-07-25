@@ -1,19 +1,31 @@
 // Package janitor provides a lightweight, optional ticker-based eviction helper for
-// egauth's in-memory stores and rate-limit buckets.
+// egauth's in-memory stores, rate-limit buckets, and SQL-backed token/verification tables.
 //
 // # Why you need this in production
 //
 // The in-memory stores in [github.com/JLugagne/egauth/sessions/memory],
-// [github.com/JLugagne/egauth/otp/memory], and the [github.com/JLugagne/egauth/ratelimit]
-// TokenBucket all grow without bound until a periodic eviction call is made:
+// [github.com/JLugagne/egauth/otp/memory], [github.com/JLugagne/egauth/tokens/memory],
+// [github.com/JLugagne/egauth/identity/memory] (verification tokens), and the
+// [github.com/JLugagne/egauth/ratelimit] TokenBucket all grow without bound until a periodic
+// eviction call is made:
 //
 //   - sessions/memory.Store.DeleteExpired — purges expired session rows
 //   - otp/memory.Store.DeleteExpired     — purges expired OTP codes
+//   - tokens/memory.Store.DeleteExpired  — purges expired refresh tokens and API keys
+//   - identity/memory.Store.DeleteExpiredVerificationTokens — purges expired password-reset,
+//     email-verification, magic-link, email-change, and phone/recovery-email tokens
 //   - ratelimit.TokenBucket.Cleanup      — drops fully-refilled rate-limit buckets
 //
 // Any production deployment using these in-memory backends MUST schedule periodic
 // eviction; failing to do so leaks memory proportional to load and creates a trivial
 // denial-of-service vector (a flood of unique keys/IPs/OTPs grows the map indefinitely).
+//
+// The equivalent SQL-backed methods in adapters/pgx (tokens.Store.DeleteExpired,
+// identity.Store.DeleteExpiredVerificationTokens, and passkey.ChallengeStore.DeleteExpired) need
+// the SAME periodic scheduling: durability does not imply automatic eviction, and an unswept
+// Postgres table grows without bound exactly like its in-memory counterpart. The one exception is
+// passkey/memory.ChallengeStore, which is hard-capped and self-prunes on every Put, so it needs no
+// janitor.
 //
 // # Usage
 //

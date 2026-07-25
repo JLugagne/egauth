@@ -48,8 +48,8 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 - `ClaimsProvider` is REQUIRED for refresh (`Rotate`); JWT `SecretKey` must be >= 32 bytes.
 - Deactivation ends access only with BOTH halves wired: `identity.WithDisableRevokers(tokens.NewAccountRevoker(store))` (+ `WithAccountErasers`) AND `identity.ActiveClaimsProvider(svc, provider)` on the issuer, since the `ClaimsProvider` is the only place a rotation can be refused. `webapp.NewWebApp` wires both.
 - Tokens/codes passed to delivery callbacks are plaintext secrets — NEVER log them.
-- In-memory stores (`sessions/memory`, `otp/memory`, `ratelimit.TokenBucket`) grow unbounded — schedule eviction with `janitor`, or use the pgx stores.
+- These accumulate entries until `DeleteExpired`/`Cleanup` is called — schedule it with `janitor`: `sessions/memory`, `otp/memory`, `tokens/memory`, `identity` verification tokens, `ratelimit.TokenBucket`. This applies to the `pgx` backends too (durability does not imply automatic eviction) — the only exception is `passkey/memory.ChallengeStore`, which is hard-capped and self-prunes.
 - Handlers are POST-only with a pre-auth body cap; `Request*`/OTP-issue handlers are enumeration-safe (always 204).
-- egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. CSRF origin check is opt-in via `WithTrustedOrigins`.
+- egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. CSRF same-origin check is ON by default on every handler family (`identity`, `tokens`, `otp`, `mfa`, `passkey`); a request whose `Origin`/`Referer` fails the check is rejected `403 cross_site_blocked`. `WithTrustedOrigins` only ADDS hosts to the allowlist beyond the request's own `Host`.
 - Implementing a custom Store/Service? Run the matching conformance suite (`<module>/storetest`, `servicetest`, `issuertest`, `hashertest`) — Store interfaces may gain methods in minor releases.
 - Authoritative API: `go doc -all github.com/JLugagne/egauth/<module>`. The `.llms/*.md` files mirror it but verify against `go doc` if in doubt.

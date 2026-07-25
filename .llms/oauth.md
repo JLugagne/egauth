@@ -264,7 +264,7 @@ import (
     "github.com/JLugagne/egauth/identity"
     "github.com/JLugagne/egauth/oauth"
     "github.com/JLugagne/egauth/oauth/providers"
-    "github.com/JLugagne/egauth/tokens"
+    jwtissuer "github.com/JLugagne/egauth/tokens/jwt"
 )
 
 // 1. Build provider (OIDC id_token validation optional but recommended)
@@ -276,10 +276,16 @@ p := providers.Google(clientID, clientSecret,
 )
 
 // 2. Wire identity service (implements IdentityLinker)
-identSvc := identity.NewService(db)
+identSvc := identity.NewService(store, hasher, policy)
 
 // 3. Wire token issuer
-tokenIssuer := tokens.NewIssuer[MyClaims](signingKey)
+tokenIssuer := jwtissuer.New(jwtissuer.Config[MyClaims]{
+    Store:      tokenStore,
+    Issuer:     "https://example.com",
+    SecretKey:  signingKey,
+    AccessTTL:  15 * time.Minute,
+    RefreshTTL: 30 * 24 * time.Hour,
+})
 
 // 4. Register handlers
 mux.Handle("GET /auth/google", oauth.BeginHandler(p,

@@ -25,7 +25,7 @@ explicitly so you can decide deliberately rather than inherit a silent default.
 |------|---------|---------|--------|
 | Passwords | Argon2 cost + rehash-on-login | safe defaults, no auto-rehash | Tune cost; call `NeedsRehash` after login |
 | Tokens (JWT) | `iss` / `aud` validation | `iss` checked if set; `aud` **off** | Set `Issuer` + `ExpectedAudience` |
-| Tokens (JWT) | Access-token tenant binding | fail-closed when `MultiTenant` set | Set `MultiTenant: true`; call `VerifyAccessTokenForTenant` |
+| Tokens (JWT) | Access-token tenant binding | always enforced (`""` for single-tenant) | Call `VerifyAccessTokenForTenant`; wire `WithAuthTenantResolver` on `RequireAuth` for multi-tenant |
 | Sessions | Cookie name (`__Host-` prefix) | **secure by default** (`__Host-session_token`) | Leave it; `WithCookieName` only as an escape hatch |
 | Sessions | Absolute lifetime | **off** (idle only) | `WithMaxLifetime` |
 | Sessions | Log-out-everywhere | available | Call `RevokeAllForUser` on reset/compromise |
@@ -107,25 +107,24 @@ svc := jwtissuer.New(jwtissuer.Config[MyClaims]{
 ```
 
 - **`Issuer`** — when set, it is both stamped at issuance and **verified** on
-  `VerifyAccessToken`. Leaving it empty disables the `iss` check (backward compatible).
+  `VerifyAccessTokenForTenant`. Leaving it empty disables the `iss` check (backward compatible).
 - **`ExpectedAudience`** — any-of semantics: a token is accepted only if its `aud` contains at
   least one configured value. Empty disables the `aud` check. **Set it whenever a signing key is
   shared across more than one audience/service.**
 
-### Tenant binding on the access path (fail-closed when multi-tenant)
+### Tenant binding on the access path (always enforced)
 
 When one `Service` signs for every tenant under a shared key, a token minted for tenant A is
-cryptographically valid in tenant B's context. The tenant-unaware `VerifyAccessToken` does **no**
-tenant comparison and is **deprecated**. Multi-tenant deployments must declare themselves so the
-unsafe path fails closed:
+cryptographically valid in tenant B's context. `Service` does not expose a tenant-unaware
+access-token verifier at all — `VerifyAccessTokenForTenant` is the only entry point, and it always
+compares the signed `tenant_id` claim against the tenant you pass it:
 
 ```go
 svc := jwtissuer.New(jwtissuer.Config[MyClaims]{
-	Store:       tokenStore,
-	Issuer:      "https://auth.example.com",
-	SecretKey:   secret,
-	AccessTTL:   15 * time.Minute,
-	MultiTenant: true, // VerifyAccessToken now returns ErrTenantBindingRequired
+	Store:     tokenStore,
+	Issuer:    "https://auth.example.com",
+	SecretKey: secret,
+	AccessTTL: 15 * time.Minute,
 	// ...
 })
 
@@ -133,11 +132,14 @@ svc := jwtissuer.New(jwtissuer.Config[MyClaims]{
 claims, err := svc.VerifyAccessTokenForTenant(ctx, requestTenantID, token)
 ```
 
-- With `MultiTenant: true`, the deprecated `VerifyAccessToken` returns
-  `tokens.ErrTenantBindingRequired` instead of silently verifying cross-tenant — use
-  `VerifyAccessTokenForTenant`, which rejects a mismatch with `tokens.ErrTenantMismatch`.
-- Genuinely single-tenant apps leave `MultiTenant` false (every token is issued under the empty
-  tenant) and may keep calling `VerifyAccessToken`, or use the `SingleTenant` wrapper.
+- `VerifyAccessTokenForTenant` rejects a mismatch with `tokens.ErrTenantMismatch`.
+- Genuinely single-tenant apps pass `""` as `requestTenantID` (every token is issued under the
+  empty tenant), or use the `SingleTenant` wrapper, which forwards `VerifyAccessTokenForTenant` so
+  callers never have to pass a tenant ID explicitly.
+- On the HTTP middleware, wire `tokens.WithAuthTenantResolver` on `RequireAuth` for multi-tenant
+  deployments: it resolves the request's tenant and verifies through `VerifyAccessTokenForTenant`
+  with that resolved value. A resolver that returns `""` (tenant could not be resolved) fails the
+  request closed with `401` rather than falling back to any unbound path.
 
 Prefer the **rotation keyset** (`SigningKeys` + `ActiveKeyID`) over a single `SecretKey` so you
 can roll keys with overlapping validity, and wire an `EventSink` to capture refresh-token

@@ -154,8 +154,10 @@ func WithCookieDomain(domain string) HandlerOption {
 //
 // The origin check is ON by default (see WithInsecureNoOriginCheck): even with no trusted origins
 // configured, a POST whose Origin (or Referer fallback) host is not the request's own Host is
-// rejected with 403 "cross_site_blocked". This option WIDENS that allowlist. Supply hosts WITHOUT
-// scheme, e.g. "app.example.com".
+// rejected with 403 "cross_site_blocked". This option WIDENS that allowlist. Each entry may be a
+// bare host, e.g. "app.example.com" (matched against the request origin's host only), or a
+// scheme-qualified origin, e.g. "https://app.example.com" (matched against scheme AND host — the
+// stricter form).
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
 		h.trustedOrigins = make(map[string]bool, len(origins))
@@ -185,11 +187,7 @@ func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginMatchesTrusted(r, cfg.trustedOrigins)
 }
 
 // guardMethodAndOrigin runs the preamble every passkey handler shares: POST-only, then the

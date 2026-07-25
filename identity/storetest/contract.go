@@ -2,6 +2,8 @@ package storetest
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -419,6 +421,49 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.Nil(t, found.LockedUntil)
 	})
 
+	t.Run("Contract: IncrementFailedAttempts reports the locking transition exactly once under concurrency", func(t *testing.T) {
+		email := "test_lockout_concurrent@example.com"
+		user, err := store.CreateUser(ctx, tenantA, email)
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, tenantA, ident))
+
+		const goroutines = 64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		justLockedCounts := make([]int32, goroutines)
+		for i := range goroutines {
+			wg.Go(func() {
+				<-start
+				justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, defaultTestLockThreshold, defaultTestLockDuration)
+				require.NoError(t, err)
+				if justLocked {
+					atomic.StoreInt32(&justLockedCounts[i], 1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		var justLockedTotal int32
+		for i := range goroutines {
+			justLockedTotal += justLockedCounts[i]
+		}
+		assert.Equal(t, int32(1), justLockedTotal,
+			"exactly one concurrent IncrementFailedAttempts call must report justLocked (the threshold-crossing transition), not zero or more than one")
+
+		found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		assert.Equal(t, goroutines, found.FailedAttempts, "every concurrent increment must be counted exactly once")
+	})
+
 	t.Run("Contract: Re-lock after lock expiry re-reports justLocked", func(t *testing.T) {
 		email := "test_relock@example.com"
 		user, err := store.CreateUser(ctx, tenantA, email)
@@ -682,6 +727,36 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, store.DeleteUser(ctx, tenantA, user.ID))
 		_, err = store.CreateVerificationToken(ctx, tenantA, user.ID, identity.KindPasswordReset, time.Hour, nil)
 		assert.ErrorIs(t, err, identity.ErrUserNotFound, "must not mint a token for a soft-deleted user")
+	})
+
+	t.Run("Contract: ConsumeVerificationToken single-use is atomic under concurrency", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, tenantA, "concurrent_verif@example.com")
+		require.NoError(t, err)
+
+		token, err := store.CreateVerificationToken(ctx, tenantA, user.ID, identity.KindPasswordReset, time.Hour, nil)
+		require.NoError(t, err)
+
+		const goroutines = 64
+		var wg sync.WaitGroup
+		start := make(chan struct{})
+		successes := make([]int32, goroutines)
+		for i := range goroutines {
+			wg.Go(func() {
+				<-start
+				if _, _, err := store.ConsumeVerificationToken(ctx, tenantA, token, identity.KindPasswordReset); err == nil {
+					atomic.StoreInt32(&successes[i], 1)
+				}
+			})
+		}
+		close(start)
+		wg.Wait()
+
+		var successCount int32
+		for i := range goroutines {
+			successCount += successes[i]
+		}
+		assert.Equal(t, int32(1), successCount,
+			"exactly one concurrent ConsumeVerificationToken call must succeed; a non-atomic consume lets more than one through")
 	})
 
 	t.Run("Contract: DeleteExpiredVerificationTokens purges only expired", func(t *testing.T) {

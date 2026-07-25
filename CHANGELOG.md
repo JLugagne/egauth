@@ -256,6 +256,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`identity/storetest` and `tokens/storetest` gained parallel-load contract cases
+  (`claims/DOC-5`).** SECURITY.md tells custom-adapter authors to run these suites because they
+  "assert the atomic behaviours ... under parallel load", but until now only `mfa/storetest` had a
+  genuine concurrency case — the identity/tokens suites were purely sequential, so a deliberately
+  non-atomic `ConsumeVerificationToken`, `IncrementFailedAttempts`, or `ConsumeRefreshToken` passed
+  them clean. Each now fires 64 concurrent callers at the same record and asserts exactly one
+  winner (single-use consumption, or the locking transition reported exactly once), run with
+  `-race` against the memory backend. A custom adapter that was silently non-atomic will now fail
+  these suites.
+
+- **`internal/doctest` now catches a fabricated struct field or method, not just a fabricated
+  top-level symbol, and scans `SECURITY.md` and every `.llms/*.md` file (`claims/DOC-1`).**
+  Previously it only resolved bare `pkg.Symbol` references via `go doc`, so a doc example using
+  `Config{MultiTenant: true}` or `svc.VerifyAccessToken(...)` — fields/methods that never existed —
+  passed silently; this is exactly how `tokens/jwt.Config.MultiTenant` and
+  `jwt.Service.VerifyAccessToken` shipped in the docs. It now additionally parses each fenced Go
+  block's AST for `pkg.Type{Field: ...}` composite literals and `x := pkg.Func(...); x.Method(...)`
+  chains and checks each against the real API, conservatively skipping anything ambiguous. It also
+  now runs as `go test ./internal/doctest/...`, so a doc-vs-code drift fails `go test ./...`, not
+  only the separate CI step.
+
 - **`adapters/pgx/passkey.NewChallengeStore` — the SHARED, Postgres-backed passkey
   `ChallengeStore` (`mfa/SF-4`).** `Config.ChallengeStore` is required, but the only implementation
   that ever shipped was the per-process in-memory one, so a multi-replica deployment rejected roughly
@@ -401,6 +422,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **`WithTrustedOrigins` now supports scheme-qualified origins across `identity`, `tokens`, `mfa`,
+  `otp` and `passkey` (`http/HTTP-3`).** A scheme-qualified entry, e.g.
+  `identity.WithTrustedOrigins("https://app.example.com")`, previously never matched anything: the
+  allowlist stored the literal string while the request-side lookup always compared a bare host, so
+  the pattern the `webapp` preset's own doc comment recommended silently failed closed. Entries may
+  now be a bare host (matched on host only, unchanged) or a scheme-qualified origin (matched on
+  scheme AND host — the stricter form). Purely additive: existing bare-host entries are unaffected.
+
+- **`webapp.NewWebApp` now wires `Config.EventSink` into the `tokens` handlers, not just `identity`
+  (`http/HTTP-6`).** The preset's own doc says `EventSink` receives "login, registration and logout"
+  events, but `LogoutHandler`'s `event.Logout` emission was never reaching it (no
+  `tokens.WithEventSink` was ever passed) — a configured sink silently never saw a logout. Fixed.
 
 - **The in-memory passkey `ChallengeStore` no longer sweeps its whole map on every `Put`
   (`conc/AVAIL-1`, `tenant/TEN-7`, `mfa/SF-5`).** `Put` — reachable from the UNAUTHENTICATED
