@@ -24,7 +24,7 @@ var MigrationsFS embed.FS
 // schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
 // migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+	return pgxmigrate.Run(ctx, db, MigrationsFS, "otp")
 }
 
 // DBQuerier matches both *pgxpool.Pool and pgx.Tx.

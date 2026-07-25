@@ -8,7 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at TIMESTAMP WITH TIME ZONE
 );
 
-CREATE UNIQUE INDEX idx_users_email_tenant ON users (tenant_id, email) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_tenant ON users (tenant_id, email) WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS identities (
     id UUID PRIMARY KEY,
@@ -21,4 +21,4 @@ CREATE TABLE IF NOT EXISTS identities (
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL
 );
 
-CREATE UNIQUE INDEX idx_identities_provider_tenant ON identities (tenant_id, provider, provider_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_identities_provider_tenant ON identities (tenant_id, provider, provider_id);

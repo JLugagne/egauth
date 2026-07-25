@@ -26,7 +26,7 @@ var MigrationsFS embed.FS
 // schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
 // migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+	return pgxmigrate.Run(ctx, db, MigrationsFS, "mfa")
 }
 
 // DBQuerier matches both *pgxpool.Pool and pgx.Tx.
@@ -157,57 +157,56 @@ func (s *Store) MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.U
 	return tag.RowsAffected() > 0, nil
 }
 
+// IncrementTOTPAttempts increments the failed-attempt counter (or applies lockout-decay reset)
+// in a SINGLE statement: a CTE reads the current row with FOR UPDATE and the outer UPDATE
+// writes the derived new state, all within one implicit per-statement transaction. This is what
+// makes it genuinely atomic even when db is a bare pool with no explicit BEGIN/COMMIT: splitting
+// the read and the write into two separate round-trips (as a prior version of this method did)
+// only holds the FOR UPDATE row lock for the duration of the first statement — on a bare pool
+// under autocommit that lock is released before the second statement runs, so two concurrent
+// callers can both read the same pre-increment count and one increment is lost.
 func (s *Store) IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
-	increment := func(q DBQuerier) (int, error) {
-		var currentAttempts int
-		var lastAttemptAt *time.Time
-		err := q.QueryRow(ctx, `SELECT failed_attempts, last_attempt_at FROM mfa_totp WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`, tenantID, userID).Scan(&currentAttempts, &lastAttemptAt)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return 0, mfa.ErrNotEnrolled
-			}
-			return 0, err
-		}
-
-		newAttempts := currentAttempts + 1
-		newLastAttempt := now.UTC()
-
-		if maxAttempts > 0 && currentAttempts >= maxAttempts {
-			decayed := false
-			if lockoutDuration > 0 && lastAttemptAt != nil && now.Sub(*lastAttemptAt) > lockoutDuration {
-				decayed = true
-			}
-			if !decayed {
-				// Locked and not decayed: DoS fix: do not increment or bump timestamp,
-				// but return an over-limit count so the service knows it's locked.
-				return currentAttempts + 1, nil
-			}
-			newAttempts = 1
-		}
-
-		_, err = q.Exec(ctx, `UPDATE mfa_totp SET failed_attempts = $3, last_attempt_at = $4 WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID, newAttempts, newLastAttempt)
-		if err != nil {
-			return 0, err
-		}
-		return newAttempts, nil
-	}
-
-	beginner, ok := s.db.(interface {
-		Begin(context.Context) (pgx.Tx, error)
-	})
-	if !ok {
-		return increment(s.db)
-	}
-	tx, err := beginner.Begin(ctx)
+	const query = `
+		WITH cur AS (
+			SELECT failed_attempts, last_attempt_at
+			FROM mfa_totp
+			WHERE tenant_id = $1 AND user_id = $2
+			FOR UPDATE
+		),
+		derived AS (
+			SELECT
+				cur.failed_attempts AS current_attempts,
+				cur.last_attempt_at AS last_attempt_at,
+				($3::int > 0 AND cur.failed_attempts >= $3::int) AS is_locked,
+				(
+					$4::bigint > 0 AND cur.last_attempt_at IS NOT NULL
+					AND $5::timestamptz - cur.last_attempt_at > ($4::bigint * interval '1 millisecond')
+				) AS decayed
+			FROM cur
+		)
+		UPDATE mfa_totp t
+		SET failed_attempts = CASE
+				WHEN derived.is_locked AND NOT derived.decayed THEN derived.current_attempts
+				WHEN derived.is_locked AND derived.decayed THEN 1
+				ELSE derived.current_attempts + 1
+			END,
+			last_attempt_at = CASE
+				WHEN derived.is_locked AND NOT derived.decayed THEN derived.last_attempt_at
+				ELSE $5::timestamptz
+			END
+		FROM derived
+		WHERE t.tenant_id = $1 AND t.user_id = $2
+		RETURNING CASE
+				WHEN derived.is_locked AND derived.decayed THEN 1
+				ELSE derived.current_attempts + 1
+			END
+	`
+	var attempts int
+	err := s.db.QueryRow(ctx, query, tenantID, userID, maxAttempts, lockoutDuration.Milliseconds(), now.UTC()).Scan(&attempts)
 	if err != nil {
-		return 0, err
-	}
-	attempts, err := increment(tx)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return 0, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, mfa.ErrNotEnrolled
+		}
 		return 0, err
 	}
 	return attempts, nil

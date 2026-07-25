@@ -640,8 +640,23 @@ func (s *Service[C]) signAccessToken(ctx context.Context, claims tokens.Claims[C
 // revocation is scoped by CreatedBy, so the two must agree (leave Subject unset to default it).
 var ErrPATSubjectMismatch = errors.New("jwt: a PAT's Claims.Subject must equal createdBy")
 
+// ErrInvalidKeyType is returned by IssueAPIKey when keyType is not one of the known constants
+// (tokens.KeyTypePAT, tokens.KeyTypeService) — the zero value included. The fail-safe direction
+// for an unclassified API key is to read as a plain human principal (see
+// tokens.PrincipalKindForKeyType), never as a machine identity, so issuance rejects an
+// unclassified type outright rather than let it be silently minted and only fail safe later at
+// verification time.
+var ErrInvalidKeyType = errors.New("jwt: keyType must be tokens.KeyTypePAT or tokens.KeyTypeService")
+
 // IssueAPIKey generates a new API key of the given type, attributed to the human user
 // createdBy, carrying the authority (scopes/roles/audiences) supplied on claims verbatim.
+//
+// keyType MUST be tokens.KeyTypePAT or tokens.KeyTypeService; any other value (including the
+// zero value) is rejected with ErrInvalidKeyType rather than silently defaulted — the fail-safe
+// direction for an unclassified key is to read as a plain human principal (see
+// tokens.PrincipalKindForKeyType), and issuance now enforces that a key is always explicitly
+// classified instead of leaving it to whatever a Store implementation happens to do with an
+// unclassified Type.
 //
 // The caller is fully responsible for the key's authority: the issuer NEVER reads or copies
 // the creating user's stored roles/scopes. Whatever scopes a leaked key can exercise are
@@ -654,6 +669,10 @@ var ErrPATSubjectMismatch = errors.New("jwt: a PAT's Claims.Subject must equal c
 //     overwritten with the newly generated key ID; createdBy remains the only link back to the
 //     human who minted it (recorded on APIKey.CreatedBy, not on the subject).
 func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+	if keyType != tokens.KeyTypePAT && keyType != tokens.KeyTypeService {
+		return nil, ErrInvalidKeyType
+	}
+
 	keyBytes := make([]byte, s.apiKeyLength)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)

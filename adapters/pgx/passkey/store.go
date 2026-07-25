@@ -24,7 +24,7 @@ var MigrationsFS embed.FS
 // schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
 // migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+	return pgxmigrate.Run(ctx, db, MigrationsFS, "passkey")
 }
 
 // DBQuerier matches both *pgxpool.Pool and pgx.Tx.
@@ -95,20 +95,41 @@ func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid
 
 // UpdateCredential persists changes to an existing credential (notably the signature counter
 // after a successful login). Returns ErrCredentialNotFound if absent.
+//
+// The write is guarded by "AND sign_count <= $5": sign_count is the cloned-credential detection
+// signal (see passkey.ErrCredentialCloned), so a lost update on it would let a concurrent write
+// with a stale, lower counter silently roll it back and defeat that detection. The guard makes
+// the write a compare-and-swap that never regresses sign_count: if the row's stored sign_count
+// has already advanced past c.SignCount (a concurrent write already committed a newer, or
+// cloned-detection-relevant, value), this call is a no-op success rather than an error — the
+// stronger concurrent write already persisted a value at least as safe as this one's, so
+// overwriting it would only lose information. The (rare) cost is that an unrelated full-record
+// field changed by this call (e.g. RenameCredential's Nickname) can be silently dropped if it
+// races a concurrent login; that is accepted for now given UpdateCredential is already documented
+// as a full-record replace shared by both use cases (see passkey/service.go).
 func (s *Store) UpdateCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
 	const query = `
 		UPDATE passkey_credentials
 		SET public_key = $4, sign_count = $5, data = $6, nickname = $7, last_used_at = $8, transports = $9, backup_eligible = $10, backup_state = $11
-		WHERE tenant_id = $1 AND user_id = $2 AND credential_id = $3
+		WHERE tenant_id = $1 AND user_id = $2 AND credential_id = $3 AND sign_count <= $5
 	`
 	tag, err := s.db.Exec(ctx, query, tenantID, c.UserID, c.ID, c.PublicKey, int64(c.SignCount), c.Data, c.Nickname, c.LastUsedAt, c.Transports, c.BackupEligible, c.BackupState)
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if tag.RowsAffected() > 0 {
+		return nil
+	}
+
+	// 0 rows: either the credential does not exist, or the CAS guard blocked a regression.
+	// Disambiguate with an existence check so a genuinely missing credential is still reported.
+	const existsQuery = `SELECT 1 FROM passkey_credentials WHERE tenant_id = $1 AND user_id = $2 AND credential_id = $3`
+	var dummy int
+	err = s.db.QueryRow(ctx, existsQuery, tenantID, c.UserID, c.ID).Scan(&dummy)
+	if errors.Is(err, pgx.ErrNoRows) {
 		return passkey.ErrCredentialNotFound
 	}
-	return nil
+	return err
 }
 
 // DeleteCredential removes one of the user's credentials by its credential ID. Returns

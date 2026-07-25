@@ -353,6 +353,31 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound)
 	})
 
+	// Contract: APIKEY-1. An unclassified (empty) Type must round-trip as empty on every
+	// backend, never be silently escalated to tokens.KeyTypeService. The fail-safe direction
+	// documented on tokens.PrincipalKindForKeyType is that an unclassified key reads as a plain
+	// human principal (egauth.User); a store that defaulted an empty Type to KeyTypeService
+	// would contradict that and let an unclassified key silently act as a machine identity.
+	t.Run("Contract: API key with empty Type round-trips as empty (never silently service)", func(t *testing.T) {
+		key := &tokens.APIKey[C]{
+			ID:       uuid.Must(uuid.NewV7()),
+			TenantID: tenantA,
+			Prefix:   "pk_",
+			Hash:     "empty_type_hash",
+			// Type intentionally left as the zero value.
+			Claims: tokens.Claims[C]{
+				Subject: uuid.Must(uuid.NewV7()),
+				Custom:  customClaim,
+			},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, tenantA, key))
+
+		found, err := store.FindAPIKeyByHash(ctx, tenantA, "empty_type_hash")
+		require.NoError(t, err)
+		assert.Equal(t, tokens.KeyType(""), found.Type,
+			"an unclassified (empty) Type must round-trip as empty, never escalated to a machine identity")
+	})
+
 	t.Run("Contract: API key revoke", func(t *testing.T) {
 		creator := uuid.Must(uuid.NewV7())
 		key := &tokens.APIKey[C]{

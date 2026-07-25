@@ -160,6 +160,27 @@ func TestIssueAPIKey(t *testing.T) {
 		assert.Equal(t, creatorID, stored.CreatedBy)
 	})
 
+	t.Run("empty keyType is rejected, never silently issued as a machine identity", func(t *testing.T) {
+		svc, saved := newIssueKeyService(t)
+		creatorID := uuid.Must(uuid.NewV7())
+
+		_, err := svc.IssueAPIKey(ctx, "sk_", tokens.KeyType(""), creatorID, tokens.Claims[MyCustomClaims]{
+			TenantID: tenant,
+		})
+		require.ErrorIs(t, err, jwt.ErrInvalidKeyType, "an empty keyType must be rejected outright, not silently defaulted")
+		assert.Empty(t, saved, "a rejected IssueAPIKey call must not persist anything")
+	})
+
+	t.Run("unknown keyType is rejected", func(t *testing.T) {
+		svc, _ := newIssueKeyService(t)
+		creatorID := uuid.Must(uuid.NewV7())
+
+		_, err := svc.IssueAPIKey(ctx, "sk_", tokens.KeyType("bogus"), creatorID, tokens.Claims[MyCustomClaims]{
+			TenantID: tenant,
+		})
+		require.ErrorIs(t, err, jwt.ErrInvalidKeyType)
+	})
+
 	t.Run("no silent role copy: only caller-supplied scopes are used", func(t *testing.T) {
 		svc, _ := newIssueKeyService(t)
 		userID := uuid.Must(uuid.NewV7())

@@ -589,6 +589,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   genuinely invalid hand-built value), and `webapp.NewWebApp` returns it as an error. `DefaultCookies`
   is unchanged — `__Host-` remains the default.
 
+- **Concurrent `Migrate` calls no longer race each other (`pgx/PG-1`).** Every pgx-backed store's
+  `Migrate` now takes a Postgres advisory lock (keyed per module namespace, e.g. `"identity"`,
+  `"tokens"`) for the whole migration run and releases it on every path, including error. Without
+  it, N replicas of one service starting together during a rolling deploy could all observe a
+  migration file as "not yet applied" and race its DDL — even fully idempotent `IF NOT EXISTS`
+  statements are not safe against a concurrent identical DDL statement in Postgres (a known
+  catalog race) — so N-1 of N replicas could fail startup. Different modules never contend with
+  each other. `internal/pgxmigrate.Run` gained a required `namespace string` parameter (internal
+  package, not part of the public API).
+- **`adapters/pgx/identity`'s migration 001 violated the runner's own idempotency contract
+  (refuter-found).** `idx_users_email_tenant` and `idx_identities_provider_tenant` were created with
+  plain `CREATE UNIQUE INDEX` (no `IF NOT EXISTS`), so re-issuing 001's DDL against a database where
+  it already ran — e.g. after the exact crash-before-the-version-row-committed scenario the runner's
+  package doc describes — failed with "relation already exists" instead of completing cleanly.
+  Every other `.sql` file across every `adapters/pgx` subpackage (`identity`, `keystore`, `mfa`,
+  `oauth`, `otp`, `passkey`, `sessions`, `tokens`) was audited against the same contract and found
+  compliant.
+- **`.llms/storage-pgx.md` overclaimed migration safety.** It said re-running `Migrate` is "always
+  safe" and told every instance to call it at startup with no caveat. It now states the actual
+  contract (idempotent files + the advisory lock make concurrent `Migrate` calls safe) and
+  recommends a dedicated migration job/init container as the primary operational pattern, with
+  per-instance `Migrate` at startup documented as the (now-safe) convenience path.
+- **The `identities` table had no index covering its per-login lookup (`pgx/PG-2`).**
+  `FindIdentitiesByUserID` filters on `(tenant_id, user_id)`, which no existing index covered (only
+  the unique `(tenant_id, provider, provider_id)` index existed), so the query sequential-scanned
+  the table. New migration `adapters/pgx/identity/migrations/009_add_identities_user_index.sql`
+  adds `idx_identities_user_tenant`.
+- **The `tokens` table had no index on `id` or `created_by` (`pgx/PG-3`, `lifecycle/IDX-1`).**
+  `RevokeAPIKey` (`WHERE id = ...`), `ListAPIKeysByCreator` and `RevokeAllAPIKeysForUser` (`WHERE
+  created_by = ...`) sequential-scanned the highest-churn table; the existing indexes
+  (`idx_tokens_user_id`, `idx_tokens_family_id`, `idx_tokens_tenant_expires`) and the
+  `(tenant_id, token_hash)` primary key cover neither column. New migration
+  `adapters/pgx/tokens/migrations/009_add_api_key_lookup_indexes.sql` adds `idx_tokens_id` and
+  `idx_tokens_created_by`, both scoped to API-key rows (`WHERE claims IS NOT NULL`). Every query in
+  every other `adapters/pgx` store was reviewed against its available indexes; no other unindexed
+  hot path was found (`sessions`, `mfa`, `passkey`, `otp`, `oauth` and `keystore` all filter on a
+  primary-key or existing-index prefix).
+- **An unclassified API key could be silently issued or stored as a machine identity
+  (`lifecycle/APIKEY-1`).** `tokens.PrincipalKindForKeyType` documents the fail-safe direction for
+  an unclassified (empty) `Type` as `egauth.User` (a plain human principal) — never a machine
+  identity — but `jwt.Service.IssueAPIKey` accepted an empty/unknown `keyType` outright, and
+  `adapters/pgx/tokens`'s `SaveAPIKey` separately defaulted an empty `Type` to `KeyTypeService`
+  before persisting, while the in-memory store stored it verbatim: the SAME key classified as a
+  machine principal on Postgres and a human principal in memory.
+  - **`IssueAPIKey` now validates `keyType`** and returns the new sentinel
+    `jwt.ErrInvalidKeyType` for anything other than `tokens.KeyTypePAT` / `tokens.KeyTypeService`,
+    including the zero value.
+  - **`adapters/pgx/tokens.Store.SaveAPIKey` no longer defaults an empty `Type` to
+    `KeyTypeService`**; it now stores `Type` verbatim, matching the in-memory store and the
+    documented fail-safe. A pre-existing pgx test asserting the old defaulting behavior was wrong
+    and has been corrected; a new case in `tokens/storetest` pins the correct round-trip behavior
+    for both backends.
+- **`mfa.IncrementTOTPAttempts` had a lost-update race in its non-transactional path
+  (`pgx/PG-5`).** The prior implementation issued a `SELECT ... FOR UPDATE` and a separate `UPDATE`;
+  on a bare pool (autocommit per statement) the row lock is released between the two statements, so
+  two concurrent attempts could both read the same pre-increment count and lose an increment — a
+  second-factor brute-force budget that does not actually decrement correctly under load. It is now
+  a single `UPDATE ... FROM (... SELECT ... FOR UPDATE ...)` statement, atomic even without an
+  explicit transaction.
+- **`passkey.Store.UpdateCredential` allowed a lost-update race on `sign_count`
+  (`pgx/PG-6`).** It was a plain full-record `UPDATE` with no guard, so a stale write (e.g. a
+  slower concurrent request whose write commits after a faster one already advanced the counter)
+  could silently roll `sign_count` backward — the exact signal `FinishLogin` uses to detect a
+  cloned credential. The write is now a compare-and-swap (`AND sign_count <= $5`): a write that
+  would regress the stored counter is a silent no-op instead of overwriting it.
+- **gofmt / `errors.Join` cleanup in `adapters/pgx/tokens`.** `adapters/pgx/tokens/store.go`'s two
+  `fmt.Errorf(...%w...)` call sites were converted to `errors.Join`, matching house style. (The
+  `pgx/PG-4` stray-blank-line gofmt violation and the `sf-11` `fmt.Errorf` usage reported for
+  `adapters/pgx/mfa` were both NOT reproduced against this branch — `gofmt -l` was already clean and
+  `adapters/pgx/mfa` already used `errors.Join` throughout before this change.)
+
 ### Security / disclosure (v1.0.0)
 
 - **Audit-status disclosure.** egauth's security review to date is an AI-driven audit only; it

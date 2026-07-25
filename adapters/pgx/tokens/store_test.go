@@ -133,12 +133,19 @@ func TestStoreAPIKeyColumns(t *testing.T) {
 		assert.Equal(t, uuid.Nil, got.CreatedBy, "zero CreatedBy must come back as uuid.Nil")
 	})
 
-	t.Run("default type applied when Type field is empty", func(t *testing.T) {
+	// NOTE: this test previously asserted that SaveAPIKey silently defaulted an empty Type to
+	// KeyTypeService. That was the wrong expectation: tokens.PrincipalKindForKeyType documents
+	// the fail-safe direction for an unclassified key as egauth.User (human), never a machine
+	// identity — see APIKEY-1. IssueAPIKey now rejects an empty keyType outright
+	// (jwt.ErrInvalidKeyType), so this only matters for a direct Store.SaveAPIKey caller; the
+	// store must not silently escalate that gap into a machine identity either, and must agree
+	// with the in-memory store (see tokens/memory, which stores Type verbatim).
+	t.Run("empty Type is stored verbatim, never silently escalated to service", func(t *testing.T) {
 		key := &egauthtokens.APIKey[customClaims]{
 			ID:       uuid.Must(uuid.NewV7()),
 			TenantID: tenantID,
 			Hash:     "hash-defaulttype-01",
-			// Type intentionally empty — SaveAPIKey must default to service
+			// Type intentionally left empty.
 			Claims: egauthtokens.Claims[customClaims]{
 				Subject: uuid.Must(uuid.NewV7()),
 				Custom:  customClaims{Foo: "default-type"},
@@ -148,7 +155,8 @@ func TestStoreAPIKeyColumns(t *testing.T) {
 
 		got, err := store.FindAPIKeyByHash(ctx, tenantID, "hash-defaulttype-01")
 		require.NoError(t, err)
-		assert.Equal(t, egauthtokens.KeyTypeService, got.Type, "empty Type must default to service")
+		assert.Equal(t, egauthtokens.KeyType(""), got.Type,
+			"an empty Type must round-trip as empty, not be escalated to a machine identity")
 	})
 
 	t.Run("DeleteExpired is a hard DELETE with no soft-delete columns", func(t *testing.T) {

@@ -5,7 +5,6 @@ import (
 	"embed"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/JLugagne/egauth"
@@ -26,7 +25,7 @@ var MigrationsFS embed.FS
 // schema_migrations table — so re-running it is a no-op. See internal/pgxmigrate for the
 // migration-authoring contract (idempotent, single-transaction, never-edit-applied files).
 func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+	return pgxmigrate.Run(ctx, db, MigrationsFS, "tokens")
 }
 
 // DBQuerier is an interface that matches both *pgxpool.Pool and pgx.Tx.
@@ -194,7 +193,11 @@ func (s *Store[C]) RevokeAllRefreshTokensForUser(ctx context.Context, tenantID s
 	return err
 }
 
-// SaveAPIKey persists an API key, including its type and created_by fields.
+// SaveAPIKey persists an API key, including its type and created_by fields. key.Type is stored
+// verbatim (an empty Type is stored as empty, never defaulted to KeyTypeService): the fail-safe
+// direction for an unclassified key is to read as a plain human principal, never a machine
+// identity (see tokens.PrincipalKindForKeyType), so this store must not silently escalate one.
+// tokens.jwt.Service.IssueAPIKey validates keyType before ever reaching this call.
 func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.APIKey[C]) error {
 	if key.TenantID != "" && key.TenantID != tenantID {
 		return tokens.ErrTenantMismatch
@@ -203,13 +206,7 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 
 	claimsJSON, err := json.Marshal(key.Claims)
 	if err != nil {
-		return fmt.Errorf("failed to marshal claims: %w", err)
-	}
-
-	// Resolve the key type; default to service when not set (safe, restricted default).
-	keyType := key.Type
-	if keyType == "" {
-		keyType = tokens.KeyTypeService
+		return errors.Join(errors.New("failed to marshal claims"), err)
 	}
 
 	// created_by is nullable: store nil when the zero UUID is supplied so the column stays NULL.
@@ -229,7 +226,7 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 	_, err = s.db.Exec(ctx, query,
 		key.ID, key.TenantID, key.Hash, key.Claims.Subject, key.Prefix,
 		claimsJSON, key.ExpiresAt, time.Now().UTC(),
-		string(keyType), createdBy,
+		string(key.Type), createdBy,
 	)
 	return err
 }
@@ -271,7 +268,7 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	}
 
 	if err := json.Unmarshal(claimsJSON, &key.Claims); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal claims: %w", err)
+		return nil, errors.Join(errors.New("failed to unmarshal claims"), err)
 	}
 
 	return &key, nil
@@ -356,7 +353,7 @@ func (s *Store[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, cr
 			key.CreatedBy = *createdByPtr
 		}
 		if err := json.Unmarshal(claimsJSON, &key.Claims); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal claims: %w", err)
+			return nil, errors.Join(errors.New("failed to unmarshal claims"), err)
 		}
 		result = append(result, &key)
 	}

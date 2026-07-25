@@ -68,3 +68,46 @@ func TestPgxStore_Contract(t *testing.T) {
 	storetest.StoreVerificationTokenPurgeContract(t, store, "tenant-A")
 	storetest.StoreVerificationTokenPurgeTenantScopeContract(t, store, "tenant-A", "tenant-B")
 }
+
+// TestMigrate_SurvivesPriorPartialApply reproduces the exact scenario the runner's idempotency
+// contract exists for (see internal/pgxmigrate's package doc: "if the process dies after a file
+// applies but before its version row is durable, the file re-applies on the next run — which is
+// harmless only because it is idempotent"): migration 001's DDL already committed against the
+// database, but schema_migrations has no row for it yet (e.g. the client crashed after Postgres
+// committed but before the version INSERT's result reached it). Migrate must survive re-issuing
+// 001 from scratch. Before IF NOT EXISTS was added to idx_users_email_tenant and
+// idx_identities_provider_tenant, this failed with "relation already exists".
+func TestMigrate_SurvivesPriorPartialApply(t *testing.T) {
+	if testing.Short() {
+		t.Skip("requires Docker (testcontainers); run without -short")
+	}
+	ctx := context.Background()
+
+	pgContainer, err := postgres.Run(ctx,
+		"postgres:16-alpine",
+		postgres.WithDatabase("testdb"),
+		postgres.WithUsername("testuser"),
+		postgres.WithPassword("testpass"),
+		testcontainers.WithWaitStrategy(
+			wait.ForLog("database system is ready to accept connections").
+				WithOccurrence(2).
+				WithStartupTimeout(15*time.Second),
+		),
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = pgContainer.Terminate(ctx) })
+
+	connString, err := pgContainer.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err)
+	pool, err := pgxpool.New(ctx, connString)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	raw, err := pgxstore.MigrationsFS.ReadFile("migrations/001_create_tables.sql")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, string(raw))
+	require.NoError(t, err, "applying 001's DDL directly (simulating the pre-crash state)")
+
+	require.NoError(t, pgxstore.Migrate(ctx, pool),
+		"Migrate must tolerate 001's DDL already having run without a schema_migrations row for it")
+}

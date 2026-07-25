@@ -307,7 +307,7 @@ Migrations:
 
 ## Errors / behavior
 
-- **Migration idempotency**: all `Migrate` calls track applied files in a `schema_migrations` table; re-running is always safe.
+- **Migration idempotency**: all `Migrate` calls track applied files in a `schema_migrations` table and take a Postgres advisory lock (keyed per module namespace) for the whole run, so concurrent `Migrate` calls targeting the same module serialize instead of racing. Every migration file must be idempotent (`IF NOT EXISTS` and friends); re-running `Migrate` is then safe, including when several instances start it concurrently during a rolling deploy.
 - **Pool ownership**: caller owns and closes `*pgxpool.Pool`; stores hold a `DBQuerier` reference only.
 - **Transaction support**: pass a `pgx.Tx` instead of a pool to enlist store operations in a caller-managed transaction.
 - **Context usage**: all methods accept a `context.Context` and propagate cancellation/deadline to the database.
@@ -315,7 +315,7 @@ Migrations:
 
 ## Gotchas
 
-- **Call `Migrate` once at startup** before any store method; missing schema causes SQL errors at runtime.
+- **Run migrations from a dedicated migration job/init container** as the primary pattern (a single `Migrate` invocation that runs to completion before any application replica starts serving traffic) — this keeps schema changes and application rollout as separate, individually observable steps. Calling `Migrate` per-instance at application startup is supported as a convenience path (the advisory lock makes it safe for N replicas to call it concurrently) but every instance then pays the migration-check cost on every boot and a slow/failing migration is harder to distinguish from an application startup failure. Either way, missing schema causes SQL errors at runtime if `Migrate` is skipped entirely.
 - **Separate `go.mod`**: add `require github.com/JLugagne/egauth/adapters/pgx <version>` to your module; it is not pulled in by the core `github.com/JLugagne/egauth` module.
 - **Pool lifecycle**: the caller must call `pool.Close()` at shutdown; stores do not close the pool.
 - **`tokens.Store[C]` generic**: the type parameter `C` is the custom-claims type embedded in API keys; use `tokens.Store[struct{}]` if no custom claims are needed.

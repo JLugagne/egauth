@@ -36,7 +36,7 @@ type DBQuerier interface {
 
 // Migrate applies the SQL schema migrations for the OAuth pgx store.
 func Migrate(ctx context.Context, db DBQuerier) error {
-	return pgxmigrate.Run(ctx, db, MigrationsFS)
+	return pgxmigrate.Run(ctx, db, MigrationsFS, "oauth")
 }
 
 // OIDCProviderConfig holds the database-storable attributes of an OIDC connection.

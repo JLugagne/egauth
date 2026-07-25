@@ -87,6 +87,55 @@ func TestPgxStore_ReplaceRecoveryCodesAtomic(t *testing.T) {
 	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "keepB"))
 }
 
+// TestPgxStore_IncrementTOTPAttempts_LockAndDecay exercises the lockout and lockout-decay
+// semantics against real Postgres, mirroring mfa/memory's IncrementTOTPAttempts exactly: once
+// the ceiling is reached, further attempts are reported as over-limit WITHOUT persisting a new
+// count or timestamp (so a locked-out attacker cannot keep bumping last_attempt_at and pushing
+// the decay window out indefinitely); once lockoutDuration has elapsed since the last recorded
+// attempt, the next attempt resets the counter to 1 instead of staying locked forever.
+func TestPgxStore_IncrementTOTPAttempts_LockAndDecay(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	uid := uuid.Must(uuid.NewV7())
+
+	require.NoError(t, store.SaveTOTP(ctx, "t1", &mfa.TOTPEnrollment{
+		UserID: uid, TenantID: "t1", Secret: "secret",
+	}))
+
+	const maxAttempts = 3
+	const lockoutDuration = time.Minute
+	base := time.Now().UTC().Truncate(time.Second)
+
+	n, err := store.IncrementTOTPAttempts(ctx, "t1", uid, base, maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n)
+
+	n, err = store.IncrementTOTPAttempts(ctx, "t1", uid, base.Add(time.Second), maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 2, n)
+
+	n, err = store.IncrementTOTPAttempts(ctx, "t1", uid, base.Add(2*time.Second), maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 3, n, "the third attempt reaches the ceiling")
+
+	// Locked, not decayed: reports an over-limit count but must NOT persist it (repeated calls
+	// within the lockout window keep reporting the same over-limit value, not an ever-growing one).
+	lockedAt := base.Add(3 * time.Second)
+	n, err = store.IncrementTOTPAttempts(ctx, "t1", uid, lockedAt, maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n, "locked attempt is reported as over-limit")
+
+	n, err = store.IncrementTOTPAttempts(ctx, "t1", uid, lockedAt.Add(time.Second), maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 4, n, "repeated locked attempts must not advance last_attempt_at and push the decay window out")
+
+	// Decayed: once lockoutDuration has elapsed since the last PERSISTED attempt (still lockedAt,
+	// since locked attempts never bumped it), the next attempt resets the counter to 1.
+	n, err = store.IncrementTOTPAttempts(ctx, "t1", uid, lockedAt.Add(lockoutDuration+time.Second), maxAttempts, lockoutDuration)
+	require.NoError(t, err)
+	assert.Equal(t, 1, n, "lockout decay must restart the counter at 1")
+}
+
 // TestPgxStore_TOTPSecretEncryptedAtRest verifies that the TOTP secret is not stored in plaintext.
 func TestPgxStore_TOTPSecretEncryptedAtRest(t *testing.T) {
 	ctx := context.Background()
