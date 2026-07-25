@@ -316,6 +316,7 @@ Migrations:
 ## Errors / behavior
 
 - **Migration idempotency**: all `Migrate` calls track applied files in a `schema_migrations` table and take a Postgres advisory lock (keyed per module namespace) for the whole run, so concurrent `Migrate` calls targeting the same module serialize instead of racing. Every migration file must be idempotent (`IF NOT EXISTS` and friends); re-running `Migrate` is then safe, including when several instances start it concurrently during a rolling deploy.
+- **Migration version keys are namespaced**: every module shares one `schema_migrations` table, so a row's `version` is `<module>:<filename>` (e.g. `sessions:002_add_expires_at_index.sql`), never the bare filename. Two modules may legitimately ship the same filename — `sessions` and `otp` both have `002_add_expires_at_index.sql` — and keying on the filename alone made the second module's file look already-applied, silently skipping it and leaving that module's schema incomplete. Upgrading from a build that recorded bare filenames re-applies every file once (safe, since each is idempotent), which is also what repairs a schema whose migration was previously skipped this way.
 - **Pool ownership**: caller owns and closes `*pgxpool.Pool`; stores hold a `DBQuerier` reference only.
 - **Transaction support**: pass a `pgx.Tx` instead of a pool to enlist store operations in a caller-managed transaction.
 - **Context usage**: all methods accept a `context.Context` and propagate cancellation/deadline to the database.

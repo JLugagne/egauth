@@ -286,7 +286,8 @@ Each module ships two interchangeable `Store` implementations behind one contrac
 - `<module>/memory` — zero-dependency, for tests and single-process apps; lives in the core module.
 - `adapters/pgx/<module>` — PostgreSQL via `jackc/pgx`, in the separate `adapters/pgx` module
   (`go get github.com/JLugagne/egauth/adapters/pgx`). Call `Migrate(ctx, pool)` once at startup
-  (forward-only, versioned via a `schema_migrations` table; re-running is a no-op).
+  (forward-only, versioned via a shared `schema_migrations` table keyed `<module>:<filename>`;
+  re-running is a no-op).
 
 ```go
 import identitypgx "github.com/JLugagne/egauth/adapters/pgx/identity"

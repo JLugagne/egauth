@@ -104,7 +104,46 @@ func TestRun_AppliesOnlyUnappliedFiles(t *testing.T) {
 		versions = append(versions, v)
 	}
 	require.NoError(t, rows.Err())
-	assert.Equal(t, []string{"001_a.sql", "002_b.sql"}, versions)
+	assert.Equal(t, []string{"ab:001_a.sql", "ab:002_b.sql"}, versions)
+}
+
+// TestRun_SameFilenameInTwoNamespacesBothApply is the Docker-gated regression test for the
+// filename-collision bug: every store shares one schema_migrations table, and two stores may
+// legitimately ship the same filename (sessions and otp both have 002_add_expires_at_index.sql).
+// Keying the applied-set on the bare filename made the second store's file look already-applied,
+// so it was silently skipped and that store's schema stayed incomplete. Both migrations here are
+// non-idempotent, so a skip shows up as a missing table rather than merely a missing row.
+func TestRun_SameFilenameInTwoNamespacesBothApply(t *testing.T) {
+	ctx := context.Background()
+	pool := newTestPool(t)
+
+	const shared = "migrations/002_add_expires_at_index.sql"
+	require.NoError(t, pgxmigrate.Run(ctx, pool, fstest.MapFS{
+		shared: {Data: []byte(`CREATE TABLE ns_one_marker (id INT);`)},
+	}, "ns-one"))
+	require.NoError(t, pgxmigrate.Run(ctx, pool, fstest.MapFS{
+		shared: {Data: []byte(`CREATE TABLE ns_two_marker (id INT);`)},
+	}, "ns-two"))
+
+	for _, table := range []string{"ns_one_marker", "ns_two_marker"} {
+		var exists bool
+		require.NoError(t, pool.QueryRow(ctx,
+			"SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = $1)", table,
+		).Scan(&exists))
+		assert.True(t, exists, "%s must exist: a filename shared with another namespace must not skip the migration", table)
+	}
+
+	var versions []string
+	rows, err := pool.Query(ctx, "SELECT version FROM schema_migrations ORDER BY version")
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var v string
+		require.NoError(t, rows.Scan(&v))
+		versions = append(versions, v)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []string{"ns-one:002_add_expires_at_index.sql", "ns-two:002_add_expires_at_index.sql"}, versions)
 }
 
 // TestRun_ConcurrentCallersOnSameNamespaceAllSucceed is the Docker-gated regression test for the
@@ -170,6 +209,6 @@ func TestRun_ConcurrentCallersOnSameNamespaceAllSucceed(t *testing.T) {
 	}
 
 	var n int
-	require.NoError(t, pools[0].QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE version = '001_create_race.sql'").Scan(&n))
+	require.NoError(t, pools[0].QueryRow(ctx, "SELECT count(*) FROM schema_migrations WHERE version = 'rolling-deploy-ns:001_create_race.sql'").Scan(&n))
 	assert.Equal(t, 1, n, "the migration must be recorded exactly once despite the concurrent race")
 }

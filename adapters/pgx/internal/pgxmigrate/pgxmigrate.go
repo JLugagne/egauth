@@ -8,6 +8,15 @@
 //     filename (lexical == numeric) order. Once a file has been applied (recorded in
 //     schema_migrations) its content MUST NOT be edited — add a new NNN_ file instead. There
 //     is no per-file checksum, so an edit to an already-applied file is silently skipped.
+//   - Every store shares ONE schema_migrations table, so a version is recorded as
+//     "<namespace>:<filename>", never the bare filename: two stores may legitimately ship the
+//     same filename (sessions and otp both have 002_add_expires_at_index.sql), and keying on the
+//     filename alone made the second store's file look already-applied and silently skipped it,
+//     leaving that store's schema incomplete. Namespaces must therefore be unique per store and
+//     must not contain versionSeparator.
+//   - Upgrading from a build that recorded bare filenames re-applies every file once, because no
+//     namespaced row exists yet. That is safe (every file is idempotent) and is what repairs a
+//     schema whose migration was previously skipped by a filename collision.
 //   - Each file MUST be idempotent (CREATE ... IF NOT EXISTS, ADD COLUMN IF NOT EXISTS, ...).
 //     Run cannot open its own transaction (the Querier it is given may be a bare connection
 //     pool with autocommit-per-statement), so the version table is a re-run OPTIMIZATION, not
@@ -94,7 +103,8 @@ func Run(ctx context.Context, db Querier, fsys fs.FS, namespace string) error {
 		if entry.IsDir() {
 			continue
 		}
-		version := entry.Name()
+		filename := entry.Name()
+		version := namespace + versionSeparator + filename
 
 		var applied bool
 		if err := db.QueryRow(ctx,
@@ -106,7 +116,7 @@ func Run(ctx context.Context, db Querier, fsys fs.FS, namespace string) error {
 			continue
 		}
 
-		content, err := fs.ReadFile(fsys, "migrations/"+version)
+		content, err := fs.ReadFile(fsys, "migrations/"+filename)
 		if err != nil {
 			return errors.Join(errors.New("pgxmigrate: read "+version), err)
 		}
@@ -115,9 +125,9 @@ func Run(ctx context.Context, db Querier, fsys fs.FS, namespace string) error {
 		// pgx uses the simple query protocol, under which Postgres wraps the whole
 		// multi-statement string in one implicit transaction — so the DDL and the version row
 		// commit atomically even when db is a bare pool that cannot open a transaction for us.
-		// The version is a build-time-embedded filename, but escape quotes defensively since it
-		// is interpolated as a SQL literal (a bound $1 would force the extended protocol and
-		// forbid the multi-statement string).
+		// The version is a caller-supplied namespace plus a build-time-embedded filename, but
+		// escape quotes defensively since it is interpolated as a SQL literal (a bound $1 would
+		// force the extended protocol and forbid the multi-statement string).
 		sql := string(content) + "\nINSERT INTO schema_migrations (version) VALUES ('" +
 			strings.ReplaceAll(version, "'", "''") + "') ON CONFLICT (version) DO NOTHING;"
 		if _, err := db.Exec(ctx, sql); err != nil {
@@ -138,6 +148,10 @@ func lockKeyForNamespace(namespace string) int64 {
 	_, _ = h.Write([]byte(namespace))
 	return int64(h.Sum64()) //#nosec G115 -- reinterpreted as an opaque pg_advisory_lock key; any bit pattern (incl. negative) is a valid lock ID, no value semantics are lost
 }
+
+// versionSeparator joins the migration namespace and the filename into the schema_migrations
+// primary key. It must not appear in any namespace, so that the composite key is unambiguous.
+const versionSeparator = ":"
 
 const createSchemaMigrations = `CREATE TABLE IF NOT EXISTS schema_migrations (
     version    TEXT PRIMARY KEY,

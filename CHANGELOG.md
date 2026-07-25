@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **`schema_migrations` rows are now keyed `<module>:<filename>` instead of the bare filename.**
+  Every pgx store shares one `schema_migrations` table, and two stores may legitimately ship the same
+  migration filename — `adapters/pgx/sessions` and `adapters/pgx/otp` both have
+  `002_add_expires_at_index.sql`. Keying the applied-set on the filename alone meant whichever store
+  migrated first recorded the name and the other store's file was silently treated as already
+  applied, so its migration never ran and its schema stayed incomplete. In the shipped tree that
+  cost `otp` or `sessions` (whichever migrated second) its `expires_at` index. Version rows now carry
+  the module namespace that `Migrate` already passed for the advisory lock.
+  **Upgrade impact:** no existing row matches the new key, so the first `Migrate` after upgrading
+  re-applies every file once per module. That is safe — every migration file is idempotent, which the
+  runner has always required — and it is what repairs a schema whose migration was previously skipped
+  by a filename collision. Custom tooling that reads `schema_migrations.version` must expect the
+  `<module>:<filename>` form. Namespaces must not contain `:`.
+
 - **The `passkey` HTTP handlers now enforce a strict same-origin CSRF check, and the ceremony cookie
   is `__Host-` prefixed (`mfa/SF-9`, `http/SF-9`, `http/HTTP-7`, `http/HTTP-10`).** The passkey
   handler family was the only one with no origin check at all, so `RenameCredentialHandler` and every
