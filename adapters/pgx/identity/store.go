@@ -455,6 +455,24 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 	return tag.RowsAffected(), nil
 }
 
+// DeleteVerificationTokensForUser purges the given user's pending verification tokens within the
+// tenant in a single DELETE, restricted to kinds when any are supplied. An empty kinds list purges
+// every kind. Both forms are covered by idx_verification_tokens_user (tenant_id, user_id, kind). It
+// is idempotent: deleting nothing is a success.
+func (s *Store) DeleteVerificationTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error {
+	const allKinds = `DELETE FROM verification_tokens WHERE user_id = $1 AND tenant_id = $2`
+	const selectedKinds = `DELETE FROM verification_tokens WHERE user_id = $1 AND tenant_id = $2 AND kind = ANY($3::varchar[])`
+
+	query, args := allKinds, []any{userID, tenantID}
+	if len(kinds) > 0 {
+		query, args = selectedKinds, []any{userID, tenantID, kinds}
+	}
+	if _, err := s.db.Exec(ctx, query, args...); err != nil {
+		return err
+	}
+	return nil
+}
+
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the new count reaches the threshold. It is performed
 // atomically in a single UPDATE statement.

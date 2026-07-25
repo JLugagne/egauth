@@ -1134,6 +1134,16 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 // mints a confirmation token via Service.RequestEmailChange and hands it to the Mailer for
 // delivery to the NEW address — delivery is dispatched off the response path. A malformed
 // address maps to 400; an address already taken by another account maps to 409.
+//
+// The account's login identifier is a takeover target, so the handler ENFORCES the same step-up bar
+// as DeleteAccountHandler rather than trusting the route to be gated: a request carried by a
+// pre-step-up interim credential — or one whose assurance cannot be resolved at all — is refused
+// with 403 "step_up_required" (see WithAssuranceResolver, which defaults to
+// tokens.AssuranceResolverFromContext, so mounting this handler behind tokens.ContextMiddleware is
+// all the wiring it needs; WithInsecureNoStepUpCheck opts out). Pass WithMFAGate as well and an
+// MFA-enrolled user must additionally present a credential carrying a step-up factor. Confirming to
+// the new address proves control of that address; it does NOT prove the requester is the account
+// owner, which is what this bar is for.
 func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1157,6 +1167,11 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 		user, ok := cfg.userResolver(r)
 		if !ok || user == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// A session alone must not be able to move the account's login identifier to an
+		// attacker-controlled address.
+		if !cfg.requireStepUp(w, r, tenant, user.ID) {
 			return
 		}
 		if !cfg.parseLimitedForm(w, r) {
@@ -1476,6 +1491,12 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 // via Service.RequestRecoveryEmail and hands it to the Mailer for delivery to THAT address (off the
 // response path). A malformed address maps to 400; using the primary email as the recovery address
 // maps to 409.
+//
+// A verified recovery address drives RequestPasswordResetViaRecovery, so enrolling one is as
+// takeover-relevant as changing the login email: the handler ENFORCES the same step-up bar as
+// RequestEmailChangeHandler and DeleteAccountHandler (403 "step_up_required" for a pre-step-up
+// interim credential or an unresolvable assurance; with WithMFAGate an MFA-enrolled user must present
+// a step-up factor). See WithAssuranceResolver and WithInsecureNoStepUpCheck.
 func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1499,6 +1520,10 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		user, ok := cfg.userResolver(r)
 		if !ok || user == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// A session alone must not be able to install an attacker-controlled recovery channel.
+		if !cfg.requireStepUp(w, r, tenant, user.ID) {
 			return
 		}
 		if !cfg.parseLimitedForm(w, r) {

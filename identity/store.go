@@ -130,6 +130,21 @@ type VerificationTokenStore interface {
 	// (selector/verifier) token table. It scopes to a single tenant; a background job sweeping
 	// every tenant must loop over them.
 	DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error)
+
+	// DeleteVerificationTokensForUser purges a single user's pending verification tokens within
+	// the tenant. When kinds is empty EVERY kind is purged; otherwise only the listed kinds are.
+	//
+	// It is the per-user revocation seam the credential-rotating flows depend on: ResetPassword,
+	// ChangePassword, SetTemporaryPassword and DisableUser call it so a token minted while the
+	// account was under an attacker's control cannot outlive the recovery. Expiry-based GC is not
+	// a substitute — a recovery-email or email-change token lives for hours to a day, which is
+	// exactly the window an evicted attacker needs.
+	//
+	// It is idempotent: purging a user with no pending token, or an unknown user, is a success
+	// (there is nothing to purge, and the callers already hold the account state they need). A
+	// genuine backend failure MUST be reported — a purge that silently succeeds would leave the
+	// attacker's foothold intact.
+	DeleteVerificationTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error
 }
 
 // LockoutStore is the failed-attempt/lockout capability of the identity backend: the counter that

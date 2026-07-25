@@ -303,6 +303,41 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
   account, an OAuth-only account, and a known account with no recovery channel all produce the
   same empty, no-error response.
+- **A credential rotation kills the account's pending token-borne credentials.** A password reset is
+  the canonical response to "I think I am compromised", so it must end the takeover on *every* axis —
+  not just the session axis. `ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and
+  `DisableUser` therefore call `Store.DeleteVerificationTokensForUser` for every
+  **credential-bearing** kind: `KindPasswordReset`, `KindMagicLink`, `KindEmailChange`,
+  `KindPhoneVerification`, `KindRecoveryEmailVerification`. Each of those is redeemable *later* by
+  whoever received it: a reset token re-sets the password, a magic link logs in outright, an
+  email-change token moves the login identifier, and a recovery-email or phone-verification token
+  installs an attacker-controlled recovery channel that then drives
+  `RequestPasswordResetViaRecovery`. Without the purge, an attacker riding a hijacked session could
+  request a recovery-email token to their own address, lose their session to the victim's reset, and
+  still confirm the token afterwards — the reset would have handed the account back. Expiry-based GC
+  is not a substitute: those tokens live for an hour to a day, which is exactly the window the evicted
+  attacker needs.
+
+  `KindEmailVerification` is deliberately **kept**: it only marks the account's *current* address as
+  verified — an address the account already owns — so confirming it grants an attacker nothing, while
+  purging it would strand a legitimate user who reset their password before clicking the welcome link.
+
+  The purge runs **after** the new hash (or `DisabledAt`) is committed, so the account is
+  authoritatively re-keyed even if the purge fails, and its error is joined into the returned error —
+  a failed purge is never a silent success, so the (idempotent) call can be retried. For `DisableUser`
+  deletion is what makes the revocation permanent: `consumeForLiveUser` only refuses tokens *while*
+  `DisabledAt` is set, so a surviving token would come back to life on `EnableUser`.
+- **Changing the login identifier or the recovery channel takes more than a session.** Confirming an
+  email change proves control of the *new* address; it does not prove the requester owns the account.
+  So `RequestEmailChangeHandler` and `RequestRecoveryEmailHandler` enforce the same step-up bar as
+  `DeleteAccountHandler`: a pre-step-up interim credential — and any request whose assurance cannot be
+  resolved (fail closed) — is refused with `403 step_up_required`, and with `WithMFAGate` configured an
+  MFA-enrolled user must present a credential carrying a step-up factor. Otherwise a hijacked
+  password-only session could move the account to `attacker@evil` (locking the victim out of their own
+  login address) or install an attacker-controlled recovery address. Mount both behind
+  `tokens.ContextMiddleware` (or supply `WithAssuranceResolver`); `WithInsecureNoStepUpCheck` is the
+  deliberate, loudly-named opt-out. A caller invoking `Service.RequestEmailChange` /
+  `Service.RequestRecoveryEmail` directly MUST apply an equivalent bar.
 - **Deactivation revokes pending tokens and blocks re-authentication.** Magic-link,
   password-reset and email-verification all reject a token whose account has since been
   soft-deleted (`DeleteUser`): the consume path re-checks `DeletedAt` and returns "not found",
@@ -676,8 +711,8 @@ not a bug:
 - **`email_taken` → 409** on the authenticated change-email request
   (`RequestEmailChangeHandler`): the caller is told up front when the requested new address
   already belongs to another account, mirroring the registration disclosure. This is gated
-  behind authentication (a higher bar than sign-up) and gives the user a clear "pick another
-  address" response. If your threat model forbids it, drop the pre-flight `FindUserByEmail`
+  behind authentication *and* the handler's step-up bar (a higher bar than sign-up) and gives the
+  user a clear "pick another address" response. If your threat model forbids it, drop the pre-flight `FindUserByEmail`
   conflict in `RequestEmailChange` and rely solely on the store's unique index at confirm
   time (`ConfirmEmailChange` already returns `ErrEmailAlreadyExists` for an address claimed in
   the interim).

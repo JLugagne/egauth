@@ -14,14 +14,23 @@ type Service interface {
     Register(ctx context.Context, tenantID string, email, password string) (*User, error)
     Authenticate(ctx context.Context, tenantID string, provider, providerID, password string) (*User, error)
     RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
+    // ResetPassword consumes the token, re-keys the password, PURGES the user's pending
+    // credential-bearing verification tokens (reset, magic link, email change, phone verification,
+    // recovery email — NOT the verification of the current address) and runs every registered
+    // AccountEraser. Purge + eraser errors are joined and returned AFTER the new hash is committed.
     ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
     RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
     VerifyEmail(ctx context.Context, tenantID string, token string) (*User, error)
     LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
     RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
     LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
-    // ChangePassword changes the user's password and triggers all registered AccountErasers to terminate sessions.
+    // ChangePassword changes the user's password, purges the same pending token kinds as
+    // ResetPassword and triggers all registered AccountErasers to terminate sessions. Cross-module
+    // revocation is done BY egauth here, not left to the consumer.
     ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
+    // RequestEmailChange mints a token delivered to newEmail. Confirming it proves control of the NEW
+    // address — it does NOT prove account ownership, so a hijacked session is stopped by the
+    // handler's step-up bar, not by this method. Direct callers must apply an equivalent bar.
     RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
     ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
     RequestPhoneVerification(ctx context.Context, tenantID string, userID uuid.UUID, phone string) (token string, err error)
@@ -31,6 +40,9 @@ type Service interface {
     RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (RecoveryChannels, error)
     RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (token string, user *User, channels RecoveryChannels, err error)
     DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
+    // DisableUser stamps DisabledAt, PURGES the user's pending credential-bearing verification tokens
+    // (so a magic link or email-change token minted before the suspension does NOT come back to life
+    // on EnableUser) and runs every registered AccountRevoker.
     DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     // EnsureActive: nil for a live account, ErrAccountDisabled when suspended, ErrUserNotFound
@@ -136,6 +148,11 @@ type Store interface {
     CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
     ConsumeVerificationToken(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
     DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error)
+    // DeleteVerificationTokensForUser is the PER-USER revocation seam the credential-rotating flows
+    // need (ResetPassword, ChangePassword, SetTemporaryPassword, DisableUser). An empty kinds list
+    // purges every kind. Idempotent (unknown user / nothing pending = success), but a genuine backend
+    // failure MUST be reported — a silent success leaves an attacker's pending token redeemable.
+    DeleteVerificationTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error
 
     // Lockout
     // justLocked reports whether THIS atomic increment crossed the threshold (counter went from
@@ -205,13 +222,14 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 
 `func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; reads `current_password`, `new_password` from form
-- Note: Changing the password proactively terminates all sessions by invoking registered `AccountEraser`s.
+- Note: Changing the password proactively terminates all sessions by invoking registered `AccountEraser`s AND purges the user's pending credential-bearing verification tokens.
 - Errors: `401 invalid_credentials`, `400 password_rejected`, `401 unauthorized`
 
 `func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; reads `new_email` from form
 - Delivery to new address dispatched async
-- Errors: `400 invalid_email`, `409 email_taken`, `401 unauthorized`
+- The login identifier is a takeover target, so it ENFORCES step-up itself (same bar as `DeleteAccountHandler`): refuses a pre-step-up interim credential — or an unresolvable assurance — with `403 step_up_required`; with `WithMFAGate` an MFA-enrolled user must present a step-up factor. `WithInsecureNoStepUpCheck` opts out
+- Errors: `403 step_up_required`, `400 invalid_email`, `409 email_taken`, `401 unauthorized`, `500 mfa_check_failed`
 
 `func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `token` from form
@@ -229,7 +247,8 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 `func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; reads `recovery_email` from form
 - Delivery to recovery address dispatched async
-- Errors: `400 invalid_email`, `409 recovery_email_is_primary`, `401 unauthorized`
+- A verified recovery address drives `RequestPasswordResetViaRecovery`, so it ENFORCES the SAME step-up bar as `RequestEmailChangeHandler`
+- Errors: `403 step_up_required`, `400 invalid_email`, `409 recovery_email_is_primary`, `401 unauthorized`, `500 mfa_check_failed`
 
 `func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `token` from form
@@ -406,9 +425,11 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - All `Request*` handlers (`RequestPasswordResetHandler`, `RequestMagicLinkHandler`, `RequestPasswordResetViaRecoveryHandler`, `RequestPhoneVerificationHandler`) are enumeration-safe: they always respond 204 regardless of account existence or delivery success.
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.
+- **Credential rotation purges pending token-borne credentials.** `ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and `DisableUser` all call `Store.DeleteVerificationTokensForUser` for `KindPasswordReset`, `KindMagicLink`, `KindEmailChange`, `KindPhoneVerification` and `KindRecoveryEmailVerification`. Without it a recovery-email or email-change token minted while an attacker held the account stays redeemable for its whole TTL (up to 24h) and hands the account straight back after the victim's recovery — expiry-based GC is far too slow to serve as revocation. `KindEmailVerification` is deliberately KEPT: it only verifies the address the account already owns. A purge failure is joined into the returned error (never a silent success), and it runs AFTER the new hash / `DisabledAt` is committed so the account is authoritatively re-keyed and the call is retriable.
 - `DeleteAccount` runs all `AccountErasers` first; a revocation failure aborts before the soft-delete (cleanly retriable). Erasers should be idempotent.
 - `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued refresh families live and ROTATABLE — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately, and wrap the issuer's provider in `ActiveClaimsProvider` so a rotation racing the disable is refused too. An already-issued stateless access token always survives until its `AccessTTL` expires.
-- A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts.
+- A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts. That gate only holds WHILE `DisabledAt` is set, which is why `DisableUser` also DELETES the credential-bearing kinds — otherwise `EnableUser` would resurrect them.
+- `RequestEmailChangeHandler` and `RequestRecoveryEmailHandler` enforce a step-up bar themselves (like `DeleteAccountHandler`): a session alone must not be able to take the account's login identifier or install a recovery channel. They fail CLOSED — without `tokens.ContextMiddleware` in front (or an explicit `WithAssuranceResolver`) they return `403 step_up_required`.
 - `LinkOrCreateIdentity` refuses silent email-based account linking (returns `ErrEmailAlreadyExists` if provider email matches an existing account); explicit linking from an authenticated session is required.
 - Verification token scheme is selector/verifier: selector stored in clear for O(1) lookup; only SHA-256 of verifier stored. Helpers: `GenerateVerificationToken()`, `SplitVerificationToken()`, `HashVerifier()`, `CompareVerifier()`.
 - Token kind constants: `KindPasswordReset`, `KindEmailVerification`, `KindMagicLink`, `KindEmailChange`, `KindPhoneVerification`, `KindRecoveryEmailVerification`.

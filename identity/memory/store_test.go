@@ -19,6 +19,8 @@ func TestStoreContract(t *testing.T) {
 	storetest.StoreDeleteAuthGateContract(t, store, "tenant-A")
 	storetest.StoreUpdateUserSoftDeleteContract(t, store, "tenant-A")
 	storetest.StoreUpdateUserFieldScopeContract(t, store, "tenant-A")
+	storetest.StoreVerificationTokenPurgeContract(t, store, "tenant-A")
+	storetest.StoreVerificationTokenPurgeTenantScopeContract(t, store, "tenant-A", "tenant-B")
 }
 
 // TestUpdateIdentityPasswordStampsRotationFields asserts that UpdateIdentityPassword stamps

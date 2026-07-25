@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **`identity.Store` gained `DeleteVerificationTokensForUser`, and a password reset now purges the
+  account's pending token-borne credentials.** A password reset is the canonical response to "I think
+  I am compromised", but nothing invalidated the *verification tokens* minted while the attacker held
+  the account, and the `Store` exposed no per-user purge seam, so a consumer could not fix it either.
+
+  - New method on the `identity.VerificationTokenStore` capability (and therefore `identity.Store`):
+    `DeleteVerificationTokensForUser(ctx, tenantID string, userID uuid.UUID, kinds ...string) error`.
+    An empty `kinds` list purges every kind. It is idempotent (an unknown user or nothing pending is a
+    success) but MUST report a genuine backend failure — a silent success would leave the attacker's
+    token redeemable. **Action required** for external `identity.Store` implementers: add the method
+    and run `identity/storetest` (`StoreVerificationTokenPurgeContract` and, for multi-tenant
+    backends, `StoreVerificationTokenPurgeTenantScopeContract`) to verify conformance. The in-memory
+    and pgx backends implement it; the pgx `DELETE` is served by the existing
+    `idx_verification_tokens_user` index, so **no new migration** is required.
+    `identity/storetest.MockStore` gained the matching `DeleteVerificationTokensForUserFunc` — an
+    unset func is a no-op success there, so existing tests built on the mock keep compiling.
+  - `identity.Service.ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and `DisableUser` now
+    call it for every credential-bearing kind: `KindPasswordReset`, `KindMagicLink`, `KindEmailChange`,
+    `KindPhoneVerification`, `KindRecoveryEmailVerification`. `KindEmailVerification` is deliberately
+    kept (it only verifies the address the account already owns). The purge runs after the new hash /
+    `DisabledAt` is committed and its error is joined into the returned error, so the account is
+    authoritatively re-keyed and the idempotent call can be retried.
+  - For `DisableUser` this makes the documented revocation of pending token-gated actions
+    **permanent**: previously `consumeForLiveUser` only refused them *while* `DisabledAt` was set, so a
+    magic-link or email-change token minted before the suspension became usable again the moment
+    `EnableUser` cleared it.
+
+- **`identity.RequestEmailChangeHandler` and `identity.RequestRecoveryEmailHandler` now enforce a
+  step-up bar.** Both refuse a pre-step-up interim credential — and, failing closed, any request whose
+  assurance cannot be resolved — with `403 step_up_required`; with `identity.WithMFAGate` configured an
+  MFA-enrolled user must additionally present a credential carrying a step-up factor. A session alone
+  could previously move the account's login address to `attacker@evil` (locking the victim out of their
+  own address) or install an attacker-controlled recovery channel that then drives
+  `RequestPasswordResetViaRecovery`. **Action required:** mount both handlers behind
+  `tokens.ContextMiddleware`, or supply `identity.WithAssuranceResolver`; opt out deliberately with
+  `identity.WithInsecureNoStepUpCheck()`.
+
 - **MFA is now an ENFORCED control, not advisory.** The pre-step-up credential minted by an MFA-gated
   login is stamped `tokens.Claims.Interim` (new field, JWT claim `interim`, omitted for ordinary
   sessions) and is no longer accepted as a session:
@@ -161,6 +198,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **A password reset did not end an account takeover (HIGH, `identity/TEN-1`).** Reproduced end to
+  end: an attacker holding a live session on the victim's account `POST`s
+  `RequestRecoveryEmailHandler` with `recovery_email=attacker@evil` (only an address equal to the
+  primary was rejected), which mails a `KindRecoveryEmailVerification` token with a 24h TTL to the
+  attacker. The victim then performs the canonical recovery — `ResetPassword` re-keys the password and
+  the `AccountErasers` revoke every session and refresh family, so the attacker loses their session.
+  But nothing deleted the pending verification-token rows, and `ConfirmRecoveryEmailHandler` is
+  authenticated by the token alone (no session), re-checking only `DeletedAt`/`DisabledAt`. The
+  attacker could therefore confirm the token *after* the reset and end up with an
+  attacker-controlled verified recovery channel — which then drives
+  `RequestPasswordResetViaRecovery` and hands the account straight back. The same held for a pending
+  email-change token (which moves the login identifier), a pending magic link (a full login
+  credential), a pending phone verification and a second pending reset token. The four
+  credential-rotating flows now purge those kinds through the new
+  `Store.DeleteVerificationTokensForUser` seam (see BREAKING).
+
+- **`RequestEmailChange`'s doc overclaimed (`identity/TEN-2`).** It said the confirm-to-new-address
+  step meant "a hijacked session cannot silently move the account to an attacker-controlled address".
+  Reproduced: a session-only email change to `attacker@evil.test` succeeded and the victim could no
+  longer log in with their own address — confirming to the new address proves control of *that
+  address*, not ownership of the account. The bar is now enforced by
+  `RequestEmailChangeHandler` (see BREAKING) and the godoc states the real guarantee.
+
+- **`ChangePassword`'s interface doc said cross-module revocation was "left to the consumer"** while
+  the implementation has been running the registered `AccountErasers` all along. The godoc,
+  `.llms/identity.md` and `SECURITY.md` now describe what the code actually does (and now also
+  document the token purge).
 
 - **Account deactivation did not end access in the shipped `webapp` preset (HIGH).** The only
   `ClaimsProvider` egauth shipped never looked at the account: it took `_ context.Context`, could

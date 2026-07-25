@@ -38,6 +38,7 @@ type MockStore struct {
 	CreateVerificationTokenFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
 	ConsumeVerificationTokenFunc        func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
 	DeleteExpiredVerificationTokensFunc func(ctx context.Context, tenantID string) (int64, error)
+	DeleteVerificationTokensForUserFunc func(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error
 }
 
 var _ identity.Store = (*MockStore)(nil)
@@ -68,6 +69,17 @@ func (m *MockStore) DeleteExpiredVerificationTokens(ctx context.Context, tenantI
 		panic("called not defined DeleteExpiredVerificationTokensFunc")
 	}
 	return m.DeleteExpiredVerificationTokensFunc(ctx, tenantID)
+}
+
+// DeleteVerificationTokensForUser records the purge. Unlike the other mocked operations an
+// undefined func is a NO-OP SUCCESS rather than a panic: every credential-rotating flow
+// (ResetPassword, ChangePassword, SetTemporaryPassword, DisableUser) purges, so a panic would make
+// the mock unusable for any test that is not about the purge itself. Set the func to assert on it.
+func (m *MockStore) DeleteVerificationTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error {
+	if m.DeleteVerificationTokensForUserFunc == nil {
+		return nil
+	}
+	return m.DeleteVerificationTokensForUserFunc(ctx, tenantID, userID, kinds...)
 }
 
 func (m *MockStore) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (bool, error) {
@@ -955,4 +967,103 @@ func StoreUpdateUserFieldScopeContract(t *testing.T, store identity.Store, tenan
 	assert.NotNil(t, got.PhoneVerifiedAt, "UpdateUser must not clear PhoneVerifiedAt")
 	assert.NotNil(t, got.RecoveryEmail, "UpdateUser must not clear the recovery email")
 	assert.NotNil(t, got.RecoveryEmailVerifiedAt, "UpdateUser must not clear RecoveryEmailVerifiedAt")
+}
+
+// StoreVerificationTokenPurgeContract verifies DeleteVerificationTokensForUser, the per-user
+// revocation seam the credential-rotating flows depend on (finding identity/TEN-1): a token minted
+// while an account was under an attacker's control must not outlive the recovery, and expiry-based
+// GC is far too slow to serve as that seam.
+//
+// It pins that the purge is kind-selective (an empty kinds list means every kind), scoped to the one
+// user, scoped to the one tenant, and idempotent for a user with nothing pending.
+// Each backend's test must run this alongside StoreContractTesting.
+func StoreVerificationTokenPurgeContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	victim, err := store.CreateUser(ctx, tenant, "purge_victim@example.com")
+	require.NoError(t, err)
+	bystander, err := store.CreateUser(ctx, tenant, "purge_bystander@example.com")
+	require.NoError(t, err)
+
+	mint := func(userID uuid.UUID, kind string) string {
+		t.Helper()
+		tok, mErr := store.CreateVerificationToken(ctx, tenant, userID, kind, time.Hour, nil)
+		require.NoError(t, mErr)
+		require.NotEmpty(t, tok)
+		return tok
+	}
+
+	// Kind-selective purge: only the listed kinds die.
+	recovery := mint(victim.ID, identity.KindRecoveryEmailVerification)
+	change := mint(victim.ID, identity.KindEmailChange)
+	verification := mint(victim.ID, identity.KindEmailVerification)
+	bystanderTok := mint(bystander.ID, identity.KindRecoveryEmailVerification)
+
+	require.NoError(t, store.DeleteVerificationTokensForUser(ctx, tenant, victim.ID,
+		identity.KindRecoveryEmailVerification, identity.KindEmailChange))
+
+	_, _, err = store.ConsumeVerificationToken(ctx, tenant, recovery, identity.KindRecoveryEmailVerification)
+	assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "the purged recovery-email token must be gone")
+	_, _, err = store.ConsumeVerificationToken(ctx, tenant, change, identity.KindEmailChange)
+	assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "the purged email-change token must be gone")
+
+	gotUser, _, err := store.ConsumeVerificationToken(ctx, tenant, verification, identity.KindEmailVerification)
+	require.NoError(t, err, "a kind that was NOT listed must survive the purge")
+	assert.Equal(t, victim.ID, gotUser)
+
+	gotUser, _, err = store.ConsumeVerificationToken(ctx, tenant, bystanderTok, identity.KindRecoveryEmailVerification)
+	require.NoError(t, err, "the purge must be scoped to the one user")
+	assert.Equal(t, bystander.ID, gotUser)
+
+	// An empty kinds list purges every kind.
+	all := []string{
+		identity.KindPasswordReset,
+		identity.KindEmailVerification,
+		identity.KindMagicLink,
+		identity.KindEmailChange,
+		identity.KindPhoneVerification,
+		identity.KindRecoveryEmailVerification,
+	}
+	minted := make(map[string]string, len(all))
+	for _, kind := range all {
+		minted[kind] = mint(victim.ID, kind)
+	}
+	require.NoError(t, store.DeleteVerificationTokensForUser(ctx, tenant, victim.ID))
+	for _, kind := range all {
+		_, _, err = store.ConsumeVerificationToken(ctx, tenant, minted[kind], kind)
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound,
+			"an empty kinds list must purge every kind, including "+kind)
+	}
+
+	// Idempotent: purging a user with nothing pending, or an unknown user, is a success.
+	require.NoError(t, store.DeleteVerificationTokensForUser(ctx, tenant, victim.ID))
+	require.NoError(t, store.DeleteVerificationTokensForUser(ctx, tenant, uuid.Must(uuid.NewV7())))
+}
+
+// StoreVerificationTokenPurgeTenantScopeContract verifies DeleteVerificationTokensForUser never
+// reaches across tenants: purging in tenant A must leave the SAME user id's tokens in tenant B
+// intact. It only runs for multi-tenant backends; each backend's multi-tenant test must run it.
+func StoreVerificationTokenPurgeTenantScopeContract(t *testing.T, store identity.Store, tenantA, tenantB string) {
+	t.Helper()
+	ctx := context.Background()
+
+	userA, err := store.CreateUser(ctx, tenantA, "purge_scope@example.com")
+	require.NoError(t, err)
+	userB, err := store.CreateUser(ctx, tenantB, "purge_scope@example.com")
+	require.NoError(t, err)
+
+	tokA, err := store.CreateVerificationToken(ctx, tenantA, userA.ID, identity.KindMagicLink, time.Hour, nil)
+	require.NoError(t, err)
+	tokB, err := store.CreateVerificationToken(ctx, tenantB, userB.ID, identity.KindMagicLink, time.Hour, nil)
+	require.NoError(t, err)
+
+	require.NoError(t, store.DeleteVerificationTokensForUser(ctx, tenantA, userA.ID))
+
+	_, _, err = store.ConsumeVerificationToken(ctx, tenantA, tokA, identity.KindMagicLink)
+	assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+
+	gotUser, _, err := store.ConsumeVerificationToken(ctx, tenantB, tokB, identity.KindMagicLink)
+	require.NoError(t, err, "a purge in one tenant must not touch another tenant's tokens")
+	assert.Equal(t, userB.ID, gotUser)
 }

@@ -376,6 +376,32 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 	return deleted, nil
 }
 
+// DeleteVerificationTokensForUser purges the given user's pending verification tokens within the
+// tenant, restricted to kinds when any are supplied.
+func (s *Store) DeleteVerificationTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID, kinds ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	wanted := make(map[string]struct{}, len(kinds))
+	for _, k := range kinds {
+		wanted[k] = struct{}{}
+	}
+
+	for selector, vt := range s.verificationTokens {
+		if vt.UserID != userID || vt.TenantID != tenantID {
+			continue
+		}
+		if len(wanted) > 0 {
+			if _, ok := wanted[vt.Kind]; !ok {
+				continue
+			}
+		}
+		delete(s.verificationTokens, selector)
+	}
+
+	return nil
+}
+
 // IncrementFailedAttempts increments the failed-attempt counter for an identity,
 // locking the account when the threshold is reached. justLocked reports whether this
 // call is the one that crossed the threshold (see the LockoutStore interface contract).

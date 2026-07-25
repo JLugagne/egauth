@@ -31,8 +31,11 @@ func TestRequestEmailChangeHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
+		// fullSessionAssurance satisfies the handler's step-up bar (see
+		// TestRequestEmailChangeHandler_EnforcesStepUp, which pins the bar itself).
 		h := identity.RequestEmailChangeHandler(svc, mailer.asMailer(),
-			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+			fullSessionAssurance())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"new_email": {"new@example.com"}}))
 
@@ -63,7 +66,8 @@ func TestRequestEmailChangeHandler_ErrorMapping(t *testing.T) {
 			}
 			mailer := newMockMailer()
 			h := identity.RequestEmailChangeHandler(svc, mailer.asMailer(),
-				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+				fullSessionAssurance())
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{"new_email": {"taken@example.com"}}))
 			assert.Equal(t, tc.wantCode, rec.Code)

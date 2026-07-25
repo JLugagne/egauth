@@ -96,13 +96,23 @@ type Service interface {
 	// is returned too, so the caller can deliver the token (e.g. via a Mailer).
 	RequestPasswordReset(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
 	// ResetPassword validates newPassword against the policy, then consumes the reset token
-	// (single-use), sets the new password (clearing any lockout), and runs the registered
-	// AccountErasers to revoke the user's existing sessions and refresh-token families.
+	// (single-use), sets the new password (clearing any lockout), PURGES the user's pending
+	// credential-bearing verification tokens, and runs the registered AccountErasers to revoke the
+	// user's existing sessions and refresh-token families.
+	//
 	// Password reset is the canonical account-recovery flow when a user believes they are
-	// compromised; the erasers provide the same cross-module revocation seam used by
-	// DeleteAccount, so an attacker who holds a live session is evicted immediately. The
-	// caller SHOULD also revoke any additional cross-module state not covered by their
-	// registered erasers (e.g. trusted-device records).
+	// compromised, so it must end the takeover on every axis. The erasers provide the same
+	// cross-module revocation seam used by DeleteAccount, so an attacker who holds a live session is
+	// evicted immediately. The token purge closes the other half: a pending magic link, email-change,
+	// recovery-email or phone-verification token minted while the attacker held the account would
+	// otherwise stay redeemable for its whole TTL (up to a day) and hand the account straight back —
+	// see Store.DeleteVerificationTokensForUser for the exact kinds. A pending verification of the
+	// account's CURRENT email address deliberately survives.
+	//
+	// A purge or eraser failure is returned (joined) AFTER the new hash is committed, so the account
+	// is authoritatively re-keyed and the caller can retry the revocation. The caller SHOULD also
+	// revoke any additional cross-module state not covered by their registered erasers (e.g.
+	// trusted-device records).
 	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
 	// RequestEmailVerification mints an email-verification token for the given user.
 	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
@@ -132,16 +142,28 @@ type Service interface {
 	// self-service counterpart to ResetPassword (which is token-gated). It returns
 	// ErrInvalidCredentials when the current password is wrong or the account has no password
 	// identity (e.g. OAuth-only), or a passwords.Policy error when the new password is
-	// rejected. After a successful change the caller SHOULD revoke the user's other sessions
-	// and refresh-token families (that is cross-module and left to the consumer).
+	// rejected.
+	//
+	// Like ResetPassword it then PURGES the user's pending credential-bearing verification tokens and
+	// runs every registered AccountEraser, so the user's other sessions and refresh-token families are
+	// revoked by egauth itself — this is NOT left to the consumer. Failures are joined and returned
+	// after the new hash is committed. The caller SHOULD still revoke any cross-module state its
+	// registered erasers do not cover (e.g. trusted-device records).
 	ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
 	// RequestEmailChange starts the authenticated change-email flow for userID. It validates
 	// and normalizes newEmail, rejects an address already owned by another live account in the
 	// tenant (ErrEmailAlreadyExists), and mints a single-use token bound to newEmail (carried
 	// as the token's metadata). The token MUST be delivered to newEmail — confirming it proves
-	// control of the new address before the swap, so a hijacked session cannot silently move
-	// the account to an attacker-controlled address. It returns ErrInvalidEmail for a malformed
+	// control of the NEW address before the swap. It returns ErrInvalidEmail for a malformed
 	// address and ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
+	//
+	// Confirming to the new address proves control of that address; it does NOT prove the requester
+	// owns the account, so this method alone does not stop a hijacked session from moving the login
+	// identifier to an attacker-controlled address. That is why RequestEmailChangeHandler ENFORCES a
+	// step-up bar of its own: it refuses a pre-step-up interim credential — and any request whose
+	// assurance cannot be resolved — and, with WithMFAGate configured, requires an MFA-enrolled user
+	// to present a credential carrying a step-up factor. A caller invoking this method directly MUST
+	// apply an equivalent bar.
 	RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
 	// ConfirmEmailChange consumes a change-email token (single-use) and atomically switches the
 	// owning user's email to the address the token was minted for, marking it verified (the
@@ -172,6 +194,11 @@ type Service interface {
 	// MUST be delivered to recoveryEmail — confirming it proves control of the recovery channel
 	// before it is trusted. It returns ErrInvalidEmail for a malformed address and ErrUserNotFound
 	// for an unknown/soft-deleted/cross-tenant user.
+	//
+	// A verified recovery address drives RequestPasswordResetViaRecovery, so enrolling one is as
+	// takeover-relevant as changing the login email: RequestRecoveryEmailHandler enforces the same
+	// step-up bar as RequestEmailChangeHandler, and a caller invoking this method directly MUST apply
+	// an equivalent bar.
 	RequestRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string) (token string, err error)
 	// ConfirmRecoveryEmail consumes a recovery-email enrollment token (single-use) and sets the
 	// owning user's recovery email to the address the token was minted for, marking it verified.
@@ -216,12 +243,15 @@ type Service interface {
 	// covers OAuth-only accounts that cannot re-verify a password).
 	DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// DisableUser administratively suspends an account: it sets the user's DisabledAt so subsequent
-	// authentication is refused (Authenticate returns ErrAccountDisabled) and pending token-gated
-	// actions, including magic-link logins, are revoked. It is REVERSIBLE — the row, email slot and
-	// all data are retained — and is the counterpart to EnableUser. Disabling an already-disabled
-	// account succeeds (idempotent). Returns ErrUserNotFound for an unknown, soft-deleted or
-	// cross-tenant user. This is an administrative operation; gate it behind appropriate
-	// authorization (it is not a self-service action).
+	// authentication is refused (Authenticate returns ErrAccountDisabled) and PURGES the user's
+	// pending credential-bearing verification tokens, so magic-link logins, email changes and
+	// recovery-channel enrollments issued before the suspension are revoked PERMANENTLY rather than
+	// merely gated for its duration — they do not come back to life on EnableUser. A pending
+	// verification of the account's current email address deliberately survives. It is REVERSIBLE —
+	// the row, email slot and all data are retained — and is the counterpart to EnableUser. Disabling
+	// an already-disabled account succeeds (idempotent). Returns ErrUserNotFound for an unknown,
+	// soft-deleted or cross-tenant user. This is an administrative operation; gate it behind
+	// appropriate authorization (it is not a self-service action).
 	//
 	// Already-issued credentials are revoked by the AccountRevokers registered with
 	// WithDisableRevokers (or RevocationRegistry) — wire tokens.NewAccountRevoker and
@@ -256,7 +286,7 @@ type Service interface {
 	// identity (e.g. OAuth-only) is never flagged (returns false). It returns ErrUserNotFound for an
 	// unknown, soft-deleted or cross-tenant user (propagated from the store).
 	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
-	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families. It returns ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
+	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then PURGES the user's pending credential-bearing verification tokens and runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families — this is the path an operator uses to wrest a compromised account back, so it must leave no redeemable credential behind. It returns ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
 	SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
 	// AdminCreateUser provisions a new user account with a temporary password that forces a change at the next login. It normalizes email, creates the user, hashes tempPassword and adds a password identity with MustChangePassword=true and PasswordChangedAt=now. It returns ErrInvalidEmail for a malformed address, ErrEmailAlreadyExists when the email is taken, and any policy or hashing error on an invalid tempPassword. On a successful call the returned User is the newly created account.
 	AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error)
@@ -776,9 +806,35 @@ func (s *service) consumeForLiveUser(ctx context.Context, tenantID string, token
 	return user, metadata, nil
 }
 
-// ResetPassword validates the new password, consumes the token and sets the password,
-// then runs every registered AccountEraser to revoke the user's existing sessions and
-// refresh-token families.
+// credentialRotationTokenKinds are the pending verification-token kinds that MUST NOT outlive a
+// credential rotation (ResetPassword, ChangePassword, SetTemporaryPassword) or an administrative
+// suspension (DisableUser). Each of them is a CREDENTIAL an attacker who held the account can
+// redeem later: a reset token re-sets the password, a magic link logs in outright, an email-change
+// token moves the login identifier, and a recovery-email or phone-verification token installs an
+// attacker-controlled recovery channel that then drives RequestPasswordResetViaRecovery.
+//
+// KindEmailVerification is deliberately ABSENT. It only marks the account's CURRENT address as
+// verified — an address the account already owns, so confirming it hands an attacker nothing — while
+// purging it would strand a legitimate user who reset their password before clicking the welcome
+// link.
+var credentialRotationTokenKinds = []string{
+	KindPasswordReset,
+	KindMagicLink,
+	KindEmailChange,
+	KindPhoneVerification,
+	KindRecoveryEmailVerification,
+}
+
+// purgeCredentialTokens revokes every pending credential-bearing verification token of the user
+// (see credentialRotationTokenKinds). Callers MUST propagate its error: a purge that silently
+// succeeds leaves the attacker's foothold intact.
+func (s *service) purgeCredentialTokens(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	return s.store.DeleteVerificationTokensForUser(ctx, tenantID, userID, credentialRotationTokenKinds...)
+}
+
+// ResetPassword validates the new password, consumes the token and sets the password, then purges
+// the user's pending credential-bearing verification tokens and runs every registered AccountEraser
+// to revoke their existing sessions and refresh-token families.
 func (s *service) ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error {
 	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
 	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
@@ -804,11 +860,16 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 		return err
 	}
 
-	// Run the cross-module erasers to evict any attacker-held sessions or refresh-token families.
-	// Password reset is the canonical account-recovery flow when a user believes they are
-	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
-	// intact. Collect every eraser error so one failure does not mask another.
+	// Revoke the pending token-borne credentials, then run the cross-module erasers to evict any
+	// attacker-held sessions or refresh-token families. Password reset is the canonical
+	// account-recovery flow when a user believes they are compromised; leaving either behind leaves
+	// the attacker's foothold intact. Both run AFTER the new hash is committed, so the account is
+	// authoritatively re-keyed even if one of them fails; every error is collected and returned so
+	// the caller retries rather than believing the recovery completed.
 	var errs []error
+	if err := s.purgeCredentialTokens(ctx, tenantID, user.ID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
@@ -828,7 +889,8 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	return nil
 }
 
-// ChangePassword re-verifies the user's current password, then validates and applies a new one.
+// ChangePassword re-verifies the user's current password, then validates and applies a new one,
+// purges the user's pending credential-bearing verification tokens and runs the AccountErasers.
 func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error {
 	// A nil policy/hasher is legal (OAuth-only deployments) but a password operation cannot run
 	// without them: fail fast with a clear error rather than dereference a nil deep in the request.
@@ -873,6 +935,9 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	}
 
 	var errs []error
+	if err := s.purgeCredentialTokens(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
@@ -1384,14 +1449,18 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 }
 
 // DisableUser administratively suspends a live account: it stamps DisabledAt (so Authenticate
-// returns ErrAccountDisabled and new tokens can no longer be issued), then runs every registered
-// AccountRevoker (see WithDisableRevokers) to invalidate the user's already-issued credentials —
-// refresh tokens, API keys and sessions — so a disabled user cannot keep acting through tokens
-// minted before the disable.
+// returns ErrAccountDisabled and new tokens can no longer be issued), purges the user's pending
+// credential-bearing verification tokens, then runs every registered AccountRevoker (see
+// WithDisableRevokers) to invalidate the user's already-issued credentials — refresh tokens, API keys
+// and sessions — so a disabled user cannot keep acting through tokens minted before the disable.
+//
+// The purge is what makes the revocation of pending token-gated actions PERMANENT: consumeForLiveUser
+// only refuses them while DisabledAt is set, so without deletion a magic link or email-change token
+// minted before the suspension would become usable again the moment EnableUser clears it.
 //
 // The DisabledAt stamp is written FIRST and the AccountDisabled event emitted before revocation,
-// so the account is authoritatively blocked even if a downstream revoker fails (fail-closed); a
-// revoker error is returned (joined across all revokers) so the caller can retry. Revokers are
+// so the account is authoritatively blocked even if a downstream purge or revoker fails
+// (fail-closed); their errors are returned (joined) so the caller can retry. Revokers are
 // expected to be idempotent, making that retry safe. Unlike DeleteAccount this does NOT run the
 // AccountErasers: disable is reversible, so re-establishable credentials are revoked while
 // enrollment data (MFA, passkeys) is preserved for EnableUser.
@@ -1402,6 +1471,13 @@ func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.
 	s.emit(ctx, event.Event{Type: event.AccountDisabled, UserID: userID.String(), TenantID: tenantID})
 
 	var errs []error
+	// Purge, do not merely gate: consumeForLiveUser refuses tokens WHILE the suspension is in
+	// force, but a token that survives the suspension becomes usable again the moment EnableUser
+	// clears DisabledAt. Deleting the credential-bearing kinds makes the revocation permanent, as
+	// the contract documents.
+	if err := s.purgeCredentialTokens(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, revoke := range s.accountRevokers() {
 		if revoke == nil {
 			continue
@@ -1470,9 +1546,9 @@ func (s *service) PasswordChangeRequired(ctx context.Context, tenantID string, u
 
 // SetTemporaryPassword replaces the user's password credential with a temporary one and sets
 // the MustChangePassword flag so the user is forced to choose a new password at next login.
-// It validates tempPassword against the policy, hashes it, and then runs every registered
-// AccountEraser to revoke the user's existing sessions and refresh-token families, mirroring
-// the behavior of ChangePassword and ResetPassword.
+// It validates tempPassword against the policy, hashes it, and then purges the user's pending
+// credential-bearing verification tokens and runs every registered AccountEraser to revoke the
+// user's existing sessions and refresh-token families, mirroring ChangePassword and ResetPassword.
 func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error {
 	if err := s.requirePasswordDeps(); err != nil {
 		return err
@@ -1491,6 +1567,9 @@ func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, use
 	// distinguishes it from a self-service change so a SIEM can flag admin-initiated resets.
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID, Reason: "admin_temporary_password"})
 	var errs []error
+	if err := s.purgeCredentialTokens(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue

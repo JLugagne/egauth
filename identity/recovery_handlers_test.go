@@ -31,8 +31,11 @@ func TestRequestRecoveryEmailHandler_RequiresResolvedUser(t *testing.T) {
 			},
 		}
 		mailer := newMockMailer()
+		// fullSessionAssurance satisfies the handler's step-up bar (see
+		// TestRequestRecoveryEmailHandler_EnforcesStepUp, which pins the bar itself).
 		h := identity.RequestRecoveryEmailHandler(svc, mailer.asMailer(),
-			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+			identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+			fullSessionAssurance())
 		rec := httptest.NewRecorder()
 		h(rec, postForm(url.Values{"recovery_email": {"rec@elsewhere.example"}}))
 
@@ -64,7 +67,8 @@ func TestRequestRecoveryEmailHandler_ErrorMapping(t *testing.T) {
 			}
 			mailer := newMockMailer()
 			h := identity.RequestRecoveryEmailHandler(svc, mailer.asMailer(),
-				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+				fullSessionAssurance())
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{"recovery_email": {"rec@elsewhere.example"}}))
 			assert.Equal(t, tc.wantCode, rec.Code)

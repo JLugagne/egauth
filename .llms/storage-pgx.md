@@ -51,6 +51,7 @@ Methods:
 - `CreateVerificationToken(ctx, tenantID, userID, kind string, ttl time.Duration, metadata []byte) (string, error)`
 - `ConsumeVerificationToken(ctx, tenantID, token, kind string) (uuid.UUID, []byte, error)` — atomic single-use
 - `DeleteExpiredVerificationTokens(ctx, tenantID) (int64, error)`
+- `DeleteVerificationTokensForUser(ctx, tenantID, userID, kinds ...string) error` — per-user purge in a single `DELETE`; an empty `kinds` list purges every kind. Covered by `idx_verification_tokens_user (tenant_id, user_id, kind)`, so no new migration is needed. The credential-rotating flows (`ResetPassword`, `ChangePassword`, `SetTemporaryPassword`, `DisableUser`) call it, so a purge failure must be returned, never swallowed.
 
 Migrations (schema evolution):
 ```
@@ -267,7 +268,7 @@ Migrations:
 - **Pool ownership**: caller owns and closes `*pgxpool.Pool`; stores hold a `DBQuerier` reference only.
 - **Transaction support**: pass a `pgx.Tx` instead of a pool to enlist store operations in a caller-managed transaction.
 - **Context usage**: all methods accept a `context.Context` and propagate cancellation/deadline to the database.
-- **Expiry eviction**: no background janitor — expired rows stay until `DeleteExpired` / `DeleteExpiredVerificationTokens` is called explicitly (e.g. periodic cron). The DB enforces expiry at read time via conditional queries.
+- **Expiry eviction**: no background janitor — expired rows stay until `DeleteExpired` / `DeleteExpiredVerificationTokens` is called explicitly (e.g. periodic cron). The DB enforces expiry at read time via conditional queries. Expiry eviction is NOT revocation: to kill one user's pending tokens immediately (password reset, disable) use `DeleteVerificationTokensForUser`.
 
 ## Gotchas
 

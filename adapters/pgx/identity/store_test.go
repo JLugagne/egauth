@@ -63,4 +63,6 @@ func TestPgxStore_Contract(t *testing.T) {
 	storetest.StoreUpdateUserSoftDeleteContract(t, store, "tenant-A")
 	storetest.StoreUpdateUserFieldScopeContract(t, store, "tenant-A")
 	storetest.StoreDeleteAuthGateContract(t, store, "tenant-A")
+	storetest.StoreVerificationTokenPurgeContract(t, store, "tenant-A")
+	storetest.StoreVerificationTokenPurgeTenantScopeContract(t, store, "tenant-A", "tenant-B")
 }
