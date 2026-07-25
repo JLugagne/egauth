@@ -11,6 +11,7 @@ import (
 
 	pgxkeystore "github.com/JLugagne/egauth/adapters/pgx/keystore"
 	"github.com/JLugagne/egauth/keystore"
+	"github.com/JLugagne/egauth/keystore/keystoretest"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -59,10 +60,24 @@ func newManager(t *testing.T, pool *pgxpool.Pool) *keystore.Manager {
 	return mgr
 }
 
+// TestPgxKeystore_StoreContract runs the SHARED cross-backend conformance suite
+// (keystoretest.StoreContractTesting) against the real Postgres backend, so the pgx store is held
+// to exactly the same contract as the in-memory one — including the sentinel rules that make an
+// emergency revocation stick. Each subtest gets a truncated (fresh, empty) store bound to the
+// suite's clock.
+func TestPgxKeystore_StoreContract(t *testing.T) {
+	pool := startPostgres(t)
+	keystoretest.StoreContractTesting(t, func(now func() time.Time) keystore.Store {
+		if _, err := pool.Exec(context.Background(), `TRUNCATE keystore_keys, keystore_tenants`); err != nil {
+			panic(errors.Join(errors.New("truncate keystore tables between contract subtests"), err))
+		}
+		return pgxkeystore.NewStore(pool, pgxkeystore.WithClock(now))
+	})
+}
+
 // TestPgxKeystore_Lifecycle exercises provision / active+verify / rotate / revoke / delete and
-// cross-tenant isolation end-to-end against a real Postgres. It uses real time (the backend's
-// SQL now()), so it covers everything except the fixed-clock retirement-reaping assertions, which
-// require an injectable clock the production pgx backend deliberately does not expose.
+// cross-tenant isolation end-to-end against a real Postgres with the default (wall-clock) time
+// source, complementing the fixed-clock contract suite above.
 func TestPgxKeystore_Lifecycle(t *testing.T) {
 	pool := startPostgres(t)
 	ctx := context.Background()
@@ -170,8 +185,12 @@ func TestPgxKeystore_DefaultAlgForLegacyRow(t *testing.T) {
 	pool := startPostgres(t)
 	ctx := context.Background()
 	// Insert directly without the alg column so the DEFAULT 'HS256' applies, simulating a row
-	// written before migration 002.
+	// written before migration 002. The tenant record is inserted first because migration 003 makes
+	// keystore_keys.tenant_id a foreign key onto keystore_tenants.
 	_, err := pool.Exec(ctx,
+		`INSERT INTO keystore_tenants (tenant_id) VALUES ($1) ON CONFLICT DO NOTHING`, "legacy")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx,
 		`INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at) VALUES ($1, $2, $3, now())`,
 		"legacy", "k1", []byte("sealed"))
 	require.NoError(t, err)
@@ -180,6 +199,66 @@ func TestPgxKeystore_DefaultAlgForLegacyRow(t *testing.T) {
 	active, err := store.ActiveSigningKey(ctx, "legacy")
 	require.NoError(t, err)
 	require.Equal(t, "HS256", active.Alg)
+}
+
+// TestPgxKeystore_Migrate_Idempotent asserts re-running the migrations, and re-applying the
+// tenant-table migration body on its own (the case the runner tolerates when a crash loses the
+// version row), is a no-op that keeps existing tenant records.
+func TestPgxKeystore_Migrate_Idempotent(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	store := pgxkeystore.NewStore(pool)
+	require.NoError(t, store.CreateTenant(ctx, "acme", keystore.SigningKey{
+		KeyID: "k1", Secret: []byte("sealed"), CreatedAt: time.Now(),
+	}))
+
+	require.NoError(t, pgxkeystore.Migrate(ctx, pool))
+
+	body, err := pgxkeystore.MigrationsFS.ReadFile("migrations/003_create_keystore_tenants_table.sql")
+	require.NoError(t, err)
+	_, err = pool.Exec(ctx, string(body))
+	require.NoError(t, err)
+
+	exists, err := store.TenantExists(ctx, "acme")
+	require.NoError(t, err)
+	require.True(t, exists, "re-applying the migration must not drop tenant records")
+	active, err := store.ActiveSigningKey(ctx, "acme")
+	require.NoError(t, err)
+	require.Equal(t, "k1", active.KeyID)
+}
+
+// TestPgxKeystore_RevokeKeepsTenantRecord pins the durable-revocation invariant at the SQL level:
+// revoking deletes key rows but keeps the tenant row, so the sentinels stay ErrNoActiveKey.
+func TestPgxKeystore_RevokeKeepsTenantRecord(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	store := pgxkeystore.NewStore(pool)
+	require.NoError(t, store.CreateTenant(ctx, "acme", keystore.SigningKey{
+		KeyID: "k1", Secret: []byte("sealed"), CreatedAt: time.Now(),
+	}))
+	require.NoError(t, store.RevokeTenantKeys(ctx, "acme"))
+
+	exists, err := store.TenantExists(ctx, "acme")
+	require.NoError(t, err)
+	require.True(t, exists, "a revoked tenant must still exist")
+
+	_, err = store.ActiveSigningKey(ctx, "acme")
+	require.True(t, errors.Is(err, keystore.ErrNoActiveKey), "got %v", err)
+
+	verify, err := store.VerificationKeys(ctx, "acme")
+	require.NoError(t, err, "VerificationKeys must publish an empty set after a revoke")
+	require.Empty(t, verify)
+
+	var keyRows, tenantRows int
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM keystore_keys WHERE tenant_id = $1`, "acme").Scan(&keyRows))
+	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM keystore_tenants WHERE tenant_id = $1`, "acme").Scan(&tenantRows))
+	require.Zero(t, keyRows)
+	require.Equal(t, 1, tenantRows)
+
+	require.NoError(t, store.DeleteTenant(ctx, "acme"))
+	exists, err = store.TenantExists(ctx, "acme")
+	require.NoError(t, err)
+	require.False(t, exists, "DeleteTenant must remove the tenant record")
 }
 
 // TestPgxKeystore_CreateTenant_ConcurrentRace fires N concurrent CreateTenant calls for the SAME

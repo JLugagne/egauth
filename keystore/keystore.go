@@ -115,23 +115,48 @@ type Keyset struct {
 //
 // Backends store Secret in its KEK-encrypted form; the Manager handles seal/open, so a Store
 // implementation never sees plaintext secrets beyond what NewManager hands it.
+//
+// # Sentinel contract (security-relevant — implement exactly)
+//
+// A backend MUST keep a tenant record that is independent of its key rows, because the Manager
+// distinguishes "unknown tenant" from "known tenant with no usable key" and acts differently on
+// each: with WithLazyProvisioning an ErrTenantNotFound makes it MINT a fresh signing key. A
+// backend that derives tenant existence from the presence of key rows therefore turns an
+// emergency RevokeTenantKeys into a silent no-op — the revocation is undone on the next keyset
+// resolution. The rules:
+//
+//   - A tenant exists from CreateTenant (or the first PutSigningKey, which auto-creates it) until
+//     DeleteTenant. RevokeTenantKeys removes only key material; the tenant KEEPS existing.
+//   - TenantExists reports that record, not the key count.
+//   - ActiveSigningKey returns ErrTenantNotFound only for a tenant that does not exist, and
+//     ErrNoActiveKey when the tenant exists but has no active (non-retired, non-expired) key —
+//     including after RevokeTenantKeys.
+//   - VerificationKeys returns ErrTenantNotFound only for a tenant that does not exist. For a
+//     known tenant with no usable key it returns an EMPTY map and a NIL error, so a JWKS endpoint
+//     publishes an empty key set after a revoke instead of failing.
+//
+// keystoretest.StoreContractTesting pins every one of these; run it against any new backend.
 type Store interface {
 	// CreateTenant records a new tenant with its initial signing key. It returns ErrTenantExists
 	// if the tenant already exists (the Manager turns that into an idempotent no-op).
 	CreateTenant(ctx context.Context, tenantID string, initial SigningKey) error
 
-	// TenantExists reports whether the tenant has any key material.
+	// TenantExists reports whether the tenant record exists — NOT whether it currently holds key
+	// material. A tenant whose keys were revoked still exists until DeleteTenant.
 	TenantExists(ctx context.Context, tenantID string) (bool, error)
 
-	// PutSigningKey inserts or replaces a key for the tenant. It fails closed if key.TenantID is
-	// set and differs from tenantID.
+	// PutSigningKey inserts or replaces a key for the tenant, creating the tenant record if it is
+	// absent. It fails closed if key.TenantID is set and differs from tenantID.
 	PutSigningKey(ctx context.Context, tenantID string, key SigningKey) error
 
-	// ActiveSigningKey returns the tenant's current active signer, or ErrNoActiveKey if none.
+	// ActiveSigningKey returns the tenant's current active signer. It returns ErrNoActiveKey when
+	// the tenant exists but has no active key (e.g. after RevokeTenantKeys) and ErrTenantNotFound
+	// only when the tenant record itself is absent.
 	ActiveSigningKey(ctx context.Context, tenantID string) (SigningKey, error)
 
 	// VerificationKeys returns every key that may still verify a token for the tenant (active
-	// plus retired-but-unexpired), keyed by KeyID.
+	// plus retired-but-unexpired), keyed by KeyID. For an existing tenant with no usable key it
+	// returns an empty map and a nil error; ErrTenantNotFound is reserved for an absent tenant.
 	VerificationKeys(ctx context.Context, tenantID string) (map[string]SigningKey, error)
 
 	// RotateSigningKey makes next the active signer and marks the current active key retired
@@ -143,11 +168,13 @@ type Store interface {
 	RetireExpiredKeys(ctx context.Context, tenantID string, now time.Time) (int64, error)
 
 	// RevokeTenantKeys immediately deletes every key for the tenant — the nuclear option, used
-	// by delete and by emergency revocation. It does not touch other tenants.
+	// by delete and by emergency revocation. The TENANT RECORD SURVIVES (see the sentinel
+	// contract): the revocation must hold until an explicit re-provision. It does not touch other
+	// tenants and returns ErrTenantNotFound for an absent tenant.
 	RevokeTenantKeys(ctx context.Context, tenantID string) error
 
-	// DeleteTenant removes the tenant and all its key material. It is idempotent: deleting an
-	// absent tenant is a no-op success.
+	// DeleteTenant removes the tenant record and all its key material. It is idempotent: deleting
+	// an absent tenant is a no-op success.
 	DeleteTenant(ctx context.Context, tenantID string) error
 }
 

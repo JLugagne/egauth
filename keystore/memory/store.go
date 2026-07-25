@@ -68,7 +68,9 @@ func (s *Store) CreateTenant(ctx context.Context, tenantID string, initial keyst
 	return nil
 }
 
-// TenantExists reports whether the tenant has any key material.
+// TenantExists reports whether the tenant record exists. A revoked (keyless) tenant still exists:
+// only DeleteTenant removes the partition, which is what keeps a revocation from being undone by a
+// lazily-provisioning Manager.
 func (s *Store) TenantExists(ctx context.Context, tenantID string) (bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -94,7 +96,9 @@ func (s *Store) PutSigningKey(ctx context.Context, tenantID string, key keystore
 }
 
 // ActiveSigningKey returns the tenant's newest active key. Among active keys the one with the
-// latest CreatedAt wins (deterministic active selection after a rotation).
+// latest CreatedAt wins (deterministic active selection after a rotation). It returns
+// keystore.ErrNoActiveKey for a known tenant with no active key and keystore.ErrTenantNotFound only
+// when the tenant record is absent.
 func (s *Store) ActiveSigningKey(ctx context.Context, tenantID string) (keystore.SigningKey, error) {
 	now := s.now()
 	s.mu.RLock()

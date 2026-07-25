@@ -38,13 +38,40 @@ type DBQuerier interface {
 }
 
 // Store implements keystore.Store for PostgreSQL using pgx.
+//
+// Tenant records live in keystore_tenants, independent of the key rows in keystore_keys, so the
+// backend can honor the keystore.Store sentinel contract: a tenant whose keys were revoked still
+// exists (ErrNoActiveKey), and only DeleteTenant makes it unknown (ErrTenantNotFound). See
+// migration 003 for why that distinction is security-relevant.
 type Store struct {
 	db DBQuerier
+	// now is the time source used to evaluate key activity and expiry. It is the APPLICATION
+	// clock, deliberately not the database clock, so a Store agrees with the keystore.Manager that
+	// stamped NotAfter (and with a test clock).
+	now func() time.Time
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithClock overrides the Store's time source, which decides whether a key row still counts as
+// active or verifiable. It must be the same clock the keystore.Manager is built with, so both
+// layers agree on expiry. The default is time.Now.
+func WithClock(now func() time.Time) Option {
+	return func(s *Store) {
+		if now != nil {
+			s.now = now
+		}
+	}
 }
 
 // NewStore creates a new PostgreSQL keystore Store.
-func NewStore(db DBQuerier) *Store {
-	return &Store{db: db}
+func NewStore(db DBQuerier, opts ...Option) *Store {
+	s := &Store{db: db, now: time.Now}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 var _ keystore.Store = (*Store)(nil)
@@ -67,17 +94,18 @@ func (s *Store) CreateTenant(ctx context.Context, tenantID string, initial keyst
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, tenantID); err != nil {
 		return err
 	}
-	if err := s.createTenantChecked(ctx, &Store{db: tx}, tenantID, initial); err != nil {
+	if err := s.createTenantChecked(ctx, &Store{db: tx, now: s.now}, tenantID, initial); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
 }
 
-// TenantExists reports whether the tenant has any key material.
+// TenantExists reports whether the tenant record exists. It is deliberately independent of the
+// tenant's key rows: a tenant whose keys were revoked still exists until DeleteTenant.
 func (s *Store) TenantExists(ctx context.Context, tenantID string) (bool, error) {
 	var dummy int
 	err := s.db.QueryRow(ctx,
-		`SELECT 1 FROM keystore_keys WHERE tenant_id = $1 LIMIT 1`, tenantID).Scan(&dummy)
+		`SELECT 1 FROM keystore_tenants WHERE tenant_id = $1`, tenantID).Scan(&dummy)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return false, nil
@@ -87,9 +115,12 @@ func (s *Store) TenantExists(ctx context.Context, tenantID string) (bool, error)
 	return true, nil
 }
 
-// PutSigningKey inserts or replaces a key for the tenant.
+// PutSigningKey inserts or replaces a key for the tenant, creating the tenant record when absent.
 func (s *Store) PutSigningKey(ctx context.Context, tenantID string, key keystore.SigningKey) error {
 	if err := guardTenant(tenantID, key); err != nil {
+		return err
+	}
+	if _, err := s.insertTenant(ctx, tenantID); err != nil {
 		return err
 	}
 	query := `
@@ -104,7 +135,9 @@ func (s *Store) PutSigningKey(ctx context.Context, tenantID string, key keystore
 	return err
 }
 
-// ActiveSigningKey returns the tenant's newest active key (not retired, not past not_after).
+// ActiveSigningKey returns the tenant's newest active key (not retired, not past not_after). It
+// returns keystore.ErrNoActiveKey when the tenant exists but holds no active key (for example after
+// RevokeTenantKeys) and keystore.ErrTenantNotFound only when the tenant record is absent.
 func (s *Store) ActiveSigningKey(ctx context.Context, tenantID string) (keystore.SigningKey, error) {
 	exists, err := s.TenantExists(ctx, tenantID)
 	if err != nil {
@@ -118,11 +151,11 @@ func (s *Store) ActiveSigningKey(ctx context.Context, tenantID string) (keystore
 		FROM keystore_keys
 		WHERE tenant_id = $1
 		  AND retired_at IS NULL
-		  AND (not_after IS NULL OR not_after > now())
+		  AND (not_after IS NULL OR not_after > $2)
 		ORDER BY created_at DESC
 		LIMIT 1
 	`
-	key, err := scanKey(s.db.QueryRow(ctx, query, tenantID), tenantID)
+	key, err := scanKey(s.db.QueryRow(ctx, query, tenantID, s.now()), tenantID)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return keystore.SigningKey{}, keystore.ErrNoActiveKey
@@ -133,7 +166,9 @@ func (s *Store) ActiveSigningKey(ctx context.Context, tenantID string) (keystore
 }
 
 // VerificationKeys returns every key that may still verify a token (not past not_after), keyed
-// by key id.
+// by key id. For an existing tenant with no usable key it returns an empty map and a nil error (so
+// a JWKS endpoint publishes an empty set after a revoke); keystore.ErrTenantNotFound is reserved
+// for an absent tenant record.
 func (s *Store) VerificationKeys(ctx context.Context, tenantID string) (map[string]keystore.SigningKey, error) {
 	exists, err := s.TenantExists(ctx, tenantID)
 	if err != nil {
@@ -145,9 +180,9 @@ func (s *Store) VerificationKeys(ctx context.Context, tenantID string) (map[stri
 	query := `
 		SELECT key_id, secret, created_at, not_after, retired_at, alg
 		FROM keystore_keys
-		WHERE tenant_id = $1 AND (not_after IS NULL OR not_after > now())
+		WHERE tenant_id = $1 AND (not_after IS NULL OR not_after > $2)
 	`
-	rows, err := s.db.Query(ctx, query, tenantID)
+	rows, err := s.db.Query(ctx, query, tenantID, s.now())
 	if err != nil {
 		return nil, err
 	}
@@ -179,7 +214,7 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 					WHEN not_after IS NULL OR not_after > $2 THEN $2
 					ELSE not_after
 				END
-			WHERE tenant_id = $1 AND retired_at IS NULL AND (not_after IS NULL OR not_after > now())
+			WHERE tenant_id = $1 AND retired_at IS NULL AND (not_after IS NULL OR not_after > $9)
 		)
 		INSERT INTO keystore_keys (tenant_id, key_id, secret, created_at, not_after, retired_at, alg)
 		VALUES ($1, $3, $4, $5, $6, $7, $8)
@@ -187,8 +222,11 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 		SET secret = EXCLUDED.secret, created_at = EXCLUDED.created_at,
 			not_after = EXCLUDED.not_after, retired_at = EXCLUDED.retired_at, alg = EXCLUDED.alg
 	`
+	if _, err := s.insertTenant(ctx, tenantID); err != nil {
+		return err
+	}
 	next.TenantID = tenantID
-	_, err := s.db.Exec(ctx, query, tenantID, retiredAt, next.KeyID, next.Secret, next.CreatedAt, nullTime(next.NotAfter), next.RetiredAt, algOrDefault(next.Alg))
+	_, err := s.db.Exec(ctx, query, tenantID, retiredAt, next.KeyID, next.Secret, next.CreatedAt, nullTime(next.NotAfter), next.RetiredAt, algOrDefault(next.Alg), s.now())
 	return err
 }
 
@@ -206,7 +244,10 @@ func (s *Store) RetireExpiredKeys(ctx context.Context, tenantID string, now time
 	return tag.RowsAffected(), nil
 }
 
-// RevokeTenantKeys immediately deletes every key for the tenant (leaving no key material).
+// RevokeTenantKeys immediately deletes every key for the tenant, leaving no key material. The
+// TENANT RECORD SURVIVES so the revocation holds: subsequent resolutions report
+// keystore.ErrNoActiveKey, which a lazily-provisioning Manager does not treat as an invitation to
+// mint a replacement key.
 func (s *Store) RevokeTenantKeys(ctx context.Context, tenantID string) error {
 	exists, err := s.TenantExists(ctx, tenantID)
 	if err != nil {
@@ -219,9 +260,13 @@ func (s *Store) RevokeTenantKeys(ctx context.Context, tenantID string) error {
 	return err
 }
 
-// DeleteTenant removes the tenant and all its keys. Deleting an absent tenant is a no-op success.
+// DeleteTenant removes the tenant record and all its keys. Deleting an absent tenant is a no-op
+// success.
 func (s *Store) DeleteTenant(ctx context.Context, tenantID string) error {
-	_, err := s.db.Exec(ctx, `DELETE FROM keystore_keys WHERE tenant_id = $1`, tenantID)
+	if _, err := s.db.Exec(ctx, `DELETE FROM keystore_keys WHERE tenant_id = $1`, tenantID); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(ctx, `DELETE FROM keystore_tenants WHERE tenant_id = $1`, tenantID)
 	return err
 }
 
@@ -281,16 +326,31 @@ func algOrDefault(a string) string {
 	return a
 }
 
+// createTenantChecked claims the tenant record and installs its initial key. The claim is the
+// INSERT itself (the primary key decides the winner), so two concurrent creates cannot both proceed
+// even without the advisory lock.
 func (s *Store) createTenantChecked(ctx context.Context, q *Store, tenantID string, initial keystore.SigningKey) error {
-	exists, err := q.TenantExists(ctx, tenantID)
+	inserted, err := q.insertTenant(ctx, tenantID)
 	if err != nil {
 		return err
 	}
-	if exists {
+	if !inserted {
 		return keystore.ErrTenantExists
 	}
 	initial.TenantID = tenantID
 	return q.PutSigningKey(ctx, tenantID, initial)
+}
+
+// insertTenant records the tenant if it is not already known, reporting whether this call created
+// it.
+func (s *Store) insertTenant(ctx context.Context, tenantID string) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`INSERT INTO keystore_tenants (tenant_id) VALUES ($1) ON CONFLICT (tenant_id) DO NOTHING`,
+		tenantID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 type txBeginner interface {

@@ -141,7 +141,10 @@ Migrations:
 
 import: `github.com/JLugagne/egauth/adapters/pgx/keystore`
 implements: `keystore.Store`
-constructor: `func NewStore(db DBQuerier) *Store`
+constructor: `func NewStore(db DBQuerier, opts ...Option) *Store`
+
+Options:
+- `WithClock(now func() time.Time)` — time source used to evaluate key activity/expiry. Defaults to `time.Now`: the store uses the **application** clock, not the database clock, so it agrees with the `keystore.Manager` that stamped `NotAfter`. Pass the same clock you give `keystore.WithClock`.
 
 Methods:
 - `CreateTenant(ctx, tenantID, initial keystore.SigningKey) error`
@@ -156,10 +159,17 @@ Methods:
 
 `keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only).
 
+Tenant records live in `keystore_tenants`, independent of the key rows in `keystore_keys`. That split is what makes the sentinel contract implementable: `TenantExists` reports the tenant record (not the key count), `RevokeTenantKeys` deletes key rows but **keeps** the tenant row, so a revoked tenant reports `keystore.ErrNoActiveKey` (never `ErrTenantNotFound`, which a `Manager` built with `WithLazyProvisioning` would answer by minting a fresh key and thereby undoing the revocation), and `VerificationKeys` returns an **empty set with a nil error** so a `/.well-known/jwks.json` handler keeps serving after an emergency revoke. Only `DeleteTenant` removes the tenant record. `PutSigningKey` creates the tenant record when absent.
+
+The backend runs the shared `keystore/keystoretest.StoreContractTesting` suite (`TestPgxKeystore_StoreContract`), which pins all of the above across backends.
+
 Migrations:
 ```
 001_create_keystore_keys_table.sql
-002_add_key_algorithm.sql           -- adds the alg column (DEFAULT 'HS256'; additive, existing rows unchanged)
+002_add_key_algorithm.sql              -- adds the alg column (DEFAULT 'HS256'; additive, existing rows unchanged)
+003_create_keystore_tenants_table.sql  -- tenant records independent of key rows; backfilled from
+                                       -- keystore_keys, then keystore_keys.tenant_id becomes a FK
+                                       -- onto it (ON DELETE CASCADE)
 ```
 
 ---

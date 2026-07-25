@@ -3,6 +3,10 @@
 // bound to a supplied clock, and gets the full battery: provision, renew (overlap continuity),
 // revoke, delete, retire, and the adversarial cross-tenant isolation checks.
 //
+// It also pins the security-relevant sentinel contract documented on keystore.Store: a revoked
+// tenant still exists, reports ErrNoActiveKey rather than ErrTenantNotFound, and publishes an empty
+// verification set — so an emergency revocation cannot be undone by lazy provisioning.
+//
 // The suite drives the store through a keystore.Manager (so it covers the seal/open round trip
 // and the lifecycle), and also pokes the Store directly where the contract is store-level.
 package keystoretest
@@ -12,6 +16,7 @@ import (
 	"context"
 	"crypto/rsa"
 	"crypto/x509"
+	"errors"
 	"testing"
 	"time"
 
@@ -52,6 +57,7 @@ func StoreContractTesting(t *testing.T, newStore StoreFactory) {
 	t.Run("RenewContinuity", func(t *testing.T) { testRenewContinuity(t, newStore) })
 	t.Run("RetireExpired", func(t *testing.T) { testRetireExpired(t, newStore) })
 	t.Run("RevokeKeys", func(t *testing.T) { testRevokeKeys(t, newStore) })
+	t.Run("RevokeSurvivesLazyProvisioning", func(t *testing.T) { testRevokeSurvivesLazyProvisioning(t, newStore) })
 	t.Run("ReprovisionAfterRevoke", func(t *testing.T) { testReprovisionAfterRevoke(t, newStore) })
 	t.Run("DeleteTenant", func(t *testing.T) { testDeleteTenant(t, newStore) })
 	t.Run("CrossTenantIsolation", func(t *testing.T) { testCrossTenantIsolation(t, newStore) })
@@ -209,7 +215,7 @@ func testRetireExpired(t *testing.T, newStore StoreFactory) {
 
 func testRevokeKeys(t *testing.T, newStore StoreFactory) {
 	ctx := context.Background()
-	_, mgr := newPair(t, newStore, time.Now)
+	store, mgr := newPair(t, newStore, time.Now)
 	if err := mgr.ProvisionTenant(ctx, "acme"); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -219,12 +225,58 @@ func testRevokeKeys(t *testing.T, newStore StoreFactory) {
 	if _, err := mgr.ActiveSigningKey(ctx, "acme"); err == nil {
 		t.Fatal("after revoke there must be no active key")
 	}
+	// A revoked tenant still EXISTS: the store must say so, and must report the absence of a
+	// signer as ErrNoActiveKey — never ErrTenantNotFound, which a lazily-provisioning Manager
+	// treats as "unknown tenant, mint a key" and would silently undo the revocation.
+	exists, err := store.TenantExists(ctx, "acme")
+	if err != nil {
+		t.Fatalf("TenantExists after revoke: %v", err)
+	}
+	if !exists {
+		t.Fatal("a revoked tenant must still exist (only DeleteTenant removes the tenant)")
+	}
+	if _, err := store.ActiveSigningKey(ctx, "acme"); !errors.Is(err, keystore.ErrNoActiveKey) {
+		t.Fatalf("store.ActiveSigningKey after revoke = %v, want ErrNoActiveKey", err)
+	}
 	verify, err := mgr.VerificationKeys(ctx, "acme")
 	if err != nil {
 		t.Fatalf("VerificationKeys after revoke: %v", err)
 	}
 	if len(verify) != 0 {
 		t.Fatalf("revoke must leave no verification keys, got %d", len(verify))
+	}
+}
+
+// testRevokeSurvivesLazyProvisioning is the fail-open regression guard: with lazy provisioning
+// enabled, resolving the keyset of a tenant whose keys were revoked must NOT re-mint a signing
+// key. A backend that reports a revoked tenant as ErrTenantNotFound turns an emergency revocation
+// into a no-op.
+func testRevokeSurvivesLazyProvisioning(t *testing.T, newStore StoreFactory) {
+	ctx := context.Background()
+	store := newStore(time.Now)
+	kek, err := keystore.NewKEK(testKEK)
+	if err != nil {
+		t.Fatalf("NewKEK: %v", err)
+	}
+	mgr, err := keystore.NewManager(store, kek, keystore.WithClock(time.Now), keystore.WithLazyProvisioning())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if err := mgr.ProvisionTenant(ctx, "acme"); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := mgr.RevokeTenantKeys(ctx, "acme"); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	key, err := mgr.ActiveSigningKey(ctx, "acme")
+	if err == nil {
+		t.Fatalf("revocation reversed: lazy provisioning re-minted signing key %q for a tenant whose keys were revoked", key.KeyID)
+	}
+	if !errors.Is(err, keystore.ErrNoActiveKey) {
+		t.Fatalf("ActiveSigningKey after revoke = %v, want ErrNoActiveKey", err)
+	}
+	if _, err := mgr.JWKS(ctx, "acme"); err != nil {
+		t.Fatalf("JWKS after revoke must publish an empty set, got error: %v", err)
 	}
 }
 

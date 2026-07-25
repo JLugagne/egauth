@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"time"
+
+	"github.com/JLugagne/egauth/event"
 )
 
 // ActiveSigningKey returns the tenant's current active signing key with its secret decrypted,
@@ -34,6 +36,12 @@ func (m *Manager) ActiveSigningKey(ctx context.Context, tenantID string) (Signin
 // key plus any retired-but-unexpired keys — keyed by KeyID, each with its secret decrypted. This
 // is what tokens/jwt consults on the verify path so a token signed by a just-rotated key keeps
 // validating during the overlap window.
+//
+// A key row that cannot be opened with the deployment KEK (corrupt at rest, or sealed under a KEK
+// that is no longer configured) is SKIPPED rather than failing the whole set, so one bad row
+// cannot take a tenant's verification path — or its published JWKS — offline. Each skipped row
+// emits EventKeyUnreadable so the degradation is observable. The signing path stays strict:
+// ActiveSigningKey still returns the open error rather than signing with nothing.
 func (m *Manager) VerificationKeys(ctx context.Context, tenantID string) (map[string]SigningKey, error) {
 	keys, err := m.store.VerificationKeys(ctx, tenantID)
 	if err != nil {
@@ -42,11 +50,23 @@ func (m *Manager) VerificationKeys(ctx context.Context, tenantID string) (map[st
 	out := make(map[string]SigningKey, len(keys))
 	for id, k := range keys {
 		if err := m.openKey(&k); err != nil {
-			return nil, err
+			m.emitKeyUnreadable(ctx, tenantID, id, err)
+			continue
 		}
 		out[id] = k
 	}
 	return out, nil
+}
+
+// emitKeyUnreadable reports a key row that could not be opened with the deployment KEK.
+func (m *Manager) emitKeyUnreadable(ctx context.Context, tenantID, keyID string, err error) {
+	event.Emit(ctx, m.events, event.Event{
+		Type:     EventKeyUnreadable,
+		TenantID: tenantID,
+		Reason:   ReasonKeyUnsealFailed,
+		Err:      err,
+		Attrs:    map[string]any{"key_id": keyID},
+	})
 }
 
 // Keyset resolves the full signing material for a tenant in one call: the active signer plus the

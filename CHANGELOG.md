@@ -113,6 +113,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `webapp.NewWebApp` now MUTATES the service it is handed, registering an account revoker on it.
     Wire the preset once, at startup, before serving traffic.
 
+- **Key revocation now holds on the pgx keystore backend (new migration required).**
+  `adapters/pgx/keystore` derived tenant existence from the presence of key rows, so
+  `RevokeTenantKeys` — which deletes every key row — made the tenant look *unknown*. A
+  `keystore.Manager` built with `WithLazyProvisioning` answers `ErrTenantNotFound` by minting a fresh
+  key, so an emergency revocation was silently reversed on the next keyset resolution (fail-open),
+  and `VerificationKeys` / `Manager.JWKS` returned `ErrTenantNotFound` instead of an empty key set,
+  erroring a `/.well-known/jwks.json` handler after a revoke.
+
+  - **New migration `003_create_keystore_tenants_table.sql`** — run `keystore.Migrate` on upgrade. It
+    creates `keystore_tenants`, backfills it from existing `keystore_keys` rows (no tenant is lost),
+    and makes `keystore_keys.tenant_id` a foreign key onto it with `ON DELETE CASCADE`. Code that
+    inserts `keystore_keys` rows directly must insert the tenant row first.
+  - `RevokeTenantKeys` now deletes key rows only; the tenant record survives until `DeleteTenant`.
+    `ActiveSigningKey` returns `ErrNoActiveKey` (not `ErrTenantNotFound`) for a revoked tenant, and
+    `VerificationKeys` returns an empty map with a nil error.
+  - The `keystore.Store` doc comment now states this sentinel contract explicitly. **Action required**
+    for external `keystore.Store` implementers: keep a tenant record independent of key rows and run
+    `keystore/keystoretest.StoreContractTesting`, which gained `RevokeKeys` store-level sentinel
+    assertions and a new `RevokeSurvivesLazyProvisioning` case.
+  - `adapters/pgx/keystore.NewStore` is now variadic (`NewStore(db, opts ...Option)`) and accepts
+    `WithClock`; the pgx backend evaluates key activity/expiry with the **application** clock instead
+    of SQL `now()`, so it agrees with the `Manager` that stamped `NotAfter`. Existing calls compile
+    unchanged. The pgx backend is now wired into the shared conformance suite
+    (`TestPgxKeystore_StoreContract`), which previously skipped it for want of an injectable clock.
+
 ### Added
 
 - **The MFA login gate now covers every login path.** `identity.WithMFAGate` applies to
@@ -198,6 +223,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **One unreadable keystore row no longer takes a tenant's whole verification set offline.**
+  `keystore.Manager.VerificationKeys` (and therefore `JWKS`) failed the entire call when a single key
+  row could not be opened with the deployment KEK (corrupt at rest, or sealed under a KEK that is no
+  longer configured). It now skips that row and emits the new `keystore.EventKeyUnreadable`
+  (`Reason: keystore.ReasonKeyUnsealFailed`, `Attrs["key_id"]`, `Err` set) so the degradation stays
+  observable. The signing path is unchanged and still strict: `ActiveSigningKey` returns the open
+  error rather than silently signing with something else.
 
 - **A password reset did not end an account takeover (HIGH, `identity/TEN-1`).** Reproduced end to
   end: an attacker holding a live session on the victim's account `POST`s
