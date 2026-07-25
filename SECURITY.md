@@ -187,7 +187,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   - **`Config.CookieKey` (required).** A stable, random secret of at least
     `passkey.MinCookieKeyLength` (32) bytes used to HMAC-authenticate the ceremony cookie.
     `NewService` returns `ErrCookieKeyMissing` if it is unset or too short — the key is validated
-    at construction, not on the first ceremony, so a misconfiguration fails at startup. (A
+    at construction, not on the first ceremony, so a misconfiguration fails at startup. Length is
+    not entropy: a key of the right size whose bytes are all identical (the `make([]byte, 32)`
+    placeholder) is refused with `ErrCookieKeyWeak`, and the per-handler / per-tenant key paths fail
+    the request closed on the same key rather than sealing cookies anyone can forge. (A
     per-handler `passkey.WithCookieKey` override still exists for the rare case of a distinct key,
     and the handlers also fail closed defensively if that override clears the key.)
   - **`Config.ChallengeStore` (required).** Provides single-use, server-side replay protection
@@ -195,7 +198,12 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
     raw Finish request cannot be replayed within the cookie TTL. `NewService` returns
     `ErrChallengeStoreMissing` unless a store is supplied or the explicit opt-out
     `Config.InsecureNoChallengeStore` is set (cookie-only protection — **do not** use for
-    passwordless). The `passkey/memory` and `passkey/pgx` subpackages provide implementations.
+    passwordless). Two implementations ship: `passkey/memory` (single process only — each replica
+    keeps its own map, so a ceremony begun on one pod cannot be finished on another) and
+    `adapters/pgx/passkey.NewChallengeStore` (shared, and the one a multi-replica deployment must
+    use; its `DeleteExpired` prunes ceremonies that were never finished). Reaching for
+    `InsecureNoChallengeStore` because ceremonies fail across pods removes the replay defence —
+    use the shared store instead.
   - **`Config.UserVerification` (defaults to required).** The zero value is now
     `protocol.VerificationRequired`: an assertion whose User Verified (UV) flag is unset is
     rejected at Finish across register, login and discoverable login. Leave it at the default for
@@ -223,9 +231,19 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
     cookie** — any refresh cookie an earlier full session left in the browser is actively CLEARED, and
     when the issuer implements `tokens.AccessTokenIssuer` (as `jwt.Service` does) no refresh-token
     family is persisted at all. The second factor is then driven by
-    `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full** access+refresh pair with
-    `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the interim access cookie.
+    `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full** access+refresh pair and sets
+    both cookies, replacing the interim access cookie. The re-issued `AMR` records **only the factors
+    actually presented**: `[AMROTP, AMRMFA]` by default, prefixed with the factors the interim
+    credential already proved when `mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C])` is wired
+    (e.g. `[AMRPassword, AMROTP, AMRMFA]` after a password login). It never asserts a password for a
+    subject who signed in with a magic link or a federated IdP.
     Users with no enrolled factor are unaffected and receive the full pair.
+    **Lost authenticator.** `mfa.StepUpRecoveryHandler` is the recovery-code twin of
+    `mfa.StepUpHandler`: it redeems a single-use recovery code through `VerifyRecoveryCode` (same
+    single-use semantics, same shared failed-attempt budget and `ErrTooManyAttempts` lockout) and
+    re-issues the same full pair, stamped `AMR=[AMRRecoveryCode, AMRMFA]`. Without it a user whose
+    authenticator is gone had no self-service path back into a session — `VerifyRecoveryHandler`
+    only *proves* a code, it mints nothing. Rate-limit it exactly like the TOTP step-up route.
   - *The interim credential is not a session, and that is **enforced**, not documented.*
     `tokens.RequireAuth` / `tokens.ContextMiddleware` refuse an interim credential with 403
     `step_up_required` on **every** route unless the route opts in with
@@ -764,6 +782,18 @@ hosts when the MFA endpoints are reachable from a browser session on another ori
 cross-subdomain or embedded app); supply hostnames without scheme, e.g.
 `mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
 `mfa.WithInsecureNoOriginCheck()` opt-out.
+
+The **`passkey` handlers** (`BeginRegistrationHandler`, `FinishRegistrationHandler`,
+`BeginLoginHandler`, `FinishLoginHandler`, `BeginDiscoverableLoginHandler`,
+`FinishDiscoverableLoginHandler`, `RenameCredentialHandler`) enforce the same strict same-origin
+check by default, with the same widening option (`passkey.WithTrustedOrigins(...)`) and the same
+explicit opt-out (`passkey.WithInsecureNoOriginCheck()`). The WebAuthn origin/RPID validation
+go-webauthn performs covers the ceremony *response*, not the non-ceremony state-changing endpoints:
+without this check a cross-site POST could rename a victim's credential or burn their in-flight
+ceremony. The ceremony cookie itself is named `__Host-passkey_ceremony`, so a sibling subdomain
+cannot toss a same-named cookie in front of the legitimate one; `passkey.WithCookieDomain` and
+`passkey.WithInsecureCookies` are incompatible with that prefix and DEMOTE the name (to `__Secure-`
+or bare) rather than emitting a cookie browsers drop.
 
 ## Observability and idempotency (consumer responsibility)
 

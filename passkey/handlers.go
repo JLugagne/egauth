@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/internal/httputil"
@@ -18,10 +19,23 @@ import (
 )
 
 // Default ceremony-cookie configuration.
+//
+// DefaultSessionCookieName carries the browser-enforced __Host- prefix: the cookie must be
+// Secure, must carry no Domain and must be rooted at Path=/. That defeats subdomain
+// cookie-tossing, where a sibling subdomain plants a same-named ceremony cookie the browser
+// sends ahead of the legitimate one. WithCookieDomain and WithInsecureCookies are incompatible
+// with the prefix, so they DEMOTE the name (see WithCookieDomain) instead of emitting a cookie
+// every browser silently drops.
 const (
-	DefaultSessionCookieName = "passkey_ceremony"
+	DefaultSessionCookieName = "__Host-passkey_ceremony"
 	DefaultSessionTTL        = 5 * time.Minute
 )
+
+// hostPrefix is the browser-enforced cookie name prefix requiring Secure, no Domain and Path=/.
+const hostPrefix = "__Host-"
+
+// securePrefix is the browser-enforced cookie name prefix requiring Secure only.
+const securePrefix = "__Secure-"
 
 // DefaultMaxBodyBytes is the default cap applied to the request body of the Finish ceremony
 // handlers. A WebAuthn attestation/assertion response is small; this bound prevents an
@@ -53,6 +67,10 @@ type handlerConfig struct {
 	maxBodyBytes       int64
 	// cookieKeys, when set, resolves the ceremony-cookie HMAC key per tenant so a cookie sealed for one tenant cannot be opened under another (per-tenant cryptographic isolation). When nil the static cookieKey is used for every tenant (unchanged single-key behavior).
 	cookieKeys CookieKeyResolver
+	// trustedOrigins widens the strict same-origin CSRF allowlist (see WithTrustedOrigins); the check itself is ON by default even when this is empty (see insecureNoOriginCheck).
+	trustedOrigins map[string]bool
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
+	insecureNoOriginCheck bool
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -75,7 +93,31 @@ func newHandlerConfig(svc *Service, opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
+	c.sessionCookie = demoteCookieName(c.sessionCookie, c.insecureCookies, c.cookieDomain)
 	return c
+}
+
+// demoteCookieName drops a browser-enforced name prefix the accompanying cookie attributes can no
+// longer satisfy: __Host- becomes __Secure- once a Domain is set (the cookie is still Secure), and
+// any prefix becomes the bare name once the cookie is no longer Secure. Begin and Finish derive the
+// name the same way, so the demotion never splits the ceremony across two names.
+func demoteCookieName(name string, insecure bool, domain string) string {
+	switch {
+	case strings.HasPrefix(name, hostPrefix):
+		base := strings.TrimPrefix(name, hostPrefix)
+		switch {
+		case insecure:
+			return base
+		case domain != "":
+			return securePrefix + base
+		default:
+			return name
+		}
+	case strings.HasPrefix(name, securePrefix) && insecure:
+		return strings.TrimPrefix(name, securePrefix)
+	default:
+		return name
+	}
 }
 
 // WithUserResolver supplies the ceremony subject (required).
@@ -99,8 +141,71 @@ func WithSessionTTL(d time.Duration) HandlerOption {
 }
 
 // WithCookieDomain scopes the ceremony cookie to a domain.
+//
+// A Domain is incompatible with the __Host- prefix DefaultSessionCookieName carries, so a name
+// still carrying it is DEMOTED to __Secure- rather than emitted as a cookie browsers reject.
+// Setting a Domain forfeits the subdomain cookie-tossing protection __Host- provides.
 func WithCookieDomain(domain string) HandlerOption {
 	return func(h *handlerConfig) { h.cookieDomain = domain }
+}
+
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for every state-changing
+// passkey handler.
+//
+// The origin check is ON by default (see WithInsecureNoOriginCheck): even with no trusted origins
+// configured, a POST whose Origin (or Referer fallback) host is not the request's own Host is
+// rejected with 403 "cross_site_blocked". This option WIDENS that allowlist. Supply hosts WITHOUT
+// scheme, e.g. "app.example.com".
+func WithTrustedOrigins(origins ...string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.trustedOrigins = make(map[string]bool, len(origins))
+		for _, o := range origins {
+			h.trustedOrigins[o] = true
+		}
+	}
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on every state-changing passkey
+// handler.
+//
+// By default these handlers reject any POST whose Origin (or Referer fallback) host is neither the
+// request's own Host nor an explicitly trusted origin (see WithTrustedOrigins). This option turns
+// that protection OFF. It is named "Insecure" deliberately: only reach for it when CSRF is handled
+// by a separate layer or in trusted test setups. Prefer WithTrustedOrigins to extend, rather than
+// remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
+}
+
+// originAllowed reports whether the request passes the CSRF same-origin check, matching the
+// identity/tokens/mfa/otp handler families: a request is allowed only when its Origin (or Referer
+// fallback) host equals the request's own Host or an allowlisted host, and a POST carrying neither
+// header is treated as untrusted.
+func (cfg handlerConfig) originAllowed(r *http.Request) bool {
+	if cfg.insecureNoOriginCheck {
+		return true
+	}
+	host := httputil.RequestOriginHost(r)
+	if host == "" {
+		return false
+	}
+	return host == r.Host || cfg.trustedOrigins[host]
+}
+
+// guardMethodAndOrigin runs the preamble every passkey handler shares: POST-only, then the
+// same-origin CSRF check. It writes the failure response and returns false when the request must
+// not proceed.
+func (cfg handlerConfig) guardMethodAndOrigin(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return false
+	}
+	if !cfg.originAllowed(r) {
+		http.Error(w, "cross_site_blocked", http.StatusForbidden)
+		return false
+	}
+	return true
 }
 
 // WithSameSite overrides the ceremony cookie SameSite attribute (default Lax).
@@ -119,7 +224,8 @@ func WithInsecureCookies() HandlerOption {
 // key for a specific handler. The cookie carries the WebAuthn challenge and user-verification
 // requirement, which the server treats as trusted state, so an unauthenticated cookie would let
 // a client forge them (e.g. downgrade user verification). Use a stable, random secret
-// (>= MinCookieKeyLength bytes) and pass the SAME key to the matching Begin and Finish handlers.
+// (>= MinCookieKeyLength bytes, and not a single repeated byte — see ErrCookieKeyWeak) and pass the
+// SAME key to the matching Begin and Finish handlers.
 func WithCookieKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) { h.cookieKey = key }
 }
@@ -240,11 +346,10 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	}
 }
 
-// subject runs the common preamble (POST-only, resolve the user) and returns it.
+// subject runs the common preamble (POST-only, same-origin CSRF check, resolve the user) and
+// returns it.
 func (cfg handlerConfig) subject(w http.ResponseWriter, r *http.Request) (uuid.UUID, string, string, string, bool) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if !cfg.guardMethodAndOrigin(w, r) {
 		return uuid.Nil, "", "", "", false
 	}
 	if cfg.resolve == nil {
@@ -449,9 +554,7 @@ func WithDiscoverableTenant(fn TenantExtractor) HandlerOption {
 func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !cfg.guardMethodAndOrigin(w, r) {
 			return
 		}
 		tenant := ""
@@ -481,9 +584,7 @@ func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Han
 func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		if !cfg.guardMethodAndOrigin(w, r) {
 			return
 		}
 		tenant := ""
@@ -567,8 +668,9 @@ func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFu
 //
 // resolver receives the tenant id exactly as produced by WithUserResolver (registration/login) or
 // WithDiscoverableTenant (discoverable login); the empty string is the single-tenant partition. It
-// must return a stable, random secret of at least MinCookieKeyLength bytes for the tenant. Returning
-// an error fails the request closed (500) rather than falling back to a shared key. Back the
+// must return a stable, random secret of at least MinCookieKeyLength bytes for the tenant, carrying
+// real entropy (a single repeated byte is refused, see ErrCookieKeyWeak). Returning an error fails
+// the request closed (500) rather than falling back to a shared key. Back the
 // resolver with egauth/keystore (e.g. derive a per-tenant cookie key from the tenant's KeyStore
 // material) so cookie keys rotate and revoke with the rest of the tenant's crypto.
 //
@@ -580,19 +682,20 @@ func WithTenantCookieKeys(resolver CookieKeyResolver) HandlerOption {
 
 // cookieKeyFor resolves the ceremony-cookie HMAC key for the request's tenant. When a per-tenant
 // resolver is configured (WithTenantCookieKeys) it is consulted; otherwise the static cookieKey
-// (Config.CookieKey / WithCookieKey) is returned. A resolver error or a too-short / missing key
-// fails the request closed with 500 and ok=false, mirroring storeSession/loadSession's existing
-// fail-closed behavior for an unconfigured key — never silently downgrading to a shared key.
+// (Config.CookieKey / WithCookieKey) is returned. A resolver error, or a key that fails the length
+// or entropy floor NewService enforces (see ErrCookieKeyWeak), fails the request closed with 500
+// and ok=false, mirroring storeSession/loadSession's existing fail-closed behavior for an
+// unconfigured key — never silently downgrading to a shared or guessable key.
 func (cfg handlerConfig) cookieKeyFor(w http.ResponseWriter, ctx context.Context, tenant string) ([]byte, bool) {
 	if cfg.cookieKeys == nil {
-		if len(cfg.cookieKey) < MinCookieKeyLength {
+		if !usableCookieKey(cfg.cookieKey) {
 			http.Error(w, "server_misconfigured", http.StatusInternalServerError)
 			return nil, false
 		}
 		return cfg.cookieKey, true
 	}
 	key, err := cfg.cookieKeys(ctx, tenant)
-	if err != nil || len(key) < MinCookieKeyLength {
+	if err != nil || !usableCookieKey(key) {
 		http.Error(w, "server_misconfigured", http.StatusInternalServerError)
 		return nil, false
 	}

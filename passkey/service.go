@@ -21,8 +21,9 @@ var ErrCredentialCloned = errors.New("passkey: authenticator signature counter r
 
 // MinCookieKeyLength is the minimum length (in bytes) accepted for the ceremony-cookie HMAC
 // key. The cookie is authenticated with HMAC-SHA-256, so a key shorter than the 32-byte hash
-// output weakens the tag; NewService rejects anything shorter. Use a stable, random secret of
-// at least this length.
+// output weakens the tag; NewService rejects anything shorter. Length is not sufficient on its
+// own: a key of the right length whose bytes are all identical (the all-zero placeholder) is
+// rejected too, with ErrCookieKeyWeak. Use a stable secret from crypto/rand.
 const MinCookieKeyLength = 32
 
 // ErrCookieKeyMissing is returned by NewService when Config.CookieKey is unset or shorter than
@@ -31,6 +32,27 @@ const MinCookieKeyLength = 32
 // authenticated cookie a client could forge them (e.g. downgrade user verification), so the key
 // is required at construction.
 var ErrCookieKeyMissing = errors.New("passkey: Config.CookieKey is required and must be at least 32 bytes")
+
+// ErrCookieKeyWeak is returned by NewService when Config.CookieKey satisfies MinCookieKeyLength but
+// carries no entropy at all — every byte is identical. The common case is the all-zero
+// make([]byte, 32) placeholder that a length-only check happily accepts: an attacker who guesses
+// that key forges ceremony cookies (challenge and user-verification downgrade) at will. Generate
+// the key with crypto/rand, or load it from your secret store.
+var ErrCookieKeyWeak = errors.New("passkey: Config.CookieKey has no entropy (every byte is identical); generate it with crypto/rand")
+
+// usableCookieKey reports whether key clears both the length floor (MinCookieKeyLength) and the
+// entropy floor (not a single repeated byte, which covers the all-zero key).
+func usableCookieKey(key []byte) bool {
+	if len(key) < MinCookieKeyLength {
+		return false
+	}
+	for _, b := range key[1:] {
+		if b != key[0] {
+			return true
+		}
+	}
+	return false
+}
 
 // ErrChallengeStoreMissing is returned by NewService when no Config.ChallengeStore is provided
 // and the insecure opt-out (Config.InsecureNoChallengeStore) was not set. The challenge store
@@ -66,7 +88,8 @@ type Config struct {
 	// ErrCookieKeyMissing if it is unset or shorter than MinCookieKeyLength), matching jwt.New's
 	// fail-fast behavior. Use a stable, random secret of at least 32 bytes. The per-request
 	// WithCookieKey HandlerOption can still override it for a specific handler, but a service-wide
-	// key here is the recommended way to configure it once.
+	// key here is the recommended way to configure it once. A key whose bytes are all identical is
+	// refused with ErrCookieKeyWeak: length alone is not entropy.
 	CookieKey []byte
 	// ChallengeStore enables server-side, single-use replay protection for the ceremony challenge
 	// (SEC-05): the issued challenge is recorded on Begin and atomically consumed on Finish, so a
@@ -112,7 +135,8 @@ const ceremonyTimeout = 5 * time.Minute
 //     is the zero value, so a UV-cleared assertion is rejected at Finish unless the caller
 //     explicitly relaxes it.
 //   - A ceremony-cookie HMAC key is required: NewService returns ErrCookieKeyMissing if
-//     Config.CookieKey is unset or shorter than MinCookieKeyLength.
+//     Config.CookieKey is unset or shorter than MinCookieKeyLength, and ErrCookieKeyWeak if it is
+//     long enough but every byte is identical (the all-zero placeholder).
 //   - A ChallengeStore is required for single-use replay protection: NewService returns
 //     ErrChallengeStoreMissing unless Config.ChallengeStore is set or the explicit opt-out
 //     Config.InsecureNoChallengeStore is true.
@@ -128,6 +152,9 @@ func NewService(store Store, cfg Config) (*Service, error) {
 	// Fail fast on an unusable security configuration before building anything.
 	if len(cfg.CookieKey) < MinCookieKeyLength {
 		return nil, ErrCookieKeyMissing
+	}
+	if !usableCookieKey(cfg.CookieKey) {
+		return nil, ErrCookieKeyWeak
 	}
 	if cfg.ChallengeStore == nil && !cfg.InsecureNoChallengeStore {
 		return nil, ErrChallengeStoreMissing

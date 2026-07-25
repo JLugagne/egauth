@@ -25,7 +25,7 @@ func beginDiscoverableAndCaptureFinish(t *testing.T, svc *passkey.Service, uid u
 	t.Helper()
 
 	beginRec := httptest.NewRecorder()
-	passkey.BeginDiscoverableLoginHandler(svc, opts...)(beginRec, httptest.NewRequest(http.MethodPost, "/discoverable/begin", nil))
+	passkey.BeginDiscoverableLoginHandler(svc, opts...)(beginRec, postReq("/discoverable/begin", nil))
 	require.Equal(t, http.StatusOK, beginRec.Code, "BeginDiscoverableLoginHandler should succeed")
 
 	cookie = findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
@@ -61,14 +61,14 @@ func TestDiscoverableLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 	cookie, body := beginDiscoverableAndCaptureFinish(t, svc, uid, auth, opts...)
 
 	// First Finish: must succeed.
-	req1 := httptest.NewRequest(http.MethodPost, "/discoverable/finish", bytes.NewReader(body))
+	req1 := postReq("/discoverable/finish", bytes.NewReader(body))
 	req1.AddCookie(cookie)
 	rec1 := httptest.NewRecorder()
 	passkey.FinishDiscoverableLoginHandler(svc, opts...)(rec1, req1)
 	require.Equal(t, http.StatusNoContent, rec1.Code, "first discoverable finish must succeed")
 
 	// Replay the IDENTICAL request (same cookie + same body bytes).
-	req2 := httptest.NewRequest(http.MethodPost, "/discoverable/finish", bytes.NewReader(body))
+	req2 := postReq("/discoverable/finish", bytes.NewReader(body))
 	req2.AddCookie(cookie)
 	rec2 := httptest.NewRecorder()
 	passkey.FinishDiscoverableLoginHandler(svc, opts...)(rec2, req2)

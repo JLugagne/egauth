@@ -36,7 +36,7 @@ func TestFinishLogin_OversizedBodyRejected(t *testing.T) {
 	cap := int64(len(body) - 1)
 	opts := append([]passkey.HandlerOption{passkey.WithMaxBodyBytes(cap)}, baseOpts...)
 
-	req := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req := postReq("/login/finish", bytes.NewReader(body))
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec, req)
@@ -63,7 +63,7 @@ func TestFinishLogin_NormalBodyAccepted(t *testing.T) {
 	require.Less(t, int64(len(body)), passkey.DefaultMaxBodyBytes,
 		"a real ceremony body must fit comfortably under the default cap")
 
-	req := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req := postReq("/login/finish", bytes.NewReader(body))
 	req.AddCookie(cookie)
 	rec := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec, req)

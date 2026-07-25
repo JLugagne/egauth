@@ -193,6 +193,26 @@ func SubjectResolverFromContext(r *http.Request) (uuid.UUID, bool) {
 //	    mfa.StepUpHandler(svc, issuer, claimsOf,
 //	        mfa.WithUserResolver(tokens.UserResolverFromContext),
 //	        mfa.WithMustChangeResolver(tokens.MustChangeResolverFromContext[C]))))
+//
+// PriorAMRResolverFromContext adapts the verified Claims[C] injected by ContextMiddleware to the
+// []string resolver shape used by mfa.WithPriorAMR. It reports the factors the credential carrying
+// the step-up request already proved, so the step-up handlers can carry them forward instead of
+// guessing: they assert only the factor they verified themselves plus these. The C must match the
+// ContextMiddleware[C] that produced the entry; a mismatch (or an unauthenticated request) reports
+// nil, which is the safe answer — nothing extra is asserted.
+//
+//	mux.Handle("/mfa/step-up", tokens.ContextMiddleware(verifier,
+//	    mfa.StepUpHandler(svc, issuer, claimsOf,
+//	        mfa.WithUserResolver(tokens.UserResolverFromContext),
+//	        mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C]))))
+func PriorAMRResolverFromContext[C any](r *http.Request) []string {
+	claims, ok := ClaimsFromContext[C](r.Context())
+	if !ok {
+		return nil
+	}
+	return claims.AMR
+}
+
 func MustChangeResolverFromContext[C any](r *http.Request) bool {
 	claims, ok := ClaimsFromContext[C](r.Context())
 	if !ok {

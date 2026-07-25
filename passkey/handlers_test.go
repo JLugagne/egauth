@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -54,7 +55,7 @@ func TestBeginRegistrationHandler(t *testing.T) {
 	h := passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))
 
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/register/begin", nil))
+	h(rec, postReq("/passkey/register/begin", nil))
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "application/json", rec.Header().Get("Content-Type"))
@@ -77,7 +78,7 @@ func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T
 	// still fail closed (defense in depth) rather than emit an unauthenticated cookie.
 	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(nil))
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	h(rec, postReq("/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Nil(t, findCookie(rec.Result().Cookies(), passkey.DefaultSessionCookieName))
 }
@@ -90,7 +91,7 @@ func TestBeginRegistrationHandler_ShortCookieKeyOverrideFailsClosed(t *testing.T
 	short := make([]byte, passkey.MinCookieKeyLength-1)
 	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(short))
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	h(rec, postReq("/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Nil(t, findCookie(rec.Result().Cookies(), passkey.DefaultSessionCookieName))
 }
@@ -102,14 +103,14 @@ func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	// Begin to obtain a validly-signed ceremony cookie.
 	beginRec := httptest.NewRecorder()
 	passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))(
-		beginRec, httptest.NewRequest(http.MethodPost, "/", nil))
+		beginRec, postReq("/", nil))
 	cookie := findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
 	require.NotNil(t, cookie)
 
 	// Tamper the cookie value: the HMAC must no longer verify.
 	tampered := &http.Cookie{Name: cookie.Name, Value: cookie.Value + "x"}
 
-	finishReq := httptest.NewRequest(http.MethodPost, "/", nil)
+	finishReq := postReq("/", nil)
 	finishReq.AddCookie(tampered)
 	finishRec := httptest.NewRecorder()
 	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))(finishRec, finishReq)
@@ -117,7 +118,7 @@ func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, finishRec.Code, "a tampered ceremony cookie must be rejected")
 
 	// A different key must also reject the legitimate cookie (HMAC mismatch).
-	otherReq := httptest.NewRequest(http.MethodPost, "/", nil)
+	otherReq := postReq("/", nil)
 	otherReq.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
 	otherRec := httptest.NewRecorder()
 	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey([]byte("a-totally-different-secret-key-32")))(otherRec, otherReq)
@@ -129,7 +130,7 @@ func TestPasskeyHandlers_AuthAndMethodGuards(t *testing.T) {
 
 	t.Run("no resolver -> 401", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		passkey.BeginRegistrationHandler(svc)(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+		passkey.BeginRegistrationHandler(svc)(rec, postReq("/", nil))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 
@@ -145,7 +146,7 @@ func TestFinishRegistrationHandler_MissingSessionCookie(t *testing.T) {
 	h := passkey.FinishRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey))
 
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/register/finish", nil))
+	h(rec, postReq("/passkey/register/finish", nil))
 
 	// No ceremony cookie → rejected before any attestation parsing.
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -162,7 +163,7 @@ func TestPasskeyHandlers_StoreErrorIs500(t *testing.T) {
 	// "bad attestation".
 	h := passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey))
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+	h(rec, postReq("/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
@@ -175,7 +176,7 @@ func TestFinishRegistrationHandler_AttestationRejectedIs403(t *testing.T) {
 	opts := []passkey.HandlerOption{resolver(uid), passkey.WithCookieKey(testCookieKey)}
 
 	beginRec := httptest.NewRecorder()
-	passkey.BeginRegistrationHandler(svc, opts...)(beginRec, httptest.NewRequest(http.MethodPost, "/register/begin", nil))
+	passkey.BeginRegistrationHandler(svc, opts...)(beginRec, postReq("/register/begin", nil))
 	require.Equal(t, http.StatusOK, beginRec.Code)
 	cookie := findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
 	require.NotNil(t, cookie)
@@ -201,7 +202,15 @@ func TestBeginLoginHandler_NoCredentials(t *testing.T) {
 	h := passkey.BeginLoginHandler(svc, resolver(uuid.Must(uuid.NewV7())))
 
 	rec := httptest.NewRecorder()
-	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/login/begin", nil))
+	h(rec, postReq("/passkey/login/begin", nil))
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code) // no_credentials
+}
+
+// postReq builds a same-origin POST, the way a browser sends one: the passkey handlers apply a
+// strict same-origin CSRF check, so a request with no Origin is (correctly) refused with 403.
+func postReq(target string, body io.Reader) *http.Request {
+	r := httptest.NewRequest(http.MethodPost, target, body)
+	r.Header.Set("Origin", "https://"+r.Host)
+	return r
 }

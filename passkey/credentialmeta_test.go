@@ -214,7 +214,7 @@ func TestRenameCredentialHandler_PersistsNickname(t *testing.T) {
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/passkey/credentials/rename", bytes.NewReader(raw))
+	req := postReq("/passkey/credentials/rename", bytes.NewReader(raw))
 	h(rec, req)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 
@@ -230,7 +230,7 @@ func TestRenameCredentialHandler_Guards(t *testing.T) {
 
 	t.Run("no resolver -> 401", func(t *testing.T) {
 		rec := httptest.NewRecorder()
-		passkey.RenameCredentialHandler(svc)(rec, httptest.NewRequest(http.MethodPost, "/", nil))
+		passkey.RenameCredentialHandler(svc)(rec, postReq("/", nil))
 		assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	})
 

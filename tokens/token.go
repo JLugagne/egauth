@@ -14,6 +14,11 @@ const (
 	AMROTP      = "otp" // a one-time password (TOTP authenticator app) was verified
 	AMRWebAuthn = "hwk" // a WebAuthn / passkey (hardware-backed key) was used
 	AMRMFA      = "mfa" // multiple factors were verified in this session
+	// AMRRecoveryCode records that a single-use MFA recovery code was redeemed. RFC 8176 has no
+	// registered value for it ("otp" is reserved for HOTP/RFC 4226 and TOTP/RFC 6238), so egauth
+	// uses this private value rather than mislabeling the factor as an authenticator-app code. It
+	// IS a possession factor, so it satisfies HasStepUpFactor.
+	AMRRecoveryCode = "rc"
 )
 
 // KeyType identifies the kind of API key, aligning with egauth.PrincipalKind at the
@@ -95,13 +100,13 @@ func (c Claims[C]) FreshAuth(maxAge time.Duration) bool {
 }
 
 // HasStepUpFactor reports whether amr (RFC 8176) records a verified SECOND — or single strong,
-// phishing-resistant — factor. It accepts AMRMFA, AMROTP and AMRWebAuthn. AMRPassword alone is
-// not a second factor and never satisfies it, so a password-only (or pre-step-up) credential
-// fails closed.
+// phishing-resistant — factor. It accepts AMRMFA, AMROTP, AMRWebAuthn and AMRRecoveryCode.
+// AMRPassword alone is not a second factor and never satisfies it, so a password-only (or
+// pre-step-up) credential fails closed.
 func HasStepUpFactor(amr []string) bool {
 	for _, v := range amr {
 		switch v {
-		case AMRMFA, AMROTP, AMRWebAuthn:
+		case AMRMFA, AMROTP, AMRWebAuthn, AMRRecoveryCode:
 			return true
 		}
 	}
@@ -128,7 +133,7 @@ func (c Claims[C]) AsInterim(ttl time.Duration) Claims[C] {
 		kept := make([]string, 0, len(c.AMR))
 		for _, v := range c.AMR {
 			switch v {
-			case AMRMFA, AMROTP, AMRWebAuthn:
+			case AMRMFA, AMROTP, AMRWebAuthn, AMRRecoveryCode:
 				continue
 			default:
 				kept = append(kept, v)

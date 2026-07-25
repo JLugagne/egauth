@@ -64,7 +64,7 @@ func beginLoginAndCaptureFinish(t *testing.T, svc *passkey.Service, uid uuid.UUI
 	t.Helper()
 
 	beginRec := httptest.NewRecorder()
-	passkey.BeginLoginHandler(svc, opts...)(beginRec, httptest.NewRequest(http.MethodPost, "/login/begin", nil))
+	passkey.BeginLoginHandler(svc, opts...)(beginRec, postReq("/login/begin", nil))
 	require.Equal(t, http.StatusOK, beginRec.Code, "begin login should succeed")
 
 	cookie = findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
@@ -110,14 +110,14 @@ func TestFinishLogin_Replay_BlockedWithChallengeStore(t *testing.T) {
 	cookie, body := beginLoginAndCaptureFinish(t, svc, uid, auth, opts...)
 
 	// First Finish: succeeds.
-	req1 := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req1 := postReq("/login/finish", bytes.NewReader(body))
 	req1.AddCookie(cookie)
 	rec1 := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec1, req1)
 	require.Equal(t, http.StatusNoContent, rec1.Code, "first finish must succeed")
 
 	// Replay the IDENTICAL request (same cookie + same body bytes).
-	req2 := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req2 := postReq("/login/finish", bytes.NewReader(body))
 	req2.AddCookie(cookie)
 	rec2 := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec2, req2)
@@ -140,14 +140,14 @@ func TestFinishLogin_Replay_UnchangedWithoutChallengeStore(t *testing.T) {
 
 	cookie, body := beginLoginAndCaptureFinish(t, svc, uid, auth, opts...)
 
-	req1 := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req1 := postReq("/login/finish", bytes.NewReader(body))
 	req1.AddCookie(cookie)
 	rec1 := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec1, req1)
 	require.Equal(t, http.StatusNoContent, rec1.Code, "first finish must succeed")
 
 	// Replay: without a ChallengeStore wired, the sign-count-0 replay still passes.
-	req2 := httptest.NewRequest(http.MethodPost, "/login/finish", bytes.NewReader(body))
+	req2 := postReq("/login/finish", bytes.NewReader(body))
 	req2.AddCookie(cookie)
 	rec2 := httptest.NewRecorder()
 	passkey.FinishLoginHandler(svc, opts...)(rec2, req2)

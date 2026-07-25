@@ -142,7 +142,7 @@ type Claims[C any] struct {
     // by identity.WithMFAGate / oauth.WithMFAGate. RequireAuth and ContextMiddleware refuse an
     // interim credential with 403 step_up_required on EVERY route that does not opt in with
     // WithInterimAllowed (put it on the step-up route only), and the factor-mutating / destructive
-    // handlers refuse it outright. Cleared only by mfa.StepUpHandler re-issuing a full pair; never
+    // handlers refuse it outright. Cleared only by mfa.StepUpHandler / mfa.StepUpRecoveryHandler re-issuing a full pair; never
     // by refresh (an interim credential is issued without a refresh token).
     // JWT claim name: "interim" (omitempty).
     Interim bool
@@ -153,11 +153,12 @@ func (c Claims[C]) FreshAuth(maxAge time.Duration) bool
 // Returns true if time.Since(AuthTime) <= maxAge. maxAge<=0 always true; zero AuthTime fails closed.
 
 func (c Claims[C]) SatisfiesStepUp() bool
-// true when the credential is NOT Interim AND its AMR carries a step-up factor (mfa/otp/hwk).
+// true when the credential is NOT Interim AND its AMR carries a step-up factor (mfa/otp/hwk/rc).
 // The predicate the factor-mutating and destructive handlers enforce.
 
 func HasStepUpFactor(amr []string) bool
-// true when amr contains AMRMFA, AMROTP or AMRWebAuthn. AMRPassword alone is NOT a second factor.
+// true when amr contains AMRMFA, AMROTP, AMRWebAuthn or AMRRecoveryCode. AMRPassword alone is NOT
+// a second factor.
 
 func (c Claims[C]) AsInterim(ttl time.Duration) Claims[C]
 // Copy stamped as a pre-step-up credential: Interim=true, every step-up AMR marker stripped,
@@ -604,10 +605,11 @@ func (c Cookies) ClearRefresh(w http.ResponseWriter)
 ### AMR constants
 ```go
 const (
-    AMRPassword = "pwd" // password/passphrase verified
-    AMROTP      = "otp" // TOTP authenticator
-    AMRWebAuthn = "hwk" // WebAuthn/passkey
-    AMRMFA      = "mfa" // multiple factors
+    AMRPassword     = "pwd" // password/passphrase verified
+    AMROTP          = "otp" // TOTP authenticator
+    AMRWebAuthn     = "hwk" // WebAuthn/passkey
+    AMRMFA          = "mfa" // multiple factors
+    AMRRecoveryCode = "rc"  // single-use MFA recovery code redeemed (private value; RFC 8176 has none)
 )
 ```
 
@@ -664,6 +666,7 @@ and injects the `Actor` + `Claims[C]`. Consumers:
 | `UserResolverFromContext(r)` | `(uuid.UUID, string, bool)` | `mfa.WithUserResolver` |
 | `SubjectResolverFromContext(r)` | `(uuid.UUID, bool)` | `otp.WithSubjectResolver` |
 | `MustChangeResolverFromContext[C](r)` | `bool` | `mfa.WithMustChangeResolver` |
+| `PriorAMRResolverFromContext[C](r)` | `[]string` | `mfa.WithPriorAMR` (carries the interim credential's proven factors into the stepped-up AMR) |
 | `AssuranceFromContext(ctx)` / `AssuranceResolverFromContext(r)` | `(Assurance{StepUp, Interim}, bool)` | `mfa.WithAssuranceResolver`, `identity.WithAssuranceResolver` (their DEFAULT) |
 
 Every one of them returns `ok=false` for a request that did not pass an authenticated

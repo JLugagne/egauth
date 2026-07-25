@@ -2,6 +2,7 @@
 
 import: `github.com/JLugagne/egauth/passkey`
 memory stores: `github.com/JLugagne/egauth/passkey/memory`
+postgres stores: `github.com/JLugagne/egauth/adapters/pgx/passkey` (credential `Store` + shared `ChallengeStore`)
 source: `passkey/*.go`
 underlying lib: `github.com/go-webauthn/webauthn`
 
@@ -115,7 +116,7 @@ type ChallengeStore interface {
 }
 ```
 
-`memory.Store` and `memory.ChallengeStore` implement these interfaces; both are safe for concurrent use.
+`memory.Store` and `memory.ChallengeStore` implement these interfaces; both are safe for concurrent use. `adapters/pgx/passkey` ships `NewStore` and `NewChallengeStore` (plus `DeleteExpired(ctx) (int64, error)` to prune unfinished ceremonies); the shared `passkey/storetest` suite pins both backends to the same contract.
 
 ## HTTP handlers
 
@@ -128,9 +129,9 @@ type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.U
 
 | Handler | Resp on success | Body / cookie |
 |---|---|---|
-| `BeginRegistrationHandler(svc, opts...)` | 200 JSON `*protocol.CredentialCreation` | Sets `passkey_ceremony` cookie (HMAC-signed SessionData) |
+| `BeginRegistrationHandler(svc, opts...)` | 200 JSON `*protocol.CredentialCreation` | Sets `__Host-passkey_ceremony` cookie (HMAC-signed SessionData) |
 | `FinishRegistrationHandler(svc, opts...)` | 204 | Reads cookie; POST body = attestation response (capped at 64 KiB) |
-| `BeginLoginHandler(svc, opts...)` | 200 JSON `*protocol.CredentialAssertion` | Sets `passkey_ceremony` cookie |
+| `BeginLoginHandler(svc, opts...)` | 200 JSON `*protocol.CredentialAssertion` | Sets `__Host-passkey_ceremony` cookie |
 | `FinishLoginHandler(svc, opts...)` | 204 (or LoginSuccessFunc) | Reads cookie; POST body = assertion response (capped at 64 KiB) |
 
 Discoverable login has no dedicated handlers; call `BeginDiscoverableLogin` / `FinishDiscoverableLogin` directly and manage the session cookie manually (or build thin wrappers matching the pattern above).
@@ -142,19 +143,30 @@ WithUserResolver(r UserResolver)          // required
 WithLoginSuccess(f LoginSuccessFunc)      // called on FinishLogin success; default: 204
 WithCookieKey(key []byte)                 // override per-handler (normally set in Config)
 WithChallengeStore(cs ChallengeStore)     // override per-handler
-WithSessionCookieName(name string)        // default: "passkey_ceremony"
+WithSessionCookieName(name string)        // default: "__Host-passkey_ceremony"
 WithSessionTTL(d time.Duration)           // default: 5 min
 WithCookieDomain(domain string)
 WithSameSite(mode http.SameSite)          // default: Lax
 WithInsecureCookies()                     // clear Secure flag (local HTTP dev only)
 WithMaxBodyBytes(n int64)                 // default: 64 KiB; <=0 disables cap
+WithTrustedOrigins(origins ...string)     // widen the same-origin CSRF allowlist (hosts, no scheme)
+WithInsecureNoOriginCheck()               // turn the CSRF check OFF (opt-out, not the default)
 ```
+
+Every state-changing passkey handler (including `RenameCredentialHandler` and the discoverable pair)
+applies the strict same-origin CSRF check first: a POST whose `Origin` (or `Referer` fallback) host is
+neither the request `Host` nor an allowlisted host is refused with 403 `cross_site_blocked`, and a POST
+carrying neither header counts as untrusted.
+
+The ceremony cookie name carries the browser-enforced `__Host-` prefix by default. `WithCookieDomain`
+and `WithInsecureCookies` are incompatible with it, so they DEMOTE the name (`__Secure-` or bare);
+Begin and Finish derive it the same way, so the ceremony never splits across two names.
 
 Body cap constants:
 ```go
 const DefaultMaxBodyBytes int64 = 64 << 10  // 65536 bytes
 const DefaultSessionTTL        = 5 * time.Minute
-const DefaultSessionCookieName = "passkey_ceremony"
+const DefaultSessionCookieName = "__Host-passkey_ceremony"
 const MinCookieKeyLength       = 32
 ```
 
@@ -163,6 +175,7 @@ const MinCookieKeyLength       = 32
 ```go
 var ErrNilStore             = errors.New("passkey: NewService requires a non-nil Store")
 var ErrCookieKeyMissing     = errors.New("passkey: Config.CookieKey is required and must be at least 32 bytes")
+var ErrCookieKeyWeak        = errors.New("passkey: Config.CookieKey has no entropy (every byte is identical); generate it with crypto/rand")
 var ErrChallengeStoreMissing = errors.New("passkey: a ChallengeStore is required for replay protection; ...")
 var ErrNoCredentials        = errors.New("passkey: no credentials registered")
 var ErrCredentialNotFound   = errors.New("passkey: credential not found")
@@ -191,7 +204,8 @@ HTTP error mapping (via `fail`):
 - **Replay protection**: `ChallengeStore.Consume` called on Finish before assertion verification. Second Consume of same challenge returns false → 400. Atomic Consume is a contract requirement on implementations.
 - **Clone detection**: regressed signature counter → `ErrCredentialCloned` + `AccountBlocked` event emitted.
 - **Body cap**: Finish handlers wrap `r.Body` in `http.MaxBytesReader` at `DefaultMaxBodyBytes` (64 KiB) to prevent memory-pressure DoS.
-- **Origin/RPID checks**: enforced by go-webauthn; RPID and RPOrigins must match the frontend exactly.
+- **Origin/RPID checks**: enforced by go-webauthn; RPID and RPOrigins must match the frontend exactly. Independently, the HTTP handlers apply their own same-origin CSRF check (403 `cross_site_blocked`) — see `WithTrustedOrigins`.
+- **Cookie key entropy**: `NewService` rejects a length-valid but entropy-free key (all bytes identical, e.g. `make([]byte, 32)`) with `ErrCookieKeyWeak`; the per-handler and per-tenant key paths fail the request closed on the same key.
 - **Ceremony timeout**: 5 min, enforced server-side via `Timeouts.Enforce: true` in go-webauthn config.
 
 ## Wiring
@@ -256,7 +270,7 @@ The events are emitted on the `Config.Events` sink configured at `NewService`.
 ## Gotchas
 
 - **Discoverable vs identified login**: `BeginDiscoverableLogin` takes no userID; `allowCredentials` is empty so the authenticator selects the key. `FinishDiscoverableLogin` resolves the user from the credential's user handle (UUID bytes). Multi-tenant: pass `tenantID` derived from request (host/subdomain), not from the credential.
-- **Challenge store eviction**: `memory.ChallengeStore` prunes lazily on access. In production use a shared backend (e.g. pgx) for multi-process deployments; a single-process `memory.ChallengeStore` won't share state across replicas.
+- **Challenge store eviction**: `memory.ChallengeStore` reclaims expired entries with a bounded, amortised prune per `Put` and hard-caps the live set at `memory.DefaultMaxChallengeEntries` (override with `memory.WithMaxEntries`), evicting oldest-first — `Put` is reachable unauthenticated, so it must not grow without bound. It stays PER-PROCESS: a multi-replica deployment must use `pgx.NewChallengeStore` from `adapters/pgx/passkey`, otherwise a ceremony begun on one pod fails on another.
 - **RPID/origin must match frontend**: RPID = registrable domain (no scheme, no port). RPOrigins = full origin strings (scheme + host + optional port). Mismatch → go-webauthn `*protocol.Error` → 400.
 - **CookieKey rotation**: all in-flight ceremonies using the old key fail at Finish (HMAC mismatch → `ErrSessionInvalid`). Rotate during low-traffic windows; ceremony TTL is 5 min.
 - **SingleTenant misuse**: `NewSingleTenant` hard-wires tenant `""`. Do NOT mix `SingleTenant` calls with multi-tenant `Service` calls against the same store; `""` is a real partition key that could collide with an explicit tenant.

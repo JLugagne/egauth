@@ -28,9 +28,9 @@ func stepUpCookie(rec *httptest.ResponseRecorder, name string) *http.Cookie {
 }
 
 // TestStepUpHandler_ReissuesFullPairWithAMRMFA proves the completion half of the AMR/step-up
-// model: after a correct TOTP, StepUpHandler re-issues the FULL access+refresh pair stamped
-// AMR=[pwd, otp, mfa] and writes both cookies, so a route gated with WithRequiredAMR(AMRMFA)
-// now passes. This is exactly what was unwireable before the fix.
+// model: after a correct TOTP, StepUpHandler re-issues the FULL access+refresh pair stamped with
+// the factors actually presented and writes both cookies, so a route gated with
+// WithRequiredAMR(AMRMFA) now passes. This is exactly what was unwireable before the fix.
 func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	clk := &clock{t: time.Unix(1_700_000_000, 0)}
 	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
@@ -73,9 +73,11 @@ func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 
-	// The re-issued token carries the full MFA factor set, including the MFA marker that
-	// WithRequiredAMR(AMRMFA) enforces.
-	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
+	// The re-issued token carries the factors this ceremony actually proved, including the MFA
+	// marker that WithRequiredAMR(AMRMFA) enforces. It no longer asserts AMRPassword: no password
+	// was presented here, and this test wires no WithPriorAMR resolver to carry one forward
+	// (mfa/SF-10).
+	assert.Equal(t, []string{tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
 	assert.Contains(t, captured.AMR, tokens.AMRMFA, "step-up token must carry the MFA factor")
 
 	// Both cookies are written now: the full session replaces the interim access-only state.
@@ -135,8 +137,10 @@ func TestStepUpHandler_MustChange_FlaggedRenewable(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	// The flag is carried forward onto the re-issued claims.
 	assert.True(t, captured.MustChangePassword, "step-up must preserve the must-change flag")
-	// The MFA factor set is still stamped — the user did complete the second factor.
-	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
+	// The MFA factor set is still stamped — the user did complete the second factor. AMRPassword is
+	// absent because no password was presented in this ceremony and no WithPriorAMR resolver is
+	// wired (mfa/SF-10).
+	assert.Equal(t, []string{tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
 	// Renewable: both cookies present. The flag is carried by the refresh family (Rotate replays
 	// it), so the renewable session stays gated rather than dropping the flag on the next refresh.
 	access := stepUpCookie(rec, tokens.DefaultAccessCookieName)

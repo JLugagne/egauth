@@ -213,11 +213,21 @@ mux.Handle("/mfa/disable", tokens.ContextMiddleware[C](verifier,
     mfa.DisableHandler(svc, mfa.WithUserResolver(tokens.UserResolverFromContext)),
     tokens.WithCookieAuth[C](cookies)))
 
-// The step-up route is the ONLY one that may admit the pre-MFA interim credential.
+// The step-up routes are the ONLY ones that may admit the pre-MFA interim credential.
 mux.Handle("/mfa/step-up", tokens.ContextMiddleware[C](verifier,
     mfa.StepUpHandler[C](svc, issuer, stepUpClaimsOf,
         mfa.WithUserResolver(tokens.UserResolverFromContext),
+        mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C]),
         mfa.WithMustChangeResolver(tokens.MustChangeResolverFromContext[C])),
+    tokens.WithCookieAuth[C](cookies),
+    tokens.WithInterimAllowed[C]()))
+
+// Lost authenticator: the recovery-code twin mints the same full pair from a single-use
+// recovery code (AMR carries "rc" + "mfa"). Same rate-limiting duty as /mfa/step-up.
+mux.Handle("/mfa/step-up/recovery", tokens.ContextMiddleware[C](verifier,
+    mfa.StepUpRecoveryHandler[C](svc, issuer, stepUpClaimsOf,
+        mfa.WithUserResolver(tokens.UserResolverFromContext),
+        mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C])),
     tokens.WithCookieAuth[C](cookies),
     tokens.WithInterimAllowed[C]()))
 ```
@@ -235,7 +245,12 @@ or a 303 to `identity.WithMFARequiredRedirect` / `oauth.WithMFARequiredRedirect`
 `tokens.RequireAuth` and `tokens.ContextMiddleware` refuse an interim credential with 403
 `step_up_required` on EVERY route unless it opts in with `tokens.WithInterimAllowed()` — put that on
 the step-up route only. `mfa.StepUpHandler` clears the interim state by re-issuing the full pair with
-`AMR=[pwd, otp, mfa]`.
+`AMR=[otp, mfa]` — the factors it actually verified — prefixed by whatever the interim credential
+already proved when `mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C])` is wired (e.g.
+`[pwd, otp, mfa]` for a password login). It never asserts a password that was not presented.
+`mfa.StepUpRecoveryHandler` is the same for a single-use recovery code, stamping
+`AMR=[rc, mfa]` (`tokens.AMRRecoveryCode`), which is what gives a user who lost their authenticator
+a self-service way back into a full session.
 
 ## Gotchas
 
@@ -250,5 +265,6 @@ the step-up route only. `mfa.StepUpHandler` clears the interim state by re-issui
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
 - `DisableHandler` / `RegenerateRecoveryCodesHandler` return 403 `step_up_required` when they cannot resolve the request's assurance. If they 403 unexpectedly, the route is not behind `tokens.ContextMiddleware` (or needs `mfa.WithAssuranceResolver`).
 - Enroll / confirm / verify / verify-recovery are NOT step-up gated: they are how a factor is added or proven in the first place.
+- `VerifyRecoveryHandler` only PROVES a recovery code (204); it mints nothing. Use `StepUpRecoveryHandler` to turn a recovery code into a full session.
 - `NewService` panics (not errors) on nil store or invalid config — designed to fail at startup.
 - Data handlers (`EnrollHandler`, `ConfirmHandler`, `RegenerateRecoveryCodesHandler`) always return JSON even when `WithSuccessRedirect` is set; only action handlers (`VerifyHandler`, `DisableHandler`) redirect on success.

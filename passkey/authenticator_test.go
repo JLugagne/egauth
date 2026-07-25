@@ -10,7 +10,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/fxamacker/cbor/v2"
@@ -170,7 +169,7 @@ func jsonPost(t *testing.T, body map[string]any) *http.Request {
 	t.Helper()
 	raw, err := json.Marshal(body)
 	require.NoError(t, err)
-	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(raw))
+	req := postReq("/", bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	return req
 }

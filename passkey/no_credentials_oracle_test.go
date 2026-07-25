@@ -76,7 +76,7 @@ func TestBeginLoginOracle_BehaviorBaseline(t *testing.T) {
 	t.Run("user_without_passkey_gets_400", func(t *testing.T) {
 		h := passkey.BeginLoginHandler(svc, resolver(uidNone), passkey.WithCookieKey(testCookieKey))
 		rec := httptest.NewRecorder()
-		h(rec, httptest.NewRequest(http.MethodPost, "/passkey/login/begin", nil))
+		h(rec, postReq("/passkey/login/begin", nil))
 		assert.Equal(t, http.StatusBadRequest, rec.Code,
 			"a user with no passkeys must receive 400 (intentional no_credentials oracle, documented in SECURITY.md)")
 		assert.Contains(t, rec.Body.String(), "no_credentials")
@@ -85,7 +85,7 @@ func TestBeginLoginOracle_BehaviorBaseline(t *testing.T) {
 	t.Run("user_with_passkey_gets_200", func(t *testing.T) {
 		h := passkey.BeginLoginHandler(svc, resolver(uidWith), passkey.WithCookieKey(testCookieKey))
 		rec := httptest.NewRecorder()
-		h(rec, httptest.NewRequest(http.MethodPost, "/passkey/login/begin", nil))
+		h(rec, postReq("/passkey/login/begin", nil))
 		assert.Equal(t, http.StatusOK, rec.Code,
 			"a user with a passkey must receive 200 plus a challenge")
 	})

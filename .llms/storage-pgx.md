@@ -243,8 +243,8 @@ Migrations:
 ### passkey
 
 import: `github.com/JLugagne/egauth/adapters/pgx/passkey`
-implements: `passkey.Store`
-constructor: `func NewStore(db DBQuerier) *Store`
+implements: `passkey.Store`, `passkey.ChallengeStore`
+constructors: `func NewStore(db DBQuerier) *Store`, `func NewChallengeStore(db DBQuerier) *ChallengeStore`
 
 Methods:
 - `SaveCredential(ctx, tenantID, c *passkey.Credential) error` — validates TenantID consistency
@@ -252,9 +252,17 @@ Methods:
 - `UpdateCredential(ctx, tenantID, c *passkey.Credential) error` — persists updated signature counter; returns `ErrCredentialNotFound` if absent
 - `DeleteCredential(ctx, tenantID, userID, credentialID []byte) error` — returns `ErrCredentialNotFound` if absent
 
+`ChallengeStore` methods (the SHARED ceremony-replay store a multi-replica deployment needs — the
+in-memory one is per-process, so a ceremony begun on one pod cannot be finished on another):
+- `Put(ctx, tenantID, challenge string, expiresAt time.Time) error` — upserts the issued challenge
+- `Consume(ctx, tenantID, challenge string) (bool, error)` — single `DELETE ... RETURNING`, so exactly one of N racing Finish requests wins
+- `DeleteExpired(ctx) (int64, error)` — pruning path for ceremonies that were never finished; run it periodically
+
 Migrations:
 ```
 001_create_passkey_credentials.sql
+002_add_credential_management_metadata.sql
+003_create_passkey_challenges.sql
 ```
 
 ---

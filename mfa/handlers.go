@@ -45,6 +45,8 @@ type handlerConfig struct {
 	assuranceResolver tokens.AssuranceResolver
 	// noStepUpCheck disables that enforcement entirely (see WithInsecureNoStepUpCheck).
 	noStepUpCheck bool
+	// priorAMR reports the factors the credential carrying the step-up request already proved (see WithPriorAMR). The step-up handlers carry those forward and add only the factor they verified themselves, so the re-issued AMR never asserts a factor that was not presented. Nil (default) means nothing is carried forward.
+	priorAMR func(r *http.Request) []string
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -133,6 +135,46 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 // tokens.ContextMiddleware. Nil (the default) leaves the flag unset.
 func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
+}
+
+// WithPriorAMR supplies the authentication methods the credential carrying the step-up request
+// ALREADY proved — typically the interim credential's own Claims.AMR — so the step-up handlers can
+// carry them forward.
+//
+// The step-up handlers assert only the factor they verified themselves (AMROTP for StepUpHandler,
+// AMRRecoveryCode for StepUpRecoveryHandler) plus the AMRMFA marker. Without this option nothing
+// else is claimed: the first factor may have been a password, a magic link or a federated IdP, and
+// egauth will not assert a password that was never presented. Wire it with
+// tokens.PriorAMRResolverFromContext when the handler is mounted behind tokens.ContextMiddleware:
+//
+//	mux.Handle("/mfa/step-up", tokens.ContextMiddleware(verifier,
+//	    mfa.StepUpHandler(svc, issuer, claimsOf,
+//	        mfa.WithUserResolver(tokens.UserResolverFromContext),
+//	        mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C]))))
+//
+// Values are carried forward in order and de-duplicated.
+func WithPriorAMR(fn func(r *http.Request) []string) HandlerOption {
+	return func(h *handlerConfig) { h.priorAMR = fn }
+}
+
+// stepUpAMR builds the AMR of the re-issued pair: the factors the prior credential proved (when
+// WithPriorAMR is wired), then the factor this ceremony verified, then the AMRMFA marker — with
+// duplicates removed and order preserved.
+func (cfg handlerConfig) stepUpAMR(r *http.Request, verified string) []string {
+	var prior []string
+	if cfg.priorAMR != nil {
+		prior = cfg.priorAMR(r)
+	}
+	amr := make([]string, 0, len(prior)+2)
+	seen := make(map[string]bool, len(prior)+2)
+	for _, v := range append(append([]string{}, prior...), verified, tokens.AMRMFA) {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		amr = append(amr, v)
+	}
+	return amr
 }
 
 // WithAssuranceResolver supplies the assurance of the credential behind the request to the
@@ -401,8 +443,9 @@ func mapMFAError(err error) (int, string) {
 }
 
 // StepUpClaimsBuilder maps the stepped-up user (resolved from the interim session) to the claims
-// embedded in the full token pair StepUpHandler re-issues. The handler overwrites the returned
-// AMR with [pwd, otp, mfa]; the builder supplies the rest (subject, tenant, scopes, custom).
+// embedded in the full token pair StepUpHandler and StepUpRecoveryHandler re-issue. The handler
+// overwrites the returned AMR with the factors actually presented (see WithPriorAMR); the builder
+// supplies the rest (subject, tenant, scopes, custom).
 // Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
 // applies to the full session.
 type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[C]
@@ -410,8 +453,9 @@ type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tena
 // StepUpHandler is the completion half of the AMR/step-up model whose pre-step-up half is
 // identity.WithMFAGate. It is mounted behind the interim session (the access cookie set by an
 // MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code it verifies the
-// second factor, then re-issues the FULL access+refresh pair with AMR=[tokens.AMRPassword,
-// tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the interim access cookie.
+// second factor, then re-issues the FULL access+refresh pair with AMR=[tokens.AMROTP,
+// tokens.AMRMFA] — plus whatever the interim credential already proved, when WithPriorAMR is wired —
+// and writes both cookies, overwriting the interim access cookie.
 // A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new token but never the
 // interim one. On an incorrect/expired code it fails (like VerifyHandler) and mints nothing, so
 // the interim session is never upgraded.
@@ -424,32 +468,68 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 			cfg.failErr(w, r, err)
 			return
 		}
-		claims := claimsOf(r.Context(), uid, tenant)
-		// The factor set is now password + a verified TOTP, so the token reaches the MFA
-		// assurance level. AMR is set here (not by the builder) so it is authoritative, and the
-		// pre-step-up marker is cleared for the same reason: the second factor was just verified, so
-		// the pair this handler mints is a full session everywhere.
-		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
-		claims.Interim = false
-		// Carry the forced-change gate forward: if the verified interim token was flagged
-		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
-		// refresh family persists the flag and Rotate replays it onto every silent refresh — so an
-		// MFA-enrolled must-change user cannot escape WithPasswordChangeGate by completing a second
-		// factor and then refreshing. The flag clears only on a fresh login after the password is
-		// changed (or when an admin revokes the family).
-		if cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r) {
-			claims.MustChangePassword = true
-		}
-		pair, err := issuer.IssueTokenPair(r.Context(), claims)
-		if err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+		issueStepUpPair(w, r, cfg, issuer, claimsOf, uid, tenant, tokens.AMROTP)
+	})
+}
+
+// StepUpRecoveryHandler is the recovery-code twin of StepUpHandler, and the shipped way back in for
+// a user who has LOST their authenticator: it redeems a single-use recovery code and, on success,
+// re-issues the FULL access+refresh pair (AMR carrying tokens.AMRRecoveryCode and tokens.AMRMFA,
+// Interim cleared) exactly as StepUpHandler does for a TOTP code. Without it, recovery codes could
+// be verified (VerifyRecoveryHandler) but never converted into a session, so the enrolled user with
+// a dead phone had no self-service path at all.
+//
+// The code is consumed by Service.VerifyRecoveryCode, so it is single-use and shares the TOTP
+// failed-attempt budget (ErrTooManyAttempts -> 429): a recovery code cannot be brute-forced any more
+// than a TOTP can. As with StepUpHandler and VerifyHandler, egauth does NOT apply a per-IP request
+// rate limit — wrap this endpoint with [github.com/JLugagne/egauth/ratelimit.Middleware].
+//
+// Mount it beside the step-up route, behind the same interim session:
+//
+//	mux.Handle("/mfa/step-up/recovery", tokens.ContextMiddleware(verifier,
+//	    mfa.StepUpRecoveryHandler(svc, issuer, claimsOf,
+//	        mfa.WithUserResolver(tokens.UserResolverFromContext)),
+//	    tokens.WithInterimAllowed[C]()))
+func StepUpRecoveryHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
+	cfg := newHandlerConfig(opts)
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if err := svc.VerifyRecoveryCode(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
+			cfg.failErr(w, r, err)
 			return
 		}
-		// Upgrade the interim access-only state to a full renewable pair, writing both cookies.
-		cfg.cookies.SetAccess(w, pair.AccessToken)
-		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
-		cfg.ok(w, r)
+		issueStepUpPair(w, r, cfg, issuer, claimsOf, uid, tenant, tokens.AMRRecoveryCode)
 	})
+}
+
+// issueStepUpPair mints and writes the full pair both step-up handlers re-issue once their factor
+// verified. verified is the AMR value of the factor THIS ceremony proved.
+func issueStepUpPair[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], uid uuid.UUID, tenant, verified string) {
+	claims := claimsOf(r.Context(), uid, tenant)
+	// AMR is set here (not by the builder) so it is authoritative, and records ONLY what was
+	// actually presented: the factor this ceremony verified, the MFA marker it earns, and whatever
+	// the prior credential already proved (WithPriorAMR). The pre-step-up marker is cleared for the
+	// same reason: the second factor was just verified, so the pair this handler mints is a full
+	// session everywhere.
+	claims.AMR = cfg.stepUpAMR(r, verified)
+	claims.Interim = false
+	// Carry the forced-change gate forward: if the verified interim token was flagged
+	// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
+	// refresh family persists the flag and Rotate replays it onto every silent refresh — so an
+	// MFA-enrolled must-change user cannot escape WithPasswordChangeGate by completing a second
+	// factor and then refreshing. The flag clears only on a fresh login after the password is
+	// changed (or when an admin revokes the family).
+	if cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r) {
+		claims.MustChangePassword = true
+	}
+	pair, err := issuer.IssueTokenPair(r.Context(), claims)
+	if err != nil {
+		cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+		return
+	}
+	// Upgrade the interim access-only state to a full renewable pair, writing both cookies.
+	cfg.cookies.SetAccess(w, pair.AccessToken)
+	cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+	cfg.ok(w, r)
 }
 
 // WithInsecureNoOriginCheck disables the CSRF same-origin check on all state-changing MFA

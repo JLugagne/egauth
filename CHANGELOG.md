@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **The `passkey` HTTP handlers now enforce a strict same-origin CSRF check, and the ceremony cookie
+  is `__Host-` prefixed (`mfa/SF-9`, `http/SF-9`, `http/HTTP-7`, `http/HTTP-10`).** The passkey
+  handler family was the only one with no origin check at all, so `RenameCredentialHandler` and every
+  ceremony endpoint were CSRF-reachable. Every state-changing passkey handler now refuses a POST
+  whose `Origin` (or `Referer` fallback) host is neither the request `Host` nor an allowlisted one
+  with `403 cross_site_blocked`, and a POST carrying neither header counts as untrusted — matching
+  identity/tokens/mfa/otp exactly. Widen with `passkey.WithTrustedOrigins("app.example.com")`; the
+  loud opt-out is `passkey.WithInsecureNoOriginCheck()`. Browser clients are unaffected (browsers
+  send `Origin` on form/fetch POSTs); non-browser callers and tests must send `Origin` or opt out.
+  `passkey.DefaultSessionCookieName` changed from `passkey_ceremony` to `__Host-passkey_ceremony`;
+  `WithCookieDomain` / `WithInsecureCookies` DEMOTE the name (`__Secure-` or bare) instead of
+  emitting a cookie browsers reject, and Begin/Finish always derive the same name. In-flight
+  ceremonies at deploy time fail once and are retried by the client.
+
+- **`passkey.NewService` rejects an entropy-free ceremony-cookie key (`crypto/CRY-8`, `EX-2`).**
+  `MinCookieKeyLength` only checked length, so the `make([]byte, 32)` placeholder — which the shipped
+  `examples/fullstack` reference application actually used — sailed through and every ceremony cookie
+  it sealed was forgeable. A key whose bytes are all identical is now refused with the new sentinel
+  `passkey.ErrCookieKeyWeak`, at construction and on the per-handler / per-tenant key paths (which
+  fail the request closed with 500). The example now generates its key with `crypto/rand`.
+
+- **`mfa.StepUpHandler` no longer asserts a password factor that was never presented (`mfa/SF-10`).**
+  It stamped `AMR=[pwd, otp, mfa]` unconditionally, claiming a password for a subject who may have
+  signed in with a magic link or a federated IdP — a false security assertion consumed by
+  `tokens.WithRequiredAMR`. The re-issued AMR is now `[otp, mfa]` (the factors the ceremony actually
+  verified), prefixed with the interim credential's own factors when the new
+  `mfa.WithPriorAMR(tokens.PriorAMRResolverFromContext[C])` seam is wired — which restores the exact
+  previous value for a password login. Deployments that gate on `AMRPassword` being present after a
+  step-up must wire `WithPriorAMR`.
+
 - **`tokens.RefreshToken` gained `Kind` and `FamilyCreatedAt`, and the token layer now enforces an
   absolute refresh-FAMILY lifetime by default (`lifecycle/LIFE-2`, `lifecycle/KIND-2`).** The struct
   change is additive (existing code compiles), but a custom `tokens.Store` MUST round-trip both
@@ -226,6 +256,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`adapters/pgx/passkey.NewChallengeStore` — the SHARED, Postgres-backed passkey
+  `ChallengeStore` (`mfa/SF-4`).** `Config.ChallengeStore` is required, but the only implementation
+  that ever shipped was the per-process in-memory one, so a multi-replica deployment rejected roughly
+  `(N-1)/N` of its ceremonies as replays and the pressure-relief valve an operator found was
+  `InsecureNoChallengeStore` — silently removing the SEC-05 replay defence. `Consume` is a single
+  `DELETE ... RETURNING`, so exactly one of N racing Finish requests wins across processes; `Put`
+  upserts; `DeleteExpired(ctx)` is the pruning path for ceremonies that are never finished. Ships with
+  migration `adapters/pgx/passkey/migrations/003_create_passkey_challenges.sql`. Both backends are now
+  pinned by the new shared contract suite `passkey/storetest.ChallengeStoreContractTesting`.
+  SECURITY.md pointed at a `passkey/pgx` package that never existed; it and the `passkey/memory` doc
+  comment now name the real one.
+
+- **`mfa.StepUpRecoveryHandler` — recovery-code self-service (`mfa/SF-6`).** No shipped handler
+  converted a recovery code into a session (`StepUpHandler` is TOTP-only and `VerifyRecoveryHandler`
+  mints nothing), so a user who lost their authenticator had no way back in. The new handler redeems a
+  single-use recovery code and re-issues the same full access+refresh pair, stamped
+  `AMR=[tokens.AMRRecoveryCode, tokens.AMRMFA]`, with the same single-use semantics, shared
+  failed-attempt budget and CSRF guard as the rest of the family.
+
+- **`tokens.AMRRecoveryCode` (`"rc"`) and `tokens.PriorAMRResolverFromContext[C]`.** The former records
+  a redeemed recovery code (RFC 8176 registers no value for it; `"otp"` means HOTP/TOTP) and counts as
+  a step-up factor in `HasStepUpFactor` / `SatisfiesStepUp`, and is stripped by `AsInterim` like the
+  other step-up markers. The latter surfaces the interim credential's proven factors to
+  `mfa.WithPriorAMR`.
+
+- **`passkey.WithTrustedOrigins` / `passkey.WithInsecureNoOriginCheck`** — the CSRF allowlist seam and
+  its loud opt-out for the passkey handler family (see BREAKING).
+
+- **`passkey/memory.WithMaxEntries` and `memory.DefaultMaxChallengeEntries` (100k).** The in-memory
+  `ChallengeStore` is now hard-capped, evicting oldest-first.
+
 - **`jwt.Config.MaxRefreshFamilyLifetime` / `DisableMaxRefreshFamilyLifetime` /
   `jwt.DefaultMaxRefreshFamilyLifetime` (30 days)** cap the ABSOLUTE lifetime of a refresh-token
   family, anchored on the family's creation, mirroring `sessions.WithMaxLifetime`. Every rotation is
@@ -340,6 +401,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **The in-memory passkey `ChallengeStore` no longer sweeps its whole map on every `Put`
+  (`conc/AVAIL-1`, `tenant/TEN-7`, `mfa/SF-5`).** `Put` — reachable from the UNAUTHENTICATED
+  `BeginRegistration` / `BeginLogin` endpoints — pruned by iterating every entry under one global
+  mutex, so insertion was linear in the live set (quadratic overall) and the sweep tracked the map's
+  PEAK size, letting a single traffic burst degrade it permanently. Expiry reclamation is now
+  amortised over an insertion-ordered queue with a bounded number of steps per `Put` (measured: 2.0M
+  scan steps for 100 inserts against a 20k live set, now ≤ 800), the queue is compacted so it tracks
+  the live set rather than the peak, and the store is hard-capped with a documented oldest-first
+  eviction policy so an anonymous caller cannot grow it without bound.
 
 - **A refresh-token family can no longer be kept alive forever by rotating it
   (`lifecycle/LIFE-2`).** Every rotation reset the full `RefreshTTL`, so a family kept warm by a

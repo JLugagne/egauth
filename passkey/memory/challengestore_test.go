@@ -6,6 +6,7 @@ import (
 	"time"
 
 	passkeymemory "github.com/JLugagne/egauth/passkey/memory"
+	"github.com/JLugagne/egauth/passkey/storetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,4 +71,10 @@ func TestChallengeStore_TenantScoping(t *testing.T) {
 	ok, err = cs.Consume(ctx, "t1", "same-chal")
 	require.NoError(t, err)
 	assert.True(t, ok)
+}
+
+// TestChallengeStore_Contract runs the shared cross-backend suite, so the in-memory store and the
+// Postgres-backed one (adapters/pgx/passkey) are pinned by exactly the same semantics.
+func TestChallengeStore_Contract(t *testing.T) {
+	storetest.ChallengeStoreContractTesting(t, passkeymemory.NewChallengeStore())
 }

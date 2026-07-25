@@ -42,6 +42,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -162,7 +163,14 @@ func BuildServer() (http.Handler, error) {
 	// ------------------------------------------------------------------ passkey
 	passkeyStore := passkeymem.NewStore()
 	challengeStore := passkeymem.NewChallengeStore()
-	cookieKey := make([]byte, 32) // zero key — replace with crypto/rand in production
+	// The ceremony-cookie HMAC key must be a real secret: passkey.NewService refuses a key with no
+	// entropy (ErrCookieKeyWeak), which is exactly what a make([]byte, 32) placeholder is. A real
+	// deployment loads a STABLE key from its secret store — a freshly generated one, as here,
+	// invalidates every in-flight ceremony on restart and cannot be shared across replicas.
+	cookieKey := make([]byte, passkey.MinCookieKeyLength)
+	if _, err := rand.Read(cookieKey); err != nil {
+		return nil, errors.Join(errors.New("generate passkey cookie key"), err)
+	}
 	// Using InsecureNoChallengeStore is NOT set: we always supply a real challenge store.
 	pkSvc, err := passkey.NewService(passkeyStore, passkey.Config{
 		RPID:             "localhost",
@@ -266,6 +274,8 @@ func BuildServer() (http.Handler, error) {
 		passkey.BeginRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
 			passkey.WithInsecureCookies(),
+			// Omit WithTrustedOrigins in this demo; a real deployment should set it.
+			passkey.WithInsecureNoOriginCheck(),
 		),
 		tokens.WithCookieAuth[AppClaims](cookies),
 	))
@@ -274,16 +284,19 @@ func BuildServer() (http.Handler, error) {
 		passkey.FinishRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
 			passkey.WithInsecureCookies(),
+			// Omit WithTrustedOrigins in this demo; a real deployment should set it.
+			passkey.WithInsecureNoOriginCheck(),
 		),
 		tokens.WithCookieAuth[AppClaims](cookies),
 	))
 	mux.Handle("POST /passkey/login/begin",
-		passkey.BeginLoginHandler(pkSvc, passkey.WithInsecureCookies()),
+		passkey.BeginLoginHandler(pkSvc, passkey.WithInsecureCookies(), passkey.WithInsecureNoOriginCheck()),
 	)
 	mux.Handle("POST /passkey/login/finish",
 		passkey.FinishLoginHandler(pkSvc,
 			passkey.WithLoginSuccess(passkeyLoginSuccess),
 			passkey.WithInsecureCookies(),
+			passkey.WithInsecureNoOriginCheck(),
 		),
 	)
 
