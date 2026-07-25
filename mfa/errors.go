@@ -31,4 +31,11 @@ var (
 	// ErrTenantMismatch is returned when a Save* call is given a tenantID that conflicts with
 	// a non-empty TenantID already set on the record being saved.
 	ErrTenantMismatch = errors.New("mfa: tenant ID mismatch")
+
+	// ErrWeakSecret is returned when a TOTP shared secret decodes to fewer than MinSecretBytes
+	// bytes — including the empty secret, which would key the HMAC with zero bytes and make every
+	// code it produces trivially computable. It is reported at enrollment AND at verification, so a
+	// factor whose stored secret was truncated (bad import, corrupt row, hand-edited record) fails
+	// closed instead of accepting an attacker-computable code.
+	ErrWeakSecret = errors.New("mfa: TOTP shared secret is too short")
 )

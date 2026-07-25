@@ -700,6 +700,14 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		return nil, tokens.ErrInvalidClaims
 	}
 
+	// "iat" and "exp" are OPTIONAL in RFC 7519 and golang-jwt therefore leaves the corresponding
+	// *NumericDate nil when the claim is absent — it does not reject the token. egauth stamps both
+	// on every token it issues, so a validly signed token missing either is not one of ours (a
+	// hand-crafted or downgraded token): reject it as invalid claims instead of dereferencing nil.
+	if wrapper.IssuedAt == nil || wrapper.ExpiresAt == nil {
+		return nil, tokens.ErrInvalidClaims
+	}
+
 	claims := tokens.Claims[C]{
 		Subject:            subject,
 		TenantID:           wrapper.TenantID,
@@ -758,6 +766,25 @@ var (
 	_ tokens.Rotator[any]  = (*Service[any])(nil)
 )
 
+// sinceConsumed returns how long ago a refresh token was consumed, measured with the Service's
+// injected clock so the reuse-grace decision shares one time source with issuance and verification.
+//
+// consumedAt is written by whichever clock the Store runs on — for a SQL backend that is the
+// DATABASE server's clock, not this process's. Skew between the two is therefore expected, and it
+// is handled explicitly in one direction: a consumedAt that is AHEAD of clock-now yields a negative
+// age, which is clamped to zero so store-clock skew is read as "just consumed" (benign concurrency)
+// instead of tripping theft detection on a token that was consumed a moment ago. Skew in the other
+// direction (store clock behind) can only shorten the grace window, never widen it, which fails
+// closed. Operators must still keep the application and database clocks synchronised (NTP): a skew
+// larger than ReuseGracePeriod degrades the concurrency allowance, and no clamp can recover it.
+func (s *Service[C]) sinceConsumed(consumedAt time.Time) time.Duration {
+	age := s.now().Sub(consumedAt)
+	if age < 0 {
+		return 0
+	}
+	return age
+}
+
 // Rotate consumes the presented refresh token and issues a fresh pair within the same
 // family. A replayed (already-consumed) token triggers revocation of the whole family.
 func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[C], error) {
@@ -776,12 +803,13 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// as benign concurrency (the legitimate client raced itself): the request is rejected
 	// but the family is kept alive. Outside the window it is treated as theft — a stale
 	// token resurfacing long after it was rotated away — and the whole family is revoked so
-	// every descendant is invalidated. If the revocation itself fails we must NOT report a
-	// clean reuse rejection (which the caller treats as "theft handled"); surface the
-	// failure so the family is never silently assumed revoked. Wrapping keeps
-	// errors.Is(…Reused) true for callers and cookie-clearing handlers.
+	// every descendant is invalidated. The age of the consumption is measured with the
+	// injected clock (see sinceConsumed), never the process wall clock. If the revocation
+	// itself fails we must NOT report a clean reuse rejection (which the caller treats as
+	// "theft handled"); surface the failure so the family is never silently assumed revoked.
+	// Wrapping keeps errors.Is(…Reused) true for callers and cookie-clearing handlers.
 	if rt.ConsumedAt != nil {
-		if time.Since(*rt.ConsumedAt) > s.reuseGrace {
+		if s.sinceConsumed(*rt.ConsumedAt) > s.reuseGrace {
 			if rerr := s.store.RevokeFamily(ctx, tenantID, rt.FamilyID); rerr != nil {
 				return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
 			}

@@ -51,6 +51,15 @@ Cost floors (values below are clamped up silently):
 - `MinTime = 1`
 - `MinThreads = 1`
 
+Verify-path ceilings (a STORED hash outside them is rejected as `ErrInvalidPassword` before the KDF runs, so one tampered/imported row cannot drive unbounded CPU or an OOM):
+- `MaxMemoryKiB = 524288` (512 MiB)
+- `MaxTime = 32` (iterations)
+- `MaxThreads = 64` (parallelism)
+- `MaxKeyLen = 1024` bytes (derived-key segment)
+- `MaxSaltLen = 1024` bytes (salt segment)
+
+The checks read only the stored hash's shape, never the candidate password.
+
 Options:
 ```go
 func WithMemory(memory uint32) Option   // KiB; clamped to MinMemoryKiB

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"testing"
+
+	"github.com/JLugagne/egauth/keystore"
 )
 
 // countingKEK records how many times Open (the client_secret decrypt) is invoked and can be
@@ -11,13 +13,19 @@ import (
 type countingKEK struct {
 	openCalls   int
 	failOnOpenN int
+	// lastSealContext / lastOpenContext record the SecretContext each call was given, so a test can
+	// pin the binding the store must supply.
+	lastSealContext keystore.SecretContext
+	lastOpenContext keystore.SecretContext
 }
 
-func (k *countingKEK) Seal(_ context.Context, plaintext []byte) ([]byte, error) {
+func (k *countingKEK) Seal(_ context.Context, sc keystore.SecretContext, plaintext []byte) ([]byte, error) {
+	k.lastSealContext = sc
 	return plaintext, nil
 }
 
-func (k *countingKEK) Open(_ context.Context, ciphertext []byte) ([]byte, error) {
+func (k *countingKEK) Open(_ context.Context, sc keystore.SecretContext, ciphertext []byte) ([]byte, error) {
+	k.lastOpenContext = sc
 	k.openCalls++
 	if k.failOnOpenN != 0 && k.openCalls == k.failOnOpenN {
 		return nil, errors.New("countingKEK: simulated transient decrypt failure")

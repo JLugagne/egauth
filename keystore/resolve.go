@@ -26,7 +26,7 @@ func (m *Manager) ActiveSigningKey(ctx context.Context, tenantID string) (Signin
 			return SigningKey{}, err
 		}
 	}
-	if err := m.openKey(&key); err != nil {
+	if err := m.openKey(tenantID, &key); err != nil {
 		return SigningKey{}, err
 	}
 	return key, nil
@@ -49,7 +49,7 @@ func (m *Manager) VerificationKeys(ctx context.Context, tenantID string) (map[st
 	}
 	out := make(map[string]SigningKey, len(keys))
 	for id, k := range keys {
-		if err := m.openKey(&k); err != nil {
+		if err := m.openKey(tenantID, &k); err != nil {
 			m.emitKeyUnreadable(ctx, tenantID, id, err)
 			continue
 		}
@@ -90,8 +90,13 @@ func (m *Manager) Keyset(ctx context.Context, tenantID string) (Keyset, error) {
 
 // openKey decrypts key.Secret in place from its KEK-sealed form. Stores hold the sealed bytes in
 // SigningKey.Secret; the Manager opens them here before any signing material leaves the package.
-func (m *Manager) openKey(key *SigningKey) error {
-	pt, err := m.kek.Open(key.Secret)
+//
+// The context bound at seal time is (tenantID, PurposeSigningKey, key id), and tenantID is the
+// tenant the OPERATION is scoped to — not the one recorded on the row. A key row moved into another
+// tenant's partition therefore fails to open (ErrCiphertextCorrupt) instead of handing the caller a
+// foreign tenant's signing material.
+func (m *Manager) openKey(tenantID string, key *SigningKey) error {
+	pt, err := m.kek.Open(SigningKeyContext(tenantID, key.KeyID), key.Secret)
 	if err != nil {
 		return err
 	}
@@ -99,11 +104,19 @@ func (m *Manager) openKey(key *SigningKey) error {
 	return nil
 }
 
-// SealSecret seals a plaintext secret with the Manager's KEK. Store backends call it (indirectly,
-// via the keys the Manager hands them already sealed) — it is exported so adapters and the
-// conformance suite can construct sealed key material without reaching into the KEK directly.
-func (m *Manager) SealSecret(plaintext []byte) ([]byte, error) {
-	return m.kek.Seal(plaintext)
+// SigningKeyContext returns the SecretContext a tenant's signing-key material is sealed under. Use
+// it when re-sealing rows out of band (see SecretContext) or when a backend has to construct sealed
+// material itself.
+func SigningKeyContext(tenantID, keyID string) SecretContext {
+	return SecretContext{TenantID: tenantID, Purpose: PurposeSigningKey, RowID: keyID}
+}
+
+// SealSecret seals a plaintext secret with the Manager's KEK, binding sc as associated data. Store
+// backends call it (indirectly, via the keys the Manager hands them already sealed) — it is exported
+// so adapters, re-sealing tooling and the conformance suite can construct sealed key material
+// without reaching into the KEK directly. For signing keys, build sc with SigningKeyContext.
+func (m *Manager) SealSecret(sc SecretContext, plaintext []byte) ([]byte, error) {
+	return m.kek.Seal(sc, plaintext)
 }
 
 // NotAfter returns the NotAfter of a tenant's active signing key — the instant past which it

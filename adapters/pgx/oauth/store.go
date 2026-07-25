@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/keystore"
 	"github.com/JLugagne/egauth/oauth"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -99,10 +100,25 @@ var ErrIssuerNotAllowed = errors.New("oauth/pgx: issuer not on allowlist")
 // make it fail at request time (PANIC-01).
 var ErrInvalidProviderConfig = errors.New("oauth/pgx: invalid provider configuration")
 
-// KEK defines the interface for a Key Encryption Key used to encrypt secrets at rest.
+// KEK defines the interface for a Key Encryption Key used to encrypt secrets at rest. Every call
+// names the keystore.SecretContext the blob belongs to, so a sealed client_secret cannot be opened
+// as another tenant's, another provider's, or another subsystem's secret. ctx is carried for
+// implementations that call out to a KMS.
 type KEK interface {
-	Seal(ctx context.Context, plaintext []byte) ([]byte, error)
-	Open(ctx context.Context, ciphertext []byte) ([]byte, error)
+	Seal(ctx context.Context, sc keystore.SecretContext, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, sc keystore.SecretContext, ciphertext []byte) ([]byte, error)
+}
+
+// ClientSecretContext returns the SecretContext a tenant's OIDC client_secret is sealed under: the
+// tenant, the oauth/client-secret purpose, and the row's own identity (its provider name).
+// Operators re-sealing existing rows in place must reproduce it exactly — see
+// keystore.SecretContext.
+func ClientSecretContext(tenantID, providerName string) keystore.SecretContext {
+	return keystore.SecretContext{
+		TenantID: tenantID,
+		Purpose:  keystore.PurposeOAuthClientSecret,
+		RowID:    providerName,
+	}
 }
 
 type cachedProvider struct {
@@ -177,7 +193,7 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		if decErr != nil {
 			return nil, fmt.Errorf("oauth/pgx: failed to base64 decode client_secret: %w", decErr)
 		}
-		dec, decErr := s.kek.Open(ctx, sealed)
+		dec, decErr := s.kek.Open(ctx, ClientSecretContext(tenantID, providerName), sealed)
 		if decErr != nil {
 			return nil, fmt.Errorf("oauth/pgx: failed to decrypt client_secret: %w", decErr)
 		}
@@ -260,7 +276,7 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 
 	var sealedSecret string
 	if config.ClientSecret != "" {
-		enc, err := s.kek.Seal(ctx, []byte(config.ClientSecret))
+		enc, err := s.kek.Seal(ctx, ClientSecretContext(tenantID, providerName), []byte(config.ClientSecret))
 		if err != nil {
 			return fmt.Errorf("oauth/pgx: failed to encrypt client_secret: %w", err)
 		}

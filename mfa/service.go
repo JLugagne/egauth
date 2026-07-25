@@ -209,6 +209,10 @@ func (s *service) EnrollTOTP(ctx context.Context, tenantID string, userID uuid.U
 	if err != nil {
 		return nil, err
 	}
+	// Defence in depth: never persist an enrollment whose secret would be unusable as an HMAC key.
+	if err := ValidateSecret(secret); err != nil {
+		return nil, err
+	}
 	enrollment := &TOTPEnrollment{
 		UserID:    userID,
 		Secret:    secret,
@@ -232,6 +236,12 @@ func (s *service) ConfirmTOTP(ctx context.Context, tenantID string, userID uuid.
 	}
 	if enrollment.Confirmed() {
 		return nil, ErrAlreadyEnrolled
+	}
+	// A stored secret too short to key an HMAC is a broken record, not a wrong code: fail closed
+	// before spending an attempt slot so the row is surfaced instead of silently confirming a
+	// factor whose codes anyone can compute.
+	if err := ValidateSecret(enrollment.Secret); err != nil {
+		return nil, err
 	}
 
 	// Reserve an attempt slot atomically BEFORE the constant-time compare, matching the
@@ -282,6 +292,11 @@ func (s *service) VerifyTOTP(ctx context.Context, tenantID string, userID uuid.U
 	}
 	if !enrollment.Confirmed() {
 		return ErrNotConfirmed
+	}
+	// See ConfirmTOTP: a secret below MinSecretBytes can never be an acceptable HMAC key, so the
+	// factor fails closed (ErrWeakSecret) rather than accepting a code an attacker can compute.
+	if err := ValidateSecret(enrollment.Secret); err != nil {
+		return err
 	}
 
 	// Reserve an attempt slot atomically BEFORE the constant-time compare. Like otp, the

@@ -266,18 +266,20 @@ func (m *Manager) newKey(tenantID, keyID, alg string, ttl time.Duration) (Signin
 	if err != nil {
 		return SigningKey{}, err
 	}
-	// Seal the material with the KEK before it ever reaches the Store: backends persist only the
-	// envelope-encrypted form. ActiveSigningKey/VerificationKeys open it again before use.
-	sealed, err := m.kek.Seal(raw)
-	if err != nil {
-		return SigningKey{}, err
-	}
+	// The key id is part of the seal context, so it must be settled BEFORE sealing.
 	if keyID == "" {
 		idBytes := make([]byte, 16)
 		if _, err := m.rand(idBytes); err != nil {
 			return SigningKey{}, fmt.Errorf("keystore: generating key id: %w", err)
 		}
 		keyID = base64.RawURLEncoding.EncodeToString(idBytes)
+	}
+	// Seal the material with the KEK before it ever reaches the Store: backends persist only the
+	// envelope-encrypted form, bound to (tenant, purpose, key id) so it cannot be opened anywhere
+	// else. ActiveSigningKey/VerificationKeys open it again before use.
+	sealed, err := m.kek.Seal(SigningKeyContext(tenantID, keyID), raw)
+	if err != nil {
+		return SigningKey{}, err
 	}
 	now := m.now()
 	var notAfter time.Time

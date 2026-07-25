@@ -23,10 +23,30 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Constant-time password comparison (by construction).** Password verification compares
   the derived key with `crypto/subtle.ConstantTimeCompare` (`passwords/argon2`), so a wrong
   password cannot be recovered byte-by-byte through timing. The guarantee is *structural*:
-  `Compare` always reaches the constant-time comparison for any well-formed stored hash and
-  never branches on the byte-wise outcome of the secret comparison. (A *malformed* stored hash
-  is rejected before the KDF — but that depends only on the shape of the untrusted stored hash,
-  not on the candidate password, so it leaks nothing about the password.) This is not provable
+  `Compare` never branches on the byte-wise outcome of the secret comparison, and for any
+  in-bounds, non-empty candidate against a well-formed stored hash it always reaches the
+  constant-time comparison.
+
+  Three kinds of input do return before the KDF, and it is worth being precise about what each
+  one discloses:
+
+  1. A *malformed or out-of-range* stored hash (bad PHC shape, wrong algorithm/version, or a
+     cost parameter outside `MinMemoryKiB`…`MaxMemoryKiB` / `MaxTime` / `MaxThreads` /
+     `MaxKeyLen` / `MaxSaltLen`) is rejected before the KDF. That decision depends only on the
+     shape of the untrusted stored hash, never on the candidate, so it leaks nothing about the
+     password.
+  2. An **empty** candidate returns `ErrInvalidPassword` immediately. This branches on the
+     candidate — but `Hash` refuses to hash `""`, so no stored hash can ever correspond to it,
+     and the decoy path (`decoyHash` → `Hash("")`) returns just as fast. The fast return is
+     what keeps the two paths symmetric; making it slow would create the enumeration oracle,
+     not remove one. The attacker learns only that they submitted an empty password.
+  3. A candidate longer than `passwords.MaxPasswordLength` returns `ErrInvalidPassword`
+     immediately (pre-auth CPU/memory DoS guard). This also branches on the candidate, and
+     discloses only the length bound the attacker themselves chose to exceed — a public,
+     documented constant, independent of the account and of the stored hash.
+
+  Neither (2) nor (3) is reachable with a candidate that could match, so neither distinguishes a
+  correct password from a wrong one, nor one account from another. This is not provable
   by a boolean unit test; the supporting *evidence* is a pair of benchmarks
   (`BenchmarkCompare_CorrectPassword` vs `BenchmarkCompare_WrongPassword` in
   `passwords/argon2`) whose measured per-op timings land within benchmark noise of each other.
@@ -86,6 +106,17 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   re-login — the very lockout the grace window exists to prevent. After-grace reuse, expiry
   and not-found still clear all cookies. Set a negative `ReuseGracePeriod` for strict mode
   where any replay revokes.
+
+  **Clock discipline.** The age of a consumption is measured with the Service's injected clock
+  (`Config.Clock`, default `time.Now`), the same source that stamps `iat`/`exp` — never a
+  second, implicit wall-clock read. `consumed_at` itself is written by whichever clock the Store
+  runs on, which for a SQL backend is the **database server's**. Skew between the two is handled
+  explicitly in one direction: a `consumed_at` *ahead* of clock-now yields a negative age that is
+  clamped to zero, so store-clock skew reads as "just consumed" (benign concurrency) instead of
+  tripping theft detection on a token consumed a moment ago. Skew the other way can only shorten
+  the grace window, never widen it, which fails closed. Operators must still keep the application
+  and database clocks in sync (NTP): a skew larger than `ReuseGracePeriod` degrades the
+  concurrency allowance and no clamp can recover it.
 - **Single-use verification tokens (selector/verifier).** Password-reset and email-verification
   tokens follow a selector/verifier scheme: a 128-bit random `selector` indexes the row, and only
   the SHA-256 of the secret `verifier` half is stored. Consumption compares the verifier in
@@ -110,11 +141,18 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   only as SHA-256 hashes. `NewService` panics at construction if `WithDigits` is called with a
   value outside the RFC 6238 range **6–8** — values below 6 produce a trivially guessable code
   space and values above 8 cause uint32 truncation in the HOTP truncation step, neither of which
-  will be accepted by any compliant authenticator app. **Caveat:** a TOTP shared secret must be stored in recoverable form (the
-  server recomputes codes from it), so — unlike passwords/opaque tokens — it is NOT hashed. Per the
-  PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
-  deployments that need defense against a database leak should encrypt the `secret` column at the
-  storage/DB layer (envelope encryption).
+  will be accepted by any compliant authenticator app. The shared secret is 160 bits of
+  `crypto/rand`, and a secret below `mfa.MinSecretBytes` (128 bits, the RFC 4226 §4 minimum) is
+  rejected with `mfa.ErrWeakSecret` at enrollment **and** at verification — an empty or truncated
+  secret would key the HMAC with (nearly) no entropy, making every code it produces computable by
+  anyone, so a row damaged by a bad import or a hand edit fails closed instead of accepting an
+  attacker-derived code. `mfa.ValidateSecret` is exported for callers importing enrollments minted
+  elsewhere. **Caveat:** a TOTP shared secret must be stored in recoverable form (the server
+  recomputes codes from it), so — unlike passwords/opaque tokens — it is NOT hashed. The in-memory
+  reference store keeps it as-is; the shipped Postgres backend
+  (`adapters/pgx/mfa`) **requires** a KEK and envelope-encrypts the `secret` column (see
+  *Envelope encryption of recoverable secrets* below). A custom store must provide equivalent
+  at-rest protection.
   **Failed-attempt lockout is time-bound.** Once `FailedAttempts` exceeds `MaxAttempts` (default 5)
   the factor is locked and `ConfirmTOTP`, `VerifyTOTP`, and `VerifyRecoveryCode` all return
   `ErrTooManyAttempts`. When `ConfirmTOTP` exhausts the budget the pending enrollment is deleted
@@ -406,22 +444,86 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   in microseconds.
 - **Argon2id cost parameters from stored hashes are bounds-checked on both sides.** `Compare`
   parses the `m`/`t`/`p` cost fields from the stored PHC string and validates them before invoking
-  `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads) prevent library panics.
-  An upper bound (`MaxMemoryKiB` = 512 MiB = 524 288 KiB) prevents an OOM DoS: `argon2.IDKey`
-  allocates `memory × 1 024` bytes, so a tampered or corrupt stored hash row carrying e.g.
-  `m=4000000000` would attempt a multi-TiB allocation on the victim's next login. Any stored hash
-  whose memory parameter exceeds `MaxMemoryKiB` is rejected as `ErrInvalidPassword` (same opaque
-  mismatch signal as all other validation failures) before the KDF is invoked.
+  `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads, non-empty derived key)
+  prevent library panics. Upper bounds cap the work a single row can demand, because *every*
+  parameter on the verify path comes out of storage and is therefore attacker-influenced (a
+  tampered row, a hostile import, a corrupt migration):
+
+  | parameter | ceiling | what it bounds |
+  |---|---|---|
+  | `m` | `MaxMemoryKiB` = 512 MiB (524 288 KiB) | `argon2.IDKey` allocates `memory × 1 024` bytes, so `m=4000000000` would attempt a multi-TiB allocation on the victim's next login |
+  | `t` | `MaxTime` = 32 | iterations multiply CPU time linearly and `t` is a `uint32` (~4 billion passes), so one row could pin a core for hours on every login attempt |
+  | `p` | `MaxThreads` = 64 | shape sanity: a parallelism far above any real core count marks a row this library never wrote |
+  | derived key length | `MaxKeyLen` = 1 024 B | the final PHC segment sizes the KDF's output and extract cost (this library emits 32 B) |
+  | salt length | `MaxSaltLen` = 1 024 B | the salt is absorbed by the KDF, so its length is work too (this library emits 16 B) |
+
+  Any stored hash outside these bounds is rejected as `ErrInvalidPassword` (the same opaque
+  mismatch signal as all other validation failures) *before* the KDF is invoked. Every ceiling is
+  an order of magnitude or more above the largest published recommendation, so no legitimately
+  produced hash is refused. The checks read only the stored hash, never the candidate password, so
+  the constant-time property above is unaffected.
+- **Envelope encryption of recoverable secrets (context-bound).** Some secrets cannot be hashed
+  because the server has to recover them: per-tenant JWT signing keys (`keystore`), TOTP shared
+  secrets (`mfa`), and OIDC `client_secret`s (`oauth`). Every one of them is sealed with a
+  deployment KEK (`keystore.KEK`, AES-256-GCM) before it reaches a Store, so a database dump alone
+  yields nothing usable — the attacker also needs the KEK, which belongs in the deployment's secret
+  manager, not the database. The KEK is **mandatory**: `keystore.NewKEK` rejects any key that is not
+  exactly 32 bytes, and `NewManager` / the pgx `mfa` and `oauth` stores refuse to construct without
+  one. There is no "no encryption" mode.
+
+  `Seal` binds a `keystore.SecretContext` — tenant, purpose, and the row's own identity — into the
+  AEAD as **associated data**. Authenticating the bytes is not enough on its own: without a binding,
+  a ciphertext is *portable*, so anyone who can write a row (a SQL injection, a restored foreign
+  dump, a misrouted migration) can paste another tenant's sealed signing key into their own row and
+  have the application decrypt and sign with it, or interchange a signing key and a TOTP secret
+  between subsystems. With the binding, a blob only opens in the place it was sealed for; anywhere
+  else it fails the tag and returns `keystore.ErrCiphertextCorrupt`. The contexts in use are:
+
+  | secret | context (tenant, purpose, row) | helper |
+  |---|---|---|
+  | tenant signing key | tenant, `keystore/signing-key`, key id | `keystore.SigningKeyContext` |
+  | TOTP shared secret | tenant, `mfa/totp-secret`, user id | `adapters/pgx/mfa.TOTPSecretContext` |
+  | OIDC `client_secret` | tenant, `oauth/client-secret`, provider name | `adapters/pgx/oauth.ClientSecretContext` |
+
+  The tenant in the context is the one the **operation** is scoped to, not the one recorded on the
+  row, which is what makes a relocated row fail rather than resolve.
+
+  Nonce discipline: a fresh 12-byte `crypto/rand` nonce per `Seal`, prefixed to the blob, never
+  reused.
+
+  **Sealed format and migration.** `Seal` writes a versioned blob,
+  `0x01 || nonce(12) || ciphertext || tag`, with the context as associated data. `Open` accepts that
+  **and** the legacy pre-binding format (`nonce(12) || ciphertext || tag`, no associated data) that
+  earlier releases wrote, so upgrading needs no data migration to keep working — a legacy blob
+  carries no binding, so it opens under any context. To finish the transition, re-seal each row:
+  read it (the legacy blob still opens), `Seal` the plaintext under the row's context (see the table
+  above), write it back. Once every row has been re-sealed, construct the KEK with
+  `keystore.WithoutLegacySealedFormat()` so the unbound format is refused from then on — until then
+  that option locks out every secret written by an earlier release.
+- **Key provisioning is a signing-path privilege, never a verify-path side effect.** With
+  `keystore.WithLazyProvisioning` an unknown tenant is provisioned (and a key minted) on first
+  keyset resolution. That resolution happens only on the **signing** path, which runs for an
+  authenticated, authorized issuance. The **verification** path — reachable by anyone presenting a
+  token, or hitting a JWKS endpoint, for any tenant id they choose — resolves verification keys
+  only and never the active signing key, so it cannot provision: an unauthenticated request for an
+  unknown tenant fails closed with `keystore.ErrTenantNotFound` and writes nothing. This holds
+  through the `tokens/jwt.CachingKeyStore` decorator, whose two cache halves are filled (and aged)
+  independently precisely so a verify-path miss does not reach `ActiveSigningKey`.
 - **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
   `slog`): `tokens.TokenPair` (access + refresh token), `tokens.APIKey` (the clear-text `Token`),
   and — because the HS256 signing key is the most catastrophic secret to leak — `tokens/jwt.Config`,
   `tokens/jwt.SigningKey` and the running `tokens/jwt.Service` (its `SecretKey` / `SigningKeys[].Secret`
-  and the resolved key bytes). Non-secret identifiers (key IDs, issuer, expiry) stay visible to aid
-  debugging. This is a safety net, **not** a licence to log these values (see below). JSON
-  marshalling is intentionally **not** redacted, since returning a freshly issued token to its
-  owner in a response body is a legitimate use.
+  and the resolved key bytes). The same treatment covers the two other recoverable secrets the
+  library holds in memory: `keystore.SigningKey` (its `Secret` is the OPENED per-tenant HMAC secret
+  or PKCS#8 private key, and a `%+v` would otherwise dump it as a byte slice) and, in `mfa`, both
+  `TOTPEnrollment` and the freshly minted `Enrollment` — for the latter the provisioning `URI` is
+  redacted alongside the secret, because `otpauth://…?secret=…` embeds it. Non-secret identifiers
+  (key IDs, tenant, alg, issuer, expiry) stay visible to aid debugging. This is a safety net,
+  **not** a licence to log these values (see below). JSON marshalling is intentionally **not**
+  redacted, since returning a freshly issued token — or a freshly minted TOTP secret and its QR
+  URI — to its owner in a response body is a legitimate use.
 - **Errors do not echo secrets.** Wrapped errors carry the underlying cause
   (`%w`) or non-sensitive metadata (e.g. a JWT `alg` header), never the plaintext
   password or token bytes.

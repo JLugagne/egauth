@@ -410,7 +410,7 @@ func testTenantMismatchGuard(t *testing.T, newStore StoreFactory) {
 func testAlgRoundTrip(t *testing.T, newStore StoreFactory) {
 	ctx := context.Background()
 	store, mgr := newPair(t, newStore, time.Now)
-	sealed, err := mgr.SealSecret([]byte("dummy-pkcs8-der-bytes-stand-in-for-a-key"))
+	sealed, err := mgr.SealSecret(keystore.SigningKeyContext("acme", "rsa-1"), []byte("dummy-pkcs8-der-bytes-stand-in-for-a-key"))
 	if err != nil {
 		t.Fatalf("SealSecret: %v", err)
 	}

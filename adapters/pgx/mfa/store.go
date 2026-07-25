@@ -6,10 +6,10 @@ import (
 	"embed"
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
+	"github.com/JLugagne/egauth/keystore"
 	"github.com/JLugagne/egauth/mfa"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -36,10 +36,23 @@ type DBQuerier interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
-// KEK provides envelope encryption for TOTP secrets at rest.
+// KEK provides envelope encryption for TOTP secrets at rest. It is satisfied by
+// *keystore.KEK. Every call names the SecretContext the blob belongs to, so a sealed TOTP secret
+// cannot be opened as another tenant's, another user's, or another subsystem's secret.
 type KEK interface {
-	Seal(plaintext []byte) ([]byte, error)
-	Open(sealed []byte) ([]byte, error)
+	Seal(sc keystore.SecretContext, plaintext []byte) ([]byte, error)
+	Open(sc keystore.SecretContext, sealed []byte) ([]byte, error)
+}
+
+// TOTPSecretContext returns the SecretContext a user's TOTP shared secret is sealed under: the
+// tenant, the mfa/totp-secret purpose, and the row's own identity (its user id). Operators
+// re-sealing existing rows in place must reproduce it exactly — see keystore.SecretContext.
+func TOTPSecretContext(tenantID string, userID uuid.UUID) keystore.SecretContext {
+	return keystore.SecretContext{
+		TenantID: tenantID,
+		Purpose:  keystore.PurposeTOTPSecret,
+		RowID:    userID.String(),
+	}
 }
 
 // Store implements mfa.Store for PostgreSQL.
@@ -81,9 +94,9 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 		lastAttemptAt = &t
 	}
 
-	sealed, err := s.kek.Seal([]byte(e.Secret))
+	sealed, err := s.kek.Seal(TOTPSecretContext(tenantID, e.UserID), []byte(e.Secret))
 	if err != nil {
-		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
+		return errors.Join(errors.New("mfa pgx: sealing secret"), err)
 	}
 	secretStr := base64.StdEncoding.EncodeToString(sealed)
 
@@ -112,11 +125,11 @@ func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) 
 
 	sealed, err := base64.StdEncoding.DecodeString(secretStr)
 	if err != nil {
-		return nil, fmt.Errorf("mfa pgx: decoding secret: %w", err)
+		return nil, errors.Join(errors.New("mfa pgx: decoding secret"), err)
 	}
-	plaintext, err := s.kek.Open(sealed)
+	plaintext, err := s.kek.Open(TOTPSecretContext(tenantID, userID), sealed)
 	if err != nil {
-		return nil, fmt.Errorf("mfa pgx: opening secret: %w", err)
+		return nil, errors.Join(errors.New("mfa pgx: opening secret"), err)
 	}
 	e.Secret = string(plaintext)
 

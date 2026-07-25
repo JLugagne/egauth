@@ -62,6 +62,28 @@ const (
 	MinTime uint32 = 1
 	// MinThreads is the minimum Argon2id degree of parallelism (the p parameter).
 	MinThreads uint8 = 1
+	// MaxTime is the upper bound on the iteration count (the t parameter) accepted by Compare.
+	// Every parameter Compare reads out of a stored PHC string is attacker-influenced (a tampered
+	// row, a hostile import, a corrupt migration), and the iteration count multiplies the KDF's
+	// CPU cost linearly and without limit — a uint32 t goes up to ~4 billion passes. 32 passes is
+	// an order of magnitude above any published recommendation (RFC 9106 and the OWASP Password
+	// Storage Cheat Sheet use t=1..3), so no legitimate stored hash is refused, while a single bad
+	// row can no longer pin a CPU on the login path.
+	MaxTime uint32 = 32
+	// MaxThreads is the upper bound on the degree of parallelism (the p parameter) accepted by
+	// Compare. Parallelism splits the memory into lanes rather than adding work, so it is bounded
+	// for shape sanity — a p far above any real core count marks a row that this library never
+	// wrote. 64 is well above the largest legitimate configuration.
+	MaxThreads uint8 = 64
+	// MaxKeyLen is the upper bound (in bytes) on the derived-key length Compare infers from the
+	// final PHC segment. Argon2id emits keyLen bytes and its final extract cost scales with it,
+	// so an absurdly long stored segment is rejected. 1024 bytes is 32x the 32-byte output this
+	// library produces.
+	MaxKeyLen uint32 = 1024
+	// MaxSaltLen is the upper bound (in bytes) on the salt length Compare infers from the stored
+	// PHC salt segment. The salt is absorbed by the KDF, so its length is attacker-influenced work
+	// as well. 1024 bytes is 64x the 16-byte salt this library produces.
+	MaxSaltLen uint32 = 1024
 )
 
 // WithTime sets the number of Argon2id iterations (the t parameter).
@@ -268,6 +290,7 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 		return passwords.ErrInvalidPassword
 	}
 	keyLen := uint32(len(decodedHash))
+	saltLen := uint32(len(salt))
 
 	// Validate the parsed cost parameters before handing them to argon2.IDKey. They come from
 	// a stored PHC string that may have been populated by a consumer (import, migration, or a
@@ -294,7 +317,15 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 	// corrupt stored hash row with e.g. m=4000000000 would OOM-kill the process on the
 	// victim's next login. MaxMemoryKiB (512 MiB) is far above any legitimate operational
 	// cost and ensures a single bad row cannot trigger a multi-GiB allocation.
-	if memory > MaxMemoryKiB {
+	//
+	// Memory is not the only cost the stored row dictates: the ITERATION count multiplies the KDF's
+	// CPU time linearly (t is a uint32, so ~4 billion passes are expressible), and the salt and
+	// derived-key lengths scale its absorb/extract work. Each is therefore bounded by the same
+	// shape-only rule as memory, so no single row can turn the login path into a CPU sink.
+	if memory > MaxMemoryKiB || time > MaxTime || threads > MaxThreads {
+		return passwords.ErrInvalidPassword
+	}
+	if keyLen > MaxKeyLen || saltLen > MaxSaltLen {
 		return passwords.ErrInvalidPassword
 	}
 

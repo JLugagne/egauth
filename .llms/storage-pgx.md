@@ -157,7 +157,7 @@ Methods:
 - `RevokeTenantKeys(ctx, tenantID) error`
 - `DeleteTenant(ctx, tenantID) error`
 
-`keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only).
+`keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg — sealed under `keystore.SigningKeyContext(tenantID, keyID)`, so a key row moved to another tenant or key id no longer opens (`keystore.ErrCiphertextCorrupt`). `SigningKey` also redacts its opened `Secret` on `fmt`/`slog`. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only).
 
 Tenant records live in `keystore_tenants`, independent of the key rows in `keystore_keys`. That split is what makes the sentinel contract implementable: `TenantExists` reports the tenant record (not the key count), `RevokeTenantKeys` deletes key rows but **keeps** the tenant row, so a revoked tenant reports `keystore.ErrNoActiveKey` (never `ErrTenantNotFound`, which a `Manager` built with `WithLazyProvisioning` would answer by minting a fresh key and thereby undoing the revocation), and `VerificationKeys` returns an **empty set with a nil error** so a `/.well-known/jwks.json` handler keeps serving after an emergency revoke. Only `DeleteTenant` removes the tenant record. `PutSigningKey` creates the tenant record when absent.
 
@@ -179,7 +179,16 @@ Migrations:
 import: `github.com/JLugagne/egauth/adapters/pgx/mfa`
 implements: `mfa.Store`
 constructor: `func NewStore(db DBQuerier, kek KEK) *Store`
-`KEK` provides envelope encryption for TOTP secrets and must be implemented or provided by the `keystore` package.
+`KEK` provides envelope encryption for TOTP secrets and is satisfied by `*keystore.KEK`:
+
+```go
+type KEK interface {
+	Seal(sc keystore.SecretContext, plaintext []byte) ([]byte, error)
+	Open(sc keystore.SecretContext, sealed []byte) ([]byte, error)
+}
+```
+
+The secret is sealed under `TOTPSecretContext(tenantID, userID)` — tenant + `keystore.PurposeTOTPSecret` + the row's user id — bound into the AEAD as associated data, so a ciphertext from another row, tenant or subsystem cannot be opened here. `Open` still accepts blobs written before context binding existed; re-seal rows with the same helper to finish the migration (see `keystore.SecretContext`).
 
 Methods:
 - `SaveTOTP`, `GetTOTP`, `DeleteTOTP`
@@ -240,7 +249,16 @@ Migrations:
 import: `github.com/JLugagne/egauth/adapters/pgx/oauth`
 implements: `oauth.ProviderStore`
 constructor: `func NewStore(db DBQuerier, kek KEK, opts ...StoreOption) *Store`
-`KEK` provides envelope encryption for OAuth client secrets and must be implemented or provided by the `keystore` package.
+`KEK` provides envelope encryption for OAuth client secrets; `ctx` is carried for KMS-backed implementations:
+
+```go
+type KEK interface {
+	Seal(ctx context.Context, sc keystore.SecretContext, plaintext []byte) ([]byte, error)
+	Open(ctx context.Context, sc keystore.SecretContext, ciphertext []byte) ([]byte, error)
+}
+```
+
+The `client_secret` is sealed under `ClientSecretContext(tenantID, providerName)` — tenant + `keystore.PurposeOAuthClientSecret` + the row's provider name — bound into the AEAD as associated data, so one tenant's sealed secret cannot be pasted into another's provider row. `Open` still accepts blobs written before context binding existed; re-seal rows with the same helper to finish the migration (see `keystore.SecretContext`).
 
 StoreOption:
 ```go

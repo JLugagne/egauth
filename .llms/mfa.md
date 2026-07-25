@@ -152,7 +152,7 @@ var ErrTenantMismatch      = errors.New("mfa: tenant ID mismatch")
 
 **Defaults:** 6 digits, 30s period, ±1 period skew (accepts previous/current/next window).
 
-**Secret:** 160-bit random, base32-encoded (no padding, uppercase). Stored in recoverable form (NOT hashed) — server must recompute expected codes. See SECURITY.md for at-rest considerations.
+**Secret:** 160-bit random, base32-encoded (no padding, uppercase). Stored in recoverable form (NOT hashed) — server must recompute expected codes. A secret decoding to fewer than `mfa.MinSecretBytes` (16 = 128 bits, the RFC 4226 minimum) is rejected with `mfa.ErrWeakSecret` at enrollment AND at verification, so an empty or truncated secret can never key the HMAC. See SECURITY.md for at-rest considerations.
 
 **Provisioning URI format:** `otpauth://totp/<issuer>:<account>?secret=…&issuer=…&algorithm=SHA1&digits=…&period=…`
 
@@ -179,6 +179,7 @@ Do NOT rely on `tokens.WithMaxAuthAge(d)` alone for these routes: a pre-MFA inte
 func GenerateSecret() (string, error)
 func GenerateCode(secret string, at time.Time, digits int, period time.Duration) (string, error)
 func ProvisioningURI(secret, issuer, account string, digits int, period time.Duration) string
+func ValidateSecret(secret string) error   // ErrWeakSecret if < MinSecretBytes of entropy
 func HashRecoveryCode(code string) string
 ```
 
@@ -238,7 +239,9 @@ the step-up route only. `mfa.StepUpHandler` clears the interim state by re-issui
 
 ## Gotchas
 
-- `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md.
+- `TOTPEnrollment.Secret` is held in recoverable form (server must recompute codes). The pgx store envelope-encrypts it with a mandatory KEK; a custom store must encrypt at rest too — see SECURITY.md.
+- `TOTPEnrollment` and `Enrollment` redact `Secret` (and the `URI`, which embeds it) on `fmt`/`slog`; JSON marshalling is deliberately NOT redacted, since returning the secret to the enrolling user is the point.
+- A stored secret below `MinSecretBytes` makes `ConfirmTOTP`/`VerifyTOTP` return `ErrWeakSecret`, not `ErrInvalidCode` — that is a broken row, not a wrong code.
 - `ErrAlreadyEnrolled` is returned if attempting to re-enroll a CONFIRMED factor. Call `DisableTOTP` first.
 - `VerifyTOTP` returns `ErrNotConfirmed` (not `ErrNotEnrolled`) if enrollment exists but was never confirmed.
 - Attempt counter is shared between TOTP and recovery code paths. Locking one locks both.

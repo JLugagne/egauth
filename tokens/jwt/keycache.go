@@ -40,11 +40,18 @@ const (
 	evtTenantDeleted = "tenant.deleted"
 )
 
-// cachedKeyset is one tenant's resolved material plus the instant it was cached.
+// cachedKeyset is one tenant's resolved material. The two halves are aged independently because
+// they are filled independently: the SIGNING path fills both (it already resolves the active key,
+// so reading the verification set in the same pass is free), while the VERIFICATION path fills the
+// verification half ALONE — it must never resolve the active key (see VerificationKeys).
 type cachedKeyset struct {
-	active   Signer
-	verify   map[string]Signer
-	cachedAt time.Time
+	active    Signer
+	activeAt  time.Time
+	hasActive bool
+
+	verify    map[string]Signer
+	verifyAt  time.Time
+	hasVerify bool
 }
 
 // CachingKeyStore is a KeyStore decorator adding a bounded-TTL per-tenant cache with explicit and
@@ -98,19 +105,47 @@ func NewCachingKeyStore(delegate KeyStore, ttl time.Duration, opts ...CachingKey
 	return c
 }
 
-// lookup returns a non-expired cached entry for tenantID, if any.
-func (c *CachingKeyStore) lookup(tenantID string) (cachedKeyset, bool) {
+// lookupActive returns the tenant's cached active key when that half is present and still fresh.
+func (c *CachingKeyStore) lookupActive(tenantID string) (Signer, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	e, ok := c.entries[tenantID]
-	if !ok {
-		return cachedKeyset{}, false
+	if !ok || !e.hasActive {
+		return nil, false
 	}
-	if c.now().Sub(e.cachedAt) >= c.ttl {
+	if c.now().Sub(e.activeAt) >= c.ttl {
+		e.active, e.hasActive = nil, false
+		c.pruneLocked(tenantID, e)
+		return nil, false
+	}
+	return e.active, true
+}
+
+// lookupVerify returns the tenant's cached verification set when that half is present and still
+// fresh. The map is the cached one: callers must clone it before handing it out.
+func (c *CachingKeyStore) lookupVerify(tenantID string) (map[string]Signer, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.entries[tenantID]
+	if !ok || !e.hasVerify {
+		return nil, false
+	}
+	if c.now().Sub(e.verifyAt) >= c.ttl {
+		e.verify, e.hasVerify = nil, false
+		c.pruneLocked(tenantID, e)
+		return nil, false
+	}
+	return e.verify, true
+}
+
+// pruneLocked writes back an entry whose halves were just re-evaluated, dropping it entirely once
+// neither half holds anything. c.mu must be held.
+func (c *CachingKeyStore) pruneLocked(tenantID string, e cachedKeyset) {
+	if !e.hasActive && !e.hasVerify {
 		delete(c.entries, tenantID)
-		return cachedKeyset{}, false
+		return
 	}
-	return e, true
+	c.entries[tenantID] = e
 }
 
 // generation returns the current invalidation counter, captured by a fill before it reads the
@@ -121,25 +156,44 @@ func (c *CachingKeyStore) generation() uint64 {
 	return c.gen
 }
 
-// store records a resolved keyset for tenantID. Both fields are populated together so the active
-// key and the verification set served from cache are always from the same backing read. seenGen is
-// the invalidation counter observed before the delegate read; if it has since changed, an
+// storeKeyset records a full fill for tenantID: both halves come from the same pair of delegate
+// reads, so the active key and the verification set served from cache are always consistent.
+// seenGen is the invalidation counter observed before the delegate read; if it has since changed, an
 // Invalidate landed mid-fill and this (now-stale) keyset is dropped rather than cached.
-func (c *CachingKeyStore) store(tenantID string, active Signer, verify map[string]Signer, seenGen uint64) {
+func (c *CachingKeyStore) storeKeyset(tenantID string, active Signer, verify map[string]Signer, seenGen uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.gen != seenGen {
 		return
 	}
-	c.entries[tenantID] = cachedKeyset{active: active, verify: verify, cachedAt: c.now()}
+	now := c.now()
+	c.entries[tenantID] = cachedKeyset{
+		active: active, activeAt: now, hasActive: true,
+		verify: verify, verifyAt: now, hasVerify: true,
+	}
+}
+
+// storeVerify records a verification-only fill, leaving any cached active half untouched (it ages
+// on its own timestamp). seenGen is honored exactly as in storeKeyset.
+func (c *CachingKeyStore) storeVerify(tenantID string, verify map[string]Signer, seenGen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen != seenGen {
+		return
+	}
+	e := c.entries[tenantID]
+	e.verify, e.verifyAt, e.hasVerify = verify, c.now(), true
+	c.entries[tenantID] = e
 }
 
 // ActiveSigningKey returns the tenant's active key, serving a cached value when fresh and otherwise
 // resolving both the active key and the verification set from the delegate in one fill so a later
-// VerificationKeys call for the same tenant is served from cache.
+// VerificationKeys call for the same tenant is served from cache. This is the SIGNING path: it runs
+// for an authenticated, authorized issuance, which is where a delegate that provisions lazily is
+// allowed to do so.
 func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string) (Signer, error) {
-	if e, ok := c.lookup(tenantID); ok {
-		return e.active, nil
+	if active, ok := c.lookupActive(tenantID); ok {
+		return active, nil
 	}
 	seenGen := c.generation()
 	active, err := c.delegate.ActiveSigningKey(ctx, tenantID)
@@ -150,27 +204,30 @@ func (c *CachingKeyStore) ActiveSigningKey(ctx context.Context, tenantID string)
 	if err != nil {
 		return nil, err
 	}
-	c.store(tenantID, active, verify, seenGen)
+	c.storeKeyset(tenantID, active, verify, seenGen)
 	return active, nil
 }
 
 // VerificationKeys returns every key that may still verify a token for tenantID, served from cache
-// when fresh. A defensive copy is returned so a caller cannot mutate the cached map. It fills both
-// halves of the entry on a miss for the same reason as ActiveSigningKey.
+// when fresh. A defensive copy is returned so a caller cannot mutate the cached map.
+//
+// A miss resolves the VERIFICATION SET ONLY. The verification path is reachable without
+// authentication — anyone can present a token, or hit a JWKS endpoint, naming any tenant — so it
+// must never resolve the tenant's active signing key: a delegate configured with
+// keystore.WithLazyProvisioning provisions the tenant and MINTS a key on that resolution, which
+// would hand an anonymous caller a tenant-creation and database-write primitive. Verification is
+// therefore strictly read-only with respect to tenant state, and an unknown tenant fails closed
+// with the delegate's not-found error.
 func (c *CachingKeyStore) VerificationKeys(ctx context.Context, tenantID string) (map[string]Signer, error) {
-	if e, ok := c.lookup(tenantID); ok {
-		return cloneKeys(e.verify), nil
+	if verify, ok := c.lookupVerify(tenantID); ok {
+		return cloneKeys(verify), nil
 	}
 	seenGen := c.generation()
-	active, err := c.delegate.ActiveSigningKey(ctx, tenantID)
-	if err != nil {
-		return nil, err
-	}
 	verify, err := c.delegate.VerificationKeys(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	c.store(tenantID, active, verify, seenGen)
+	c.storeVerify(tenantID, verify, seenGen)
 	return cloneKeys(verify), nil
 }
 

@@ -9,6 +9,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **KEK-sealed secrets are now bound to WHERE they belong (`crypto/CRY-1`).** `keystore.KEK.Seal` /
+  `Open` took no context and passed `nil` GCM associated data, so a sealed blob authenticated its
+  bytes but not its position: a ciphertext was **portable** between rows, tenants and subsystems. A
+  signing-key ciphertext and a TOTP-secret ciphertext were interchangeable at the storage layer, and
+  anyone able to write a row (a SQL injection, a restored foreign dump, a misrouted migration) could
+  paste another tenant's sealed signing key into their own row and have the application decrypt and
+  sign with it — a confused deputy. Both cases are now regression-tested end to end.
+
+  - New type `keystore.SecretContext{TenantID, Purpose, RowID}` is bound into the AEAD as associated
+    data. `Purpose` is required (`keystore.ErrSecretContextIncomplete` otherwise); the shipped labels
+    are `keystore.PurposeSigningKey`, `PurposeTOTPSecret` and `PurposeOAuthClientSecret`. Helpers
+    build the context for each call site: `keystore.SigningKeyContext(tenantID, keyID)`,
+    `adapters/pgx/mfa.TOTPSecretContext(tenantID, userID)`,
+    `adapters/pgx/oauth.ClientSecretContext(tenantID, providerName)`. On the open path the tenant is
+    the one the **operation** is scoped to, not the one recorded on the row, so a relocated row fails
+    instead of resolving.
+  - **Signature changes.** `KEK.Seal(sc, plaintext)`, `KEK.Open(sc, sealed)` and
+    `keystore.Manager.SealSecret(sc, plaintext)` gained a leading `SecretContext`. The pgx `KEK`
+    interfaces changed to match: `adapters/pgx/mfa.KEK` is now
+    `Seal(keystore.SecretContext, []byte)` / `Open(keystore.SecretContext, []byte)`, and
+    `adapters/pgx/oauth.KEK` is `Seal(ctx, keystore.SecretContext, []byte)` /
+    `Open(ctx, keystore.SecretContext, []byte)`. `*keystore.KEK` satisfies the former directly.
+    **Action required** only for code that calls `Seal`/`Open`/`SealSecret` itself or supplies its own
+    KEK implementation (e.g. a KMS-backed one): thread the context through. Nothing else changes —
+    `NewKEK` is now variadic and existing calls compile unchanged.
+  - **Sealed format, and NO data migration to keep working.** `Seal` writes
+    `0x01 || nonce(12) || ciphertext || tag` with the context as associated data. `Open` accepts that
+    **and** the legacy pre-binding format (`nonce(12) || ciphertext || tag`, no associated data), so
+    every secret already at rest keeps opening across the upgrade while everything newly written is
+    bound. A legacy blob carries no binding, so it opens under any context — that is the compatibility
+    this buys, and the reason to finish the transition. To finish it, re-seal each row (read it, `Seal`
+    the plaintext under the row's context, write it back) and then build the KEK with the new
+    `keystore.WithoutLegacySealedFormat()`, which refuses the unbound format from then on. Nonce
+    discipline is unchanged: a fresh 12-byte `crypto/rand` nonce per `Seal`, prefixed, never reused.
+    Documented in SECURITY.md (*Envelope encryption of recoverable secrets*) and `.llms/storage-pgx.md`.
+
+- **An out-of-range Argon2id parameter in a STORED hash is now rejected (`crypto/CRY-3`).**
+  `argon2.Hasher.Compare` capped the memory parameter read out of a stored PHC string but not the
+  iteration count, so one tampered row — or a hostile import — drove unbounded CPU on the login path
+  (`t` is a `uint32`: ~4 billion passes). New exported ceilings `MaxTime` (32), `MaxThreads` (64),
+  `MaxKeyLen` (1024 B) and `MaxSaltLen` (1024 B) join the existing `MaxMemoryKiB`; a stored hash
+  outside any of them is rejected as `passwords.ErrInvalidPassword` *before* the KDF runs. Every
+  ceiling is an order of magnitude or more above the largest published recommendation, so no
+  legitimately produced hash is refused — but a deployment that hand-wrote hashes with absurd
+  parameters will now see those rows fail to verify. The checks read only the stored hash's shape,
+  never the candidate password, so the documented constant-time property is preserved.
+
+- **A TOTP shared secret below 128 bits is now refused (`crypto/CRY-9`).** `mfa` accepted an empty or
+  truncated secret, keying the HMAC with (nearly) no entropy and making every code it produced
+  computable by anyone — a second factor that verified an attacker-derived code. Secrets decoding to
+  fewer than the new `mfa.MinSecretBytes` (16) are rejected with the new `mfa.ErrWeakSecret` at
+  enrollment **and** at verification (`EnrollTOTP`, `ConfirmTOTP`, `VerifyTOTP`, `GenerateCode`), and
+  `mfa.ValidateSecret` is exported for callers importing enrollments minted elsewhere. A row damaged
+  by a bad import now surfaces `ErrWeakSecret` instead of `ErrInvalidCode`: that is a broken record,
+  not a wrong code.
+
 - **`identity.Store` gained `DeleteVerificationTokensForUser`, and a password reset now purges the
   account's pending token-borne credentials.** A password reset is the canonical response to "I think
   I am compromised", but nothing invalidated the *verification tokens* minted while the attacker held
@@ -223,6 +279,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **An unauthenticated verify no longer provisions a tenant and mints a key (`crypto/CRY-4`,
+  `tenant/TEN-4`).** `tokens/jwt.CachingKeyStore.VerificationKeys` resolved the delegate's
+  `ActiveSigningKey` on a verification-path cache miss to fill both halves of its cache entry. With
+  `keystore.WithLazyProvisioning` wired, that resolution PROVISIONS the tenant: an anonymous request
+  presenting any token (or a JWKS lookup) for an attacker-chosen tenant id created a tenant and wrote a
+  fresh signing key to the database — attacker-driven key creation from an unauthenticated endpoint.
+  The verification path now resolves verification keys ONLY and never touches `ActiveSigningKey`, so an
+  unknown tenant fails closed with `keystore.ErrTenantNotFound` and writes nothing. The cache's two
+  halves are filled and aged independently to make that possible (the signing path still fills both in
+  one pass, so it costs no extra reads); staleness is still bounded by the same TTL per half and by the
+  same event-driven invalidation. Lazy provisioning on the signing path is unchanged.
+
+- **A validly signed access token missing `iat` or `exp` no longer panics (`crypto/CRY-2`).** Both
+  claims are OPTIONAL in RFC 7519, so golang-jwt leaves the corresponding `*NumericDate` nil rather
+  than rejecting the token, and `verifyAccessToken` dereferenced them unguarded — a nil-pointer panic
+  on the verify path, reachable by anyone who can get a token signed (or hand one to a service using a
+  leaked key). Both are now nil-guarded and the token is rejected with `tokens.ErrInvalidClaims`;
+  egauth stamps both on every token it issues, so a token missing either is not one of ours.
+
+- **The refresh reuse-grace decision now uses the injected clock (`lifecycle/CLOCK-1`,
+  `crypto/CRY-10`).** `Rotate` compared `consumed_at` — written by the STORE's clock, which for a SQL
+  backend is the database server's — against a direct `time.Since` wall-clock read, bypassing the
+  `Config.Clock` seam the rest of the package (issuance, `exp`/`nbf` validation) runs on. App/DB skew
+  therefore either falsely tripped theft detection (revoking a whole family on ordinary concurrency)
+  or silently widened the reuse window, and a test clock could not pin the behaviour. The age is now
+  measured with the injected clock, and skew handling is explicit: a `consumed_at` ahead of clock-now
+  yields a negative age that is clamped to zero, so store-clock skew reads as benign concurrency
+  instead of theft; skew the other way can only shorten the window, never widen it. Documented in
+  SECURITY.md (*Clock discipline*).
+
+- **The per-tenant signing key and the TOTP secret are now redacted in log/print output
+  (`crypto/CRY-6`).** Redaction coverage stopped at `tokens/` and `tokens/jwt/`, so a `%+v` of a struct
+  holding a `keystore.SigningKey` dumped the OPENED signing material (as a byte slice), and a `%+v` of
+  an `mfa.TOTPEnrollment` or a freshly minted `mfa.Enrollment` printed the shared secret verbatim —
+  the `Enrollment.URI` too, since `otpauth://…?secret=…` embeds it. All three now implement
+  `fmt.Stringer`, `fmt.GoStringer` and `slog.LogValuer` mirroring the `tokens/redact.go` pattern:
+  secrets render as `REDACTED` on `%v`/`%+v`/`%s`/`%#v` and through `slog`, while non-secret
+  identifiers (key id, tenant, alg, timestamps) stay visible. JSON marshalling is deliberately left
+  alone — returning a freshly minted TOTP secret and QR URI to the enrolling user is the point.
+
+- **SECURITY.md overstated the constant-time `Compare` guarantee (`claims/DOC-12`).** Two pre-KDF
+  early returns branch on the CANDIDATE password (an empty candidate, and one over
+  `passwords.MaxPasswordLength`), not only on the shape of the stored hash. Both are legitimate — the
+  empty-candidate return is what keeps `Compare` timing-symmetric with the decoy path, and the
+  oversized-candidate return is a pre-auth DoS guard — so the document now states precisely what each
+  one discloses (nothing that distinguishes a correct password from a wrong one, or one account from
+  another) instead of claiming they do not exist. No code change.
 
 - **One unreadable keystore row no longer takes a tenant's whole verification set offline.**
   `keystore.Manager.VerificationKeys` (and therefore `JWKS`) failed the entire call when a single key

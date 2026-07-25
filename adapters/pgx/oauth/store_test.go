@@ -17,11 +17,11 @@ import (
 
 type dummyKEK struct{}
 
-func (dummyKEK) Seal(_ context.Context, plaintext []byte) ([]byte, error) {
+func (dummyKEK) Seal(_ context.Context, _ keystore.SecretContext, plaintext []byte) ([]byte, error) {
 	return plaintext, nil
 }
 
-func (dummyKEK) Open(_ context.Context, ciphertext []byte) ([]byte, error) {
+func (dummyKEK) Open(_ context.Context, _ keystore.SecretContext, ciphertext []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
@@ -29,12 +29,12 @@ type wrappedKEK struct {
 	k *keystore.KEK
 }
 
-func (w wrappedKEK) Seal(_ context.Context, plaintext []byte) ([]byte, error) {
-	return w.k.Seal(plaintext)
+func (w wrappedKEK) Seal(_ context.Context, sc keystore.SecretContext, plaintext []byte) ([]byte, error) {
+	return w.k.Seal(sc, plaintext)
 }
 
-func (w wrappedKEK) Open(_ context.Context, ciphertext []byte) ([]byte, error) {
-	return w.k.Open(ciphertext)
+func (w wrappedKEK) Open(_ context.Context, sc keystore.SecretContext, ciphertext []byte) ([]byte, error) {
+	return w.k.Open(sc, ciphertext)
 }
 
 func TestStore(t *testing.T) {

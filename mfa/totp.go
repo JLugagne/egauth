@@ -18,6 +18,23 @@ import (
 // recommended by RFC 4226).
 const secretBytes = 20
 
+// MinSecretBytes is the smallest DECODED shared-secret length accepted anywhere a secret is used:
+// 128 bits, the minimum RFC 4226 §4 R6 mandates (it recommends the 160 bits GenerateSecret
+// produces). Anything shorter is rejected with ErrWeakSecret rather than used as an HMAC key — an
+// empty secret would key the HMAC with zero bytes, making every code it produces computable by
+// anyone and turning the second factor into a no-op.
+const MinSecretBytes = 16
+
+// ValidateSecret checks that secret is a usable TOTP shared secret — valid base32 (padded or not,
+// spaces tolerated) decoding to at least MinSecretBytes bytes — returning nil when it is,
+// ErrWeakSecret when it is well-formed but too short, and a decoding error otherwise. Call it when
+// importing or migrating enrollments minted outside this package; EnrollTOTP, ConfirmTOTP,
+// VerifyTOTP and GenerateCode already enforce it.
+func ValidateSecret(secret string) error {
+	_, err := decodeSecret(secret)
+	return err
+}
+
 // GenerateSecret returns a fresh base32-encoded (RFC 4648, no padding, uppercase) TOTP shared
 // secret suitable for provisioning into an authenticator app.
 func GenerateSecret() (string, error) {
@@ -54,13 +71,22 @@ func GenerateCode(secret string, at time.Time, digits int, period time.Duration)
 }
 
 // decodeSecret decodes a base32 secret tolerantly: it strips spaces, uppercases, and pads to a
-// multiple of 8 so both padded and unpadded forms decode.
+// multiple of 8 so both padded and unpadded forms decode. It returns ErrWeakSecret when the decoded
+// key is shorter than MinSecretBytes, so no caller can ever key an HMAC with a truncated (or empty)
+// shared secret.
 func decodeSecret(secret string) ([]byte, error) {
 	s := strings.ToUpper(strings.ReplaceAll(secret, " ", ""))
 	if pad := len(s) % 8; pad != 0 {
 		s += strings.Repeat("=", 8-pad)
 	}
-	return base32.StdEncoding.DecodeString(s)
+	key, err := base32.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	if len(key) < MinSecretBytes {
+		return nil, ErrWeakSecret
+	}
+	return key, nil
 }
 
 // hotp computes the RFC 4226 HOTP value for a counter, zero-padded to digits.

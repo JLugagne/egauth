@@ -11,7 +11,9 @@
 //
 // Key material persisted by a Store backend is encrypted at rest with a deployment KEK
 // (envelope encryption); see KEK and NewManager. The KEK is required and fail-fast validated
-// at construction.
+// at construction. Every sealed blob is bound to the tenant, subsystem and row it belongs to
+// (see SecretContext), so a ciphertext cannot be moved between rows or tenants; SecretContext
+// also documents the transition for secrets sealed before that binding existed.
 package keystore
 
 import (
