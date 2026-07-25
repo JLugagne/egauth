@@ -107,6 +107,15 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   and not-found still clear all cookies. Set a negative `ReuseGracePeriod` for strict mode
   where any replay revokes.
 
+  **Superseded-row retention.** A row that has been rotated away is kept until its original
+  expiry, because the theft tripwire only fires while the row still exists — so a continuously
+  rotating session accumulates roughly `RefreshTTL / rotation-interval` rows until `DeleteExpired`
+  collects them. `jwt.Config.SupersededRefreshRetention` (opt-in, default off) shortens that
+  retained window and is an explicit **trade-off**: it bounds storage but narrows the window in
+  which a stolen-then-rotated token still trips the tripwire. A value below `ReuseGracePeriod` is
+  raised to it, so the benign-concurrency allowance is never blinded, and shortening is
+  best-effort — a failure to rewrite the superseded row never fails the rotation.
+
   **Clock discipline.** The age of a consumption is measured with the Service's injected clock
   (`Config.Clock`, default `time.Now`), the same source that stamps `iat`/`exp` — never a
   second, implicit wall-clock read. `consumed_at` itself is written by whichever clock the Store
@@ -668,6 +677,43 @@ redaction is in any case only a backstop. Therefore the consumer must:
   `WithMaxLifetime(0)` is treated as "keep the default" (not "disable"), so callers that
   pass a configurable duration do not silently opt out of the cap when the user configures
   zero.
+- **Refresh-token family absolute lifetime.** The token layer applies the same discipline to
+  refresh-token **families**: `jwt.New` enforces `jwt.DefaultMaxRefreshFamilyLifetime` (30 days)
+  measured from the family's creation (the initial `IssueTokenPair`), not from the last rotation.
+  Every rotation is **clamped**, never extended — the new refresh expiry is
+  `min(now+RefreshTTL, familyCreatedAt+MaxRefreshFamilyLifetime)` — and past the deadline `Rotate`
+  reports `tokens.ErrTokenExpired`, so a family kept warm by a stolen token cannot live forever.
+  The anchor is persisted on every refresh row (`RefreshToken.FamilyCreatedAt`, the pgx
+  `family_created_at` column) and carried unchanged onto every descendant; a legacy row that
+  predates it falls back to its own `CreatedAt`.
+  Tune the cap with `jwt.Config.MaxRefreshFamilyLifetime`. Misconfiguration cannot silently remove
+  it: an unset value selects the default (or `RefreshTTL` when that is longer, so the default cap
+  never shortens a single configured token), a **negative** value is reported by
+  `Config.Validate` and normalised to the default, and combining an explicit cap with
+  `DisableMaxRefreshFamilyLifetime` keeps the **cap** (fail secure) while `Validate` reports the
+  contradiction. `DisableMaxRefreshFamilyLifetime` alone turns the cap off and is insecure for the
+  same reason `sessions.WithNoMaxLifetime()` is.
+- **Rotation pins the family's identity.** `Rotate` resolves fresh claims through the
+  `ClaimsProvider` but overrides the fields that define *which* credential the family is:
+  the subject, the tenant, the principal `Kind`, `auth_time` and `must_change_password` all come
+  from the stored family record, never from the provider. A provider that returns a different
+  subject therefore cannot silently re-point a session at another user, and a `Service`/`PAT`
+  family stays machine/PAT for its whole chain — without the `Kind` pin a
+  `WithRequiredKind`/`RequireMachine`/`RequireHuman` gate would flip after the first silent refresh.
+  The issuer also stamps `Claims.Kind` on every API key it mints (`KeyTypePAT` → `egauth.PAT`,
+  `KeyTypeService` → `egauth.Service`, anything else → `egauth.User`), which is what makes those
+  gates enforceable for key-backed credentials.
+- **Credential precedence.** An explicitly presented `Authorization: Bearer` token wins over the
+  ambient access **cookie** in `RequireAuth`/`ContextMiddleware`: the cookie is attached by the
+  browser to every request, whereas the header is a deliberate choice by the caller, so a client
+  acting as another principal is never silently served the cookie's identity. A
+  presented-but-invalid bearer token is rejected rather than downgraded to the cookie; any other
+  scheme (e.g. `Basic`) is not a bearer credential and leaves the cookie in charge.
+- **Gate order.** Every built-in `RequireAuth` gate runs before the application-supplied
+  `WithGate` predicate, in this order: principal kind → step-up (interim / AMR / auth-age) →
+  scopes → password-change → `WithGate`. Application policy code therefore only ever sees a
+  credential that already cleared the built-in gates, on both the direct-token and the
+  auto-refresh paths.
 
 ## CSRF on the form handlers (strict same-origin by default)
 

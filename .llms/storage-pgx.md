@@ -98,6 +98,8 @@ Migrations:
 004_add_expires_at_index.sql
 005_add_refresh_token_must_change_password.sql
 006_add_api_key_type_and_created_by.sql
+007_add_api_key_revoked_at.sql
+008_add_refresh_family_lifetime_and_kind.sql
 ```
 
 Migration `005_add_refresh_token_must_change_password.sql` adds `must_change_password` (boolean, NOT
@@ -114,9 +116,22 @@ Migration `006_add_api_key_type_and_created_by.sql` adds two columns to the `tok
   rows and for keys whose creator is not tracked. For service tokens this is the only back-link to
   a human, since the token's `Claims.Subject` is the key's own ID.
 
+Migration `008_add_refresh_family_lifetime_and_kind.sql` adds two nullable columns to the `tokens`
+table (refresh-token rows only):
+- `family_created_at TIMESTAMPTZ NULL` — when the rotation FAMILY was created. It equals
+  `created_at` on the initial pair and is carried unchanged onto every rotated descendant, so each
+  rotation's `expires_at` is clamped to `family_created_at + MaxRefreshFamilyLifetime` (default 30
+  days) instead of resetting the full `RefreshTTL`. `NULL` marks a legacy row; the issuer then falls
+  back to that row's `created_at` as the anchor. `SaveRefreshToken` writes `created_at` when the
+  record carries no explicit anchor.
+- `kind TEXT NULL` — the principal classification (`'user'`/`'pat'`/`'service'`) of the credential
+  that started the family, replayed verbatim onto every rotated descendant so a `WithRequiredKind`
+  gate cannot flip after a silent refresh. `NULL`/empty is unclassified and normalises to the human
+  default. It is distinct from the API-key-only `type` column.
+
 `SaveAPIKey` and `FindAPIKeyByHash` both round-trip `type` and `created_by`. The `created_by` column
 stores `NULL` when `APIKey.CreatedBy` is the zero UUID. `DeleteExpired` still hard-deletes expired
-rows and there are no soft-delete or per-key revoke columns.
+rows; per-key revocation is the soft `revoked_at` column added by migration `007`.
 
 ---
 

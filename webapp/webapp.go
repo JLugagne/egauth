@@ -36,8 +36,9 @@ import (
 const DefaultAccessTTL = 15 * time.Minute
 
 // DefaultRefreshTTL is the refresh-token lifetime NewWebApp uses when Config.RefreshTTL is
-// left zero. It bounds how long a session can be kept alive by rotation before the user must
-// re-authenticate.
+// left zero. It bounds how long an IDLE session survives before the user must re-authenticate;
+// the ABSOLUTE bound on a continuously rotated session is the issuer's refresh-family lifetime
+// cap (jwt.DefaultMaxRefreshFamilyLifetime, also 30 days, measured from login).
 const DefaultRefreshTTL = 30 * 24 * time.Hour
 
 // ErrIdentityNotRegisterable is returned by NewWebApp when Config.Identity does not implement

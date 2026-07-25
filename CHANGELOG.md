@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **`tokens.RefreshToken` gained `Kind` and `FamilyCreatedAt`, and the token layer now enforces an
+  absolute refresh-FAMILY lifetime by default (`lifecycle/LIFE-2`, `lifecycle/KIND-2`).** The struct
+  change is additive (existing code compiles), but a custom `tokens.Store` MUST round-trip both
+  fields or the absolute cap loses its anchor and the principal kind is dropped on every refresh —
+  run `tokens/storetest`, whose refresh-token contract case now asserts both. Postgres users must
+  apply the new migration `adapters/pgx/tokens/migrations/008_add_refresh_family_lifetime_and_kind.sql`
+  (two nullable columns, `family_created_at` and `kind`); legacy rows keep working, falling back to
+  the row's own `created_at` as the cap anchor.
+  Behaviourally, a family now dies 30 days (`jwt.DefaultMaxRefreshFamilyLifetime`) after its
+  creation however often it is rotated. Deployments relying on indefinitely renewable refresh
+  families must set `jwt.Config.MaxRefreshFamilyLifetime` to a longer value, or opt out explicitly
+  with `DisableMaxRefreshFamilyLifetime` (insecure).
+
 - **`identity.Store` gained `MarkEmailVerified`, and `DeleteUser` now releases the account's provider
   identities (`identity/TEN-5`, `identity/TEN-6`).** Both change the backend contract, so a custom
   `identity.Store` implementation must be updated (the shipped memory and pgx backends already are;
@@ -213,6 +226,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`jwt.Config.MaxRefreshFamilyLifetime` / `DisableMaxRefreshFamilyLifetime` /
+  `jwt.DefaultMaxRefreshFamilyLifetime` (30 days)** cap the ABSOLUTE lifetime of a refresh-token
+  family, anchored on the family's creation, mirroring `sessions.WithMaxLifetime`. Every rotation is
+  clamped to `min(now+RefreshTTL, familyCreatedAt+cap)` — never extended — and `Rotate` reports
+  `tokens.ErrTokenExpired` past the deadline. The cap is on by DEFAULT: an unset value selects
+  `max(DefaultMaxRefreshFamilyLifetime, RefreshTTL)` so it never shortens a single configured token,
+  a NEGATIVE value is a `Validate` error normalised to the default (never a silent opt-out), and
+  combining an explicit cap with the disable flag keeps the CAP (fail secure) while `Validate`
+  reports the contradiction.
+- **`jwt.Config.SupersededRefreshRetention`** (opt-in, default off) shortens how long a
+  rotated-away refresh row is retained so the reaper can collect it, bounding the
+  `RefreshTTL / rotation-interval` row growth of a long-lived session. It is an explicit trade-off —
+  it narrows the window in which a replay of that token still revokes the family — and a value below
+  `ReuseGracePeriod` is raised to it so benign-concurrency detection is never blinded.
+- **`tokens.PrincipalKindForKeyType(KeyType)`** exposes the single key-type → `egauth.PrincipalKind`
+  mapping shared by `ActorFromAPIKey` and the issuer (which now stamps it on every minted key).
 - **`identity.WithRevocationTimeout(d)` / `identity.DefaultRevocationTimeout`** bound the detached
   revocation cascade of the credential-rotating flows (30s by default; a non-positive value keeps
   the default, the cascade is never unbounded).
@@ -312,6 +341,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A refresh-token family can no longer be kept alive forever by rotating it
+  (`lifecycle/LIFE-2`).** Every rotation reset the full `RefreshTTL`, so a family kept warm by a
+  stolen token never expired — unlike `sessions`, which has had an absolute cap. Rotation is now
+  clamped to the family's absolute deadline (see Added) and the anchor is persisted on every refresh
+  row.
+- **Rotation no longer drops the principal kind (`lifecycle/KIND-2`, `lifecycle/KIND-1`).** `Rotate`
+  pinned the tenant, `auth_time` and `must_change_password` but not `Claims.Kind`, so a
+  `Service`/`PAT` credential silently became a human one after a single refresh and a
+  `WithRequiredKind`/`RequireMachine`/`RequireHuman` gate flipped. The kind is now recorded on the
+  family and replayed onto every descendant. Relatedly, `IssueAPIKey` never stamped `Claims.Kind` at
+  all — contradicting the `WithRequiredKind` documentation and leaving the gate useless for
+  key-backed credentials — so it now stamps it from the key type.
+- **Rotation can no longer be re-pointed at another user (refuter-found).** A `ClaimsProvider`
+  returning a different `Subject` silently re-issued the family's tokens for that other user while
+  the stored family still named the original one; `Rotate` now pins the subject to the family record.
+- **`WithGate` now really runs after the principal-kind gate (`lifecycle/GATE-1`).** Its
+  documentation promised the built-in gates ran first, but the kind gate ran AFTER the
+  application predicate, so app policy code observed credentials the route was configured to
+  reject outright. All built-in gates (kind → step-up → scopes → password-change) now run before
+  `WithGate` on both the direct-token and the auto-refresh paths.
+- **An explicit `Authorization: Bearer` token now beats the ambient access cookie
+  (`lifecycle/HDR-1`).** The cookie always shadowed a deliberately presented header token, so a
+  client acting as another principal was silently served the cookie's identity. A
+  presented-but-invalid bearer token is now rejected rather than downgraded to the cookie, while a
+  non-bearer scheme (e.g. `Basic`) leaves the cookie in charge. Bearer parsing also tolerates extra
+  whitespace after the scheme instead of rejecting the header.
 - **A client abort no longer leaves a rotated password with every old session alive
   (`identity/TEN-3`, `http/HTTP-2`).** `ResetPassword`, `ChangePassword` and `SetTemporaryPassword`
   commit the new hash first and then revoke the account's pending token-borne credentials, sessions

@@ -206,12 +206,7 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
-			actor := actorFromClaims(claims)
-			if !cfg.kindSatisfied(actor) {
-				wrongPrincipalKind(w)
-				return
-			}
-			next(w, r, actor, claims.Custom)
+			next(w, r, actorFromClaims(claims), claims.Custom)
 		})
 	}
 }
@@ -250,23 +245,8 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), "", token)
 		}
 		if err == nil {
-			if !cfg.stepUpSatisfied(claims) {
-				stepUpRequired(w)
+			if !cfg.gatesSatisfied(w, r, claims) {
 				return
-			}
-			if !cfg.scopesSatisfied(claims) {
-				insufficientScope(w)
-				return
-			}
-			if cfg.passwordChangeBlocked(claims) {
-				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
-				return
-			}
-			if cfg.gate != nil {
-				if gateErr := cfg.gate(actorFromClaims(claims), claims.Custom); gateErr != nil {
-					forbidden(w)
-					return
-				}
 			}
 			onAuth(w, r, claims)
 			return
@@ -304,23 +284,8 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			}
 			cfg.cookies.SetAccess(w, pair.AccessToken)
 			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
-			if !cfg.stepUpSatisfied(&pair.Claims) {
-				stepUpRequired(w)
+			if !cfg.gatesSatisfied(w, r, &pair.Claims) {
 				return
-			}
-			if !cfg.scopesSatisfied(&pair.Claims) {
-				insufficientScope(w)
-				return
-			}
-			if cfg.passwordChangeBlocked(&pair.Claims) {
-				passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
-				return
-			}
-			if cfg.gate != nil {
-				if gateErr := cfg.gate(actorFromClaims(&pair.Claims), pair.Claims.Custom); gateErr != nil {
-					forbidden(w)
-					return
-				}
 			}
 			onAuth(w, r, &pair.Claims)
 			return
@@ -330,22 +295,75 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 	unauthorized(w)
 }
 
-// extractAccessToken pulls the access token from the configured cookie and/or the
-// Authorization header. The bool reports whether it came from a cookie.
+// gatesSatisfied runs every built-in gate in the documented order — principal kind, step-up
+// (interim/AMR/auth-age), scopes, password-change — and finally the application-supplied WithGate
+// predicate. It writes the matching failure response and returns false as soon as one gate rejects,
+// so the app gate only ever sees a credential that already cleared the built-in ones. It is the
+// single ordering shared by the direct-token and the auto-refresh paths.
+func (cfg *authConfig[C]) gatesSatisfied(w http.ResponseWriter, r *http.Request, claims *Claims[C]) bool {
+	actor := actorFromClaims(claims)
+	if !cfg.kindSatisfied(actor) {
+		wrongPrincipalKind(w)
+		return false
+	}
+	if !cfg.stepUpSatisfied(claims) {
+		stepUpRequired(w)
+		return false
+	}
+	if !cfg.scopesSatisfied(claims) {
+		insufficientScope(w)
+		return false
+	}
+	if cfg.passwordChangeBlocked(claims) {
+		passwordChangeRequired(w, r, cfg.passwordChangeResetURL)
+		return false
+	}
+	if cfg.gate != nil {
+		if gateErr := cfg.gate(actor, claims.Custom); gateErr != nil {
+			forbidden(w)
+			return false
+		}
+	}
+	return true
+}
+
+// extractAccessToken pulls the access token from the Authorization header and/or the configured
+// cookie. The bool reports whether it came from a cookie.
+//
+// An explicitly presented Authorization: Bearer token WINS over the access cookie: the cookie is
+// ambient (the browser attaches it to every request) whereas the header is a deliberate choice by
+// the caller, so a client acting as another principal must not be silently served the cookie's
+// identity. A presented-but-invalid bearer token is therefore rejected rather than downgraded to
+// the cookie. Any other Authorization scheme (e.g. Basic) is not a bearer credential and leaves the
+// cookie in charge.
 func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, bool) {
+	if cfg.readHeader {
+		if t, ok := bearerToken(r.Header.Get("Authorization")); ok {
+			return t, false
+		}
+	}
 	if cfg.cookies != nil {
 		if t, ok := cfg.cookies.Access(r); ok {
 			return t, true
 		}
 	}
-	if cfg.readHeader {
-		authHeader := r.Header.Get("Authorization")
-		parts := strings.Split(authHeader, " ")
-		if len(parts) == 2 && strings.EqualFold(parts[0], "bearer") {
-			return parts[1], false
-		}
-	}
 	return "", false
+}
+
+// bearerToken extracts the credential from an "Authorization: Bearer <token>" header value. The
+// scheme match is case-insensitive and any amount of whitespace may separate it from the token
+// (RFC 9110 allows more than one space), but a value carrying anything beyond the single token is
+// rejected rather than guessed at.
+func bearerToken(header string) (string, bool) {
+	scheme, rest, found := strings.Cut(header, " ")
+	if !found || !strings.EqualFold(scheme, "bearer") {
+		return "", false
+	}
+	token := strings.TrimSpace(rest)
+	if token == "" || strings.ContainsAny(token, " \t") {
+		return "", false
+	}
+	return token, true
 }
 
 // actorFromClaims builds the egauth.Actor from verified claims. Kind is propagated verbatim

@@ -189,6 +189,19 @@ type RefreshToken struct {
 	// initial pair and carried unchanged onto every rotated descendant, so a silent refresh does
 	// not reset step-up freshness (see Claims.AuthTime).
 	AuthTime time.Time
+	// Kind records the principal classification of the credential that started this rotation
+	// family (see Claims.Kind). Like AuthTime it is set on the initial pair and carried unchanged
+	// onto every rotated descendant: Rotate replays it verbatim onto the new token's claims
+	// (overriding the ClaimsProvider), so a Service/PAT credential cannot silently become a human
+	// one after a refresh and a WithRequiredKind gate keeps holding down the whole chain.
+	Kind egauth.PrincipalKind
+	// FamilyCreatedAt is when the rotation FAMILY was created — the anchor of the absolute family
+	// lifetime cap. It equals CreatedAt on the initial pair and is carried unchanged onto every
+	// rotated descendant (CreatedAt keeps tracking the individual token), so each rotation's expiry
+	// can be clamped to FamilyCreatedAt+MaxRefreshFamilyLifetime instead of resetting the full
+	// RefreshTTL. A zero value marks a legacy row written before the cap existed; the issuer then
+	// falls back to CreatedAt as the anchor.
+	FamilyCreatedAt time.Time
 	// MustChangePassword records whether this rotation family is gated on a forced password change.
 	// Like AuthTime it is set on the initial pair and carried unchanged onto every rotated
 	// descendant: Rotate copies it verbatim onto the new token's claims (overriding the

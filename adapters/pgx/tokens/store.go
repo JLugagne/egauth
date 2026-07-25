@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/adapters/pgx/internal/pgxmigrate"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -57,28 +58,39 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 	}
 
 	// auth_time is stored as NULL when unset so legacy rows and callers that do not track it
-	// scan back to a zero time.
+	// scan back to a zero time. family_created_at follows the same convention, defaulting to this
+	// row's created_at so a row saved without an explicit anchor still caps its family.
 	var authTime *time.Time
 	if !rt.AuthTime.IsZero() {
 		authTime = &rt.AuthTime
 	}
+	familyCreatedAt := rt.FamilyCreatedAt
+	if familyCreatedAt.IsZero() {
+		familyCreatedAt = createdAt
+	}
+	var kind *string
+	if rt.Kind != "" {
+		k := string(rt.Kind)
+		kind = &k
+	}
 
 	query := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, kind, must_change_password, expires_at, created_at, family_created_at, consumed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
 		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
-			must_change_password = EXCLUDED.must_change_password,
-			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
+			kind = EXCLUDED.kind, must_change_password = EXCLUDED.must_change_password,
+			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at,
+			family_created_at = EXCLUDED.family_created_at, consumed_at = EXCLUDED.consumed_at
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.MustChangePassword, rt.ExpiresAt, createdAt, rt.ConsumedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, kind, rt.MustChangePassword, rt.ExpiresAt, createdAt, familyCreatedAt, rt.ConsumedAt)
 	return err
 }
 
 // FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
 func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
 	query := `
-		SELECT token_hash, family_id, user_id, tenant_id, auth_time, must_change_password, expires_at, created_at, consumed_at
+		SELECT token_hash, family_id, user_id, tenant_id, auth_time, kind, must_change_password, expires_at, created_at, family_created_at, consumed_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL
 	`
@@ -86,7 +98,9 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 
 	var rt tokens.RefreshToken
 	var authTime *time.Time
-	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.MustChangePassword, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt)
+	var kind *string
+	var familyCreatedAt *time.Time
+	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &kind, &rt.MustChangePassword, &rt.ExpiresAt, &rt.CreatedAt, &familyCreatedAt, &rt.ConsumedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrRefreshTokenNotFound
@@ -95,6 +109,12 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 	}
 	if authTime != nil {
 		rt.AuthTime = *authTime
+	}
+	if kind != nil {
+		rt.Kind = egauth.PrincipalKind(*kind)
+	}
+	if familyCreatedAt != nil {
+		rt.FamilyCreatedAt = *familyCreatedAt
 	}
 
 	return &rt, nil

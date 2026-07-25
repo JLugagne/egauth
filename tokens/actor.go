@@ -32,20 +32,32 @@ func ActorFromAPIKey[C any](key *APIKey[C]) egauth.Actor {
 		TenantID: key.TenantID,
 		KeyID:    key.ID,
 		Scopes:   key.Claims.Scopes,
+		Kind:     PrincipalKindForKeyType(key.Type),
 	}
 
-	switch key.Type {
-	case KeyTypeService:
-		// Machine identity: the subject is the key itself (already in KeyID); no owning user.
-		actor.Kind = egauth.Service
-	case KeyTypePAT:
-		actor.Kind = egauth.PAT
-		actor.UserID = key.Claims.Subject
-	default:
-		// Unclassified key: fail safe as a plain human principal, never as a machine.
-		actor.Kind = egauth.User
+	// A machine identity's subject IS the key (already in KeyID), so it has no owning user; every
+	// human kind carries the owning/authenticated user.
+	if actor.Kind != egauth.Service {
 		actor.UserID = key.Claims.Subject
 	}
 
 	return actor
+}
+
+// PrincipalKindForKeyType maps an API-key type to the egauth.PrincipalKind that classifies the
+// requests the key authenticates: KeyTypeService to egauth.Service, KeyTypePAT to egauth.PAT, and
+// any other value (including the zero KeyType) to egauth.User, so an unclassified key fails safe as
+// a plain human principal rather than silently reading as a machine.
+//
+// It is the single mapping shared by ActorFromAPIKey and the issuer, which stamps it on a key's
+// Claims.Kind at issuance so the WithRequiredKind gate can enforce it.
+func PrincipalKindForKeyType(keyType KeyType) egauth.PrincipalKind {
+	switch keyType {
+	case KeyTypeService:
+		return egauth.Service
+	case KeyTypePAT:
+		return egauth.PAT
+	default:
+		return egauth.User
+	}
 }

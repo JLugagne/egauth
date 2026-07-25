@@ -35,6 +35,13 @@ type claimsWrapper[C any] struct {
 	Custom  C    `json:"custom"`
 }
 
+// DefaultMaxRefreshFamilyLifetime is the absolute lifetime a refresh-token FAMILY gets when
+// Config.MaxRefreshFamilyLifetime is not set. It is enforced by default (never opt-in): once a
+// family is older than this, rotation stops working no matter how continuously the family was
+// kept warm, so a stolen refresh token cannot be rotated forever. It mirrors the 30-day absolute
+// cap sessions.NewService applies to server-side sessions.
+const DefaultMaxRefreshFamilyLifetime = 30 * 24 * time.Hour
+
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
 // replay of that same token is treated as benign concurrency (e.g. parallel tabs, link
 // prefetch, or several sub-resource requests racing to rotate the same cookie) rather than
@@ -62,8 +69,15 @@ type Service[C any] struct {
 	refreshLength     int
 	apiKeyLength      int
 	reuseGrace        time.Duration
-	events            event.Sink
-	now               func() time.Time
+	// maxFamilyLifetime is the absolute lifetime of a refresh-token family, anchored on the
+	// family's creation time. Zero means the cap is disabled (only Config's explicit disable flag
+	// produces that).
+	maxFamilyLifetime time.Duration
+	// supersededRetention, when positive, shortens the retained window of a refresh-token row that
+	// has just been rotated away (opt-in GC; see Config.SupersededRefreshRetention).
+	supersededRetention time.Duration
+	events              event.Sink
+	now                 func() time.Time
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -116,6 +130,38 @@ type Config[C any] struct {
 	RefreshTTL     time.Duration
 	RefreshLength  int
 	APIKeyLength   int
+	// MaxRefreshFamilyLifetime caps the ABSOLUTE lifetime of a refresh-token family, measured from
+	// the family's creation (the initial IssueTokenPair), not from the last rotation. Every rotation
+	// clamps the new refresh expiry to min(now+RefreshTTL, familyCreatedAt+MaxRefreshFamilyLifetime),
+	// so a family cannot be kept alive indefinitely by rotating it — the tripwire a stolen,
+	// continuously refreshed token would otherwise never hit.
+	//
+	// The cap is ON BY DEFAULT: a zero (unset) value selects DefaultMaxRefreshFamilyLifetime, or
+	// RefreshTTL when that is longer, so enabling it never shortens the lifetime of a single
+	// configured refresh token. A NEGATIVE value is a misconfiguration, not a way to disable the
+	// cap: it is reported by Validate and normalised to the default by New. To run without an
+	// absolute cap set DisableMaxRefreshFamilyLifetime instead (insecure — prefer a longer cap).
+	MaxRefreshFamilyLifetime time.Duration
+	// DisableMaxRefreshFamilyLifetime turns the absolute refresh-family lifetime cap OFF, relying on
+	// RefreshTTL alone. This is insecure: an attacker holding a refresh token can rotate it forever,
+	// so the family never expires. Prefer a longer MaxRefreshFamilyLifetime over disabling.
+	//
+	// Setting it TOGETHER with a positive MaxRefreshFamilyLifetime is a contradiction: Validate
+	// reports it and New keeps the CAP (fail secure), so a stray disable flag can never silently
+	// remove an explicitly configured cap.
+	DisableMaxRefreshFamilyLifetime bool
+	// SupersededRefreshRetention shortens how long the row of a refresh token that has just been
+	// rotated away is retained. By default (zero) a superseded row keeps its original expiry, so a
+	// continuously rotating session accumulates RefreshTTL/rotation-interval rows until the reaper
+	// (DeleteExpired) collects them.
+	//
+	// Setting it trades storage for theft detection: a replay of a superseded token is only caught
+	// as reuse (revoking the family) while its row still exists, so a shorter retention narrows the
+	// window in which a stolen-then-rotated token still trips the tripwire — outside it the replay
+	// merely reports not-found. A value below ReuseGracePeriod is raised to it, so the
+	// benign-concurrency allowance is never blinded. Shortening is best-effort: a failure to rewrite
+	// the superseded row never fails the rotation.
+	SupersededRefreshRetention time.Duration
 	// ReuseGracePeriod tunes refresh-token reuse detection. A replay of a consumed token
 	// within this window is treated as benign concurrency (rejected without revoking the
 	// family); a replay after it is treated as theft and revokes the whole family. The zero
@@ -231,6 +277,16 @@ func (cfg Config[C]) Validate() error {
 	if cfg.RefreshTTL <= 0 {
 		errs = append(errs, errors.New("jwt: RefreshTTL must be positive"))
 	}
+	// A negative absolute cap is a misconfiguration: it must never read as "disable the cap".
+	if cfg.MaxRefreshFamilyLifetime < 0 {
+		errs = append(errs, errors.New("jwt: MaxRefreshFamilyLifetime must not be negative (0 selects the default; use DisableMaxRefreshFamilyLifetime to run without a cap)"))
+	}
+	if cfg.MaxRefreshFamilyLifetime > 0 && cfg.DisableMaxRefreshFamilyLifetime {
+		errs = append(errs, errors.New("jwt: DisableMaxRefreshFamilyLifetime must not be combined with a positive MaxRefreshFamilyLifetime (the cap is kept)"))
+	}
+	if cfg.SupersededRefreshRetention < 0 {
+		errs = append(errs, errors.New("jwt: SupersededRefreshRetention must not be negative (0 keeps the full retained window)"))
+	}
 	// A non-zero RefreshLength or APIKeyLength below MinTokenLength yields guessable tokens.
 	// Zero means "use the default (32)" and is accepted here; New substitutes the safe default.
 	if cfg.RefreshLength != 0 && cfg.RefreshLength < MinTokenLength {
@@ -337,6 +393,11 @@ func resolveKeyset[C any](cfg Config[C]) (active Signer, verify map[string]Signe
 // The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
 // exists exclusively for test code that needs short keys; production callers must never set it.
 // For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
+//
+// It enforces an absolute refresh-token FAMILY lifetime by default (see
+// Config.MaxRefreshFamilyLifetime and DefaultMaxRefreshFamilyLifetime): no rotation can push a
+// family's expiry past its creation time plus that cap. A misconfigured (negative) cap falls back
+// to the default rather than disabling the control.
 func New[C any](cfg Config[C]) *Service[C] {
 	// Fail fast at startup rather than with a nil-pointer panic deep in a request,
 	// matching the convention of identity.NewService, sessions.NewService, otp.NewService
@@ -372,38 +433,80 @@ func New[C any](cfg Config[C]) *Service[C] {
 	if cfg.Clock == nil {
 		cfg.Clock = time.Now
 	}
+	// Normalise the absolute family cap. The cap is on by default; only the explicit disable flag
+	// (and only when no positive cap contradicts it) turns it off, so neither a zero nor a negative
+	// duration can silently remove it. An unset cap is at least the configured RefreshTTL, so
+	// enabling it by default never shortens a single token's configured lifetime.
+	maxFamilyLifetime := cfg.MaxRefreshFamilyLifetime
+	switch {
+	case maxFamilyLifetime > 0:
+	case cfg.DisableMaxRefreshFamilyLifetime:
+		maxFamilyLifetime = 0
+	default:
+		maxFamilyLifetime = max(DefaultMaxRefreshFamilyLifetime, cfg.RefreshTTL)
+	}
+	// A superseded row must stay readable for at least the reuse-grace window, otherwise the
+	// benign-concurrency allowance would see a not-found instead of a consumed token.
+	supersededRetention := cfg.SupersededRefreshRetention
+	if supersededRetention > 0 && supersededRetention < cfg.ReuseGracePeriod {
+		supersededRetention = cfg.ReuseGracePeriod
+	}
 
 	return &Service[C]{
-		store:             cfg.Store,
-		claimsProvider:    cfg.ClaimsProvider,
-		active:            active,
-		signingKeyID:      signKeyID,
-		verifySigners:     verifySigners,
-		legacy:            legacy,
-		keyStore:          cfg.KeyStore,
-		issuer:            cfg.Issuer,
-		expectedAudiences: cfg.ExpectedAudience,
-		accessTTL:         cfg.AccessTTL,
-		refreshTTL:        cfg.RefreshTTL,
-		refreshLength:     cfg.RefreshLength,
-		apiKeyLength:      cfg.APIKeyLength,
-		reuseGrace:        cfg.ReuseGracePeriod,
-		events:            cfg.EventSink,
-		now:               cfg.Clock,
+		store:               cfg.Store,
+		claimsProvider:      cfg.ClaimsProvider,
+		active:              active,
+		signingKeyID:        signKeyID,
+		verifySigners:       verifySigners,
+		legacy:              legacy,
+		keyStore:            cfg.KeyStore,
+		issuer:              cfg.Issuer,
+		expectedAudiences:   cfg.ExpectedAudience,
+		accessTTL:           cfg.AccessTTL,
+		refreshTTL:          cfg.RefreshTTL,
+		refreshLength:       cfg.RefreshLength,
+		apiKeyLength:        cfg.APIKeyLength,
+		reuseGrace:          cfg.ReuseGracePeriod,
+		maxFamilyLifetime:   maxFamilyLifetime,
+		supersededRetention: supersededRetention,
+		events:              cfg.EventSink,
+		now:                 cfg.Clock,
 	}
 }
 
 // IssueTokenPair generates a new Access and Refresh token pair for the given claims,
-// starting a fresh rotation family.
+// starting a fresh rotation family. The family's absolute lifetime is anchored on this call
+// (see Config.MaxRefreshFamilyLifetime).
 func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error) {
-	return s.issuePair(ctx, claims, uuid.Must(uuid.NewV7()), true)
+	return s.issuePair(ctx, claims, uuid.Must(uuid.NewV7()), time.Time{}, true)
+}
+
+// familyDeadline returns the absolute deadline of the family created at familyCreatedAt and whether
+// an absolute cap is active. The cap is inactive when it was explicitly disabled, or when the anchor
+// is unknown (a legacy refresh row that carries neither a family nor a token creation time).
+func (s *Service[C]) familyDeadline(familyCreatedAt time.Time) (time.Time, bool) {
+	if s.maxFamilyLifetime <= 0 || familyCreatedAt.IsZero() {
+		return time.Time{}, false
+	}
+	return familyCreatedAt.Add(s.maxFamilyLifetime), true
+}
+
+// clampToFamilyDeadline returns min(candidate, familyDeadline) so a rotation can shorten a refresh
+// expiry but never push it past the family's absolute deadline.
+func (s *Service[C]) clampToFamilyDeadline(familyCreatedAt time.Time, candidate time.Time) time.Time {
+	if deadline, ok := s.familyDeadline(familyCreatedAt); ok && candidate.After(deadline) {
+		return deadline
+	}
+	return candidate
 }
 
 // issuePair signs an access JWT and mints an opaque refresh token, persisting the refresh
 // token (hash only) within the given family. It is shared by initial issuance (new family)
 // and rotation (existing family); initial reports which, so auth_time defaults to the issue
 // time ONLY for a genuine fresh authentication and is never manufactured by a rotation.
-func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
+// familyCreatedAt anchors the absolute family lifetime; a zero value means "this call creates the
+// family" and anchors it at now.
+func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, familyCreatedAt time.Time, initial bool) (*tokens.TokenPair[C], error) {
 	now := s.now()
 	accessTokenStr, accessExpiresAt, authTime, err := s.signAccessToken(ctx, claims, now, initial)
 	if err != nil {
@@ -417,7 +520,12 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}
 	refreshTokenStr := base64.RawURLEncoding.EncodeToString(refreshBytes)
 	refreshHash := tokens.HashToken(refreshTokenStr)
-	refreshExpiresAt := now.Add(s.refreshTTL)
+	if familyCreatedAt.IsZero() {
+		familyCreatedAt = now
+	}
+	// Clamp, never extend: a rotation gets min(now+RefreshTTL, familyCreatedAt+cap) so the family
+	// dies at its absolute deadline however often it is refreshed.
+	refreshExpiresAt := s.clampToFamilyDeadline(familyCreatedAt, now.Add(s.refreshTTL))
 
 	rt := &tokens.RefreshToken{
 		Hash:               refreshHash,
@@ -425,9 +533,11 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		UserID:             claims.Subject,
 		TenantID:           claims.TenantID,
 		AuthTime:           authTime,
+		Kind:               claims.Kind,
 		MustChangePassword: claims.MustChangePassword,
 		ExpiresAt:          refreshExpiresAt,
 		CreatedAt:          now,
+		FamilyCreatedAt:    familyCreatedAt,
 	}
 
 	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
@@ -571,6 +681,10 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tok
 		}
 		claims.Subject = createdBy
 	}
+	// Kind is stamped from the key type (never taken from the caller): it is what the
+	// WithRequiredKind / RequireMachine / RequireHuman gates read, so a key whose claims carried no
+	// kind would read as a plain human principal and the gate would be useless for API keys.
+	claims.Kind = tokens.PrincipalKindForKeyType(keyType)
 
 	var expiresAt *time.Time
 	if !claims.ExpiresAt.IsZero() {
@@ -830,6 +944,14 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 		return nil, tokens.ErrTokenExpired
 	}
 
+	// The family's absolute deadline is enforced even if this row's own expiry says otherwise (a row
+	// written before the cap existed, or by a differently configured issuer). Past the deadline the
+	// family is over: report expiry so cookie-clearing callers force a real re-authentication.
+	familyCreatedAt := s.familyAnchor(rt)
+	if deadline, capped := s.familyDeadline(familyCreatedAt); capped && s.now().After(deadline) {
+		return nil, tokens.ErrTokenExpired
+	}
+
 	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
 	// trusting values frozen at login.
 	// Surface which family is being rotated (plus its preserved auth_time) so the provider can
@@ -867,6 +989,15 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// honor a provider-supplied expiry, which could extend a short-lived token unbounded.
 	claims.TenantID = rt.TenantID
 	claims.ExpiresAt = time.Time{}
+	// The subject is immutable within a family too: the descendant must authenticate the SAME
+	// principal the family was issued to. A ClaimsProvider returning a different subject (a bug, or
+	// a lookup poisoned by an attacker) would otherwise silently re-point the session at another
+	// user, while the family's store record still names the original one.
+	claims.Subject = rt.UserID
+	// The principal kind is pinned for the same reason: a Service/PAT family must stay machine/PAT
+	// for its whole chain, or a WithRequiredKind (RequireMachine/RequireHuman) gate flips after the
+	// first silent refresh — the provider does not usually reproduce the kind.
+	claims.Kind = rt.Kind
 	// Preserve the family's original authentication time: a silent refresh re-evaluates the
 	// assurance level (AMR/scopes via the provider) but does NOT count as a fresh authentication,
 	// so step-up freshness (WithMaxAuthAge) cannot be defeated by simply refreshing.
@@ -884,7 +1015,47 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
 	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
-	return s.issuePair(ctx, claims, rt.FamilyID, false)
+	pair, err := s.issuePair(ctx, claims, rt.FamilyID, familyCreatedAt, false)
+	if err != nil {
+		return nil, err
+	}
+
+	s.shortenSupersededWindow(ctx, tenantID, rt)
+
+	return pair, nil
+}
+
+// familyAnchor returns the creation time anchoring rt's family for the absolute-lifetime cap. It
+// prefers the family's own creation time and falls back to the token's CreatedAt for a legacy row
+// written before the family anchor was persisted, which is the most conservative anchor available.
+func (s *Service[C]) familyAnchor(rt *tokens.RefreshToken) time.Time {
+	if !rt.FamilyCreatedAt.IsZero() {
+		return rt.FamilyCreatedAt
+	}
+	return rt.CreatedAt
+}
+
+// shortenSupersededWindow rewrites the row of the refresh token just rotated away so it is retained
+// only for supersededRetention, letting the reaper collect it instead of keeping it for the whole
+// RefreshTTL (see Config.SupersededRefreshRetention). It is best-effort GC: the pair has already
+// been issued, so a failure here must not fail the rotation, and a store that rejects the write
+// simply keeps the original window.
+func (s *Service[C]) shortenSupersededWindow(ctx context.Context, tenantID string, rt *tokens.RefreshToken) {
+	if s.supersededRetention <= 0 {
+		return
+	}
+	now := s.now()
+	shortened := now.Add(s.supersededRetention)
+	if !shortened.Before(rt.ExpiresAt) {
+		return
+	}
+	superseded := *rt
+	superseded.ExpiresAt = shortened
+	if superseded.ConsumedAt == nil {
+		consumed := now
+		superseded.ConsumedAt = &consumed
+	}
+	_ = s.store.SaveRefreshToken(ctx, tenantID, &superseded)
 }
 
 // VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring

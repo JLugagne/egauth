@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -159,15 +160,19 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		expiresAt := time.Now().Add(time.Hour).Truncate(time.Second)
 		authTime := time.Now().Add(-10 * time.Minute).Truncate(time.Second)
 
+		familyCreatedAt := time.Now().Add(-2 * time.Hour).Truncate(time.Second)
+
 		rt := &tokens.RefreshToken{
 			Hash:               tokenHash,
 			FamilyID:           familyID,
 			UserID:             userID,
 			TenantID:           tenantA,
 			AuthTime:           authTime,
+			Kind:               egauth.Service,
 			MustChangePassword: true,
 			ExpiresAt:          expiresAt,
 			CreatedAt:          time.Now().Truncate(time.Second),
+			FamilyCreatedAt:    familyCreatedAt,
 		}
 		err := store.SaveRefreshToken(ctx, tenantA, rt)
 		require.NoError(t, err)
@@ -179,6 +184,9 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.Equal(t, familyID, found.FamilyID)
 		assert.WithinDuration(t, expiresAt, found.ExpiresAt, time.Second)
 		assert.WithinDuration(t, authTime, found.AuthTime, time.Second, "auth_time must round-trip (step-up freshness)")
+		assert.Equal(t, egauth.Service, found.Kind, "kind must round-trip (principal kind pinned across rotation)")
+		assert.WithinDuration(t, familyCreatedAt, found.FamilyCreatedAt, time.Second,
+			"family_created_at must round-trip (anchor of the absolute family lifetime cap)")
 		assert.True(t, found.MustChangePassword, "must_change_password must round-trip (forced-change gate carried across refresh)")
 		assert.Nil(t, found.ConsumedAt, "freshly saved token must not be consumed")
 

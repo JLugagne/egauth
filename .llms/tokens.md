@@ -110,10 +110,12 @@ type FamilyRevoker interface {
 type Claims[C any] struct {
     Subject   uuid.UUID
     TenantID  string
-    // Kind records the principal classification stamped at issuance for API-key-backed tokens
-    // (PAT or Service). Interactive tokens (IssueTokenPair) leave Kind at its zero value,
-    // which the middleware normalises to egauth.User (the safe human default). Stamped into
-    // the JWT "kind" claim (omitempty) and decoded back by the verify path.
+    // Kind records the principal classification. IssueAPIKey STAMPS it from the key type
+    // (KeyTypePAT → egauth.PAT, KeyTypeService → egauth.Service, anything else → egauth.User),
+    // and Rotate replays the family's kind onto every refresh, so a WithRequiredKind gate cannot
+    // be flipped by a silent refresh. Interactive pairs (IssueTokenPair) carry whatever the caller
+    // sets — the zero value, which the middleware normalises to egauth.User (safe human default).
+    // Stamped into the JWT "kind" claim (omitempty) and decoded back by the verify path.
     Kind      egauth.PrincipalKind
     IssuedAt  time.Time
     // AuthTime: when subject last authenticated (OIDC auth_time). NOT reset by silent refresh.
@@ -185,11 +187,19 @@ type RefreshToken struct {
     UserID     uuid.UUID
     TenantID   string
     AuthTime   time.Time  // preserved across family rotation for step-up anchoring
+    Kind       egauth.PrincipalKind // family's principal kind; replayed onto every rotation
+    MustChangePassword bool         // forced-change gate; replayed onto every rotation
     ExpiresAt  time.Time
-    CreatedAt  time.Time
+    CreatedAt  time.Time  // this token's creation
+    FamilyCreatedAt time.Time // the FAMILY's creation: anchor of the absolute family cap
     ConsumedAt *time.Time // non-nil = consumed (single-use enforced)
 }
 ```
+
+`Rotate` overrides the `ClaimsProvider` for every field above that defines *which* credential the
+family is — subject (`UserID`), `TenantID`, `Kind`, `AuthTime`, `MustChangePassword` — so a provider
+can re-evaluate authority (scopes/roles/AMR) but can never re-point a family at another user or flip
+its principal kind. `FamilyCreatedAt` is the absolute-cap anchor (see `MaxRefreshFamilyLifetime`).
 
 ### `APIKey[C any]`
 ```go
@@ -245,6 +255,8 @@ The single seam for turning a verified API key into an `egauth.Actor`. Mapping r
 
 `KeyID` is always the key's own ID; `Scopes` are taken verbatim from the key's claims. No secret or hash is copied onto the Actor.
 
+`tokens.PrincipalKindForKeyType(KeyType) egauth.PrincipalKind` exposes the same mapping; `IssueAPIKey` uses it to stamp `Claims.Kind` at issuance, so a key-backed credential and its Actor always agree.
+
 ### `tokens.NewAccountRevoker`
 ```go
 func NewAccountRevoker[C any](store Store[C]) func(ctx context.Context, tenantID string, userID uuid.UUID) error
@@ -279,11 +291,29 @@ type Config[C any] struct {
     // ReuseGracePeriod: replay within window = benign concurrency (no family revoke).
     // 0 = DefaultReuseGracePeriod (10s). Negative = strict (any replay revokes family).
     ReuseGracePeriod time.Duration
+    // MaxRefreshFamilyLifetime: ABSOLUTE cap on a refresh FAMILY, anchored on the family's
+    // creation. Every rotation is clamped to min(now+RefreshTTL, familyCreatedAt+cap), so a
+    // family cannot be kept alive by rotating it; past the deadline Rotate returns
+    // tokens.ErrTokenExpired. ON BY DEFAULT: 0 = max(DefaultMaxRefreshFamilyLifetime (30d),
+    // RefreshTTL). Negative = misconfiguration (Validate errors, New falls back to the default) —
+    // never a way to disable the cap.
+    MaxRefreshFamilyLifetime time.Duration
+    // DisableMaxRefreshFamilyLifetime: run with NO absolute family cap (insecure — an attacker
+    // holding a refresh token rotates forever). Combined with a positive
+    // MaxRefreshFamilyLifetime it is a contradiction: Validate errors and New keeps the CAP.
+    DisableMaxRefreshFamilyLifetime bool
+    // SupersededRefreshRetention: opt-in GC. Shortens how long a rotated-away row is retained
+    // (default: its original expiry). Trade-off — bounds row growth but narrows the window in
+    // which a replay of that token still revokes the family. Values below ReuseGracePeriod are
+    // raised to it; the rewrite is best-effort and never fails the rotation.
+    SupersededRefreshRetention time.Duration
     EventSink        event.Sink      // optional; receives reuse/revocation security events
     Clock            func() time.Time // override for deterministic tests; zero = time.Now
 }
 
-func (cfg Config[C]) Validate() error  // checks key size, non-empty Issuer, positive TTLs
+func (cfg Config[C]) Validate() error  // key size, non-empty Issuer, positive TTLs, family-cap sanity
+
+const DefaultMaxRefreshFamilyLifetime = 30 * 24 * time.Hour
 ```
 
 `basic.Config` = `jwt.Config[struct{}]`
@@ -536,7 +566,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithRequiredKind[C](kinds ...egauth.PrincipalKind)` | Require the credential's `Actor.Kind` to be one of the listed values; rejects with `403 wrong_principal_kind`. Opt-in only — no default kind policy. |
 | `RequireMachine[C]()` | Convenience: `WithRequiredKind(egauth.Service)` — admits Service tokens only. |
 | `RequireHuman[C]()` | Convenience: `WithRequiredKind(egauth.User, egauth.PAT)` — admits User and PAT tokens only. |
-| `WithGate[C](fn func(egauth.Actor, C) error)` | Attach an application-supplied predicate that runs after all built-in gates (kind, scopes, AMR, auth-age, password-change). If it returns non-nil the request is rejected `403 Forbidden`; the error text is NOT echoed to the client. A nil fn is a no-op. |
+| `WithGate[C](fn func(egauth.Actor, C) error)` | Attach an application-supplied predicate that runs LAST, after every built-in gate. Enforced order: principal kind → step-up (interim/AMR/auth-age) → scopes → password-change → `WithGate`, identically on the direct-token and auto-refresh paths. If it returns non-nil the request is rejected `403 Forbidden`; the error text is NOT echoed to the client. A nil fn is a no-op. |
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -601,6 +631,9 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Publishable JWKS**: `Service.PublicJWKS()` returns an RFC 7517 key set. Asymmetric public keys are safe to serve at `/.well-known/jwks.json`; HMAC keys are emitted metadata-only (`kty:"oct"`) and the secret (`k`) is NEVER published.
 - **SHA-256 at rest / no clear-text retrieval**: refresh tokens and API keys are stored as `HashToken(raw)` (SHA-256 hex); the clear-text value is never persisted and is unrecoverable after issuance. `IssueAPIKey` returns `APIKey.Token` exactly once; subsequent reads (e.g. via `ListAPIKeysByCreator`) always return a blank `Token` field. Revocation is therefore always by key ID (`RevokeAPIKey`), not by token value.
 - **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
+- **Absolute family lifetime** (`MaxRefreshFamilyLifetime`, default 30 d, ON by default): a family dies at `familyCreatedAt + cap` however often it is rotated — rotations are clamped to the deadline, never extended past it, so a stolen refresh token kept warm cannot renew forever. A negative value never disables the cap (Validate errors, New uses the default); `DisableMaxRefreshFamilyLifetime` is the only opt-out and loses the guarantee, and combining it with an explicit cap keeps the cap.
+- **Family identity is pinned on rotation**: subject, tenant, `Kind`, `AuthTime` and `MustChangePassword` come from the stored family record, never from the `ClaimsProvider`, so a provider cannot re-point a family at another user or downgrade/upgrade its principal kind mid-chain.
+- **Credential precedence**: an explicit `Authorization: Bearer` token beats the ambient access cookie; an invalid bearer token is rejected instead of silently falling back to the cookie.
 - **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it. `WithMaxAuthAge` ALONE is not a step-up gate: a pre-MFA interim credential is freshly issued, so its freshness window passes trivially — pair it with `WithRequiredAMR(AMRMFA)`.
 - **Interim (pre-step-up) credentials**: `Claims.Interim` is refused by `RequireAuth`/`ContextMiddleware` with `403 step_up_required` on every route without `WithInterimAllowed()`. `AssuranceFromContext` / `AssuranceResolverFromContext` expose the assurance (`Assurance{StepUp, Interim}`) non-generically so `identity` and `mfa` handlers can enforce it themselves; both fail closed when no assurance is available.
@@ -698,12 +731,14 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 ## Gotchas
 
 - `ClaimsProvider` is **required** for `Rotate`; omitting it returns `ErrNoClaimsProvider`. `IssueTokenPair`/`IssueAPIKey` do not need it.
-- **Deactivation needs BOTH halves.** `NewAccountRevoker(store)` wired via `identity.WithDisableRevokers`/`WithAccountErasers` revokes the STORED credentials (every refresh token across all families + all API keys). It does NOT retract an already-issued access token (stateless JWT — valid until `AccessTTL` expires) and does not touch the `sessions` module. The second half is `identity.ActiveClaimsProvider(svc, provider)`, which makes `Rotate` refuse a disabled/deleted account; without it a suspended user rotates forever and each rotation resets the refresh expiry to `now+RefreshTTL`. `webapp.NewWebApp` wires both and fails construction (`ErrIdentityNotRegisterable`) if it cannot.
+- **Deactivation needs BOTH halves.** `NewAccountRevoker(store)` wired via `identity.WithDisableRevokers`/`WithAccountErasers` revokes the STORED credentials (every refresh token across all families + all API keys). It does NOT retract an already-issued access token (stateless JWT — valid until `AccessTTL` expires) and does not touch the `sessions` module. The second half is `identity.ActiveClaimsProvider(svc, provider)`, which makes `Rotate` refuse a disabled/deleted account; without it a suspended user rotates forever within the family's absolute lifetime, each rotation resetting the refresh expiry to `min(now+RefreshTTL, familyCreatedAt+MaxRefreshFamilyLifetime)`. `webapp.NewWebApp` wires both and fails construction (`ErrIdentityNotRegisterable`) if it cannot.
 - `SecretKey` must be >= `jwt.MinSecretKeyLength` (32 bytes); `Config.Validate()` enforces this — `New`/`NewIssuer` panics only on structurally broken config, not on short keys.
 - Asymmetric signing: set `Config.Signers` with `NewRSASigner`/`NewECDSASigner`/`NewEdDSASigner` (and `ActiveKeyID` when >1). `Signers` supersedes `SecretKey`/`SigningKeys` for signing and MUST NOT be combined with `SigningKeys` (Validate/New reject it). Verifiers fetch the public keys via `Service.PublicJWKS()`. The `basic` facade is HS256-only — use generic `jwt.New[C]` for asymmetric.
 - `basic` vs generic: use `basic` when `C = struct{}`; use `jwt.New[C]` / `tokens.RequireAuth[C]` directly when embedding app-specific data in tokens.
 - `Store` is **monolithic** in v0.x (no capability split before v1); external implementations must run `tokens/storetest` conformance suite on each upgrade.
 - `RefreshPath` on `Cookies` must remain `"/"` when using `WithAutoRefresh` middleware (the browser only sends the refresh cookie on matching paths).
 - Single-tenant shortcut: `jwt.NewSingleTenant(svc)` hard-wires `tenantID=""` on `Rotate`; do NOT mix with multi-tenant calls against the same `Service`.
-- Consumed refresh rows are retained until `ExpiresAt` for replay detection; run `Store.DeleteExpired` periodically (e.g. hourly) to prevent unbounded growth.
+- Consumed refresh rows are retained until `ExpiresAt` for replay detection; run `Store.DeleteExpired` periodically (e.g. hourly) to prevent unbounded growth. `jwt.Config.SupersededRefreshRetention` shortens that window (opt-in) at the cost of narrowing the replay tripwire.
+- A refresh FAMILY dies at `familyCreatedAt + MaxRefreshFamilyLifetime` (default 30d) no matter how often it is rotated: rotations are clamped to the deadline and `Rotate` then returns `ErrTokenExpired`. External `Store` implementations must round-trip `RefreshToken.FamilyCreatedAt` and `RefreshToken.Kind` or the cap loses its anchor and the principal kind is dropped on refresh (run `tokens/storetest`).
+- The `Authorization: Bearer` header takes precedence over the access cookie; an invalid bearer token is rejected rather than falling back to the cookie.
 - `WithAutoRefresh`: on expired access token + valid refresh cookie the middleware rotates transparently and proceeds — no redirect. On rotation failure it clears cookies and returns `401`.
