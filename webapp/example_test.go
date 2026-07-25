@@ -52,7 +52,7 @@ func ExampleNewWebApp() {
 	form := url.Values{"email": {"alice@example.com"}, "password": {"Correct horse battery staple 1!"}}
 	resp, err := http.PostForm(srv.URL+"/auth/register", form)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal(err) //nolint:gocritic // Fatal exits the process; the deferred srv.Close() is moot
 	}
 	defer func() { _ = resp.Body.Close() }()
 

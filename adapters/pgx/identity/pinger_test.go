@@ -1,7 +1,7 @@
 package pgx_test
 
 import (
-	"github.com/JLugagne/egauth/adapters/pgx/identity"
+	pgx "github.com/JLugagne/egauth/adapters/pgx/identity"
 	"github.com/JLugagne/egauth/health"
 )
 

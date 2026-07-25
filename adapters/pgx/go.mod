@@ -2,17 +2,13 @@ module github.com/JLugagne/egauth/adapters/pgx
 
 go 1.26.5
 
-// The `replace` directive at the bottom of this file resolves the core module
-// (github.com/JLugagne/egauth) from this repo's root, so every go command (build, test, vet, tidy,
-// go work sync) works locally and offline — without reaching the module proxy for the core version,
-// which is unpublished until the maintainer cuts the root tag (and the repo is private until
-// launch). The committed root go.work also lists both modules. The `require` below pins the core
-// version this adapter ships against.
-//
-// At release the maintainer removes the `replace` (keeping the pinned `require`) and re-tidies
-// against the published core tag, for a clean shipped go.mod — see the two-tag dance in
-// RELEASING.md. A replace in a dependency module is ignored by external importers anyway, so even
-// if it shipped it would be harmless to consumers.
+// This file carries NO `replace` directive: the `require` below pins the core module
+// (github.com/JLugagne/egauth) directly at its latest published tag, exactly as an external
+// consumer of this adapter would resolve it. Local development and CI still don't hit the module
+// proxy for core, though — the committed root `go.work` lists both modules and resolves core from
+// this repo's root whenever the workspace is active (the default; GOWORK=off opts out of it). See
+// the two-tag dance in RELEASING.md for how the `require` pin above gets bumped after each core
+// release.
 
 require (
 	github.com/google/uuid v1.6.0

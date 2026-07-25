@@ -1,6 +1,10 @@
 package egauth
 
-import "github.com/google/uuid"
+import (
+	"slices"
+
+	"github.com/google/uuid"
+)
 
 // PrincipalKind classifies the authenticated entity making a request. It lets egauth tell the
 // application whether a request is a user action or a machine action without requiring the
@@ -63,12 +67,7 @@ func (a Actor) IsMachine() bool {
 // HasScope reports whether scope s is present in the actor's Scopes list.
 // It returns false for a nil or empty Scopes slice.
 func (a Actor) HasScope(s string) bool {
-	for _, sc := range a.Scopes {
-		if sc == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(a.Scopes, s)
 }
 
 // HasAllScopes reports whether every requested scope is present in the actor's Scopes list.
@@ -87,10 +86,5 @@ func (a Actor) HasAllScopes(scopes ...string) bool {
 // Scopes list. Calling with no arguments always returns false (no scope can satisfy an empty
 // requirement set). It returns false for a nil or empty Scopes slice.
 func (a Actor) HasAnyScope(scopes ...string) bool {
-	for _, s := range scopes {
-		if a.HasScope(s) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(scopes, a.HasScope)
 }

@@ -242,7 +242,7 @@ jobs:
           if-no-files-found: error
 
   govulncheck:
-    name: Vulnerability Check (both modules)
+    name: Vulnerability Check (all modules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -257,14 +257,18 @@ jobs:
       - name: govulncheck — core
         env:
           GOWORK: "off"
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
       - name: govulncheck — adapters/pgx
         working-directory: adapters/pgx
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: govulncheck — adapters/otel
+        working-directory: adapters/otel
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
 
   lint:
-    name: Linting (both modules)
+    name: Linting (all modules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -278,7 +282,8 @@ jobs:
 
       - name: Run golangci-lint — core
         # Use go run so golangci-lint is compiled with the same Go version as the project,
-        # bypassing the "lower than targeted Go version" error.
+        # bypassing the "lower than targeted Go version" error. The root .golangci.yml is
+        # discovered by all three modules below via golangci-lint's parent-directory walk-up.
         env:
           GOWORK: "off"
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
@@ -286,6 +291,63 @@ jobs:
       - name: Run golangci-lint — adapters/pgx
         working-directory: adapters/pgx
         run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
+
+      - name: Run golangci-lint — adapters/otel
+        working-directory: adapters/otel
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
+
+  sast-gosec:
+    name: SAST — gosec (all modules)
+    runs-on: ubuntu-latest
+    # gosec complements golangci-lint/govulncheck with Go-specific security-pattern checks (weak
+    # crypto primitives, unsafe file perms, command injection shapes, etc.) that neither of those
+    # cover. CodeQL (see codeql.yml) provides the deeper, cross-file dataflow SAST pass; gosec is
+    # the fast, always-on per-push complement.
+    #
+    # -exclude=G101,G124,G401,G505 are disabled repo-wide, each independently verified as a
+    # systemic false-positive class for this codebase rather than "convenient to silence":
+    #   G101 (hardcoded credentials): fires on the domain vocabulary itself — event Type constants
+    #     and keystore Purpose labels containing "key"/"token"/"secret", and public (non-secret)
+    #     OAuth provider endpoint URLs. No literal secret is involved anywhere it fires.
+    #   G124 (cookie missing Secure/HttpOnly/SameSite): every cookie in this codebase sets all
+    #     three via a computed, config-driven boolean/value (e.g. `Secure: !cfg.insecureCookies`),
+    #     which gosec's literal-only scanner cannot recognize as secure. The PRD-mandated default
+    #     (documented in tokens/cookies.go) is HttpOnly+Secure+SameSite=Lax; WithInsecureCookies is
+    #     an explicit, logged opt-out.
+    #   G401/G505 (weak crypto: SHA-1): both uses are protocol-mandated, not a weakness introduced
+    #     here — RFC 4226/6238 HOTP/TOTP (mfa/totp.go) and the HIBP k-anonymity range-query API
+    #     (passwords/breach/{hibp,offline}), which HASHES the disclosed prefix, not a
+    #     confidentiality or integrity primitive.
+    # Isolated, single-call-site findings (integer-length-as-prefix conversions bounded by their
+    # own subsequent checks, one nonce-fill idiom gosec's AST misreads, and internal/doctest's
+    # dev-only `go doc` subprocess/file access) are suppressed inline with `#nosec <ruleID>` at
+    # the exact line, not blanket-disabled.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: gosec — core
+        env:
+          GOWORK: "off"
+        run: >
+          go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+          -exclude=G101,G124,G401,G505
+          -exclude-rules="internal/doctest/.*:G204,G304"
+          ./...
+
+      - name: gosec — adapters/pgx
+        working-directory: adapters/pgx
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -exclude=G101,G124,G401,G505 ./...
+
+      - name: gosec — adapters/otel
+        working-directory: adapters/otel
+        run: go run github.com/securego/gosec/v2/cmd/gosec@v2.28.0 -exclude=G101,G124,G401,G505 ./...
 
   docs:
     name: Docs API Drift

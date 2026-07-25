@@ -35,7 +35,7 @@ func TestDynamicBeginHandler_ConcurrentDistinctTenantsNoAliasing(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, n)
 	start := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for i := range n {
 		tenant := "tenant-a"
 		if i%2 == 1 {
 			tenant = "tenant-b"

@@ -1,0 +1,47 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  schedule:
+    # Weekly deep scan catches new query-pack findings even on a quiet week with no pushes.
+    - cron: '30 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL analysis (Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@f081e69141f6ea0aa740920b0c7012cd81a4fbe6 # v3.37.3
+        with:
+          languages: go
+          # The committed go.work spans core + both adapter modules, so a single init/autobuild
+          # pass sees all three; core is still built with GOWORK=off elsewhere in CI to prove it
+          # is standalone (see ci.yml). CodeQL's dataflow analysis benefits from seeing every
+          # module, so the workspace view is deliberately used here.
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@f081e69141f6ea0aa740920b0c7012cd81a4fbe6 # v3.37.3
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@f081e69141f6ea0aa740920b0c7012cd81a4fbe6 # v3.37.3
+        with:
+          category: "/language:go"

@@ -75,5 +75,5 @@ func (p *DefaultPolicy) Verify(ctx context.Context, password string) error {
 	return nil
 }
 
-// Verify interface compliance
+// Verify interface compliance.
 var _ passwords.Policy = (*DefaultPolicy)(nil)

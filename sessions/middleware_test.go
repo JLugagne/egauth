@@ -39,7 +39,7 @@ func TestMiddleware(t *testing.T) {
 	}
 
 	t.Run("Valid session in cookie", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		// The secure default cookie name is now "__Host-session_token".
 		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
@@ -51,7 +51,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("Valid session in header", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 		rr := httptest.NewRecorder()
 
@@ -62,7 +62,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("No token", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		rr := httptest.NewRecorder()
 
 		middleware := sessions.RequireSession(svc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, session sessions.Session) {})
@@ -79,7 +79,7 @@ func TestMiddleware(t *testing.T) {
 		}
 		svcError := sessions.NewService(mockStoreError)
 
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: "invalid"})
 		rr := httptest.NewRecorder()
 
@@ -90,7 +90,7 @@ func TestMiddleware(t *testing.T) {
 	})
 
 	t.Run("Invalid Authorization header prefix", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Header.Set("Authorization", "Basic something")
 		rr := httptest.NewRecorder()
 
@@ -131,7 +131,7 @@ func TestMiddleware_ResolverEmptyReturnIsRejected(t *testing.T) {
 	// Resolver that cannot map the request (e.g. unmapped Host) and returns "".
 	resolver := func(*http.Request) string { return "" }
 
-	req := httptest.NewRequest("GET", "/", nil)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
 	rr := httptest.NewRecorder()
 
@@ -169,7 +169,7 @@ func TestMiddleware_WithCookieName(t *testing.T) {
 	}
 
 	t.Run("WithCookieName reads from custom cookie", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: "__Host-session", Value: token})
 		rr := httptest.NewRecorder()
 
@@ -180,7 +180,7 @@ func TestMiddleware_WithCookieName(t *testing.T) {
 	})
 
 	t.Run("WithCookieName ignores the default session_token cookie", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		// Only the old hardcoded name is present; the custom name is absent.
 		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
 		rr := httptest.NewRecorder()
@@ -222,7 +222,7 @@ func TestMiddleware_SecureCookieNameIsDefault(t *testing.T) {
 	})
 
 	t.Run("default reads the __Host- cookie without any option", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: sessions.DefaultSessionCookieName, Value: token})
 		rr := httptest.NewRecorder()
 
@@ -233,7 +233,7 @@ func TestMiddleware_SecureCookieNameIsDefault(t *testing.T) {
 	})
 
 	t.Run("default ignores the legacy plain session_token cookie", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		// Only the old hardcoded name is present; the secure default name is absent.
 		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
 		rr := httptest.NewRecorder()
@@ -245,7 +245,7 @@ func TestMiddleware_SecureCookieNameIsDefault(t *testing.T) {
 	})
 
 	t.Run("WithCookieName escape hatch overrides the secure default", func(t *testing.T) {
-		req := httptest.NewRequest("GET", "/", nil)
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.AddCookie(&http.Cookie{Name: "session_token", Value: token})
 		rr := httptest.NewRecorder()
 

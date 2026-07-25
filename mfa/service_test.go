@@ -2,6 +2,7 @@ package mfa_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -247,7 +248,7 @@ func TestVerifyTOTP_ConcurrentAttemptLimit(t *testing.T) {
 	for range n {
 		wg.Go(func() {
 			<-start
-			if err := svc.VerifyTOTP(ctx, "", uid, "000000"); err == mfa.ErrInvalidCode {
+			if err := svc.VerifyTOTP(ctx, "", uid, "000000"); errors.Is(err, mfa.ErrInvalidCode) {
 				atomic.AddInt64(&invalid, 1)
 			}
 		})

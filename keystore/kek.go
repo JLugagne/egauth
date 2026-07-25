@@ -116,7 +116,7 @@ func (sc SecretContext) aad() []byte {
 
 func appendLenPrefixed(dst []byte, s string) []byte {
 	var n [4]byte
-	binary.BigEndian.PutUint32(n[:], uint32(len(s)))
+	binary.BigEndian.PutUint32(n[:], uint32(len(s))) //#nosec G115 -- s is a tenant ID/purpose/row ID, never large enough to overflow uint32
 	dst = append(dst, n[:]...)
 	return append(dst, s...)
 }
@@ -172,7 +172,7 @@ func (k *KEK) Seal(sc SecretContext, plaintext []byte) ([]byte, error) {
 	if _, err := rand.Read(nonce); err != nil {
 		return nil, errors.Join(errors.New("keystore: generating nonce"), err)
 	}
-	return k.aead.Seal(blob, nonce, plaintext, sc.aad()), nil
+	return k.aead.Seal(blob, nonce, plaintext, sc.aad()), nil //#nosec G407 -- nonce is filled by rand.Read above, not hardcoded; gosec misreads the make-then-slice-then-fill idiom
 }
 
 // Open reverses Seal. It returns ErrCiphertextCorrupt if the blob is too short, its authentication

@@ -422,9 +422,21 @@ func main() {
 		slog.Error("failed to build server", "err", err)
 		return
 	}
-	addr := ":8080"
-	slog.Info("egauth fullstack example listening", "addr", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
+	// A production http.Server must always set explicit timeouts: the zero-value server
+	// http.ListenAndServe builds internally never times out on a slow or stalled client,
+	// which is a trivially exploitable connection-exhaustion DoS. These values are reasonable
+	// defaults for a form/JSON API; tune ReadTimeout/WriteTimeout upward if you add large
+	// uploads or long-lived streaming responses.
+	srv := &http.Server{
+		Addr:              ":8080",
+		Handler:           handler,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	slog.Info("egauth fullstack example listening", "addr", srv.Addr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server stopped", "err", err)
 	}
 }

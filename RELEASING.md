@@ -155,21 +155,35 @@ Alternatively, create the release manually in the GitHub UI:
 
 ---
 
-## Multi-module release: core + `adapters/pgx`
+## Multi-module release: core + `adapters/pgx` + `adapters/otel`
 
 The repository is a **multi-module monorepo**: the core flagship module
-(`github.com/JLugagne/egauth`) and a nested pgx adapter module
-(`github.com/JLugagne/egauth/adapters/pgx`, holding the PostgreSQL stores + migration runner).
-Each module is versioned and tagged independently, and the adapter depends on core — so the two
-tags must be cut **in order**.
+(`github.com/JLugagne/egauth`), a nested pgx adapter module
+(`github.com/JLugagne/egauth/adapters/pgx`, holding the PostgreSQL stores + migration runner), and
+a nested OpenTelemetry adapter module (`github.com/JLugagne/egauth/adapters/otel`, an `event.Sink`
+that emits spans). Each module is versioned and tagged independently, and both adapters depend on
+core — so the core tag must be cut **before** either adapter tag.
 
-For local development and CI, the adapter `go.mod` carries a relative `replace
-github.com/JLugagne/egauth => ../..` that resolves the (as-yet-unpublished, private) core module
-from this repo's root, so every go command — `build`, `test`, `vet`, `tidy`, `go work sync` — works
-offline without reaching the proxy for a core version that doesn't exist yet. A committed `go.work`
-also lists both modules so the workspace spans them. Both are **development-only**: `go.work` is
-never seen by external consumers, and the `replace` is dropped at release (and is ignored by
-importers even if it shipped). `go.work.sum` is a derived lock file and is not tracked.
+Local development and CI resolve core from this repo's root via the committed root `go.work`
+(`use ( . ./adapters/pgx ./adapters/otel )`), regardless of what each adapter's own `require`/
+`replace` says — this is what lets every go command (`build`, `test`, `vet`, `go work sync`) run
+against the current, in-tree core with no proxy access. `go.work` is **development-only**: it is
+never seen by external consumers. `go.work.sum` is a derived lock file and is not tracked.
+
+The two adapters are currently in different states of the release dance below:
+
+- **`adapters/pgx/go.mod` carries no `replace`.** Its `require` pins core directly at the latest
+  published tag (currently `v0.7.0`), exactly as an external importer resolves it — this is the
+  **post-Step-2** state described below, reached the last time pgx's `require` was bumped.
+- **`adapters/otel/go.mod` still carries `replace github.com/JLugagne/egauth => ../..`.** Its
+  `require` pin is bumped in lockstep with pgx's (Step 2 below applies to it too) but the replace
+  has not yet been dropped.
+
+A `replace` left in a shipped go.mod is ignored by external importers (so it is harmless either
+way); the two adapters do not need to be in the same state as each other, only self-consistent —
+whichever state a given adapter is in, `go mod edit -dropreplace=... -require=...@vX.Y.Z` (Step 2)
+is what advances it, and `GOWORK=off go build ./...` inside that adapter's directory is what proves
+the drop actually resolved from the proxy rather than silently falling back to the workspace.
 
 ### Adapter granularity convention
 
@@ -179,41 +193,54 @@ all seven pgx stores (`adapters/pgx/identity`, `.../tokens`, …) because they a
 win. A future SQL or Mongo backend gets its **own** module (`adapters/sql`, `adapters/mongo`) so a
 consumer who picks pgx never inherits another backend's driver.
 
-### The two-tag release dance (ordered, maintainer-manual)
+### The release dance (ordered, maintainer-manual)
 
-1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. The adapter's `require` can only point at
-   a published core version, so core must exist on the proxy before the adapter is tagged.
-2. **Point the adapter at the published core version.** Pre-tag, `adapters/pgx/go.mod` pins the core
-   `require` and carries the dev `replace github.com/JLugagne/egauth => ../..`. Now that core is
-   published, drop the replace, pin the require to the freshly-cut version, and regenerate `go.sum`
-   against the proxy (`GOWORK=off` forces proxy resolution instead of the workspace):
+1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. Each adapter's `require` can only point
+   at a published core version, so core must exist on the proxy before either adapter is tagged.
+2. **Point each adapter at the published core version.** For an adapter whose go.mod still carries
+   the dev `replace github.com/JLugagne/egauth => ../..` (currently `adapters/otel`), drop it and
+   pin the require to the freshly-cut version in one step:
+
+   ```sh
+   cd adapters/otel
+   go mod edit -dropreplace=github.com/JLugagne/egauth -require=github.com/JLugagne/egauth@vX.Y.Z
+   GOWORK=off go mod tidy   # resolves core from the proxy; proves the adapter builds standalone
+   cd ..
+   git add adapters/otel/go.mod adapters/otel/go.sum
+   git commit -m "chore: point adapters/otel at egauth vX.Y.Z"
+   ```
+
+   For an adapter that already has no `replace` (currently `adapters/pgx`), just bump the pin:
 
    ```sh
    cd adapters/pgx
-   go mod edit -dropreplace=github.com/JLugagne/egauth -require=github.com/JLugagne/egauth@vX.Y.Z
+   go mod edit -require=github.com/JLugagne/egauth@vX.Y.Z
    GOWORK=off go mod tidy   # resolves core from the proxy; proves the adapter builds standalone
    cd ..
    git add adapters/pgx/go.mod adapters/pgx/go.sum
    git commit -m "chore: point adapters/pgx at egauth vX.Y.Z"
    ```
 
-   A `replace` left in the shipped go.mod is ignored by external importers (so it's harmless if
+   A `replace` left in a shipped go.mod is ignored by external importers (so it's harmless if
    forgotten), but dropping it keeps the published module clean.
-3. **Cut the adapter tag**, which is path-prefixed because it is a nested module:
+3. **Cut each adapter tag**, path-prefixed because each is a nested module:
 
    ```sh
    git tag -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
    git push origin adapters/pgx/vX.Y.Z
+   git tag -a adapters/otel/vX.Y.Z -m "adapters/otel vX.Y.Z"
+   git push origin adapters/otel/vX.Y.Z
    ```
 4. **Consumers** then install each module at its tag, independently:
 
    ```sh
    go get github.com/JLugagne/egauth@vX.Y.Z
    go get github.com/JLugagne/egauth/adapters/pgx@vX.Y.Z
+   go get github.com/JLugagne/egauth/adapters/otel@vX.Y.Z
    ```
 
 The core and adapter versions need not match, but keeping them in lockstep (same `vX.Y.Z`) is the
-simplest mental model while the adapter tracks core 1:1.
+simplest mental model while both adapters track core 1:1.
 
 ---
 
@@ -252,13 +279,14 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
 - [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes
 - [ ] **SBOM attached**: Upload SBOM JSON and XML files to the GitHub release
-- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the adapter tag after the core tag is published
+- [ ] **Adapter tags (if applicable)**: For multi-module releases, cut the `adapters/pgx` and `adapters/otel` tags after the core tag is published
 
 ### Vulnerability gate
 
 Before releasing, verify that:
 - [ ] `govulncheck ./...` passes with no unresolved vulnerabilities
 - [ ] `govulncheck ./adapters/pgx/...` passes (if releasing adapters)
+- [ ] `govulncheck ./adapters/otel/...` passes (if releasing adapters)
 
 ### Documentation
 

@@ -170,13 +170,13 @@ func (h *Hasher) NeedsRehash(hash string) bool {
 	if err != nil {
 		return true
 	}
-	keyLen := uint32(len(decodedHash))
+	keyLen := uint32(len(decodedHash)) //#nosec G115 -- keyLen only feeds a "<" cost comparison below, never a buffer size; a stored hash long enough to wrap uint32 is not exploitable here
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
 	if err != nil {
 		return true
 	}
-	saltLen := uint32(len(salt))
+	saltLen := uint32(len(salt)) //#nosec G115 -- same as keyLen above: only used in the cost comparison, not a buffer size
 
 	// Any stored parameter weaker than this hasher's target means the hash was
 	// produced under a lower cost (an imported/migrated row, or a pre-upgrade
@@ -289,8 +289,8 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 	if err != nil {
 		return passwords.ErrInvalidPassword
 	}
-	keyLen := uint32(len(decodedHash))
-	saltLen := uint32(len(salt))
+	keyLen := uint32(len(decodedHash)) //#nosec G115 -- bounded below by keyLen > MaxKeyLen before use; wrapping would need a multi-GiB stored row, already its own DoS
+	saltLen := uint32(len(salt))       //#nosec G115 -- bounded below by saltLen > MaxSaltLen before use; same rationale as keyLen
 
 	// Validate the parsed cost parameters before handing them to argon2.IDKey. They come from
 	// a stored PHC string that may have been populated by a consumer (import, migration, or a

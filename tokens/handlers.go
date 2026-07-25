@@ -438,9 +438,10 @@ func (cfg handlerConfig) warnIfInsecureMisuse(r *http.Request) {
 		// time rather than crash (the supported path always has a non-nil Once).
 		once = &sync.Once{}
 	}
+	ctx := r.Context()
 	once.Do(func() {
 		eventTenant, _ := cfg.resolveTenant(r)
-		event.Emit(r.Context(), cfg.events, event.Event{
+		event.Emit(ctx, cfg.events, event.Event{
 			Type:     event.InsecureCookieMisuse,
 			TenantID: eventTenant,
 			Reason:   "non_loopback_plaintext_host",

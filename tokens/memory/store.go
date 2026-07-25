@@ -189,7 +189,7 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	return &kCopy, nil
 }
 
-// Verify interface compliance
+// Verify interface compliance.
 var _ tokens.Store[any] = (*Store[any])(nil)
 
 // RevokeAPIKey soft-revokes the API key identified by keyID within tenantID.

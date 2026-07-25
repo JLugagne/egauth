@@ -193,7 +193,7 @@ func (a *SoftAuthenticator) authData(t testing.TB, flags byte, withCred bool) []
 	if withCred {
 		buf.Write(a.aaguid) // 16 bytes
 		credLen := make([]byte, 2)
-		binary.BigEndian.PutUint16(credLen, uint16(len(a.CredentialID)))
+		binary.BigEndian.PutUint16(credLen, uint16(len(a.CredentialID))) //#nosec G115 -- test-only soft authenticator; CredentialID is generated in-process, never attacker-sized
 		buf.Write(credLen)
 		buf.Write(a.CredentialID)
 		buf.Write(a.coseKey(t))

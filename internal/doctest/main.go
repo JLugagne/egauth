@@ -629,7 +629,7 @@ func doResolveReturnType(alias, funcName string) (string, string, bool) {
 // funcSignatureLine returns the first line of `go doc`'s output that is the function signature
 // itself (starts with "func "), skipping the leading "package p // import ..." header line.
 func funcSignatureLine(s string) (string, bool) {
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		if strings.HasPrefix(line, "func ") {
 			return line, true
 		}

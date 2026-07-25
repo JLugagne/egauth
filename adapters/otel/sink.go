@@ -26,6 +26,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 
 	"github.com/JLugagne/egauth/event"
 )
@@ -40,11 +41,11 @@ type spanSink struct {
 // OpenTelemetry span under the span already present in ctx (or as a root span when none).
 //
 // The returned sink is safe for concurrent use. Spans are ended synchronously inside
-// EmitEvent, so no goroutine is spawned. If tracer is nil, [trace.NewNoopTracerProvider]
+// EmitEvent, so no goroutine is spawned. If tracer is nil, [noop.NewTracerProvider]
 // is used (all spans become no-ops).
 func NewSpanSink(tracer trace.Tracer) event.Sink {
 	if tracer == nil {
-		tracer = trace.NewNoopTracerProvider().Tracer("")
+		tracer = noop.NewTracerProvider().Tracer("")
 	}
 	return &spanSink{tracer: tracer}
 }

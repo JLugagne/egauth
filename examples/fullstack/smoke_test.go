@@ -66,7 +66,7 @@ func TestFullStackRegisterLoginMe(t *testing.T) {
 	}
 
 	// 2. GET /me with the access cookie → 200 with userID and role.
-	req, _ := http.NewRequest("GET", srv.URL+"/me", nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/me", nil)
 	req.AddCookie(accessCookie)
 	meResp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -119,7 +119,7 @@ func TestFullStackMFAEnrollConfirm(t *testing.T) {
 	}
 
 	// POST /mfa/enroll with access cookie + email form field.
-	enrollReq, _ := http.NewRequest("POST", srv.URL+"/mfa/enroll",
+	enrollReq, _ := http.NewRequest(http.MethodPost, srv.URL+"/mfa/enroll",
 		strings.NewReader(url.Values{"email": {"mfa@example.com"}}.Encode()))
 	enrollReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	enrollReq.AddCookie(accessCookie)

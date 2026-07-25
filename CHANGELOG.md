@@ -778,6 +778,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Post-v1, any security-relevant change re-discloses its review status here (see AUDIT.md's
   re-disclosure policy). (#19)
 
+### Tooling / CI
+
+- **Added a strict `golangci-lint` configuration (`.golangci.yml`).** With no config file, CI and
+  `make lint` silently ran only the five linters golangci-lint enables by default. The new config
+  adds `revive`, `errorlint`, `errname`, `godot`, `misspell`, `dupword`, `perfsprint`, `intrange`,
+  `usestdlibvars`, `unconvert`, `bodyclose`, `contextcheck`, `nilerr`, `copyloopvar` and `gocritic`,
+  and all three modules (core, `adapters/pgx`, `adapters/otel`) now pass it with zero issues.
+  `errorlint`'s "use `%w`" check is deliberately disabled repo-wide (`errorf: false`): the house
+  convention is `errors.Join`, not `fmt.Errorf("%w", ...)`, and converting the ~258 existing
+  `fmt.Errorf` call sites is tracked separately as a mechanical follow-up, not part of this change.
+  A handful of other rules are excluded with a one-line justification each (documented inline in
+  `.golangci.yml`) for verified, systemic false-positive patterns: the three deliberate
+  enumeration-uniform `nilerr` hits in `identity/service.go`, `bodyclose`'s inability to see a
+  `t.Cleanup`-deferred close or recognize `httptest.NewRecorder().Result()` as leak-free, and
+  `contextcheck` on test helpers that legitimately construct a detached `context.Background()`.
+  Real diagnostics the new linters found (not excluded) were fixed: `errors.Is`/`!errors.Is`
+  instead of `==`/`!=` sentinel-error comparisons, `http.MethodGet`/`http.MethodPost` instead of
+  string literals, `for range n` instead of `for i := 0; i < n; i++`, missing doc-comment periods,
+  a redundant `fmt.Errorf` with no format arguments replaced by `errors.New`, and a deprecated
+  `trace.NewNoopTracerProvider` replaced by `trace/noop.NewTracerProvider` in `adapters/otel`.
+- **Added SAST: CodeQL and gosec.** A new `.github/workflows/codeql.yml` runs GitHub's CodeQL Go
+  analysis on push, PR, and a weekly schedule. A new `sast-gosec` job in `ci.yml` runs `gosec`
+  across all three modules. `gosec`'s findings were triaged, not blanket-silenced: `G114` (the
+  `examples/fullstack` reference server using bare `http.ListenAndServe`, with no timeouts, a real
+  connection-exhaustion DoS risk) is fixed with a properly configured `http.Server`; `G101`,
+  `G124`, `G401` and `G505` are excluded repo-wide as verified systemic false positives (see the
+  rationale comment in `ci.yml`); a handful of isolated integer-length-as-prefix conversions and
+  one nonce-fill idiom `gosec` misreads are suppressed with a per-line `#nosec <ruleID>` and an
+  explanation; `internal/doctest`'s dev-only `go doc` subprocess/file access is excluded by path.
+- **`govulncheck` bumped from v1.1.4 to v1.6.0**, in the Makefile and `ci.yml`, both of which
+  document that the pin must stay in sync. `golangci-lint`'s v2.12.2 pin was checked against the
+  latest release and is already current.
+- **`govulncheck` and `golangci-lint` CI jobs now actually cover all three modules.** Both were
+  misleadingly named "(both modules)" while only ever running against core and `adapters/pgx` —
+  `adapters/otel` had no vulnerability or lint coverage at all. Renamed to "(all modules)" and
+  extended to include `adapters/otel`; the Makefile's `lint`/`vulncheck`/`vet`/`verify`/`test-unit`
+  targets were extended the same way.
+- **`.github/dependabot.yml` now covers every module.** It only declared `directory: "/"` for the
+  `gomod` ecosystem, so `adapters/pgx` and `adapters/otel` — each with their own `go.mod` — never
+  got automated dependency-update PRs. Added a `gomod` entry for each.
+- **`adapters/otel`'s core pin was three releases stale (v0.3.0) and it was absent from
+  `RELEASING.md`.** Bumped the pin to v0.7.0 (matching `adapters/pgx`) and added it to the
+  release dance, the vulnerability-gate checklist, and the release-checklist summary.
+  `adapters/otel`'s tests already exercise the current, in-tree core via the committed `go.work`
+  (unaffected by whatever the pin says); `internal/doctest` already validates its package doc
+  comment against current core too, confirmed by a clean `go run ./internal/doctest`.
+- **Corrected `RELEASING.md` and `adapters/pgx/go.mod`'s stale description of a `replace`
+  directive that no longer exists.** Both said the adapter's go.mod carries a dev
+  `replace github.com/JLugagne/egauth => ../..`, dropped only at release time — but a prior
+  release-prep commit already dropped it in favor of a `require` pinned directly at the latest
+  published core tag. (An earlier claim that this causes untested divergence between the pin and
+  HEAD core was investigated and refuted: no CI job builds `adapters/pgx` with `GOWORK=off`, so
+  every CI run already compiles it against HEAD core via the committed `go.work` regardless of
+  the pin.) Both files now describe what actually happens; `adapters/otel`, which still carries
+  the `replace`, is documented as the adapter currently mid-transition.
+- **`examples/fullstack`'s `main()` now uses a configured `http.Server`** (`ReadHeaderTimeout`,
+  `ReadTimeout`, `WriteTimeout`, `IdleTimeout`) instead of bare `http.ListenAndServe`, which never
+  times out a slow or stalled client (`gosec` G114). Every other development-only shortcut in the
+  example (in-memory backends, `WithInsecureNoOriginCheck`, `WithInsecureCookies`, the hardcoded
+  JWT signing key) was already called out in a comment.
+- **Applied the real `go fix -diff` modernizer suggestions**: `Actor.HasScope`/`HasAnyScope`
+  (`actor.go`) and `tokens/middleware.go`'s `isAllowedKind` now use `slices.Contains`/
+  `slices.ContainsFunc` instead of a hand-rolled loop; `internal/doctest`'s `funcSignatureLine`
+  uses `strings.SplitSeq`; `passkey/storetest/challengestore.go`'s racer goroutines use
+  `sync.WaitGroup.Go` instead of manual `Add`/`go func`/`defer Done`.
+
 ## [0.7.0] - 2026-07-21
 
 Security-hardening batch: CSRF coverage is completed across the state-changing handler families,

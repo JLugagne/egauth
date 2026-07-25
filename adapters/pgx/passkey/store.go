@@ -87,7 +87,7 @@ func (s *Store) GetCredentials(ctx context.Context, tenantID string, userID uuid
 		if err := rows.Scan(&c.ID, &c.PublicKey, &signCount, &c.Data, &c.CreatedAt, &c.Nickname, &c.LastUsedAt, &c.Transports, &c.BackupEligible, &c.BackupState); err != nil {
 			return nil, err
 		}
-		c.SignCount = uint32(signCount)
+		c.SignCount = uint32(signCount) //#nosec G115 -- the column only ever holds a value this store previously widened from uint32 (see Create/Update below); a value outside that range means the row was tampered with out-of-band
 		out = append(out, c)
 	}
 	return out, rows.Err()

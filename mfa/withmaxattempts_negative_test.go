@@ -31,7 +31,7 @@ func TestWithMaxAttempts_NegativeValue_UsesDefault(t *testing.T) {
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 
-	for i := 0; i < mfa.DefaultMaxAttempts-1; i++ {
+	for i := range mfa.DefaultMaxAttempts - 1 {
 		assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrInvalidCode,
 			"attempt %d should be ErrInvalidCode", i+1)
 	}

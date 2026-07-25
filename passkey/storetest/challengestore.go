@@ -101,9 +101,7 @@ func ChallengeStoreContractTesting(t *testing.T, cs passkey.ChallengeStore) {
 				start = make(chan struct{})
 			)
 			for range racers {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					<-start
 					ok, err := cs.Consume(ctx, "tenant-A", challenge)
 					mu.Lock()
@@ -111,7 +109,7 @@ func ChallengeStoreContractTesting(t *testing.T, cs passkey.ChallengeStore) {
 					if err == nil && ok {
 						wins++
 					}
-				}()
+				})
 			}
 			close(start)
 			wg.Wait()

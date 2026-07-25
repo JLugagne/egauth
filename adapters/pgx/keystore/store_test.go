@@ -277,7 +277,7 @@ func TestPgxKeystore_CreateTenant_ConcurrentRace(t *testing.T) {
 	start := make(chan struct{})
 	results := make([]error, n)
 
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()

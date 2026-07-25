@@ -2,6 +2,7 @@ package otp_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -60,7 +61,7 @@ func TestService_ConcurrentVerify_AttemptLimit(t *testing.T) {
 	for range n {
 		wg.Go(func() {
 			<-start
-			if err := svc.Verify(ctx, "t1", sub, "login", bad); err == otp.ErrInvalidCode {
+			if err := svc.Verify(ctx, "t1", sub, "login", bad); errors.Is(err, otp.ErrInvalidCode) {
 				atomic.AddInt64(&invalid, 1)
 			}
 		})

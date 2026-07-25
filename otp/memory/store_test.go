@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -103,7 +104,7 @@ func TestBoundedOTPStore_EvictsExpiredFirst(t *testing.T) {
 	}
 
 	// Expired entry must be gone.
-	if _, err := store.GetOTP(ctx, "t1", expiredSubject, "p"); err != otp.ErrCodeNotFound {
+	if _, err := store.GetOTP(ctx, "t1", expiredSubject, "p"); !errors.Is(err, otp.ErrCodeNotFound) {
 		t.Fatalf("expired OTP survived eviction: err=%v", err)
 	}
 	// Live entries must still be present.

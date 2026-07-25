@@ -1,0 +1,129 @@
+version: "2"
+
+# Strict-but-practical linter suite. Keep the version pin in sync with Makefile
+# (GOLANGCI_LINT_VERSION) and .github/workflows/ci.yml.
+run:
+  timeout: 10m
+
+# Never hide issues behind the default per-linter/per-pattern caps: a security-sensitive codebase
+# wants every diagnostic surfaced, not just the first few of each kind.
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+linters:
+  default: none
+  enable:
+    # Default set (must stay enabled even when overriding `default: none`).
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    # Strict additions.
+    - revive
+    - errorlint
+    - errname
+    - godot
+    - misspell
+    - dupword
+    - perfsprint
+    - intrange
+    - usestdlibvars
+    - unconvert
+    - bodyclose
+    - contextcheck
+    - nilerr
+    - copyloopvar
+    - gocritic
+
+  settings:
+    revive:
+      rules:
+        # This codebase's house rule forbids narrative comments on unexported code, but exported
+        # symbols do carry doc comments starting with the symbol name (checked elsewhere by
+        # internal/doctest). Relax revive's stricter exported-comment format rule to avoid
+        # fighting doctest over comment wording; doctest is the actual API-drift gate.
+        - name: exported
+          disabled: true
+
+    errorlint:
+      # The house error convention is errors.Join, not fmt.Errorf("%w", ...) — so errorlint's
+      # "use %w" nudge (the errorf check) recommends an idiom this codebase deliberately does not
+      # use going forward. Converting the ~258 existing fmt.Errorf call sites is a separate,
+      # tracked, mechanical change. Keep the comparison/asserts checks: `err == sentinel` should
+      # still be `errors.Is`, regardless of the wrapping style question.
+      errorf: false
+      errorf-multi: false
+
+    gocritic:
+      disabled-checks:
+        # identity/service.go's RegisterAccountErasers/RegisterDisableRevokers deliberately build
+        # a fresh `next` slice (correct capacity) and append the OLD then NEW elements into it
+        # before assigning to the field — the copy-on-write idiom the surrounding comment
+        # documents, not the aliasing bug appendAssign otherwise catches.
+        - appendAssign
+
+  exclusions:
+    rules:
+      # identity/service.go: RequestPasswordReset, RequestMagicLink and
+      # RequestPasswordResetViaRecovery deliberately check `errors.Is(err, ErrUserNotFound)` and
+      # then return a nil error — this is the enumeration-uniform response contract (an unknown
+      # account must be indistinguishable from a known one with no reset channel), not a
+      # swallowed error. Excluded here instead of three inline nolint comments.
+      - path: identity/service.go
+        linters:
+          - nilerr
+
+      # internal/doctest walks the tree as a filepath.WalkDir callback: returning a non-nil error
+      # aborts the whole doctest run over one unparseable file. Skipping it (nil) and continuing
+      # is the deliberate, documented behavior, not a swallowed error.
+      - path: internal/doctest/main.go
+        linters:
+          - nilerr
+
+      # These tests deliberately format the same redacted value through every fmt verb (%v, %+v,
+      # %s, %#v) to prove the redaction survives each rendering path independently; collapsing
+      # `fmt.Sprintf("%s", x)` into `x.String()` would drop the %s-verb case from coverage even
+      # though the two happen to be equivalent today.
+      - path: '(keystore|mfa)/redact_test\.go'
+        linters:
+          - staticcheck
+        text: 'S1025'
+
+      # dupword false positives on deliberate test/doc content, not typos:
+      #  - passphrase_test.go: "password password" is a re-spaced denylist probe, not a copy-paste
+      #    error.
+      #  - tokens/context.go: a doc-comment code sample showing a 3-string return signature.
+      - path: passwords/policy/passphrase_test\.go
+        linters:
+          - dupword
+      - path: tokens/context\.go
+        linters:
+          - dupword
+
+      # bodyclose is unusable across this test suite's two dominant response-producing patterns:
+      # (1) helpers that DO close the body, just via `t.Cleanup(func() { resp.Body.Close() })`,
+      # a control-flow shape bodyclose's static analysis does not follow through a returned
+      # *http.Response; and (2) httptest.NewRecorder().Result(), whose Body is an in-memory
+      # io.NopCloser with nothing to leak — the standard way to exercise an http.Handler directly.
+      # Both are verified safe across the tokens/webapp/test helper functions that triggered this.
+      - path: '_test\.go'
+        linters:
+          - bodyclose
+
+      # contextcheck is noisy on test helpers that legitimately construct a fresh, detached
+      # context.Background() (no caller context to inherit, or an intentionally-detached context
+      # for a cascade/rotation test) — a normal and safe pattern confined to _test.go files.
+      - path: '_test\.go'
+        linters:
+          - contextcheck
+
+    # Third-party generated/vendored-style code and examples are not held to the same bar.
+    paths:
+      - examples/.*/testdata
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

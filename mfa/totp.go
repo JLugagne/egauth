@@ -67,7 +67,7 @@ func GenerateCode(secret string, at time.Time, digits int, period time.Duration)
 	if err != nil {
 		return "", err
 	}
-	return hotp(key, uint64(timeStep(at, period)), digits), nil
+	return hotp(key, uint64(timeStep(at, period)), digits), nil //#nosec G115 -- a Unix time step is never negative or large enough to overflow uint64
 }
 
 // decodeSecret decodes a base32 secret tolerantly: it strips spaces, uppercases, and pads to a
@@ -105,7 +105,7 @@ func hotp(key []byte, counter uint64, digits int) string {
 		(uint32(sum[offset+2]) << 8) |
 		uint32(sum[offset+3])
 
-	mod := bin % uint32(pow10(digits))
+	mod := bin % uint32(pow10(digits)) //#nosec G115 -- digits is a small, caller-bounded code length (RFC 4226 §5.3), never overflows uint32
 	return fmt.Sprintf("%0*d", digits, mod)
 }
 

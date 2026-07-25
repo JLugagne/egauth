@@ -16,7 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockPolicy is a simple mock for passwords.Policy
+// mockPolicy is a simple mock for passwords.Policy.
 type mockPolicy struct {
 	VerifyFunc func(ctx context.Context, password string) error
 }

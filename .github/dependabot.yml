@@ -5,6 +5,18 @@ updates:
     schedule:
       interval: "weekly"
 
+  # Multi-module monorepo: each nested module (adapters/pgx, adapters/otel) has its own go.mod
+  # and needs its own Dependabot entry — the root entry above does not recurse into them.
+  - package-ecosystem: "gomod"
+    directory: "/adapters/pgx"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "gomod"
+    directory: "/adapters/otel"
+    schedule:
+      interval: "weekly"
+
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

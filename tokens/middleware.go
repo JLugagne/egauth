@@ -3,6 +3,7 @@ package tokens
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -457,12 +458,7 @@ func (cfg *authConfig[C]) kindSatisfied(actor egauth.Actor) bool {
 	if kind == "" {
 		kind = egauth.User
 	}
-	for _, allowed := range cfg.requiredKinds {
-		if kind == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(cfg.requiredKinds, kind)
 }
 
 func unauthorized(w http.ResponseWriter) {

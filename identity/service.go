@@ -1322,7 +1322,7 @@ func normalizePhone(phone string) (string, error) {
 	if len(digits) < 8 || len(digits) > 15 {
 		return "", ErrInvalidPhone
 	}
-	for i := 0; i < len(digits); i++ {
+	for i := range digits {
 		if digits[i] < '0' || digits[i] > '9' {
 			return "", ErrInvalidPhone
 		}

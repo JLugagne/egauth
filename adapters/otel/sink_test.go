@@ -24,7 +24,7 @@ func newRecorder() (*tracetest.SpanRecorder, *sdktrace.TracerProvider) {
 }
 
 func TestNewSpanSink_ImplementsSink(t *testing.T) {
-	var _ event.Sink = egauthotel.NewSpanSink(nil)
+	var _ = egauthotel.NewSpanSink(nil)
 }
 
 func TestSpanSink_EmitsSpanPerEvent(t *testing.T) {

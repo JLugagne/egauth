@@ -3,6 +3,7 @@ package providers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -140,7 +141,7 @@ func fetchOIDCDiscovery(ctx context.Context, c *http.Client, issuer string, allo
 		return nil, fmt.Errorf("oidc discovery: document issuer %q does not match requested issuer %q", doc.Issuer, issuer)
 	}
 	if doc.AuthorizationEndpoint == "" || doc.TokenEndpoint == "" {
-		return nil, fmt.Errorf("oidc discovery: document missing authorization_endpoint or token_endpoint")
+		return nil, errors.New("oidc discovery: document missing authorization_endpoint or token_endpoint")
 	}
 	return &doc, nil
 }

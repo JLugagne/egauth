@@ -73,7 +73,7 @@ func BenchmarkAuthenticate_ValidUser_WrongPassword(b *testing.B) {
 	svc, email := benchAuthService(b)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = svc.Authenticate(ctx, "t1", "password", email, "wrong-password")
 	}
 }
@@ -88,7 +88,7 @@ func BenchmarkAuthenticate_UnknownUser(b *testing.B) {
 	svc, _ := benchAuthService(b)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = svc.Authenticate(ctx, "t1", "password", "ghost@example.com", "wrong-password")
 	}
 }
@@ -102,7 +102,7 @@ func BenchmarkAuthenticate_NonPasswordProvider(b *testing.B) {
 	svc, _ := benchAuthService(b)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = svc.Authenticate(ctx, "t1", "google", "someone@example.com", "wrong-password")
 	}
 }

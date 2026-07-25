@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -60,12 +61,12 @@ func TestIndexConsistency(t *testing.T) {
 	}
 
 	// Absent hash returns not found.
-	if _, err := store.FindSessionByHash(ctx, "tenantA", "no-such-hash"); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", "no-such-hash"); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("absent hash: got %v want ErrSessionNotFound", err)
 	}
 
 	// Tenant mismatch returns not found even though the hash exists.
-	if _, err := store.FindSessionByHash(ctx, "tenantB", target.TokenHash); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantB", target.TokenHash); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("tenant mismatch: got %v want ErrSessionNotFound", err)
 	}
 
@@ -75,7 +76,7 @@ func TestIndexConsistency(t *testing.T) {
 	if err := store.UpdateSession(ctx, "tenantA", &rotated, target.TokenHash); err != nil {
 		t.Fatalf("UpdateSession rotation: %v", err)
 	}
-	if _, err := store.FindSessionByHash(ctx, "tenantA", target.TokenHash); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", target.TokenHash); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("old hash after rotation: got %v want ErrSessionNotFound", err)
 	}
 	got, err = store.FindSessionByHash(ctx, "tenantA", "rotated-hash")
@@ -93,7 +94,7 @@ func TestIndexConsistency(t *testing.T) {
 	if err := store.DeleteSession(ctx, "tenantA", target.ID); err != nil {
 		t.Fatalf("DeleteSession: %v", err)
 	}
-	if _, err := store.FindSessionByHash(ctx, "tenantA", "rotated-hash"); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", "rotated-hash"); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("hash after delete: got %v want ErrSessionNotFound", err)
 	}
 	if len(store.sessions) != len(store.byHash) {
@@ -105,7 +106,7 @@ func TestIndexConsistency(t *testing.T) {
 	if err := store.DeleteSessionsByUserID(ctx, "tenantA", victim.UserID); err != nil {
 		t.Fatalf("DeleteSessionsByUserID: %v", err)
 	}
-	if _, err := store.FindSessionByHash(ctx, "tenantA", victim.TokenHash); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", victim.TokenHash); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("hash after DeleteSessionsByUserID: got %v want ErrSessionNotFound", err)
 	}
 	if len(store.sessions) != len(store.byHash) {
@@ -184,7 +185,7 @@ func TestBindSessionChangesUserID(t *testing.T) {
 		t.Fatalf("BindSession: %v", err)
 	}
 
-	if _, err := store.FindSessionByHash(ctx, "tenantA", "anon-h"); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", "anon-h"); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("old token after BindSession: got %v want ErrSessionNotFound", err)
 	}
 	found, err := store.FindSessionByHash(ctx, "tenantA", "auth-h")
@@ -241,7 +242,7 @@ func TestEvictExpiredOnRead(t *testing.T) {
 		t.Fatalf("CreateSession live: %v", err)
 	}
 
-	if _, err := store.FindSessionByHash(ctx, "tenantA", "stale"); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "tenantA", "stale"); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("expired lookup: got %v want ErrSessionNotFound", err)
 	}
 
@@ -320,7 +321,7 @@ func TestBoundedStore_EvictsExpiredFirst(t *testing.T) {
 		t.Fatalf("Len() after eviction: got %d want %d", store.Len(), cap)
 	}
 	// The expired session must be gone.
-	if _, err := store.FindSessionByHash(ctx, "t1", "expired"); err != sessions.ErrSessionNotFound {
+	if _, err := store.FindSessionByHash(ctx, "t1", "expired"); !errors.Is(err, sessions.ErrSessionNotFound) {
 		t.Fatalf("expired session survived eviction: err=%v", err)
 	}
 	// Live sessions must still be present.

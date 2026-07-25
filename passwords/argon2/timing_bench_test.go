@@ -59,7 +59,7 @@ func BenchmarkCompare_CorrectPassword(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = h.Compare(ctx, stored, password)
 	}
 }
@@ -78,7 +78,7 @@ func BenchmarkCompare_WrongPassword(b *testing.B) {
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = h.Compare(ctx, stored, "wrong-horse-battery-staple")
 	}
 }
@@ -96,7 +96,7 @@ func BenchmarkCompare_MalformedHash(b *testing.B) {
 	const malformed = "$argon2id$v=19$not-a-cost$bad$bad"
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = h.Compare(ctx, malformed, "correct-horse-battery-staple")
 	}
 }
@@ -130,7 +130,7 @@ func BenchmarkDecoyGap_VerifyOldCost(b *testing.B) {
 	)
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_ = target.Compare(ctx, oldHash, password)
 	}
 }
@@ -149,7 +149,7 @@ func BenchmarkDecoyGap_DecoyNewCost(b *testing.B) {
 	const password = "correct-horse-battery-staple"
 	b.ReportAllocs()
 	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for range b.N {
 		_, _ = target.Hash(ctx, password)
 	}
 }

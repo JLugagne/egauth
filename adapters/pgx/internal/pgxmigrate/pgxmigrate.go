@@ -136,7 +136,7 @@ func Run(ctx context.Context, db Querier, fsys fs.FS, namespace string) error {
 func lockKeyForNamespace(namespace string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(namespace))
-	return int64(h.Sum64())
+	return int64(h.Sum64()) //#nosec G115 -- reinterpreted as an opaque pg_advisory_lock key; any bit pattern (incl. negative) is a valid lock ID, no value semantics are lost
 }
 
 const createSchemaMigrations = `CREATE TABLE IF NOT EXISTS schema_migrations (
