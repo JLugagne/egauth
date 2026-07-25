@@ -117,6 +117,7 @@ type Service interface {
 - `func WithDisableRevokers(revokers ...AccountRevoker) ServiceOption` — cross-module revocation hooks for `DisableUser` (refresh tokens, API keys, sessions). Use `tokens.NewAccountRevoker(tokenStore)` for tokens/keys and `sessions.Service.RevokeAllForUser` for sessions.
 - `func WithEventSink(sink event.Sink) ServiceOption` — service-level security events
 - `func WithClock(now func() time.Time) ServiceOption` — override time source (tests)
+- `func WithRevocationTimeout(d time.Duration) ServiceOption` — deadline of the DETACHED revocation cascade run by `ResetPassword` / `ChangePassword` / `SetTemporaryPassword` (default `DefaultRevocationTimeout` = 30s; non-positive keeps the default)
 
 ## Store contract
 ```go
@@ -131,6 +132,10 @@ type Store interface {
     // MUST NOT be written: a stale *User copy would otherwise clear DisabledAt and re-activate a
     // suspended account. Rejects soft-deleted users with ErrUserNotFound.
     UpdateUser(ctx context.Context, tenantID string, user *User) error
+    // MarkEmailVerified writes ONLY email_verified_at. It is what VerifyEmail uses: passing a whole
+    // *User through UpdateUser made that flow a read-modify-write on the email too, silently losing
+    // a concurrent ConfirmEmailChange. Idempotent; ErrUserNotFound for unknown/soft-deleted users.
+    MarkEmailVerified(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error
     UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
     UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
     UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
@@ -142,7 +147,11 @@ type Store interface {
     AddIdentity(ctx context.Context, tenantID string, identity *Identity) error
     FindIdentitiesByUserID(ctx context.Context, tenantID string, userID uuid.UUID) ([]*Identity, error)
     FindIdentityByProvider(ctx context.Context, tenantID string, provider, providerID string) (*Identity, error)
-    UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string) error
+    // UpdateIdentityPassword clears lockout, stamps password_changed_at and sets
+    // must_change_password in the same write. Gated on the owner being a LIVE user: ErrUserNotFound
+    // for an unknown/soft-deleted account (a rotation must never re-arm a deleted account's hash),
+    // ErrIdentityNotFound when a live user has no password identity.
+    UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error
 
     // Verification tokens (selector/verifier scheme)
     CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
@@ -298,6 +307,8 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 - `ErrUserNotFound` — user absent or soft-deleted
 - `ErrEmailAlreadyExists` — email taken in tenant
 - `ErrInvalidEmail` — RFC 5322 parse failure
+- `ErrEmailTooLong` — address longer than `MaxEmailLength` (254, the RFC 5321 ceiling) once canonicalized
+- `ErrDeliveryPanic` — joined into the `Err` of the `DeliveryFailed` event when a consumer Mailer/SMSSender callback PANICS on the detached delivery goroutine (recovered there; never returned to a caller)
 - `ErrPhoneAlreadyExists` — phone taken by another live account in tenant
 - `ErrInvalidPhone` — not a plausible E.164 number (`+` + 8–15 digits)
 - `ErrRecoveryEmailIsPrimary` — recovery email equals the account's primary email
@@ -426,7 +437,13 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.
 - **Credential rotation purges pending token-borne credentials.** `ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and `DisableUser` all call `Store.DeleteVerificationTokensForUser` for `KindPasswordReset`, `KindMagicLink`, `KindEmailChange`, `KindPhoneVerification` and `KindRecoveryEmailVerification`. Without it a recovery-email or email-change token minted while an attacker held the account stays redeemable for its whole TTL (up to 24h) and hands the account straight back after the victim's recovery — expiry-based GC is far too slow to serve as revocation. `KindEmailVerification` is deliberately KEPT: it only verifies the address the account already owns. A purge failure is joined into the returned error (never a silent success), and it runs AFTER the new hash / `DisabledAt` is committed so the account is authoritatively re-keyed and the call is retriable.
+- **The rotation cascade is DETACHED from the request.** `ResetPassword`, `ChangePassword` and `SetTemporaryPassword` commit the new hash FIRST, so they run the purge + `AccountEraser`s on `context.WithoutCancel(ctx)` bounded by `WithRevocationTimeout`: a client that aborts mid-request must not leave the NEW password active with every OLD session and refresh family alive. Failures are still joined and returned (never silent). `DeleteAccount` is the opposite by design: its erasers run BEFORE the soft delete, so it honours cancellation and stays cleanly retriable.
+- `VerifyEmail` writes through `Store.MarkEmailVerified` (email_verified_at only), so a concurrent `ConfirmEmailChange` is never clobbered.
 - `DeleteAccount` runs all `AccountErasers` first; a revocation failure aborts before the soft-delete (cleanly retriable). Erasers should be idempotent.
+- `DeleteAccount` RELEASES the account's provider identities (every `provider_id` is anonymized, password and OAuth alike), so a deleted account's social login can sign up again — it provisions a NEW account, never resurrecting the deleted one. Keeping those keys used to lock the user out of that provider forever.
+- `LinkOrCreateIdentity` provisioned WITHOUT an email (a provider that supplies none) stores an EMPTY email, and the email slot is unique per tenant: at most ONE such account can exist, the next attempt returns `ErrEmailAlreadyExists`. Supply a synthetic unique address (e.g. `provider-sub@no-reply.invalid`) if you need several.
+- `LinkOrCreateIdentity` compensates a failed provisioning step (verified-flag write, `AddIdentity`) by soft-deleting the just-created user, so a failure never leaves an orphan that blocks the email address forever.
+- Email validation caps the canonicalized address at `MaxEmailLength` (254) and returns `ErrEmailTooLong`; the enumeration-safe `Request*` flows still treat it like any malformed address (uniform empty response).
 - `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued refresh families live and ROTATABLE — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately, and wrap the issuer's provider in `ActiveClaimsProvider` so a rotation racing the disable is refused too. An already-issued stateless access token always survives until its `AccessTTL` expires.
 - A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts. That gate only holds WHILE `DisabledAt` is set, which is why `DisableUser` also DELETES the credential-bearing kinds — otherwise `EnableUser` would resurrect them.
 - `RequestEmailChangeHandler` and `RequestRecoveryEmailHandler` enforce a step-up bar themselves (like `DeleteAccountHandler`): a session alone must not be able to take the account's login identifier or install a recovery channel. They fail CLOSED — without `tokens.ContextMiddleware` in front (or an explicit `WithAssuranceResolver`) they return `403 step_up_required`.

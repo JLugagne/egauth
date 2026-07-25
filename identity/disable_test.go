@@ -198,13 +198,15 @@ func TestDisableUser_BlocksOAuthRelink(t *testing.T) {
 		"a disabled account must not regain a session via its linked OAuth identity")
 }
 
-// TestDeletedAccount_BlocksOAuthRelink is the regression test for TASK-069: a soft-deleted
-// account must not be able to re-complete the social-login flow through its already-linked OAuth
-// identity. LinkOrCreateIdentity's already-linked branch calls FindUserByID, which intentionally
-// still returns soft-deleted users (inspection contract), so the liveness gate after that call
-// must be present and effective. Without the DeletedAt check the deleted user would be returned,
-// allowing an OAuth callback to issue a fresh session for a non-existent account.
-func TestDeletedAccount_BlocksOAuthRelink(t *testing.T) {
+// TestDeletedAccount_DoesNotRegainSessionViaOAuth is the successor of the TASK-069 regression test.
+// The invariant it protects is unchanged — a soft-deleted account must never regain a session
+// through its previously-linked OAuth identity — but the mechanism changed with identity/TEN-6:
+// deletion now RELEASES the provider identity instead of keeping it, so the same provider account
+// signs up again into a brand-new account rather than being refused forever. The old expectation
+// (ErrUserNotFound on every later social login) was wrong: it locked a user who deleted their
+// account out of that social login permanently. What must still hold is that the DELETED user is
+// never handed back.
+func TestDeletedAccount_DoesNotRegainSessionViaOAuth(t *testing.T) {
 	ctx := context.Background()
 	svc, _ := newVerificationService(t)
 
@@ -221,11 +223,9 @@ func TestDeletedAccount_BlocksOAuthRelink(t *testing.T) {
 	// Soft-delete the account (GDPR erasure / account deletion).
 	require.NoError(t, svc.DeleteAccount(ctx, "", user.ID))
 
-	// Re-completing the social login through the already-linked identity must be refused with
-	// ErrUserNotFound: a soft-deleted account must not produce a session. FindUserByID still
-	// returns the row (store inspection contract), so the service-layer liveness gate is the
-	// sole barrier — this test pins it against silent regression.
-	_, err = svc.LinkOrCreateIdentity(ctx, "", "google", "sub-deleted", "deleted-relink@example.com", true)
-	assert.ErrorIs(t, err, identity.ErrUserNotFound,
-		"a soft-deleted account must not regain a session via its linked OAuth identity")
+	// The deleted user must not come back: the social login provisions a NEW account.
+	fresh, err := svc.LinkOrCreateIdentity(ctx, "", "google", "sub-deleted", "deleted-relink@example.com", true)
+	require.NoError(t, err)
+	assert.NotEqual(t, user.ID, fresh.ID,
+		"a soft-deleted account must never be handed back through its previously-linked OAuth identity")
 }

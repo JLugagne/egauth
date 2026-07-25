@@ -327,6 +327,15 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
 - **Magic-link login** reuses the single-use selector/verifier verification tokens; the request
   endpoint is uniform (no account enumeration) and delivery is dispatched off the response path,
   exactly like the password-reset request.
+- **A panicking delivery callback cannot take the process down.** The off-response-path delivery
+  goroutine (`identity` and `otp` `Request*`/`Issue` handlers) invokes the application's
+  `Mailer`/`SMSSender`/`deliver` callback after the request has already returned, so no
+  `http.Server` recovery covers it: an unrecovered panic in consumer code was a whole-process
+  crash reachable from a mostly unauthenticated endpoint. Those goroutines now `recover()`. In the
+  `identity` handlers the recovered value is reported as a `DeliveryFailed` event with
+  `Reason: "delivery_panic"` and an `Err` joined with `identity.ErrDeliveryPanic`, so a broken
+  callback is as observable as a backend outage; the `otp` handlers have no event sink and swallow
+  it like any other delivery error. The request itself is unaffected (still the uniform `204`).
 - **Independent recovery channels (breaking the single-email takeover chain).** An account can
   enroll a verified phone (`RequestPhoneVerification`) and/or a verified recovery email
   (`RequestRecoveryEmail`) — both proven by a token delivered to that channel before it is trusted,
@@ -365,6 +374,18 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   a failed purge is never a silent success, so the (idempotent) call can be retried. For `DisableUser`
   deletion is what makes the revocation permanent: `consumeForLiveUser` only refuses tokens *while*
   `DisabledAt` is set, so a surviving token would come back to life on `EnableUser`.
+- **The revocation cascade of a rotation is DETACHED from the request.** Because the new hash is
+  committed first, running the purge and the `AccountEraser`s on the client-cancellable request
+  context had the worst possible failure mode: a client that aborted mid-request (a closed tab, a
+  proxy timeout) left the **new password active and every old session and refresh family alive** —
+  the exact inverse of the intended outcome on the compromise-recovery path. `ResetPassword`,
+  `ChangePassword` and `SetTemporaryPassword` therefore run the cascade on
+  `context.WithoutCancel(ctx)` bounded by `identity.DefaultRevocationTimeout` (30s, override with
+  `identity.WithRevocationTimeout`): the revocation always runs to completion, while a hung eraser
+  still cannot pin the call forever. Failures stay visible — every error is joined and returned, so
+  the caller retries. `DeleteAccount` deliberately keeps honouring cancellation instead: its erasers
+  run *before* the soft delete, so an abort there leaves the account live and the operation cleanly
+  retriable.
 - **Changing the login identifier or the recovery channel takes more than a session.** Confirming an
   email change proves control of the *new* address; it does not prove the requester owns the account.
   So `RequestEmailChangeHandler` and `RequestRecoveryEmailHandler` enforce the same step-up bar as
@@ -381,12 +402,17 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   soft-deleted (`DeleteUser`): the consume path re-checks `DeletedAt` and returns "not found",
   so deleting an account reliably invalidates its outstanding passwordless logins and reset links.
   `LinkOrCreateIdentity`'s already-linked branch likewise re-checks `DeletedAt` and returns
-  "not found", so a deleted account cannot regain a session through its previously-linked OAuth
-  identity. To make this gate reachable, `DeleteUser` only anonymizes the `provider_id` of
-  **password-provider** identity rows (the `provider_id` for password identities is the user's
-  email address, which is PII); non-password (OAuth/OIDC) identity `provider_id` values are
-  opaque external subject identifiers and are preserved intact so that `FindIdentityByProvider`
-  can still locate the identity after deletion, allowing the `DeletedAt` check to fire.
+  "not found", so a deleted account can never be handed back — no session is ever issued for a
+  deleted user.
+
+  `DeleteUser` anonymizes the `provider_id` of **every** identity row of the account: for a password
+  identity that erases PII (the `provider_id` *is* the email address), and for an external
+  (OAuth/OIDC) identity it **releases** the provider key. Releasing it is deliberate: keeping those
+  keys meant a user who deleted their account could never come back through the same social login —
+  every later sign-in or signup was refused forever. Now the same provider account provisions a
+  **new** account, exactly as the freed email slot allows a fresh registration. The service-layer
+  `DeletedAt` gate remains as belt-and-suspenders for any identity row that outlives its account
+  (a legacy row, an externally managed store).
 - **Deactivation ends access — but only when both halves are wired.** `DisableUser` /
   `DeleteAccount` stamp the account and refuse every fresh authentication, yet an already-issued
   refresh token lives in the `tokens` store, which the `identity` service cannot reach by design.

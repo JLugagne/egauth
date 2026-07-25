@@ -132,6 +132,23 @@ func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.
 	return nil
 }
 
+// MarkEmailVerified stamps a live user's EmailVerifiedAt, writing only that field.
+func (s *Store) MarkEmailVerified(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	v := verifiedAt
+	user.EmailVerifiedAt = &v
+	user.UpdatedAt = time.Now()
+
+	return nil
+}
+
 // UpdateUserEmail atomically swaps a live user's email and re-keys its password identity.
 func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error {
 	s.mu.Lock()
@@ -168,11 +185,11 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 	return nil
 }
 
-// DeleteUser performs a soft delete and anonymizes the user row plus any password-provider
-// identity rows. Non-password (OAuth/OIDC) identity ProviderIDs are intentionally preserved so
-// that the already-linked branch of LinkOrCreateIdentity can still resolve the identity and
-// reach the DeletedAt guard in the service layer — without this, re-authenticating with the
-// same OAuth credentials would JIT-provision a new account instead of being refused.
+// DeleteUser performs a soft delete and anonymizes the user row plus EVERY identity row of the
+// user, mirroring the pgx backend. Anonymizing the password identity erases PII (its ProviderID is
+// the email address); anonymizing the external (OAuth/OIDC) ones RELEASES the provider identity, so
+// a user who deleted their account can sign up again through the same social login and get a new
+// account — keeping those keys would lock them out of it forever.
 func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -189,14 +206,11 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 
 	for _, ident := range s.identities {
 		if ident.UserID == id && ident.TenantID == tenantID {
-			// Only anonymize password-provider identities: their ProviderID is the user's
-			// email address, which is PII that must be erased. OAuth/OIDC ProviderIDs are
-			// opaque external subject identifiers; keeping them intact lets the already-linked
-			// branch of LinkOrCreateIdentity detect the deleted account and refuse it (via the
-			// DeletedAt gate in the service) rather than silently provisioning a new account.
-			if ident.Provider == "password" {
-				ident.ProviderID = uuid.Must(uuid.NewV7()).String()
-			}
+			// A per-row random key: it erases the password identity's PII (its ProviderID is the
+			// email address) and frees every external provider key for re-registration, while never
+			// colliding with another anonymized row.
+			ident.ProviderID = uuid.Must(uuid.NewV7()).String()
+			ident.UpdatedAt = now
 		}
 	}
 
@@ -276,10 +290,17 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, pro
 }
 
 // UpdateIdentityPassword sets a new password hash on the user's "password" identity,
-// clears any lockout, stamps PasswordChangedAt and sets the MustChangePassword flag.
+// clears any lockout, stamps PasswordChangedAt and sets the MustChangePassword flag. It is gated on
+// the owner being a live, same-tenant user, mirroring the pgx backend: without that gate
+// ChangePassword and SetTemporaryPassword could re-arm a usable hash on a soft-deleted account.
 func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	user, exists := s.users[userID]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
 
 	for _, ident := range s.identities {
 		if ident.UserID == userID && ident.TenantID == tenantID && ident.Provider == "password" {

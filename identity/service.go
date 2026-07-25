@@ -24,10 +24,18 @@ import (
 // hazard and a pre-registration takeover of a victim's case-variant or Unicode-variant address.
 // The local part is lowercased too: although RFC 5321 permits case-sensitive local parts,
 // virtually all providers treat them case-insensitively, so this is the safe, expected behavior.
+//
+// An address longer than MaxEmailLength is rejected with ErrEmailTooLong — both before the IDN
+// fold (so an oversized value never reaches it) and after canonicalization (punycode can lengthen
+// a domain). Without that bound an oversized address passes validation and fails late in the
+// store, where the failure is opaque.
 func normalizeEmail(email string) (string, error) {
 	addr, err := mail.ParseAddress(strings.TrimSpace(email))
 	if err != nil {
 		return "", ErrInvalidEmail
+	}
+	if len(addr.Address) > MaxEmailLength {
+		return "", ErrEmailTooLong
 	}
 
 	// Split into local part and domain on the last '@'. RFC 5322 allows '@'
@@ -52,8 +60,26 @@ func normalizeEmail(email string) (string, error) {
 		return "", ErrInvalidEmail
 	}
 
-	return local + "@" + asciiDomain, nil
+	normalized := local + "@" + asciiDomain
+	if len(normalized) > MaxEmailLength {
+		return "", ErrEmailTooLong
+	}
+	return normalized, nil
 }
+
+// MaxEmailLength is the maximum accepted length, in bytes, of a canonicalized email address. 254
+// is the effective RFC 5321 ceiling for a forward path (a 256-byte path minus the enclosing angle
+// brackets); no deliverable address is longer. Anything above it is refused by validation with
+// ErrEmailTooLong instead of being handed to the store.
+const MaxEmailLength = 254
+
+// DefaultRevocationTimeout bounds the DETACHED revocation cascade that the credential-rotating
+// flows (ResetPassword, ChangePassword, SetTemporaryPassword) run after committing the new hash.
+// The cascade must outlive the request — a client that aborts must not leave the new password
+// active with every old session alive — so it does not observe the request's cancellation; this
+// deadline is what still stops a hung eraser from pinning the call forever. Override it with
+// WithRevocationTimeout.
+const DefaultRevocationTimeout = 30 * time.Second
 
 // Default lockout configuration values.
 const (
@@ -113,17 +139,33 @@ type Service interface {
 	// is authoritatively re-keyed and the caller can retry the revocation. The caller SHOULD also
 	// revoke any additional cross-module state not covered by their registered erasers (e.g.
 	// trusted-device records).
+	//
+	// The purge and the erasers run on a context DETACHED from ctx (bounded by
+	// DefaultRevocationTimeout, see WithRevocationTimeout): the new hash is already committed, so a
+	// client that aborts mid-request must not be able to leave the NEW password active with every OLD
+	// session and refresh family alive.
 	ResetPassword(ctx context.Context, tenantID string, token, newPassword string) error
 	// RequestEmailVerification mints an email-verification token for the given user.
 	RequestEmailVerification(ctx context.Context, tenantID string, userID uuid.UUID) (token string, err error)
 	// VerifyEmail consumes an email-verification token and marks the user's email verified,
-	// returning the updated user.
+	// returning the updated user. It writes ONLY the verification stamp (Store.MarkEmailVerified),
+	// so a ConfirmEmailChange racing it is never clobbered.
 	VerifyEmail(ctx context.Context, tenantID string, token string) (*User, error)
 	// LinkOrCreateIdentity resolves the user behind an external (e.g. OAuth) identity: it
 	// returns the existing user when (provider, providerID) is already linked, otherwise it
 	// just-in-time provisions a new user+identity. It refuses to silently attach the identity
 	// to a pre-existing account that merely shares the email (returns ErrEmailAlreadyExists),
 	// since auto-linking by email is an account-takeover vector.
+	//
+	// An empty or unparseable email provisions the account WITHOUT one. The email slot is unique per
+	// tenant, so a tenant can hold at most ONE such account: the second email-less provisioning
+	// returns ErrEmailAlreadyExists rather than collapsing two provider accounts into one. A
+	// deployment that must support several (a provider that never exposes an address) should pass a
+	// synthetic unique address instead, e.g. "<provider>-<sub>@no-reply.invalid".
+	//
+	// A failure of one of the provisioning steps (the emailVerified write, AddIdentity) compensates
+	// by soft-deleting the just-created user, so a failed attempt never leaves an orphan that blocks
+	// the email address for good.
 	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
 	// RequestMagicLink mints a passwordless login token for the account owning email and
 	// returns it together with the user (for delivery, e.g. via a Mailer). Like
@@ -146,9 +188,10 @@ type Service interface {
 	//
 	// Like ResetPassword it then PURGES the user's pending credential-bearing verification tokens and
 	// runs every registered AccountEraser, so the user's other sessions and refresh-token families are
-	// revoked by egauth itself — this is NOT left to the consumer. Failures are joined and returned
-	// after the new hash is committed. The caller SHOULD still revoke any cross-module state its
-	// registered erasers do not cover (e.g. trusted-device records).
+	// revoked by egauth itself — this is NOT left to the consumer. That cascade runs on a DETACHED,
+	// bounded context (see ResetPassword) and its failures are joined and returned after the new hash
+	// is committed. The caller SHOULD still revoke any cross-module state its registered erasers do
+	// not cover (e.g. trusted-device records).
 	ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
 	// RequestEmailChange starts the authenticated change-email flow for userID. It validates
 	// and normalizes newEmail, rejects an address already owned by another live account in the
@@ -225,11 +268,15 @@ type Service interface {
 	// DeleteAccount performs a user-facing account deletion: it revokes the user's cross-module
 	// artifacts by running every registered AccountEraser (sessions, refresh-token families,
 	// MFA, passkeys — see WithAccountErasers) and then soft-deletes and anonymizes the identity
-	// (clearing the email and provider IDs, which erases the account's PII and frees its
+	// (clearing the email and EVERY provider ID, which erases the account's PII and frees its
 	// email/identity slots for re-registration). Erasers run first so a revocation failure
 	// aborts before anything is deleted, leaving the operation cleanly retriable; the identity
 	// is soft-deleted only once every eraser succeeds. Returns ErrUserNotFound when no live user
 	// matches.
+	//
+	// Releasing the provider IDs means a deleted account's social login WORKS AGAIN: it provisions a
+	// NEW account rather than being refused forever. The deleted user itself is never handed back —
+	// LinkOrCreateIdentity still refuses an identity that resolves to a soft-deleted account.
 	//
 	// Deletion is irreversible, so DeleteAccountHandler ENFORCES a step-up bar itself: it refuses a
 	// pre-step-up interim credential — and any request whose assurance cannot be resolved — and, with
@@ -286,7 +333,7 @@ type Service interface {
 	// identity (e.g. OAuth-only) is never flagged (returns false). It returns ErrUserNotFound for an
 	// unknown, soft-deleted or cross-tenant user (propagated from the store).
 	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
-	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then PURGES the user's pending credential-bearing verification tokens and runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families — this is the path an operator uses to wrest a compromised account back, so it must leave no redeemable credential behind. It returns ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
+	// SetTemporaryPassword replaces the user's password credential with a temporary one that forces a change at the next login. It validates tempPassword against the password policy, hashes it, stores it with MustChangePassword=true and a fresh PasswordChangedAt timestamp, then PURGES the user's pending credential-bearing verification tokens and runs every registered AccountEraser to revoke the user's existing sessions and refresh-token families — this is the path an operator uses to wrest a compromised account back, so it must leave no redeemable credential behind. That cascade runs on a DETACHED, bounded context (see ResetPassword) so an aborted request cannot leave the old sessions alive. It returns ErrUserNotFound for an unknown or soft-deleted account, ErrPasswordPolicyRequired / ErrPasswordHasherRequired when the service has no password dependencies configured, and any policy or hashing error on an invalid tempPassword.
 	SetTemporaryPassword(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
 	// AdminCreateUser provisions a new user account with a temporary password that forces a change at the next login. It normalizes email, creates the user, hashes tempPassword and adds a password identity with MustChangePassword=true and PasswordChangedAt=now. It returns ErrInvalidEmail for a malformed address, ErrEmailAlreadyExists when the email is taken, and any policy or hashing error on an invalid tempPassword. On a successful call the returned User is the newly created account.
 	AdminCreateUser(ctx context.Context, tenantID string, email, tempPassword string) (*User, error)
@@ -343,6 +390,7 @@ type service struct {
 	emailChangeTTL       time.Duration
 	phoneVerificationTTL time.Duration
 	recoveryEmailTTL     time.Duration
+	revocationTimeout    time.Duration
 	hooksMu              sync.RWMutex
 	erasers              []AccountEraser
 	disableRevokers      []AccountRevoker
@@ -445,6 +493,13 @@ func WithRecoveryEmailTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.recoveryEmailTTL = d }
 }
 
+// WithRevocationTimeout overrides the deadline of the detached revocation cascade run by
+// ResetPassword, ChangePassword and SetTemporaryPassword (see DefaultRevocationTimeout). A
+// non-positive value is ignored and the default kept: the cascade must always be bounded.
+func WithRevocationTimeout(d time.Duration) ServiceOption {
+	return func(s *service) { s.revocationTimeout = d }
+}
+
 // WithAccountErasers registers cross-module revocation hooks run by DeleteAccount, in the order
 // given, to revoke the deleted user's sessions, refresh-token families, MFA enrollments,
 // passkeys, etc. egauth keeps its modules decoupled, so the identity service cannot revoke
@@ -516,6 +571,7 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 		emailChangeTTL:       DefaultEmailChangeTTL,
 		phoneVerificationTTL: DefaultPhoneVerificationTTL,
 		recoveryEmailTTL:     DefaultRecoveryEmailTTL,
+		revocationTimeout:    DefaultRevocationTimeout,
 		now:                  time.Now,
 	}
 	for _, opt := range opts {
@@ -538,6 +594,11 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 	}
 	if s.now == nil {
 		s.now = time.Now
+	}
+	// The detached cascade must always carry a deadline: an unbounded one could pin the call on a
+	// hung eraser forever, since it deliberately ignores the request's cancellation.
+	if s.revocationTimeout <= 0 {
+		s.revocationTimeout = DefaultRevocationTimeout
 	}
 	return s
 }
@@ -832,6 +893,37 @@ func (s *service) purgeCredentialTokens(ctx context.Context, tenantID string, us
 	return s.store.DeleteVerificationTokensForUser(ctx, tenantID, userID, credentialRotationTokenKinds...)
 }
 
+// revokeAfterRotation purges the user's pending credential-bearing verification tokens and runs
+// every registered AccountEraser, on a context DETACHED from the caller's.
+//
+// The rotating flows commit the new password hash first, so by the time this runs the credential is
+// already changed. Running the cascade on the client-cancellable request context therefore had the
+// worst possible failure mode: a client that aborted mid-request left the NEW password active and
+// every OLD session and refresh family alive — the exact inverse of the intended outcome on the
+// compromise-recovery path. context.WithoutCancel plus DefaultRevocationTimeout (see
+// WithRevocationTimeout) keeps the cascade running to completion while still bounding it.
+//
+// Every failure is collected and returned (joined) so a revocation outage is visible and the caller
+// can retry; erasers are expected to be idempotent, which makes that retry safe.
+func (s *service) revokeAfterRotation(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	detached, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.revocationTimeout)
+	defer cancel()
+
+	var errs []error
+	if err := s.purgeCredentialTokens(detached, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
+	for _, erase := range s.accountErasers() {
+		if erase == nil {
+			continue
+		}
+		if err := erase(detached, tenantID, userID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // ResetPassword validates the new password, consumes the token and sets the password, then purges
 // the user's pending credential-bearing verification tokens and runs every registered AccountEraser
 // to revoke their existing sessions and refresh-token families.
@@ -863,26 +955,12 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	// Revoke the pending token-borne credentials, then run the cross-module erasers to evict any
 	// attacker-held sessions or refresh-token families. Password reset is the canonical
 	// account-recovery flow when a user believes they are compromised; leaving either behind leaves
-	// the attacker's foothold intact. Both run AFTER the new hash is committed, so the account is
-	// authoritatively re-keyed even if one of them fails; every error is collected and returned so
-	// the caller retries rather than believing the recovery completed.
-	var errs []error
-	if err := s.purgeCredentialTokens(ctx, tenantID, user.ID); err != nil {
-		errs = append(errs, err)
-	}
-	for _, erase := range s.accountErasers() {
-		if erase == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := erase(ctx, tenantID, user.ID); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	// the attacker's foothold intact. Both run AFTER the new hash is committed — and on a DETACHED
+	// context, so a client that aborts here cannot leave the new password live with the old sessions
+	// alive — and every error is collected and returned so the caller retries rather than believing
+	// the recovery completed.
+	if err := s.revokeAfterRotation(ctx, tenantID, user.ID); err != nil {
+		return err
 	}
 
 	s.emit(ctx, event.Event{Type: event.PasswordReset, UserID: user.ID.String(), TenantID: user.TenantID})
@@ -934,23 +1012,10 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 		return err
 	}
 
-	var errs []error
-	if err := s.purgeCredentialTokens(ctx, tenantID, userID); err != nil {
-		errs = append(errs, err)
-	}
-	for _, erase := range s.accountErasers() {
-		if erase == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := erase(ctx, tenantID, userID); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
+	// Detached cascade: the new hash is already committed, so a client abort must not leave the old
+	// sessions and refresh families alive (see revokeAfterRotation).
+	if err := s.revokeAfterRotation(ctx, tenantID, userID); err != nil {
+		return err
 	}
 
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID})
@@ -1084,11 +1149,16 @@ func (s *service) VerifyEmail(ctx context.Context, tenantID string, token string
 		return nil, err
 	}
 
-	now := time.Now()
-	user.EmailVerifiedAt = &now
-	if err := s.store.UpdateUser(ctx, tenantID, user); err != nil {
+	now := s.now()
+	// MarkEmailVerified writes ONLY email_verified_at. Writing the whole row back through
+	// UpdateUser (which also persists Email) made this a read-modify-write: a ConfirmEmailChange
+	// landing between the read above and this write was silently LOST — the login address reverted
+	// to the old one although its change token had already been consumed.
+	if err := s.store.MarkEmailVerified(ctx, tenantID, user.ID, now); err != nil {
 		return nil, err
 	}
+	user.EmailVerifiedAt = &now
+	user.UpdatedAt = now
 	s.emit(ctx, event.Event{Type: event.EmailVerified, UserID: user.ID.String(), TenantID: user.TenantID})
 	return user, nil
 }
@@ -1155,10 +1225,16 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 	}
 	if emailVerified {
 		now := s.now()
-		user.EmailVerifiedAt = &now
-		if err := s.store.UpdateUser(ctx, tenantID, user); err != nil {
+		if err := s.store.MarkEmailVerified(ctx, tenantID, user.ID, now); err != nil {
+			// Compensate for the lack of a transaction, exactly as the AddIdentity failure below
+			// does: without this the just-created user is left as an ORPHAN with no identity, and
+			// because the live-row email index keeps matching it, that address becomes permanently
+			// unusable — neither a retried social login nor a registration can ever claim it.
+			// Best-effort.
+			_ = s.store.DeleteUser(ctx, tenantID, user.ID)
 			return nil, err
 		}
+		user.EmailVerifiedAt = &now
 	}
 
 	link := &Identity{
@@ -1566,25 +1642,9 @@ func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, use
 	// Audit the privileged credential override (like ChangePassword/ResetPassword). The Reason
 	// distinguishes it from a self-service change so a SIEM can flag admin-initiated resets.
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID, Reason: "admin_temporary_password"})
-	var errs []error
-	if err := s.purgeCredentialTokens(ctx, tenantID, userID); err != nil {
-		errs = append(errs, err)
-	}
-	for _, erase := range s.accountErasers() {
-		if erase == nil {
-			continue
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := erase(ctx, tenantID, userID); err != nil {
-			errs = append(errs, err)
-		}
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
-	}
-	return nil
+	// Detached cascade: the temporary credential is already committed, so a client abort must not
+	// leave the compromised account's sessions and refresh families alive (see revokeAfterRotation).
+	return s.revokeAfterRotation(ctx, tenantID, userID)
 }
 
 // AdminCreateUser provisions a new user account with a temporary password. The caller is

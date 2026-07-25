@@ -294,6 +294,9 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 // Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
 // DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
 // delivery durable across the request finishing.
+//
+// A PANIC in the consumer's deliver callback is recovered inside the goroutine: the request has
+// already left, so nothing above this frame could contain it and the whole process would die.
 func (cfg handlerConfig) dispatchDelivery(r *http.Request, send func(ctx context.Context) error) {
 	base := context.WithoutCancel(r.Context())
 
@@ -317,6 +320,10 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, send func(ctx context
 			ctx, cancel = context.WithTimeout(base, cfg.deliveryTimeout)
 			defer cancel()
 		}
+		// Contain a panic in the consumer's deliver callback: the request has already left, so
+		// nothing above this frame could recover it and the process would die. It is swallowed like
+		// a delivery error (this handler family has no event sink to report it through).
+		defer func() { _ = recover() }()
 		_ = send(ctx)
 	}()
 }

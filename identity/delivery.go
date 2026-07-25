@@ -1,6 +1,20 @@
 package identity
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+)
+
+// deliveryPanicError turns a value recovered from a panicking consumer delivery callback into an
+// error joined with ErrDeliveryPanic, so the event sink reports both the stable sentinel and the
+// original value.
+func deliveryPanicError(recovered any) error {
+	if err, ok := recovered.(error); ok {
+		return errors.Join(ErrDeliveryPanic, err)
+	}
+	return errors.Join(ErrDeliveryPanic, errors.New(fmt.Sprint(recovered)))
+}
 
 // PasswordResetMail carries everything the application needs to craft and deliver a
 // password-reset message. egauth populates it and hands it to Mailer.PasswordReset; it never

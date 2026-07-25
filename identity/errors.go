@@ -13,6 +13,11 @@ var (
 	// ErrInvalidEmail is returned when an email fails RFC 5322 address parsing.
 	ErrInvalidEmail = errors.New("identity: invalid email")
 
+	// ErrEmailTooLong is returned when an address is longer than MaxEmailLength once
+	// canonicalized. An oversized address is rejected by validation rather than handed to the
+	// store, where it would fail late (e.g. on an index row-size limit) with an opaque error.
+	ErrEmailTooLong = errors.New("identity: email too long")
+
 	// ErrPhoneAlreadyExists is returned when trying to set a phone number that another
 	// live account in the same tenant already owns.
 	ErrPhoneAlreadyExists = errors.New("identity: phone already exists")
@@ -83,4 +88,11 @@ var (
 	// only surfaces through the event sink so an over-cap drop is observable like a Mailer
 	// outage. See dispatchDelivery / WithDeliveryConcurrency.
 	ErrDeliveryDropped = errors.New("identity: delivery dropped, concurrency cap exceeded")
+
+	// ErrDeliveryPanic is joined into the Err of the DeliveryFailed event emitted when a
+	// consumer Mailer/SMSSender callback PANICS on the off-response-path delivery goroutine.
+	// The panic is recovered there — it would otherwise take the whole process down, since the
+	// request has already left and no http.Server recovery covers that goroutine — and reported
+	// through the event sink alongside the recovered value. It is never returned to a caller.
+	ErrDeliveryPanic = errors.New("identity: delivery callback panicked")
 )

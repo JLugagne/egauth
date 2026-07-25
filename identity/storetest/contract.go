@@ -23,6 +23,7 @@ type MockStore struct {
 	FindUserByEmailFunc                 func(ctx context.Context, tenantID string, email string) (*identity.User, error)
 	FindUserByPhoneFunc                 func(ctx context.Context, tenantID string, phone string) (*identity.User, error)
 	UpdateUserFunc                      func(ctx context.Context, tenantID string, user *identity.User) error
+	MarkEmailVerifiedFunc               func(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error
 	UpdateUserEmailFunc                 func(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
 	UpdateUserPhoneFunc                 func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
 	UpdateUserRecoveryEmailFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
@@ -122,6 +123,13 @@ func (m *MockStore) UpdateUser(ctx context.Context, tenantID string, user *ident
 		panic("called not defined UpdateUserFunc")
 	}
 	return m.UpdateUserFunc(ctx, tenantID, user)
+}
+
+func (m *MockStore) MarkEmailVerified(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error {
+	if m.MarkEmailVerifiedFunc == nil {
+		panic("called not defined MarkEmailVerifiedFunc")
+	}
+	return m.MarkEmailVerifiedFunc(ctx, tenantID, userID, verifiedAt)
 }
 
 func (m *MockStore) UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error {
@@ -840,10 +848,11 @@ func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant strin
 //     consumeForLiveUser and LinkOrCreateIdentity already-linked branch depend on this).
 //   - FindUserByEmail must NOT return the deleted user (email was anonymized).
 //   - The password-provider identity's ProviderID must be anonymized (it held the email, which is PII).
-//   - Non-password (OAuth/OIDC) identity ProviderIDs must be preserved intact, so that
-//     FindIdentityByProvider can still locate the identity and the service-layer DeletedAt gate
-//     can refuse it. Without this, a re-auth with the same OAuth credentials would fall through
-//     to the JIT-provision path and create a new account for the deleted user.
+//   - Every OTHER identity's ProviderID (OAuth/OIDC subject identifiers) must ALSO be released, so
+//     the deleted account's provider identity can be re-registered: a user who deletes their account
+//     must be able to come back through the same social login, which then JIT-provisions a NEW
+//     account (finding identity/TEN-6). The service layer keeps its DeletedAt gate as
+//     belt-and-suspenders for any identity row that outlives its account.
 //
 // Each backend's test must run this alongside StoreContractTesting.
 func StoreDeleteAuthGateContract(t *testing.T, store identity.Store, tenant string) {
@@ -893,14 +902,115 @@ func StoreDeleteAuthGateContract(t *testing.T, store identity.Store, tenant stri
 	assert.ErrorIs(t, err, identity.ErrIdentityNotFound,
 		"password identity ProviderID must be anonymized after deletion")
 
-	// 4. OAuth identity ProviderID must be PRESERVED so the service-layer DeletedAt gate fires.
-	//    Without this, LinkOrCreateIdentity's already-linked branch cannot detect the deleted
-	//    account and would fall through to JIT-provisioning a new account.
-	foundOAuth, err := store.FindIdentityByProvider(ctx, tenant, oauthProvider, oauthSub)
-	require.NoError(t, err,
-		"non-password identity ProviderID must be preserved after deletion so the auth gate fires")
-	assert.Equal(t, user.ID, foundOAuth.UserID,
-		"preserved OAuth identity must still reference the (now-deleted) user")
+	// 4. The OAuth identity's ProviderID must be RELEASED too, so the same provider account can be
+	//    re-registered: without this the deleted user is permanently locked out of that social
+	//    login (identity/TEN-6).
+	_, err = store.FindIdentityByProvider(ctx, tenant, oauthProvider, oauthSub)
+	assert.ErrorIs(t, err, identity.ErrIdentityNotFound,
+		"a deleted account's provider identity must be released so it can be re-registered")
+
+	// The release must be per-row, so an account holding SEVERAL identities of the same provider
+	// (distinct subjects) still deletes cleanly instead of colliding on the anonymized key.
+	multi, err := store.CreateUser(ctx, tenant, "authgate_multi@example.com")
+	require.NoError(t, err)
+	for _, sub := range []string{"multi-sub-1", "multi-sub-2"} {
+		require.NoError(t, store.AddIdentity(ctx, tenant, &identity.Identity{
+			UserID:     multi.ID,
+			Provider:   oauthProvider,
+			ProviderID: sub,
+		}))
+	}
+	require.NoError(t, store.DeleteUser(ctx, tenant, multi.ID),
+		"deleting an account with several identities of one provider must not collide on the anonymized key")
+	for _, sub := range []string{"multi-sub-1", "multi-sub-2"} {
+		_, err = store.FindIdentityByProvider(ctx, tenant, oauthProvider, sub)
+		assert.ErrorIs(t, err, identity.ErrIdentityNotFound, "every provider identity must be released")
+	}
+}
+
+// StoreMarkEmailVerifiedContract verifies MarkEmailVerified, the NARROW write behind VerifyEmail
+// (finding identity/TEN-5): it must stamp email_verified_at and touch nothing else — above all not
+// the email, or a concurrent ConfirmEmailChange would be lost — be idempotent, and refuse an
+// unknown or soft-deleted account with ErrUserNotFound.
+// Each backend's test must run this alongside StoreContractTesting.
+func StoreMarkEmailVerifiedContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	const email = "mark_verified_contract@example.com"
+	const changed = "mark_verified_changed@example.com"
+	user, err := store.CreateUser(ctx, tenant, email)
+	require.NoError(t, err)
+	assert.Nil(t, user.EmailVerifiedAt, "a freshly created user is unverified")
+
+	// The state a concurrent operation owns: an email change plus the administrative columns.
+	stamped := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, store.UpdateUserEmail(ctx, tenant, user.ID, changed, stamped))
+	require.NoError(t, store.UpdateUserPhone(ctx, tenant, user.ID, "+15557772222", stamped))
+	require.NoError(t, store.DisableUser(ctx, tenant, user.ID, stamped))
+
+	verifiedAt := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, store.MarkEmailVerified(ctx, tenant, user.ID, verifiedAt))
+
+	got, err := store.FindUserByID(ctx, tenant, user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.EmailVerifiedAt, "MarkEmailVerified must stamp EmailVerifiedAt")
+	assert.Equal(t, verifiedAt.Unix(), got.EmailVerifiedAt.Unix())
+	assert.Equal(t, changed, got.Email, "MarkEmailVerified must not touch the email address")
+	assert.NotNil(t, got.Phone, "MarkEmailVerified must not touch the phone")
+	assert.NotNil(t, got.DisabledAt, "MarkEmailVerified must not clear DisabledAt")
+
+	// Idempotent: re-stamping an already-verified address succeeds.
+	require.NoError(t, store.MarkEmailVerified(ctx, tenant, user.ID, time.Now()))
+
+	// Unknown and soft-deleted accounts are refused.
+	assert.ErrorIs(t, store.MarkEmailVerified(ctx, tenant, uuid.Must(uuid.NewV7()), time.Now()),
+		identity.ErrUserNotFound)
+	require.NoError(t, store.DeleteUser(ctx, tenant, user.ID))
+	assert.ErrorIs(t, store.MarkEmailVerified(ctx, tenant, user.ID, time.Now()),
+		identity.ErrUserNotFound, "a soft-deleted account must not be re-verified")
+}
+
+// StorePasswordRotationLivenessContract verifies UpdateIdentityPassword refuses a SOFT-DELETED
+// account (finding: refuter-found LOW). The write is not gated on liveness in either backend, so
+// ChangePassword and SetTemporaryPassword could re-arm a usable password hash on a deleted account —
+// resurrecting a credential for an account that no longer exists. Both backends must report
+// ErrUserNotFound and leave the stored hash untouched.
+// Each backend's test must run this alongside StoreContractTesting.
+func StorePasswordRotationLivenessContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	const email = "rotation_liveness@example.com"
+	user, err := store.CreateUser(ctx, tenant, email)
+	require.NoError(t, err)
+
+	oldHash := "live_hash"
+	require.NoError(t, store.AddIdentity(ctx, tenant, &identity.Identity{
+		UserID:       user.ID,
+		Provider:     "password",
+		ProviderID:   email,
+		PasswordHash: &oldHash,
+	}))
+
+	// Sanity: the rotation works while the account is live.
+	require.NoError(t, store.UpdateIdentityPassword(ctx, tenant, user.ID, "rotated_hash", time.Now().UTC(), false))
+
+	require.NoError(t, store.DeleteUser(ctx, tenant, user.ID))
+
+	err = store.UpdateIdentityPassword(ctx, tenant, user.ID, "re_armed_hash", time.Now().UTC(), false)
+	assert.ErrorIs(t, err, identity.ErrUserNotFound,
+		"UpdateIdentityPassword must refuse a soft-deleted account rather than re-arm its credential")
+
+	idents, err := store.FindIdentitiesByUserID(ctx, tenant, user.ID)
+	require.NoError(t, err)
+	for _, ident := range idents {
+		if ident.Provider != "password" || ident.PasswordHash == nil {
+			continue
+		}
+		assert.NotEqual(t, "re_armed_hash", *ident.PasswordHash,
+			"the refused rotation must not have written a hash")
+	}
 }
 
 // StoreUpdateUserSoftDeleteContract verifies that UpdateUser rejects a soft-deleted user with

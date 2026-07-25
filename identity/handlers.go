@@ -633,6 +633,11 @@ func (cfg handlerConfig) requireTenant(w http.ResponseWriter, r *http.Request) (
 // Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
 // DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
 // delivery durable across the request finishing.
+//
+// A PANIC in the consumer's Mailer/SMSSender callback is recovered inside the goroutine: the request
+// has already left, so nothing above this frame could contain it and an unrecovered panic would take
+// the whole process down. The recovered value is reported as a DeliveryFailed event carrying
+// ErrDeliveryPanic, so a broken callback is as observable as a backend outage instead of silent.
 func (cfg handlerConfig) dispatchDelivery(r *http.Request, tenant, userID string, send func(ctx context.Context) error) {
 	base := context.WithoutCancel(r.Context())
 
@@ -661,6 +666,16 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, tenant, userID string
 			ctx, cancel = context.WithTimeout(base, cfg.deliveryTimeout)
 			defer cancel()
 		}
+		// Registered after ctx is final so the report is emitted with the delivery's own context,
+		// and before send so it covers the consumer callback.
+		defer func() {
+			if rec := recover(); rec != nil {
+				event.Emit(ctx, cfg.events, event.Event{
+					Type: event.DeliveryFailed, TenantID: tenant, UserID: userID,
+					Reason: "delivery_panic", Err: deliveryPanicError(rec),
+				})
+			}
+		}()
 		if err := send(ctx); err != nil {
 			event.Emit(ctx, cfg.events, event.Event{
 				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID, Err: err,
@@ -1182,7 +1197,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 		token, err := svc.RequestEmailChange(r.Context(), tenant, user.ID, newEmail)
 		if err != nil {
 			switch {
-			case errors.Is(err, ErrInvalidEmail):
+			case errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrEmailTooLong):
 				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
 			case errors.Is(err, ErrEmailAlreadyExists):
 				cfg.fail(w, r, http.StatusConflict, "email_taken")
@@ -1330,7 +1345,7 @@ func mapVerificationError(err error) (int, string) {
 	case errors.Is(err, ErrPhoneAlreadyExists):
 		// Phone-verification: the target number was claimed by another account in the interim.
 		return http.StatusConflict, "phone_taken"
-	case errors.Is(err, ErrInvalidEmail):
+	case errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrEmailTooLong):
 		// Change-email: the token's stored address failed re-validation (defensive).
 		return http.StatusBadRequest, "invalid_email"
 	case errors.Is(err, ErrInvalidPhone):
@@ -1534,7 +1549,7 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		token, err := svc.RequestRecoveryEmail(r.Context(), tenant, user.ID, recoveryEmail)
 		if err != nil {
 			switch {
-			case errors.Is(err, ErrInvalidEmail):
+			case errors.Is(err, ErrInvalidEmail), errors.Is(err, ErrEmailTooLong):
 				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
 			case errors.Is(err, ErrRecoveryEmailIsPrimary):
 				cfg.fail(w, r, http.StatusConflict, "recovery_email_is_primary")

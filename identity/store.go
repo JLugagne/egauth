@@ -53,6 +53,14 @@ type UserStore interface {
 	// cross-tenant or soft-deleted user (a soft-deleted account is never resurrected).
 	UpdateUser(ctx context.Context, tenantID string, user *User) error
 
+	// MarkEmailVerified stamps email_verified_at = verifiedAt on a live user, writing ONLY that
+	// column. It is the narrow write behind VerifyEmail: passing a whole *User through UpdateUser
+	// made that flow a read-modify-write on the email too, so a ConfirmEmailChange landing between
+	// the read and the write was silently lost (the login address reverted while its change token
+	// had already been consumed). It is idempotent — re-verifying an already-verified address just
+	// re-stamps it — and returns ErrUserNotFound for an unknown, cross-tenant or soft-deleted user.
+	MarkEmailVerified(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error
+
 	// UpdateUserEmail atomically changes a live user's email to newEmail, marks it verified
 	// (email_verified_at = verifiedAt) and re-keys the user's "password" identity provider_id
 	// to newEmail. The password flow looks identities up by email, so the user email and the
@@ -105,8 +113,12 @@ type IdentityStore interface {
 	// atomically clears any lockout (failed_attempts and locked_until), since proving control
 	// of the reset channel re-establishes trust. It also stamps password_changed_at=changedAt
 	// and sets must_change_password=mustChange in the same write, so the rotation policy can
-	// flag or clear the credential without a second round-trip. Returns ErrIdentityNotFound
-	// when the user has no password identity.
+	// flag or clear the credential without a second round-trip.
+	//
+	// It is gated on the owner being a LIVE, same-tenant user: it returns ErrUserNotFound for an
+	// unknown, cross-tenant or SOFT-DELETED account, so a rotation can never re-arm a usable
+	// password hash on a deleted one. Returns ErrIdentityNotFound when a live user has no password
+	// identity.
 	UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error
 }
 

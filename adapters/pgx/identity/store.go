@@ -148,6 +148,26 @@ func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.
 	return nil
 }
 
+// MarkEmailVerified stamps email_verified_at on a live user, touching no other column. It is the
+// narrow write behind VerifyEmail (see identity.UserStore): writing the whole row back would make
+// that flow a read-modify-write and silently lose a concurrent email change.
+func (s *Store) MarkEmailVerified(ctx context.Context, tenantID string, userID uuid.UUID, verifiedAt time.Time) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET email_verified_at = $1, updated_at = $2
+		WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, verifiedAt, now, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
 // UpdateUserEmail atomically swaps a live user's email and re-keys its password identity in a
 // single statement (data-modifying CTEs share one snapshot and one transaction), so a unique
 // violation on either index aborts the whole change.
@@ -184,15 +204,20 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 }
 
 // DeleteUser soft-deletes and anonymizes a live user in one atomic statement: it anonymizes the
-// users row (deleted_at + random email), anonymizes the user's password-provider identity
-// provider_ids (which hold the email address as PII), and purges any pending verification tokens
-// (which would otherwise outlive the account carrying its user_id and, for change-email tokens, a
-// plaintext target email — residual PII the soft delete is meant to erase). Non-password
-// (OAuth/OIDC) identity ProviderIDs are intentionally preserved so that the already-linked branch
-// of LinkOrCreateIdentity can still resolve the identity and reach the service-layer DeletedAt
-// gate, rather than silently JIT-provisioning a new account for the deleted user's OAuth
-// credentials. All three run as data-modifying CTEs gated on the user actually being live, so they
-// commit together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
+// users row (deleted_at + random email), anonymizes EVERY identity row of the user, and purges any
+// pending verification tokens (which would otherwise outlive the account carrying its user_id and,
+// for change-email tokens, a plaintext target email — residual PII the soft delete is meant to
+// erase).
+//
+// Anonymizing the password identity erases PII (its provider_id is the email address); anonymizing
+// the external (OAuth/OIDC) ones RELEASES the provider identity so the same provider account can be
+// registered again — a user who deletes their account must be able to come back through the same
+// social login, which then provisions a NEW account. The anonymized key is derived per row
+// ('deleted_' || identities.id) so an account holding several identities of one provider cannot
+// collide on the (tenant_id, provider, provider_id) index.
+//
+// All three run as data-modifying CTEs gated on the user actually being live, so they commit
+// together or not at all. Returns ErrUserNotFound when no live, same-tenant user matches.
 func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error {
 	now := time.Now().UTC()
 	anonymizedEmail := "deleted_" + uuid.Must(uuid.NewV7()).String() + "@deleted.local"
@@ -206,9 +231,8 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 		),
 		ident AS (
 			UPDATE identities
-			SET provider_id = $2, updated_at = $1
+			SET provider_id = 'deleted_' || identities.id::text, updated_at = $1
 			WHERE user_id IN (SELECT id FROM del) AND tenant_id = $4
-			  AND provider = 'password'
 		),
 		toks AS (
 			DELETE FROM verification_tokens
@@ -342,19 +366,35 @@ func (s *Store) FindIdentityByProvider(ctx context.Context, tenantID string, pro
 // atomically clears any lockout (failed_attempts and locked_until). It also stamps
 // password_changed_at=changedAt and sets must_change_password=mustChange in the same write,
 // so the rotation policy can flag or clear the credential without a second round-trip.
-// Returns ErrIdentityNotFound when the user has no password identity.
+//
+// The write is gated on the owner being a LIVE, same-tenant user: a soft-deleted account reports
+// ErrUserNotFound and keeps its (already anonymized) credential untouched, so a rotation can never
+// re-arm a usable hash on a deleted account. The two counts come back from the same statement, which
+// is what lets an unknown/deleted user be reported apart from a live user with no password identity
+// (ErrIdentityNotFound).
 func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, userID uuid.UUID, passwordHash string, changedAt time.Time, mustChange bool) error {
-	query := `
-		UPDATE identities
-		SET password_hash = $1, failed_attempts = 0, locked_until = NULL,
-		    password_changed_at = $4, must_change_password = $5, updated_at = now()
-		WHERE user_id = $2 AND tenant_id = $3 AND provider = 'password'
+	const query = `
+		WITH live AS (
+			SELECT id FROM users
+			WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+		),
+		upd AS (
+			UPDATE identities
+			SET password_hash = $1, failed_attempts = 0, locked_until = NULL,
+			    password_changed_at = $4, must_change_password = $5, updated_at = now()
+			WHERE user_id = (SELECT id FROM live) AND tenant_id = $3 AND provider = 'password'
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM live), (SELECT count(*) FROM upd)
 	`
-	tag, err := s.db.Exec(ctx, query, passwordHash, userID, tenantID, changedAt.UTC(), mustChange)
-	if err != nil {
+	var liveCount, updated int64
+	if err := s.db.QueryRow(ctx, query, passwordHash, userID, tenantID, changedAt.UTC(), mustChange).Scan(&liveCount, &updated); err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if liveCount == 0 {
+		return identity.ErrUserNotFound
+	}
+	if updated == 0 {
 		return identity.ErrIdentityNotFound
 	}
 	return nil

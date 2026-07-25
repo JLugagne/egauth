@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **`identity.Store` gained `MarkEmailVerified`, and `DeleteUser` now releases the account's provider
+  identities (`identity/TEN-5`, `identity/TEN-6`).** Both change the backend contract, so a custom
+  `identity.Store` implementation must be updated (the shipped memory and pgx backends already are;
+  run `identity/storetest` against yours).
+  - New method
+    `MarkEmailVerified(ctx, tenantID string, userID uuid.UUID, verifiedAt time.Time) error` writes
+    ONLY `email_verified_at` on a live user (`ErrUserNotFound` otherwise) and is what `VerifyEmail`
+    now uses. New contract case: `storetest.StoreMarkEmailVerifiedContract`.
+  - `DeleteUser` must now anonymize the `provider_id` of **every** identity row of the account, not
+    just the password one, and must derive the anonymized value **per row** so an account holding
+    several identities of one provider still deletes cleanly.
+    `storetest.StoreDeleteAuthGateContract` was inverted accordingly: it used to require the OAuth
+    `provider_id` to be preserved and now requires it to be released.
+  - `UpdateIdentityPassword` must now refuse a SOFT-DELETED owner with `ErrUserNotFound` (it kept
+    returning success and re-armed the credential). New contract case:
+    `storetest.StorePasswordRotationLivenessContract`.
+
 - **KEK-sealed secrets are now bound to WHERE they belong (`crypto/CRY-1`).** `keystore.KEK.Seal` /
   `Open` took no context and passed `nil` GCM associated data, so a sealed blob authenticated its
   bytes but not its position: a ciphertext was **portable** between rows, tenants and subsystems. A
@@ -196,6 +213,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`identity.WithRevocationTimeout(d)` / `identity.DefaultRevocationTimeout`** bound the detached
+  revocation cascade of the credential-rotating flows (30s by default; a non-positive value keeps
+  the default, the cascade is never unbounded).
+- **`identity.MaxEmailLength` (254) and `identity.ErrEmailTooLong`** cap the canonicalized address
+  in every flow that validates one (`identity/TEN-16`). The enumeration-safe `Request*` flows keep
+  treating an oversized address exactly like a malformed one; the handlers map it to the existing
+  `400 invalid_email`.
+- **`identity.ErrDeliveryPanic`** is joined into the `Err` of the `DeliveryFailed` event emitted when
+  a consumer delivery callback panics (see Fixed).
+- **Documented: a tenant holds at most ONE email-less account** (refuter-found). A provider account
+  that supplies no usable email is provisioned with an EMPTY email, and the email slot is unique per
+  tenant, so the second such provisioning returns `ErrEmailAlreadyExists` rather than collapsing two
+  provider accounts into one. `LinkOrCreateIdentity`'s contract now says so explicitly and a test
+  pins it; deployments needing several must supply a synthetic unique address.
+
 - **The MFA login gate now covers every login path.** `identity.WithMFAGate` applies to
   `MagicLinkLoginHandler` as well as `LoginHandler` (a magic link is a first factor: a compromised
   mailbox no longer bypasses the second factor), and the new `oauth.WithMFAGate(checker)` +
@@ -279,6 +311,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so registration is safe alongside in-flight operations.
 
 ### Fixed
+
+- **A client abort no longer leaves a rotated password with every old session alive
+  (`identity/TEN-3`, `http/HTTP-2`).** `ResetPassword`, `ChangePassword` and `SetTemporaryPassword`
+  commit the new hash first and then revoke the account's pending token-borne credentials, sessions
+  and refresh families — but that cascade ran on the CLIENT-CANCELLABLE request context and even
+  checked `ctx.Err()` between erasers. A client that aborted mid-request (closed tab, proxy timeout)
+  therefore left the NEW password active and EVERY OLD session and refresh family alive: the exact
+  inverse of the intended outcome on the compromise-recovery path. The cascade now runs on
+  `context.WithoutCancel(ctx)` bounded by `DefaultRevocationTimeout` (`WithRevocationTimeout`), and
+  every failure is still joined and returned so a revocation outage is visible and retriable.
+  `DeleteAccount` keeps honouring cancellation by design (its erasers run before the soft delete).
+- **`VerifyEmail` no longer clobbers a concurrent email change (`identity/TEN-5`).** It
+  read-modify-wrote the whole user row through `UpdateUser`, so a `ConfirmEmailChange` landing
+  between the read and the write was silently LOST — the login address reverted although its
+  change token had already been consumed. It now writes through the narrow
+  `Store.MarkEmailVerified`, pinned in the shared store contract for both backends.
+- **A deleted account can sign up again through the same social login (`identity/TEN-6`).**
+  `DeleteUser` preserved external (OAuth/OIDC) `provider_id` values, so after a user-facing account
+  deletion every later login OR signup with that provider account was refused **forever** — a user
+  who deleted their account could never come back. Deletion now releases the provider identity (as
+  it already did for the password identity's email key) and the same provider account provisions a
+  NEW account; the service-layer `DeletedAt` gate remains, so a deleted user is still never handed
+  back. Covered end to end and in both backends' contract suite.
+- **A panicking Mailer/SMSSender no longer kills the process (`identity/TEN-7`).** The
+  off-response-path delivery goroutine in the `identity` and `otp` handlers invoked consumer
+  callbacks with no `recover()`; because the request has already returned, no `http.Server`
+  recovery covered it, so any panic in consumer code was a whole-process crash reachable from a
+  mostly unauthenticated endpoint. Both goroutines now recover. The `identity` handlers report the
+  recovered value as a `DeliveryFailed` event (`Reason: "delivery_panic"`, `Err` joined with
+  `ErrDeliveryPanic`); the request still returns its uniform `204`.
+- **A failed social-login provisioning no longer burns the email address (`identity/TEN-8`).**
+  When the `emailVerified` write failed, `LinkOrCreateIdentity` left the just-created user as an
+  ORPHAN with no identity, and the live-row email index kept matching it — that address became
+  permanently unusable for both a retried social login and an ordinary registration. The failure
+  now compensates by soft-deleting the orphan, exactly as the `AddIdentity` failure path already did.
+- **A password rotation can no longer re-arm a soft-deleted account (refuter-found).**
+  `UpdateIdentityPassword` was not gated on the owner being live in either backend, so
+  `ChangePassword` / `SetTemporaryPassword` could write a usable hash onto a deleted account's
+  identity. Both backends now return `ErrUserNotFound`, pinned by
+  `storetest.StorePasswordRotationLivenessContract`.
+- **An oversized email address is rejected by validation (`identity/TEN-16`).** `normalizeEmail`
+  enforced no maximum, so an address far beyond the RFC 5321 limit passed validation and failed late
+  in the store with an opaque error. It now returns `ErrEmailTooLong` above `MaxEmailLength` (254),
+  checked both before the IDN fold and after canonicalization.
 
 - **An unauthenticated verify no longer provisions a tenant and mints a key (`crypto/CRY-4`,
   `tenant/TEN-4`).** `tokens/jwt.CachingKeyStore.VerificationKeys` resolved the delegate's
