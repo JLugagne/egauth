@@ -156,7 +156,7 @@ handler := tokens.RequireAuth(
 
 A resolved token whose signed `tenant_id` does not match the request tenant is rejected (`tokens.ErrTenantMismatch` → 401). The same resolver scopes any auto-refresh rotation. `tokens.WithRefreshTenantResolver` is retained as a deprecated alias.
 
-The `tokens` package also provides ready-made HTTP handlers for the refresh and logout endpoints: `tokens.RefreshHandler` and `tokens.LogoutHandler`, both configurable with options such as `tokens.WithCookies`, `tokens.WithTrustedOrigins`, and `tokens.WithTenantResolver`.
+The `tokens` package also provides ready-made HTTP handlers for the refresh and logout endpoints: `tokens.RefreshHandler` and `tokens.LogoutHandler`, both configurable with options such as `tokens.WithCookies`, `tokens.WithTrustedOrigins`, and `tokens.WithTenantResolver`. `tokens.WithTenantResolver` follows the same fail-closed contract as the middleware: map the request through an explicit allowlist, and a resolver returning `""` refuses the request with `401 tenant_unresolved` instead of rotating or revoking in the single-tenant (`""`) partition.
 
 ### Inspecting scopes on the Actor
 

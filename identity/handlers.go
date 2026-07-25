@@ -49,7 +49,7 @@ const DefaultInterimTokenTTL = 5 * time.Minute
 type handlerConfig struct {
 	provider             string
 	cookies              tokens.Cookies
-	tenantResolver       func(*http.Request) string
+	tenantResolver       func(*http.Request) (string, bool)
 	successURL           string
 	failureURL           string
 	emailField           string
@@ -194,9 +194,29 @@ func WithFormFields(email, password, remember string) HandlerOption {
 }
 
 // WithTenantResolver derives the tenant from the request to scope identity and token store
-// operations in multi-tenant deployments.
+// operations in multi-tenant deployments. The tenant is resolved ONCE per request and that
+// single value scopes every store operation the handler performs, so an impure resolver cannot
+// route parts of one request into different partitions.
+//
+// A configured resolver MUST return a non-empty tenant ID for any request it can map. Returning
+// "" means "the tenant could not be resolved" (an unmapped Host, a missing path segment, an
+// absent claim) and the handler then REFUSES the request with 401 "tenant_unresolved" instead of
+// falling back to the single-tenant ("") partition — where a bootstrap/operator account may
+// live. Map the request explicitly (an allowlist of known hosts or a canonical host->tenant
+// table), never the raw Host header. The "" partition is used only when no resolver is
+// configured at all (single-tenant mode). This mirrors sessions.WithTenantResolver and
+// tokens.WithAuthTenantResolver.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
-	return func(h *handlerConfig) { h.tenantResolver = f }
+	return func(h *handlerConfig) {
+		if f == nil {
+			h.tenantResolver = nil
+			return
+		}
+		h.tenantResolver = func(r *http.Request) (string, bool) {
+			tenant := f(r)
+			return tenant, tenant != ""
+		}
+	}
 }
 
 // WithTokenField overrides the form field carrying the verification token in the
@@ -323,6 +343,10 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
@@ -331,7 +355,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password, requestContext(r))
+		user, err := svc.Authenticate(r.Context(), tenant, cfg.provider, email, password, requestContext(r))
 		if err != nil {
 			status, code := mapAuthError(err)
 			cfg.fail(w, r, status, code)
@@ -343,7 +367,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		// renewable — but the issued pair carries Claims.MustChangePassword so the middleware
 		// soft-redirects to the reset page. Fail closed on a policy error rather than silently
 		// issuing an unflagged pair, which would let a flagged user slip past the gate.
-		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), tenant, user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
@@ -355,7 +379,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		// the full pair. Users without an enrolled factor fall through below. When the user is
 		// also must-change, the flag is carried onto the interim token so step-up preserves it.
 		if cfg.mfaGate != nil {
-			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
+			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
 			if err != nil {
 				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
 				return
@@ -396,6 +420,10 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
@@ -404,7 +432,7 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 		password := r.PostForm.Get(cfg.passwordField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.Register(r.Context(), cfg.tenant(r), email, password)
+		user, err := svc.Register(r.Context(), tenant, email, password)
 		if err != nil {
 			status, code := mapRegisterError(err)
 			cfg.fail(w, r, status, code)
@@ -440,11 +468,20 @@ func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg h
 	return nil
 }
 
-func (cfg handlerConfig) tenant(r *http.Request) string {
+func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {
 	if cfg.tenantResolver == nil {
-		return ""
+		return "", true
 	}
 	return cfg.tenantResolver(r)
+}
+
+func (cfg handlerConfig) requireTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenant, ok := cfg.resolveTenant(r)
+	if !ok {
+		cfg.fail(w, r, http.StatusUnauthorized, "tenant_unresolved")
+		return "", false
+	}
+	return tenant, true
 }
 
 // dispatchDelivery hands a freshly minted credential to the Mailer/SMSSender off the response
@@ -465,9 +502,8 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 // Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
 // DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
 // delivery durable across the request finishing.
-func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) {
+func (cfg handlerConfig) dispatchDelivery(r *http.Request, tenant, userID string, send func(ctx context.Context) error) {
 	base := context.WithoutCancel(r.Context())
-	tenant := cfg.tenant(r)
 
 	if cfg.deliverySem != nil {
 		select {
@@ -570,6 +606,10 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
@@ -579,9 +619,9 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// not the email maps to an account, so a backend error must NOT be surfaced as a
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
-		token, user, _ := svc.RequestPasswordReset(r.Context(), cfg.tenant(r), email)
+		token, user, _ := svc.RequestPasswordReset(r.Context(), tenant, email)
 		if token != "" && user != nil && mailer.PasswordReset != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
 			})
 		}
@@ -604,13 +644,17 @@ func ResetPasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
 		password := r.PostForm.Get(cfg.passwordField)
-		if err := svc.ResetPassword(r.Context(), cfg.tenant(r), token, password); err != nil {
+		if err := svc.ResetPassword(r.Context(), tenant, token, password); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -634,6 +678,10 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -644,7 +692,7 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 			return
 		}
 
-		token, err := svc.RequestEmailVerification(r.Context(), cfg.tenant(r), user.ID)
+		token, err := svc.RequestEmailVerification(r.Context(), tenant, user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "verification_request_failed")
 			return
@@ -652,7 +700,7 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 		// token is empty when the account is not a live, same-tenant user (swallowed at the
 		// service for enumeration safety); only dispatch delivery when a token was minted.
 		if token != "" && mailer.EmailVerification != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
 			})
 		}
@@ -676,12 +724,16 @@ func VerifyEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.VerifyEmail(r.Context(), cfg.tenant(r), token); err != nil {
+		if _, err := svc.VerifyEmail(r.Context(), tenant, token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -707,14 +759,18 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
-		token, user, _ := svc.RequestMagicLink(r.Context(), cfg.tenant(r), email)
+		token, user, _ := svc.RequestMagicLink(r.Context(), tenant, email)
 		if token != "" && user != nil && mailer.MagicLink != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
 			})
 		}
@@ -739,6 +795,10 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
@@ -746,7 +806,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		token := r.PostForm.Get(cfg.tokenField)
 		remember := parseFormBool(r.PostForm.Get(cfg.rememberField))
 
-		user, err := svc.LoginWithMagicLink(r.Context(), cfg.tenant(r), token, requestContext(r))
+		user, err := svc.LoginWithMagicLink(r.Context(), tenant, token, requestContext(r))
 		if err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
@@ -756,7 +816,7 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		// Forced-change gate: a magic-link login is still subject to the must-change flag. When the
 		// credential is flagged the renewable pair carries Claims.MustChangePassword (persisted across
 		// refresh), so the middleware soft-redirects to the reset page. Fail closed on a policy error.
-		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), tenant, user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
@@ -792,6 +852,10 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -808,7 +872,7 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 		current := r.PostForm.Get(cfg.currentPasswordField)
 		newPassword := r.PostForm.Get(cfg.newPasswordField)
 
-		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
+		if err := svc.ChangePassword(r.Context(), tenant, user.ID, current, newPassword); err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidCredentials):
 				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
@@ -850,6 +914,10 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -866,7 +934,7 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 		current := r.PostForm.Get(cfg.currentPasswordField)
 		newPassword := r.PostForm.Get(cfg.newPasswordField)
 
-		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
+		if err := svc.ChangePassword(r.Context(), tenant, user.ID, current, newPassword); err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidCredentials):
 				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
@@ -910,6 +978,10 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -924,7 +996,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 		}
 
 		newEmail := strings.TrimSpace(r.PostForm.Get(cfg.newEmailField))
-		token, err := svc.RequestEmailChange(r.Context(), cfg.tenant(r), user.ID, newEmail)
+		token, err := svc.RequestEmailChange(r.Context(), tenant, user.ID, newEmail)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidEmail):
@@ -946,7 +1018,7 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 			if n, nerr := normalizeEmail(newEmail); nerr == nil {
 				deliverTo = n
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
 			})
 		}
@@ -971,12 +1043,16 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.ConfirmEmailChange(r.Context(), cfg.tenant(r), token); err != nil {
+		if _, err := svc.ConfirmEmailChange(r.Context(), tenant, token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -1007,6 +1083,10 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -1017,7 +1097,7 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			return
 		}
 
-		if err := svc.DeleteAccount(r.Context(), cfg.tenant(r), user.ID); err != nil {
+		if err := svc.DeleteAccount(r.Context(), tenant, user.ID); err != nil {
 			switch {
 			case errors.Is(err, ErrUserNotFound):
 				cfg.fail(w, r, http.StatusNotFound, "not_found")
@@ -1123,6 +1203,10 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -1137,7 +1221,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 		}
 
 		phone := strings.TrimSpace(r.PostForm.Get(cfg.phoneField))
-		token, err := svc.RequestPhoneVerification(r.Context(), cfg.tenant(r), user.ID, phone)
+		token, err := svc.RequestPhoneVerification(r.Context(), tenant, user.ID, phone)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidPhone):
@@ -1159,7 +1243,7 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 			if n, nerr := normalizePhone(phone); nerr == nil {
 				deliverTo = n
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
 			})
 		}
@@ -1185,12 +1269,16 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.ConfirmPhoneVerification(r.Context(), cfg.tenant(r), token); err != nil {
+		if _, err := svc.ConfirmPhoneVerification(r.Context(), tenant, token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -1218,6 +1306,10 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.userResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -1232,7 +1324,7 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		}
 
 		recoveryEmail := strings.TrimSpace(r.PostForm.Get(cfg.recoveryEmailField))
-		token, err := svc.RequestRecoveryEmail(r.Context(), cfg.tenant(r), user.ID, recoveryEmail)
+		token, err := svc.RequestRecoveryEmail(r.Context(), tenant, user.ID, recoveryEmail)
 		if err != nil {
 			switch {
 			case errors.Is(err, ErrInvalidEmail):
@@ -1251,7 +1343,7 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
 				deliverTo = n
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+			cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 				return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
 			})
 		}
@@ -1275,12 +1367,16 @@ func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.Handle
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
 
 		token := r.PostForm.Get(cfg.tokenField)
-		if _, err := svc.ConfirmRecoveryEmail(r.Context(), cfg.tenant(r), token); err != nil {
+		if _, err := svc.ConfirmRecoveryEmail(r.Context(), tenant, token); err != nil {
 			status, code := mapVerificationError(err)
 			cfg.fail(w, r, status, code)
 			return
@@ -1308,6 +1404,10 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		if !cfg.parseLimitedForm(w, r) {
 			return
 		}
@@ -1317,13 +1417,13 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		// not the email maps to an account, so a backend error must NOT be surfaced as a
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are observable via the store/event instrumentation.
-		token, user, channels, _ := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
+		token, user, channels, _ := svc.RequestPasswordResetViaRecovery(r.Context(), tenant, email)
 		// Uniform response regardless of account existence or recovery-channel availability; deliver
 		// off the response path to the verified channels only (token/user are empty otherwise).
 		if token != "" && user != nil {
 			if channels.RecoveryEmail && mailer.PasswordReset != nil && user.RecoveryEmail != nil {
 				recoveryEmail := *user.RecoveryEmail
-				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 					return mailer.PasswordReset(ctx, PasswordResetMail{User: &User{
 						ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
 					}, Token: token})
@@ -1331,7 +1431,7 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 			}
 			if channels.Phone && sms.PhoneVerification != nil && user.Phone != nil {
 				phone := *user.Phone
-				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+				cfg.dispatchDelivery(r, tenant, user.ID.String(), func(ctx context.Context) error {
 					return sms.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: phone, Token: token})
 				})
 			}

@@ -31,7 +31,7 @@ type handlerConfig struct {
 	stateTTL        time.Duration
 	redirectURL     string
 	usePKCE         bool
-	tenantResolver  func(*http.Request) string
+	tenantResolver  func(*http.Request) (string, bool)
 	successURL      string
 	failureURL      string
 	persistRefresh  bool
@@ -125,16 +125,38 @@ func WithPersistentRefresh() HandlerOption {
 	return func(h *handlerConfig) { h.persistRefresh = true }
 }
 
-// WithTenantResolver derives the tenant from the request to scope identity store operations
-// in multi-tenant deployments. The resolver MUST be a pure, deterministic function of the
-// request: given the same *http.Request it must always return the same string. DynamicBeginHandler
-// and DynamicCallbackHandler resolve the tenant exactly once per request and thread that single
-// value through all subsequent operations (provider lookup, CSRF gate, identity link), so a
-// resolver that consults mutable external state and returns different values on successive calls
-// would violate that guarantee and could cause the token-exchange, security gate, and identity
-// partition to operate on different tenants within the same request.
+// WithTenantResolver derives the tenant from the request to scope identity store operations and
+// to bind the in-flight flow to a tenant. The tenant is resolved ONCE per request and that single
+// value is used for the state-cookie binding and the identity link, so an impure resolver cannot
+// route parts of one flow into different partitions. The resolver SHOULD still be a pure,
+// deterministic function of the request: DynamicBeginHandler and DynamicCallbackHandler pin the
+// single resolved value for the provider lookup, the CSRF gate and the identity link, and a
+// resolver that consults mutable external state only makes that pinned value arbitrary.
+//
+// A configured resolver MUST return a non-empty tenant ID for any request it can map. Returning
+// "" means "the tenant could not be resolved" (an unmapped Host, a missing path segment, an
+// absent claim) and the handler then REFUSES the request with 403 "tenant_unresolved" instead of
+// linking or provisioning the identity in the single-tenant ("") partition — where a
+// bootstrap/operator account may live. Map the request explicitly (an allowlist of known hosts or
+// a canonical host->tenant table), never the raw Host header. The "" partition is used only when
+// no resolver is configured at all (single-tenant mode).
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
-	return func(h *handlerConfig) { h.tenantResolver = f }
+	return func(h *handlerConfig) {
+		if f == nil {
+			h.tenantResolver = nil
+			return
+		}
+		h.tenantResolver = func(r *http.Request) (string, bool) {
+			tenant := f(r)
+			return tenant, tenant != ""
+		}
+	}
+}
+
+func withPinnedTenant(tenant string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.tenantResolver = func(*http.Request) (string, bool) { return tenant, true }
+	}
 }
 
 // WithAllowUnverifiedEmail permits JIT-provisioning an account from a provider email the
@@ -152,6 +174,10 @@ func WithAllowUnverifiedEmail() HandlerOption {
 func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		state, err := newState()
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -175,7 +201,7 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r)))
+		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), tenant))
 		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -216,7 +242,11 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "provider_mismatch")
 			return
 		}
-		if !stateMatches(cookieTenant, cfg.tenant(r)) {
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
+		if !stateMatches(cookieTenant, tenant) {
 			cfg.fail(w, r, http.StatusForbidden, "tenant_mismatch")
 			return
 		}
@@ -254,7 +284,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		user, err := linker.LinkOrCreateIdentity(r.Context(), cfg.tenant(r), p.Name(), info.ProviderID, info.Email, info.EmailVerified)
+		user, err := linker.LinkOrCreateIdentity(r.Context(), tenant, p.Name(), info.ProviderID, info.Email, info.EmailVerified)
 		if err != nil {
 			status, code := mapLinkError(err)
 			cfg.fail(w, r, status, code)
@@ -329,13 +359,20 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
-// configured (the single-tenant default partition).
-func (cfg handlerConfig) tenant(r *http.Request) string {
+func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {
 	if cfg.tenantResolver == nil {
-		return ""
+		return "", true
 	}
 	return cfg.tenantResolver(r)
+}
+
+func (cfg handlerConfig) requireTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenant, ok := cfg.resolveTenant(r)
+	if !ok {
+		cfg.fail(w, r, http.StatusForbidden, "tenant_unresolved")
+		return "", false
+	}
+	return tenant, true
 }
 
 func mapLinkError(err error) (int, string) {
@@ -364,7 +401,10 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 func DynamicBeginHandler(store ProviderStore, providerName string, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		tenant := cfg.tenant(r)
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		p, err := store.GetProvider(r.Context(), tenant, providerName)
 		if err != nil {
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
@@ -373,7 +413,7 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 		// Thread the pre-resolved tenant into the delegated handler as a constant resolver
 		// so that the state cookie binding operates on the same value that was used to look
 		// up the provider above.
-		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
+		fixedTenantOpt := withPinnedTenant(tenant)
 		// Copy opts into a fresh slice before appending. opts is the closure-captured variadic
 		// shared across every request; appending into its spare capacity would race concurrent
 		// requests on the same backing array and could leak one tenant's resolver into another's.
@@ -389,7 +429,10 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 func DynamicCallbackHandler[C any](store ProviderStore, providerName string, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		tenant := cfg.tenant(r)
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 		p, err := store.GetProvider(r.Context(), tenant, providerName)
 		if err != nil {
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
@@ -401,7 +444,7 @@ func DynamicCallbackHandler[C any](store ProviderStore, providerName string, lin
 		// resolver could return a different tenant on later calls inside CallbackHandler,
 		// causing the identity to be linked into a different partition than the one whose
 		// provider minted the token (TASK-092 / 2026-06 audit INFO).
-		fixedTenantOpt := WithTenantResolver(func(*http.Request) string { return tenant })
+		fixedTenantOpt := withPinnedTenant(tenant)
 		// Copy opts into a fresh slice before appending (see DynamicBeginHandler): the captured
 		// variadic is shared across requests, so appending into its spare capacity would race
 		// concurrent callbacks and could cross tenants at the link/provision step.

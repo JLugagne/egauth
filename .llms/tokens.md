@@ -515,7 +515,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithRefreshCookiePath(string)` | Set Path on refresh cookie only; DEMOTES the refresh name the same way |
 | `WithSameSite(http.SameSite)` | Override SameSite |
 | `WithInsecureCookies()` | Disable Secure (dev only); DEMOTES both names to their bare form |
-| `WithTenantResolver(func(*http.Request) string)` | Resolve tenantID for multi-tenant |
+| `WithTenantResolver(func(*http.Request) string)` | Resolve tenantID for multi-tenant (allowlist-mapped, resolved once per request). `""` return → `401 tenant_unresolved` (fail-closed); no resolver configured → `""` (single-tenant partition) |
 | `WithTrustedOrigins(hosts ...string)` | Enable CSRF origin check (hosts without scheme) |
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
 | `WithFailureRedirect(url)` | 303 to url?error=<code> on failure |

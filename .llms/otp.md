@@ -117,6 +117,7 @@ Form field: "code" (default; override with WithCodeField)
 |---|---|---|
 | Success | `204` (or 303 / `WithOnVerified`) | — |
 | Any failure | `401` | `invalid_code` |
+| Unresolved tenant (configured resolver returned `""`) | `401` | `invalid_code` (`unauthorized` on `IssueHandler`) |
 | CSRF (trusted origins configured, blocked) | `403` | `cross_site_blocked` |
 | Body too large | `413` | `request_too_large` |
 | Malformed form | `400` | `invalid_request` |
@@ -124,7 +125,7 @@ Form field: "code" (default; override with WithCodeField)
 Handler options:
 ```go
 func WithSubjectResolver(f func(*http.Request) (uuid.UUID, bool)) HandlerOption  // required
-func WithTenantResolver(f func(*http.Request) string) HandlerOption              // default: "" (single-tenant)
+func WithTenantResolver(f func(*http.Request) string) HandlerOption              // allowlist-mapped tenant; "" => unresolved => 401 (fail-closed). No resolver => "" (single-tenant)
 func WithPurpose(purpose string) HandlerOption                                   // default "login"
 func WithPurposeResolver(f func(*http.Request) string) HandlerOption             // overrides WithPurpose
 func WithCodeField(name string) HandlerOption                                    // default "code"

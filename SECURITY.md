@@ -378,6 +378,28 @@ redaction is in any case only a backstop. Therefore the consumer must:
   unbound. Genuinely single-tenant deployments leave `MultiTenant` false (every token is issued
   under the empty tenant), configure no resolver, and may keep using `VerifyAccessToken` or the
   `SingleTenant` wrapper.
+- **Tenant resolution is fail-closed on every HTTP surface.** Every `WithTenantResolver` /
+  `WithAuthTenantResolver` option in the library (`identity`, `tokens`, `otp`, `oauth`, `sessions`)
+  obeys one contract: a **configured** resolver MUST return a non-empty tenant ID for any request
+  it can map, and a `""` return means "the tenant could not be resolved" (an unmapped `Host`, a
+  missing path segment, an absent claim). The handler then REFUSES the request — `401
+  tenant_unresolved` on the `identity`, `tokens` and `otp` surfaces, `403 tenant_unresolved` on
+  `oauth`, `401` in `sessions.RequireSession` and `tokens.RequireAuth` — instead of falling back to
+  the empty tenant. That fallback is what makes it a security property and not a nicety: `""` is a
+  real partition, and in a single-tenant/bootstrap deployment it is where the operator accounts
+  live, so failing open would let an unmapped host authenticate, register, reset a password or link
+  an OAuth identity there. The `""` partition is used only when **no** resolver is configured at
+  all (single-tenant mode), so single-tenant deployments are unaffected.
+  Consequently: resolve the tenant through an **explicit allowlist / canonical mapping** (a
+  host→tenant table, a validated path segment), never by returning the raw `Host` header — it is
+  attacker-controlled and not canonical (case, port, trailing dot, IDN).
+- **One tenant resolution per request.** Each handler resolves the tenant ONCE and pins that single
+  value for every store operation it performs (authentication, the forced-password-change check,
+  the MFA-enrollment gate, delivery events, the OAuth state binding and identity link). An impure
+  resolver — an expiring cache entry, a transient store error returning `""` — therefore cannot
+  make two steps of the same request operate on different partitions. That mattered: a per-step
+  re-resolution let `identity.LoginHandler` consult the MFA gate in the wrong partition, find no
+  enrollment, and issue a full renewable session on the password alone.
 - **`__Host-` cookie name prefix** — the tokens package defaults to `__Host-access_token`
   and `__Host-refresh_token` (`DefaultAccessCookieName` / `DefaultRefreshCookieName`).
   Browsers enforce that a `__Host-` cookie is host-locked: `Secure`, no `Domain` attribute,

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### BREAKING
+
+- **A configured tenant resolver that returns `""` now refuses the request** (`identity`, `tokens`,
+  `otp`, `oauth`). Behavioural, not an API change: no signature moved. Previously `""` was passed
+  through verbatim and the request operated on the empty tenant partition. A deployment that
+  configured a resolver and relied on its `""` return to mean "the default partition" now receives
+  `401 tenant_unresolved` (`403` on `oauth`) and must either map those requests explicitly or
+  configure no resolver at all (single-tenant mode, where `""` remains the legitimate partition).
+
 ### Added
 
 - **Forced-password-change for temporary credentials** (M7). Lets an admin provision a credential
@@ -55,6 +64,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Zero behavior change unless a credential is explicitly flagged via admin provisioning.
 
 ### Fixed
+
+- **HTTP handlers now fail CLOSED on an unresolved tenant** (`identity`, `tokens`, `otp`, `oauth`).
+  A configured tenant resolver that could not map a request (the natural result of a map or DB
+  lookup for an unknown `Host`) returned `""`, and that `""` was passed through verbatim: the
+  request then authenticated, registered, reset a password, verified an OTP, rotated/revoked a
+  refresh family or linked an OAuth identity **in the empty tenant partition** — which in a
+  single-tenant/bootstrap deployment is exactly where the operator accounts live. `identity.LoginHandler`
+  returned `204` against `""` and `identity.RegisterHandler` created an account there.
+
+  Every handler now distinguishes "no resolver configured" (single-tenant mode: `""` is the
+  legitimate default partition, unchanged) from "a resolver was configured and could not resolve"
+  (refused). The refusal is `401 tenant_unresolved` on the `identity` and `tokens` handlers, `401`
+  with the family's uniform code on `otp` (`unauthorized` for `IssueHandler`, `invalid_code` for
+  `VerifyHandler`, so no new account-existence oracle is introduced) and `403 tenant_unresolved` on
+  the `oauth` begin/callback handlers (matching the existing `tenant_mismatch` refusal).
+  `sessions.RequireSession` and `tokens.RequireAuth` already behaved this way; the handler families
+  now mirror them. The `WithTenantResolver` doc comments, `SECURITY.md` and the `.llms/*.md` guides
+  document the contract, and the guides no longer teach `func(r *http.Request) string { return
+  r.Host }` — resolvers must map the request through an explicit allowlist / canonical table.
+
+- **Handlers resolve the tenant exactly once per request** (`identity`, `tokens`, `otp`, `oauth`).
+  `identity.LoginHandler` resolved it three separate times (authentication, the
+  forced-password-change check, the MFA-enrollment gate), so an impure resolver — an expiring cache
+  entry, a transient store error returning `""` — made `MFAEnrollmentChecker.IsEnrolled` look for
+  the second factor in the wrong partition, find none, and skip the MFA branch entirely, issuing a
+  full renewable session on the password alone. Each handler now pins the single resolved value and
+  reuses it for every store operation (`oauth.DynamicCallbackHandler` already did this).
 
 - **A negative lockout argument no longer silently disables brute-force protection**
   (`identity`, `mfa`). `identity.WithLockout` and `mfa.WithMaxAttempts` were documented (and, for

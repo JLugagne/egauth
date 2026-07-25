@@ -143,6 +143,8 @@ All handlers are POST-only; non-POST returns 405. On success: 204 No Content (or
 
 Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
 
+Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pins that value for all of its store operations. With a resolver configured, a request it cannot map (resolver returns `""`) is refused with `401 tenant_unresolved` on EVERY handler below — including the otherwise enumeration-uniform `Request*` handlers — instead of operating on the single-tenant `""` partition. With no resolver configured the tenant is `""` (single-tenant mode) and nothing changes.
+
 ---
 
 `func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
@@ -233,7 +235,7 @@ Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
 - `func WithSuccessRedirect(url string) HandlerOption` — 303 redirect on success instead of 204
 - `func WithFailureRedirect(url string) HandlerOption` — 303 redirect with `?error=<code>` on failure
 - `func WithFormFields(email, password, remember string) HandlerOption` — override default field names
-- `func WithTenantResolver(f func(*http.Request) string) HandlerOption` — extract tenantID from request
+- `func WithTenantResolver(f func(*http.Request) string) HandlerOption` — extract tenantID from request; resolved ONCE per request. Map the request through an explicit allowlist / canonical table, never the raw `Host`. A configured resolver returning `""` means "unresolved" and the handler refuses the request with `401 tenant_unresolved` (fail-closed) instead of using the single-tenant `""` partition; `""` is used only when no resolver is configured at all
 - `func WithTokenField(name string) HandlerOption` — override token field name (default `"token"`)
 - `func WithUserResolver(f func(*http.Request) (*User, bool)) HandlerOption` — supply authenticated user to authenticated handlers
 - `func WithHandlerEventSink(sink event.Sink) HandlerOption` — handler-level security events (e.g. delivery failures)
@@ -311,8 +313,20 @@ app := identity.NewSingleTenant(svc)
 user, err := app.Register(ctx, "user@example.com", "S3cr3t!")
 
 // HTTP (multi-tenant)
+// Map the request through an EXPLICIT allowlist of canonical hosts — never the raw Host header.
+// An unmapped host resolves to "" and the handler then REFUSES the request (401
+// tenant_unresolved); it never falls back to the single-tenant ("") partition, where a
+// bootstrap/operator account may live.
+tenantsByHost := map[string]string{"acme.example.com": "acme"}
+tenantFromHost := func(r *http.Request) string {
+    host := strings.ToLower(r.Host)
+    if h, _, err := net.SplitHostPort(host); err == nil {
+        host = h
+    }
+    return tenantsByHost[strings.TrimSuffix(host, ".")]
+}
 mux.Handle("/login", identity.LoginHandler(svc, issuer, claimsOf,
-    identity.WithTenantResolver(func(r *http.Request) string { return r.Host }),
+    identity.WithTenantResolver(tenantFromHost),
     identity.WithTrustedOrigins("app.example.com"),
 ))
 mux.Handle("/password-reset/request", identity.RequestPasswordResetHandler(svc, mailer))

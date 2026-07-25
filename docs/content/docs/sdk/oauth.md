@@ -152,7 +152,7 @@ callback := oauth.CallbackHandler(
 mux.Handle("/auth/google/callback", callback)
 ```
 
-Useful handler options include `WithRedirectURL`, `WithSuccessRedirect`, `WithFailureRedirect`, `WithCookies`, `WithCookieDomain`, `WithSameSite`, `WithStateTTL`, `WithTenantResolver`, `WithAllowUnverifiedEmail`, and `WithoutPKCE`.
+Useful handler options include `WithRedirectURL`, `WithSuccessRedirect`, `WithFailureRedirect`, `WithCookies`, `WithCookieDomain`, `WithSameSite`, `WithStateTTL`, `WithTenantResolver`, `WithAllowUnverifiedEmail`, and `WithoutPKCE`. `WithTenantResolver` is fail-closed: map the request to a tenant through an explicit allowlist, since a resolver that returns `""` (a Host or path segment it cannot map) makes the handler refuse the flow with `403 tenant_unresolved` rather than link the identity into the single-tenant (`""`) partition.
 
 ## Multi-Tenant (Bring Your Own SSO)
 

@@ -144,7 +144,9 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 
 func WithTenantResolver(f func(*http.Request) string) HandlerOption
 // extracts tenantID from request (host header, path segment, JWT claim, etc.)
-// default: empty string (single-tenant partition)
+// MUST map the request through an explicit allowlist / canonical table — never the raw Host
+// returning "" means "unresolved" -> the middleware rejects with 401 (fail-closed)
+// default (no resolver configured at all): empty string (single-tenant partition)
 ```
 
 No cookie is set by the middleware. The caller is responsible for writing the `Set-Cookie` header (using the plaintext token returned by `CreateSession` or `Rotate`). No `Secure`, `HttpOnly`, or `SameSite` flags are set by the library — cookie attributes are the caller's responsibility.
@@ -218,8 +220,21 @@ sess, token, err := svc.CreateSession(ctx, tenantID, userID, r.UserAgent(), ip, 
 // http.SetCookie(w, &http.Cookie{Name:sessions.DefaultSessionCookieName, Value:token, Path:"/", HttpOnly:true, Secure:true, SameSite:http.SameSiteLaxMode})
 
 // Middleware
+// Map the request to a tenant through an EXPLICIT allowlist of canonical hosts. Never return the
+// raw Host header: it is attacker-controlled, is not canonical (case, port, trailing dot, IDN),
+// and an unknown Host must NOT silently become a tenant. An unmapped host yields "" and the
+// middleware then rejects the request with 401 (fail-closed) instead of falling back to the
+// single-tenant ("") partition.
+tenantsByHost := map[string]string{"acme.example.com": "acme", "globex.example.com": "globex"}
+tenantFromHost := func(r *http.Request) string {
+    host := strings.ToLower(r.Host)
+    if h, _, err := net.SplitHostPort(host); err == nil {
+        host = h
+    }
+    return tenantsByHost[strings.TrimSuffix(host, ".")] // "" when unknown -> request refused
+}
 mux.Handle("/protected", sessions.RequireSession(svc, myHandler,
-    sessions.WithTenantResolver(func(r *http.Request) string { return r.Host }),
+    sessions.WithTenantResolver(tenantFromHost),
 ))
 
 // Activity: slide idle timeout

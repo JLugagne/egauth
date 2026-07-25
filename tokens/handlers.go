@@ -24,7 +24,7 @@ type FamilyRevoker interface {
 // handlerConfig holds the configurable behavior of the tokens HTTP handlers.
 type handlerConfig struct {
 	cookies               Cookies
-	tenantResolver        func(*http.Request) string
+	tenantResolver        func(*http.Request) (string, bool)
 	successURL            string
 	failureURL            string
 	persistRefresh        bool
@@ -120,9 +120,27 @@ func WithPersistentRefresh() HandlerOption {
 }
 
 // WithTenantResolver derives the tenant from the request to scope store operations in
-// multi-tenant deployments.
+// multi-tenant deployments. The tenant is resolved ONCE per request and that single value scopes
+// every store operation the handler performs.
+//
+// A configured resolver MUST return a non-empty tenant ID for any request it can map. Returning
+// "" means "the tenant could not be resolved" (an unmapped Host, a missing path segment, an
+// absent claim) and the handler then REFUSES the request with 401 "tenant_unresolved" instead of
+// rotating or revoking in the single-tenant ("") partition. Map the request explicitly (an
+// allowlist of known hosts or a canonical host->tenant table), never the raw Host header. The ""
+// partition is used only when no resolver is configured at all (single-tenant mode). This mirrors
+// WithAuthTenantResolver on RequireAuth.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
-	return func(h *handlerConfig) { h.tenantResolver = f }
+	return func(h *handlerConfig) {
+		if f == nil {
+			h.tenantResolver = nil
+			return
+		}
+		h.tenantResolver = func(r *http.Request) (string, bool) {
+			tenant := f(r)
+			return tenant, tenant != ""
+		}
+	}
 }
 
 // WithTrustedOrigins widens the same-origin CSRF check on the cookie-driven token endpoints
@@ -163,6 +181,10 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 
 		refreshToken, ok := cfg.cookies.Refresh(r)
 		if !ok {
@@ -171,7 +193,7 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			return
 		}
 
-		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
+		pair, err := rotator.Rotate(r.Context(), tenant, refreshToken)
 		if err != nil {
 			// ErrRefreshConcurrent is benign concurrency: a parallel request won the rotation
 			// race and already minted a fresh, valid refresh cookie for this client (the family
@@ -221,15 +243,18 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r)
+		if !ok {
+			return
+		}
 
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-			tenantID := cfg.tenant(r)
 			hash := HashToken(refreshToken)
-			rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash)
+			rt, err := revoker.FindRefreshToken(r.Context(), tenant, hash)
 			switch {
 			case err == nil:
 				// Token found: revoke the whole rotation family.
-				if err := revoker.RevokeFamily(r.Context(), tenantID, rt.FamilyID); err != nil {
+				if err := revoker.RevokeFamily(r.Context(), tenant, rt.FamilyID); err != nil {
 					cfg.cookies.Clear(w)
 					cfg.fail(w, r, http.StatusInternalServerError, "logout_incomplete")
 					return
@@ -237,7 +262,7 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 				// Audit the user sign-out. Reuse the existing logout event type with
 				// Reason="token_logout" (symmetric with sessions/service.go), carrying the client
 				// IP/User-Agent. A nil sink is a no-op and emission never alters the response.
-				cfg.emitLogout(r, tenantID, rt.UserID.String())
+				cfg.emitLogout(r, tenant, rt.UserID.String())
 			case errors.Is(err, ErrRefreshTokenNotFound):
 				// Token already gone: idempotent success — fall through. The double-logout path
 				// emits nothing: there is no family to revoke and no fresh sign-out to record, and
@@ -277,13 +302,20 @@ func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	return host == r.Host || cfg.trustedOrigins[host]
 }
 
-// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
-// configured (the single-tenant default partition).
-func (cfg handlerConfig) tenant(r *http.Request) string {
+func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {
 	if cfg.tenantResolver == nil {
-		return ""
+		return "", true
 	}
 	return cfg.tenantResolver(r)
+}
+
+func (cfg handlerConfig) requireTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
+	tenant, ok := cfg.resolveTenant(r)
+	if !ok {
+		cfg.fail(w, r, http.StatusUnauthorized, "tenant_unresolved")
+		return "", false
+	}
+	return tenant, true
 }
 
 // fail emits a failure response: a 303 redirect to the configured failure URL (carrying an
@@ -406,9 +438,10 @@ func (cfg handlerConfig) warnIfInsecureMisuse(r *http.Request) {
 		once = &sync.Once{}
 	}
 	once.Do(func() {
+		eventTenant, _ := cfg.resolveTenant(r)
 		event.Emit(r.Context(), cfg.events, event.Event{
 			Type:     event.InsecureCookieMisuse,
-			TenantID: cfg.tenant(r),
+			TenantID: eventTenant,
 			Reason:   "non_loopback_plaintext_host",
 			Attrs:    map[string]any{"host": r.Host},
 		})

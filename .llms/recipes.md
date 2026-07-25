@@ -111,6 +111,11 @@ mux.Handle("GET /auth/google/callback", oauth.CallbackHandler(google, svc /* ide
 // Multi-tenant SSO (per-tenant providers): use a ProviderStore + Dynamic*Handler
 store := oauth.NewMemoryStore()
 store.AddProvider("tenant-a", providers.Okta(/* ... */))
+// Resolve the tenant through an EXPLICIT allowlist — never the raw Host header. An unmapped host
+// resolves to "" and every handler then refuses the request (fail-closed) instead of operating in
+// the single-tenant ("") partition.
+tenantsByHost := map[string]string{"tenant-a.example.com": "tenant-a"}
+tenantFromHost := func(r *http.Request) string { return tenantsByHost[strings.ToLower(r.Host)] }
 mux.Handle("GET /sso/begin",    oauth.DynamicBeginHandler(store, "okta", oauth.WithTenantResolver(tenantFromHost)))
 mux.Handle("GET /sso/callback", oauth.DynamicCallbackHandler(store, "okta", svc, issuer, claimsOf, oauth.WithTenantResolver(tenantFromHost)))
 ```

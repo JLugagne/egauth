@@ -129,7 +129,7 @@ WithoutPKCE() HandlerOption                                 // disable PKCE (non
 WithSuccessRedirect(url string) HandlerOption               // 303 redirect on success instead of 204
 WithFailureRedirect(url string) HandlerOption               // 303 redirect on failure with ?error=<code>
 WithPersistentRefresh() HandlerOption                       // persistent refresh cookie ("remember me")
-WithTenantResolver(f func(*http.Request) string) HandlerOption // derive tenantID from request
+WithTenantResolver(f func(*http.Request) string) HandlerOption // derive tenantID from request (allowlist-mapped); "" => unresolved => 403 tenant_unresolved (fail-closed)
 WithAllowUnverifiedEmail() HandlerOption                    // allow unverified emails (off by default)
 ```
 
@@ -167,7 +167,7 @@ var ErrJWKSHostMismatch = errors.New("oauth: JWKS source does not match issuer")
 var ErrProviderNotFound = errors.New("oauth: provider not found")    // ProviderStore
 ```
 
-Callback failure codes (query param when `WithFailureRedirect`): `invalid_state`, `state_mismatch`, `provider_mismatch`, `tenant_mismatch`, `access_denied`, `missing_code`, `exchange_failed`, `email_missing`, `email_unverified`, `account_exists`, `link_failed`, `token_issuance_failed`, `provider_not_found`.
+Callback failure codes (query param when `WithFailureRedirect`): `invalid_state`, `state_mismatch`, `provider_mismatch`, `tenant_mismatch`, `tenant_unresolved`, `access_denied`, `missing_code`, `exchange_failed`, `email_missing`, `email_unverified`, `account_exists`, `link_failed`, `token_issuance_failed`, `provider_not_found`.
 
 ## Providers (oauth/providers)
 
@@ -291,8 +291,11 @@ mux.Handle("GET /auth/google/callback", oauth.CallbackHandler(p, identSvc, token
 // Multi-tenant dynamic variant
 store := oauth.NewMemoryStore()
 store.AddProvider("tenant-abc", p)
+// The resolver must map the request through an explicit allowlist / canonical table. Returning ""
+// (unknown tenant segment, unmapped host) refuses the flow with 403 tenant_unresolved rather than
+// linking the identity into the single-tenant ("") partition.
 mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
-    oauth.WithTenantResolver(func(r *http.Request) string { return r.PathValue("tenant") }),
+    oauth.WithTenantResolver(func(r *http.Request) string { return knownTenants[r.PathValue("tenant")] }),
     oauth.WithRedirectURL("https://example.com/auth/google/callback"),
 ))
 ```
@@ -316,7 +319,7 @@ mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
 - State cookie and nonce are single-use; do not retry the callback on the same cookie.
 - For self-hosted issuers (Keycloak, GitLab self-hosted, Cognito), add the base URL / issuer to `SafeHTTPClient`'s SSRF allowlist by supplying a non-safe client via `oauth.WithHTTPClient` only if the issuer is on an internal host — otherwise `SafeHTTPClient` will block it.
 - `providers.OIDC` performs network I/O at construction; build once at startup (or memoize in `ProviderStore`), never per request.
-- Multi-tenant providers: use `WithTenantResolver` on both `Begin` and `Callback` handlers to bind the in-flight flow to the correct tenant; mismatch returns `tenant_mismatch`.
+- Multi-tenant providers: use `WithTenantResolver` on both `Begin` and `Callback` handlers to bind the in-flight flow to the correct tenant; mismatch returns `tenant_mismatch`. The tenant is resolved ONCE per request and pinned for the state binding and the identity link; a configured resolver that returns `""` (cannot map the request) refuses the flow with `403 tenant_unresolved` — it never falls back to the `""` partition.
 - Microsoft `"common"` / `"organizations"` tenants: the id_token `iss` contains the caller's home tenant GUID, not the literal `"common"` — prefer a specific tenant GUID for issuer validation.
 - Auth0 issuer has a trailing slash in the `"iss"` claim; use `providers.Auth0Issuer(domain)`, not a manually constructed string.
 - Apple client secret is a short-lived ES256-signed JWT; regenerate before it expires (Apple does not issue a static secret).

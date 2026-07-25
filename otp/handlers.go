@@ -31,7 +31,7 @@ type handlerConfig struct {
 	purpose         string
 	purposeResolver func(*http.Request) string
 	codeField       string
-	tenantResolver  func(*http.Request) string
+	tenantResolver  func(*http.Request) (string, bool)
 	trustedOrigins  map[string]bool
 	// insecureNoOriginCheck disables the strict same-origin CSRF check (see WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins allowlist.
 	insecureNoOriginCheck bool
@@ -94,9 +94,26 @@ func WithCodeField(name string) HandlerOption {
 	return func(h *handlerConfig) { h.codeField = name }
 }
 
-// WithTenantResolver derives the tenant from the request to scope store operations.
+// WithTenantResolver derives the tenant from the request to scope store operations. The tenant is
+// resolved ONCE per request and that single value scopes both the mint and the verification.
+//
+// A configured resolver MUST return a non-empty tenant ID for any request it can map. Returning
+// "" means "the tenant could not be resolved" (an unmapped Host, a missing path segment, an
+// absent claim) and the handler then REFUSES the request (401) instead of minting or verifying a
+// challenge in the single-tenant ("") partition. Map the request explicitly (an allowlist of known
+// hosts or a canonical host->tenant table), never the raw Host header. The "" partition is used
+// only when no resolver is configured at all (single-tenant mode).
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
-	return func(h *handlerConfig) { h.tenantResolver = f }
+	return func(h *handlerConfig) {
+		if f == nil {
+			h.tenantResolver = nil
+			return
+		}
+		h.tenantResolver = func(r *http.Request) (string, bool) {
+			tenant := f(r)
+			return tenant, tenant != ""
+		}
+	}
 }
 
 // WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for the OTP handlers.
@@ -183,6 +200,10 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r, "unauthorized")
+		if !ok {
+			return
+		}
 		if cfg.subjectResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -192,7 +213,6 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 		}
 
 		if subjectID, ok := cfg.subjectResolver(r); ok {
-			tenant := cfg.tenant(r)
 			purpose := cfg.purposeOf(r)
 			cfg.dispatchDelivery(r, func(ctx context.Context) error {
 				ch, err := svc.Issue(ctx, tenant, subjectID, purpose)
@@ -226,6 +246,10 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.requireTenant(w, r, "invalid_code")
+		if !ok {
+			return
+		}
 		if cfg.subjectResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -241,7 +265,7 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
-		if err := svc.Verify(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r), code); err != nil {
+		if err := svc.Verify(r.Context(), tenant, subjectID, cfg.purposeOf(r), code); err != nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
@@ -304,13 +328,20 @@ func (cfg handlerConfig) purposeOf(r *http.Request) string {
 	return cfg.purpose
 }
 
-// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
-// configured (the single-tenant default partition).
-func (cfg handlerConfig) tenant(r *http.Request) string {
+func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {
 	if cfg.tenantResolver == nil {
-		return ""
+		return "", true
 	}
 	return cfg.tenantResolver(r)
+}
+
+func (cfg handlerConfig) requireTenant(w http.ResponseWriter, r *http.Request, code string) (string, bool) {
+	tenant, ok := cfg.resolveTenant(r)
+	if !ok {
+		cfg.fail(w, r, http.StatusUnauthorized, code)
+		return "", false
+	}
+	return tenant, true
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {
