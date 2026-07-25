@@ -60,6 +60,8 @@ type Rotator[C any] interface {
 
 type ClaimsProvider[C any] interface {
     // Called during Rotate to resolve fresh claims; error aborts rotation (old token is NOT consumed to allow retry on transient error).
+    // It is the ONLY place a rotation can be refused: it MUST re-check account status, or a
+    // disabled/deleted user refreshes forever. Wrap yours with identity.ActiveClaimsProvider.
     ClaimsForUser(ctx context.Context, userID uuid.UUID, tenantID string) (Claims[C], error)
 }
 
@@ -71,7 +73,8 @@ type Store[C any] interface {
     RevokeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error
     RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error
     // RevokeAllRefreshTokensForUser deletes EVERY refresh token a user holds, across all
-    // families — the "kill every session" primitive used on account disable. Idempotent
+    // families — the "no session can be renewed" primitive used on account disable (issued
+    // access tokens still run out their AccessTTL). Idempotent
     // (no live tokens → nil, never ErrRefreshTokenNotFound).
     RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     SaveAPIKey(ctx context.Context, tenantID string, key *APIKey[C]) error
@@ -246,12 +249,12 @@ The single seam for turning a verified API key into an `egauth.Actor`. Mapping r
 ```go
 func NewAccountRevoker[C any](store Store[C]) func(ctx context.Context, tenantID string, userID uuid.UUID) error
 ```
-Cross-module revocation hook that kills every credential a user holds: revokes all their refresh tokens (`RevokeAllRefreshTokensForUser`) and soft-revokes every API key they issued (`RevokeAllAPIKeysForUser`). Wire it into `identity.WithDisableRevokers` so `identity.DisableUser` cascades into the tokens module without coupling the two packages:
+Cross-module revocation hook over the STORED credentials in this store: it revokes every refresh token the user holds across all families (`RevokeAllRefreshTokensForUser`) and soft-revokes every API key they issued (`RevokeAllAPIKeysForUser`). It does **not** retract an already-issued **access token** (a stateless JWT verified without a store lookup — valid until `AccessTTL` expires, so keep that short), does not touch the `sessions` module (add `sessions.Service.RevokeAllForUser`), and deliberately preserves enrollment data (MFA, passkeys) so the account works again after `EnableUser`. Wire it into `identity.WithDisableRevokers` so `identity.DisableUser` cascades into the tokens module without coupling the two packages:
 ```go
 svc := identity.NewService(store, hasher, policy,
     identity.WithDisableRevokers(tokens.NewAccountRevoker(tokenStore)))
 ```
-Both revocations run even if the first errors (errors are joined). Idempotent — safe to retry, which matters because disable may be re-attempted. The signature also fits `identity.WithAccountErasers` if you want the same fan-out on `DeleteAccount`.
+Both revocations run even if the first errors (errors are joined). Idempotent — safe to retry, which matters because disable may be re-attempted. The signature also fits `identity.WithAccountErasers` if you want the same fan-out on `DeleteAccount`. Pair it with `identity.ActiveClaimsProvider` — revoking stored tokens does not stop a rotation racing the disable.
 
 ### `jwt.Config[C any]`
 ```go
@@ -648,10 +651,12 @@ issuer := basic.NewIssuer(basic.Config{
     SecretKey:  os.Getenv("TOKEN_SECRET"), // >= 32 bytes
     AccessTTL:  15 * time.Minute,
     RefreshTTL: 720 * time.Hour,
-    ClaimsProvider: basic.ClaimsProviderFunc(func(ctx context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
+    // ActiveClaimsProvider re-checks account status on every rotation (EnsureActive) and aborts
+    // the refresh of a disabled/deleted account. Required for deactivation to end access.
+    ClaimsProvider: identity.ActiveClaimsProvider(svc, basic.ClaimsProviderFunc(func(ctx context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
         // fetch user from DB, return claims or error to abort rotation
         return basic.Claims{Subject: userID, TenantID: tenantID}, nil
-    }),
+    })),
 })
 
 // 2. Issue pair at login (store RefreshToken, set cookies).
@@ -693,6 +698,7 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 ## Gotchas
 
 - `ClaimsProvider` is **required** for `Rotate`; omitting it returns `ErrNoClaimsProvider`. `IssueTokenPair`/`IssueAPIKey` do not need it.
+- **Deactivation needs BOTH halves.** `NewAccountRevoker(store)` wired via `identity.WithDisableRevokers`/`WithAccountErasers` revokes the STORED credentials (every refresh token across all families + all API keys). It does NOT retract an already-issued access token (stateless JWT — valid until `AccessTTL` expires) and does not touch the `sessions` module. The second half is `identity.ActiveClaimsProvider(svc, provider)`, which makes `Rotate` refuse a disabled/deleted account; without it a suspended user rotates forever and each rotation resets the refresh expiry to `now+RefreshTTL`. `webapp.NewWebApp` wires both and fails construction (`ErrIdentityNotRegisterable`) if it cannot.
 - `SecretKey` must be >= `jwt.MinSecretKeyLength` (32 bytes); `Config.Validate()` enforces this — `New`/`NewIssuer` panics only on structurally broken config, not on short keys.
 - Asymmetric signing: set `Config.Signers` with `NewRSASigner`/`NewECDSASigner`/`NewEdDSASigner` (and `ActiveKeyID` when >1). `Signers` supersedes `SecretKey`/`SigningKeys` for signing and MUST NOT be combined with `SigningKeys` (Validate/New reject it). Verifiers fetch the public keys via `Service.PublicJWKS()`. The `basic` facade is HS256-only — use generic `jwt.New[C]` for asymmetric.
 - `basic` vs generic: use `basic` when `C = struct{}`; use `jwt.New[C]` / `tokens.RequireAuth[C]` directly when embedding app-specific data in tokens.

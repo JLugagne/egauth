@@ -19,6 +19,10 @@ import (
 // ExampleNewWebApp shows the batteries-included preset: a few lines wire identity + tokens
 // into a single mounted http.Handler with secure-by-default cookies, CSRF and a non-nil
 // event sink. The à-la-carte handlers stay available for anything the preset does not cover.
+//
+// The preset also makes account deactivation end access: it registers the tokens account revoker
+// on the identity service and re-checks account status on every refresh rotation, so
+// idSvc.DisableUser both revokes the user's refresh families and refuses any further /auth/refresh.
 func ExampleNewWebApp() {
 	// Compose the dependencies from the public, in-memory backends.
 	idStore := identitymem.NewStore()

@@ -59,6 +59,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `401 tenant_unresolved` (`403` on `oauth`) and must either map those requests explicitly or
   configure no resolver at all (single-tenant mode, where `""` remains the legitimate partition).
 
+- **`identity.Service` gained `EnsureActive`, and `webapp.Config.Identity` must now implement
+  `identity.RevocationRegistry`.** Both changes serve one guarantee: account deactivation ends
+  access.
+
+  - `EnsureActive(ctx, tenantID, userID) error` is a new method on the `identity.Service`
+    **interface** (and on `identity.SingleTenant`). **Action required** only for code that
+    implements `identity.Service` itself — add the method (or embed the real Service);
+    `identity.servicetest.MockService` already has it, defaulting to "active" when its
+    `EnsureActiveFunc` is unset.
+  - `webapp.NewWebApp` now returns `webapp.ErrIdentityNotRegisterable` when `Config.Identity` does
+    not implement the new `identity.RevocationRegistry` seam. The `Service` returned by
+    `identity.NewService` does, so ordinary wiring is unaffected; a hand-written `identity.Service`
+    passed to the preset must implement it (or embed the real Service). Failing construction is
+    deliberate: without that seam the preset cannot revoke the refresh families it issues.
+  - `webapp.NewWebApp` now MUTATES the service it is handed, registering an account revoker on it.
+    Wire the preset once, at startup, before serving traffic.
+
 ### Added
 
 - **The MFA login gate now covers every login path.** `identity.WithMFAGate` applies to
@@ -127,7 +144,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Zero behavior change unless a credential is explicitly flagged via admin provisioning.
 
+- **`identity.ActiveClaimsProvider` + `identity.Service.EnsureActive`: the account-status re-check
+  refresh rotation needs.** `Rotate` resolves fresh claims through the issuer's `ClaimsProvider`,
+  which is the only place a rotation can be refused. Wrapping your provider —
+  `identity.ActiveClaimsProvider(svc, provider)` — aborts the refresh of a disabled or soft-deleted
+  account with `ErrAccountDisabled` / `ErrUserNotFound` (the presented token stays unconsumed;
+  `RefreshHandler` answers `401` and clears the cookies). `EnsureActive` is the underlying gate and
+  is also the cheap status check for API-key and background-job paths that never re-run
+  `Authenticate`. New narrow interface `identity.ActiveChecker` for wiring it from less than the
+  whole Service.
+
+- **`identity.RevocationRegistry`: post-construction registration of the revocation hooks.**
+  `RegisterAccountErasers` / `RegisterDisableRevokers` do at wiring time what `WithAccountErasers` /
+  `WithDisableRevokers` do at construction, for a composition root that only receives an
+  already-built `Service` (a DI container, or the `webapp` preset). Hook lists are copied on write,
+  so registration is safe alongside in-flight operations.
+
 ### Fixed
+
+- **Account deactivation did not end access in the shipped `webapp` preset (HIGH).** The only
+  `ClaimsProvider` egauth shipped never looked at the account: it took `_ context.Context`, could
+  not fail, and the preset registered no disable revoker (it could not — `Config.Identity` arrives
+  already constructed). So after `identity.DisableUser`, every `POST /auth/refresh` still returned
+  `204` and each rotation reset the refresh expiry to `now+RefreshTTL` — access was not merely
+  retained, it was renewed indefinitely, defeating offboarding, GDPR erasure and compromise
+  response for anyone using the preset or the README quickstart. `NewWebApp` now wires both halves
+  (revoker registration + `ActiveClaimsProvider`) and refuses to build when it cannot. Every shipped
+  example, the README quickstart, `.llms/*`, `llms.txt` and the docs site taught the same broken
+  provider and were corrected.
+
+- **`identity/memory`'s `UpdateUser` blind-wrote the whole user row, clearing `DisabledAt`.** A
+  stale `*User` copy — e.g. the one a concurrent `VerifyEmail` holds — replayed its old values over
+  an administrative change, so a suspended account could be re-activated (and `Phone`,
+  `PhoneVerifiedAt`, `RecoveryEmail`, `RecoveryEmailVerifiedAt` reverted) and log in again. The
+  memory backend now persists only `Email`/`EmailVerifiedAt`, matching the pgx backend's narrow
+  `UPDATE`; the field scope is now part of the documented `Store` contract and pinned for BOTH
+  backends by `storetest.StoreUpdateUserFieldScopeContract`.
+
+- **`tokens.NewAccountRevoker`'s doc claimed more than it does.** It said it invalidates "EVERY
+  token a user holds" and kills "every active session". It revokes stored refresh tokens and API
+  keys; an already-issued stateless access token survives until `AccessTTL` expires and the
+  `sessions` module is untouched. The godoc, `SECURITY.md`, `.llms/tokens.md`, `.llms/identity.md`,
+  `.llms/architecture.md` and the docs site now state exactly what is revoked, what survives and
+  for how long. The `identity.Service.DisableUser` doc no longer claims that refresh tokens are not
+  revoked by the call (they are, through the registered revokers).
 
 - **HTTP handlers now fail CLOSED on an unresolved tenant** (`identity`, `tokens`, `otp`, `oauth`).
   A configured tenant resolver that could not map a request (the natural result of a map or DB

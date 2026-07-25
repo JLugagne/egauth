@@ -20,7 +20,10 @@
 //	    SecretKey:      hs256SecretFromYourSecretStore, // >= 32 bytes
 //	    AccessTTL:      15 * time.Minute,
 //	    RefreshTTL:     720 * time.Hour,
-//	    ClaimsProvider: claimsProvider,                 // required for Rotate (refresh)
+//	    // Required for Rotate (refresh). Wrap your provider in identity.ActiveClaimsProvider so
+//	    // rotation re-checks account status — it is the only place a refresh can be refused, and a
+//	    // provider that always succeeds lets a disabled user renew their session forever.
+//	    ClaimsProvider: identity.ActiveClaimsProvider(idSvc, claimsProvider),
 //	})
 //	pair, err := issuer.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID})
 //	// ... later, refresh:

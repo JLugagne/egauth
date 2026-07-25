@@ -59,6 +59,8 @@ fmt.Println("Access Token:", pair.AccessToken)
 
 Refresh tokens are single-use. When a user refreshes their access token, they are issued a completely new Token Pair via `Rotate`. The issuer must be constructed with a `ClaimsProvider`, which resolves fresh claims (status, scopes, roles) at rotation time rather than trusting values frozen at login.
 
+Because the provider is the only place a rotation can be refused, it **must** re-check the account's status. Wrap it with `identity.ActiveClaimsProvider(identityService, myClaimsProvider)`: a provider that always succeeds keeps renewing a disabled or deleted user's session, each rotation pushing the refresh expiry out to `now+RefreshTTL`. See [Identity & Passwords]({{< ref "identity-and-passwords" >}}).
+
 If an attacker steals a Refresh Token and uses it, the user's client will eventually try to use the *same* Refresh Token. The `tokens` module detects this replay and (outside the configured `ReuseGracePeriod`) immediately revokes the **entire token family**, forcing everyone (including the attacker) to re-authenticate.
 
 ```go
@@ -101,7 +103,7 @@ err := tokenService.RevokeAPIKey(ctx, "tenant-123", apiKey.ID)
 
 After revocation, any call to `VerifyAPIKey` or `VerifyAPIKeyActor` for that key returns `tokens.ErrAPIKeyRevoked` — a distinct error from `ErrAPIKeyNotFound`, so callers can tell the difference between "unknown key" and "key was deliberately disabled". The revoked record is retained and remains visible in management listings; it is not deleted.
 
-To revoke **every** credential a user holds at once — all their refresh tokens and all the API keys they issued — use `tokens.NewAccountRevoker(store)`. Its main use is wiring into `identity.WithDisableRevokers` so disabling an account automatically revokes its tokens and keys (see [Identity & Passwords]({{< ref "identity-and-passwords" >}})); the underlying store also exposes `RevokeAllRefreshTokensForUser` and `RevokeAllAPIKeysForUser` directly.
+To revoke every **stored** credential a user holds at once — all their refresh tokens and all the API keys they issued — use `tokens.NewAccountRevoker(store)`. Its main use is wiring into `identity.WithDisableRevokers` so disabling an account automatically revokes its tokens and keys (see [Identity & Passwords]({{< ref "identity-and-passwords" >}})); the underlying store also exposes `RevokeAllRefreshTokensForUser` and `RevokeAllAPIKeysForUser` directly. It cannot retract an already-issued **access token** (a stateless JWT, valid until `AccessTTL` expires) and does not reach the `sessions` module — pair it with `identity.ActiveClaimsProvider` and, if you use sessions, `sessions.Service.RevokeAllForUser`.
 
 ### Listing a user's keys
 

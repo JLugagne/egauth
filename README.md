@@ -76,19 +76,28 @@ with your own type — see [below](#with-custom-claims).) This is the runnable p
 ctx := context.Background()
 const tenant = "" // empty string is the single-tenant default partition
 
-// identity: credential verification + account lifecycle
+tokenStore := basic.NewMemoryStore() // tokens/memory; or adapters/pgx/tokens.NewStore(pool)
+
+// identity: credential verification + account lifecycle.
+// The revoker makes DisableUser/DeleteAccount cascade into the token store (killing the
+// user's refresh families and API keys) — half of "deactivation ends access".
+revoker := tokens.NewAccountRevoker(tokenStore)
 idStore := identitymem.NewStore() // identity/memory; or adapters/pgx/identity.NewStore(pool)
-svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
+svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
+    identity.WithDisableRevokers(revoker),
+    identity.WithAccountErasers(revoker),
+)
 
 // tokens: stateless access tokens + refresh rotation (no custom claims).
-// claimsProvider re-derives a user's claims on every refresh, so a disabled or
-// role-changed user is re-evaluated rather than frozen at login.
-claimsProvider := basic.ClaimsProviderFunc(
+// claimsProvider re-derives a user's claims on every refresh, so a role change is picked
+// up rather than frozen at login. ActiveClaimsProvider is the other half: it aborts the
+// rotation of a disabled or deleted account, which would otherwise renew its session
+// forever (each rotation pushes the refresh expiry out again).
+claimsProvider := identity.ActiveClaimsProvider(svc, basic.ClaimsProviderFunc(
     func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
         return basic.Claims{Subject: userID, TenantID: tenantID}, nil
     },
-)
-tokenStore := basic.NewMemoryStore() // tokens/memory; or adapters/pgx/tokens.NewStore(pool)
+))
 issuer := basic.NewIssuer(basic.Config{
     Store:          tokenStore,
     Issuer:         "example-app",

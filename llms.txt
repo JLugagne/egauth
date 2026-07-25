@@ -46,6 +46,7 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 - `identity` verifies credentials only — pair it with `tokens` (stateless) OR `sessions` (revocable) to establish auth state.
 - Most apps: use `tokens/basic` (no custom claims). Custom claims → generic `tokens`/`tokens/jwt` with your type `C`.
 - `ClaimsProvider` is REQUIRED for refresh (`Rotate`); JWT `SecretKey` must be >= 32 bytes.
+- Deactivation ends access only with BOTH halves wired: `identity.WithDisableRevokers(tokens.NewAccountRevoker(store))` (+ `WithAccountErasers`) AND `identity.ActiveClaimsProvider(svc, provider)` on the issuer, since the `ClaimsProvider` is the only place a rotation can be refused. `webapp.NewWebApp` wires both.
 - Tokens/codes passed to delivery callbacks are plaintext secrets — NEVER log them.
 - In-memory stores (`sessions/memory`, `otp/memory`, `ratelimit.TokenBucket`) grow unbounded — schedule eviction with `janitor`, or use the pgx stores.
 - Handlers are POST-only with a pre-auth body cap; `Request*`/OTP-issue handlers are enumeration-safe (always 204).

@@ -12,6 +12,7 @@ import (
 	identitymem "github.com/JLugagne/egauth/identity/memory"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/basic"
 	"github.com/google/uuid"
 )
@@ -24,19 +25,28 @@ func Example() {
 	ctx := context.Background()
 	const tenant = "" // empty string is the single-tenant default partition
 
+	tokenStore := basic.NewMemoryStore() // or tokens/pgx.NewStore(pool)
+
 	// --- identity: credential verification + account lifecycle ---
+	// The revoker is half of "deactivation ends access": DisableUser/DeleteAccount cascade into
+	// the token store and kill the user's refresh families and API keys.
+	revoker := tokens.NewAccountRevoker(tokenStore)
 	idStore := identitymem.NewStore()
-	svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
+	svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
+		identity.WithDisableRevokers(revoker),
+		identity.WithAccountErasers(revoker),
+	)
 
 	// --- tokens: stateless access tokens + refresh-token rotation, no custom claims ---
-	// claimsProvider re-derives a user's claims on every refresh, so a disabled or
-	// role-changed user is re-evaluated rather than frozen at login.
-	claimsProvider := basic.ClaimsProviderFunc(
+	// claimsProvider re-derives a user's claims on every refresh, so a role change is picked up
+	// rather than frozen at login. ActiveClaimsProvider is the other half of "deactivation ends
+	// access": it aborts the rotation of a disabled or deleted account, which would otherwise
+	// renew its session indefinitely.
+	claimsProvider := identity.ActiveClaimsProvider(svc, basic.ClaimsProviderFunc(
 		func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
 			return basic.Claims{Subject: userID, TenantID: tenantID}, nil
 		},
-	)
-	tokenStore := basic.NewMemoryStore() // or tokens/pgx.NewStore(pool)
+	))
 	issuer := basic.NewIssuer(basic.Config{
 		Store:          tokenStore,
 		Issuer:         "example-app",

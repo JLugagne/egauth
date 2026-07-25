@@ -36,13 +36,15 @@ func Example() {
 	svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 
 	// --- tokens: stateless access tokens + stateful refresh-token rotation ---
-	// claimsProvider re-derives a user's claims on every refresh, so a disabled or
-	// role-changed user is re-evaluated rather than frozen at login.
-	claimsProvider := tokens.ClaimsProviderFunc[struct{}](
+	// claimsProvider re-derives a user's claims on every refresh, so a role change is picked up
+	// rather than frozen at login. ActiveClaimsProvider adds the account-status re-check that
+	// rotation owes the lifecycle: it aborts the refresh of a disabled or deleted account, which
+	// would otherwise renew its session forever.
+	claimsProvider := identity.ActiveClaimsProvider(svc, tokens.ClaimsProviderFunc[struct{}](
 		func(_ context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
 			return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
 		},
-	)
+	))
 	issuer := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          tokenmem.NewStore[struct{}](),
 		Issuer:         "example-app",
@@ -113,11 +115,13 @@ func ExampleLoginHandler() {
 		SecretKey:  "a-32-byte-minimum-hs256-signing-secret!!",
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 720 * time.Hour,
-		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](
+		// The status re-check belongs here, not only on the login path: rotation is the one
+		// place a live-but-deactivated session can be refused.
+		ClaimsProvider: identity.ActiveClaimsProvider(svc, tokens.ClaimsProviderFunc[struct{}](
 			func(_ context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
 				return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
 			},
-		),
+		)),
 	})
 
 	claimsOf := func(u *identity.User) tokens.Claims[struct{}] {

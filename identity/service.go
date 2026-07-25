@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/mail"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/JLugagne/egauth/event"
@@ -218,17 +219,33 @@ type Service interface {
 	// authentication is refused (Authenticate returns ErrAccountDisabled) and pending token-gated
 	// actions, including magic-link logins, are revoked. It is REVERSIBLE — the row, email slot and
 	// all data are retained — and is the counterpart to EnableUser. Disabling an already-disabled
-	// account succeeds (idempotent). Unlike DeleteAccount it does NOT run the AccountErasers, so
-	// existing sessions/refresh tokens are not revoked by this call; a caller that wants active
-	// sessions terminated on suspension SHOULD revoke them separately. Returns ErrUserNotFound for
-	// an unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it
-	// behind appropriate authorization (it is not a self-service action).
+	// account succeeds (idempotent). Returns ErrUserNotFound for an unknown, soft-deleted or
+	// cross-tenant user. This is an administrative operation; gate it behind appropriate
+	// authorization (it is not a self-service action).
+	//
+	// Already-issued credentials are revoked by the AccountRevokers registered with
+	// WithDisableRevokers (or RevocationRegistry) — wire tokens.NewAccountRevoker and
+	// sessions.Service.RevokeAllForUser or the suspended user keeps acting through them. Unlike
+	// DeleteAccount it does NOT run the AccountErasers: revocation must not destroy enrollment data
+	// (MFA, passkeys) the account needs again after EnableUser. Two things still survive a fully
+	// wired disable: an already-issued stateless access token, until it expires (bound it with a
+	// short AccessTTL), and a refresh rotation racing the disable — which is why the issuer's
+	// ClaimsProvider must also re-check status via ActiveClaimsProvider / EnsureActive.
 	DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// EnableUser re-activates an administratively disabled account by clearing its DisabledAt.
 	// Enabling an account that is not disabled succeeds (idempotent). Returns ErrUserNotFound for an
 	// unknown, soft-deleted or cross-tenant user. This is an administrative operation; gate it behind
 	// appropriate authorization.
 	EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+	// EnsureActive reports whether userID may still act: it returns nil for a live account,
+	// ErrAccountDisabled for an administratively suspended one and ErrUserNotFound for an unknown,
+	// soft-deleted or cross-tenant one. It is the status re-check every long-lived credential path
+	// owes the account lifecycle — above all refresh-token rotation, whose ClaimsProvider is the
+	// ONLY place a rotation can be refused. Wrap your provider with ActiveClaimsProvider (or call
+	// this from it) or a disabled user renews their session forever, each rotation extending the
+	// refresh lifetime. It does not touch passwords or lockout state, so it is also the cheap gate
+	// for API-key and background-job paths that never re-run Authenticate.
+	EnsureActive(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// PasswordChangeRequired reports whether userID's password credential is flagged for a forced
 	// change at next login. It is the soft-gate query behind WithPasswordChangeGate: the credential
 	// stays valid (this is never a lockout), the caller just issues a flagged token (renewable, the
@@ -262,6 +279,27 @@ type AccountEraser func(ctx context.Context, tenantID string, userID uuid.UUID) 
 // Each revoker SHOULD be idempotent, since disable may be retried after a partial failure.
 type AccountRevoker func(ctx context.Context, tenantID string, userID uuid.UUID) error
 
+// RevocationRegistry is the post-construction seam for the cross-module revocation hooks
+// otherwise wired with WithAccountErasers / WithDisableRevokers. The Service returned by
+// NewService implements it.
+//
+// It exists because a composition root that receives an ALREADY-BUILT Service (the webapp preset,
+// a DI container) can no longer pass ServiceOptions, and a Service with no registered hooks cannot
+// reach the tokens or sessions stores: DisableUser and DeleteAccount would stamp the account and
+// leave its refresh families live and rotatable, so deactivation would not end access.
+//
+// Register during wiring, before serving traffic. Registration is safe to call concurrently with
+// in-flight operations (the hook lists are copied on write), but a hook registered after an
+// operation has started does not run for that operation.
+type RevocationRegistry interface {
+	// RegisterAccountErasers appends erasers run by DeleteAccount (and the password-reset /
+	// temporary-password paths), exactly as WithAccountErasers would at construction.
+	RegisterAccountErasers(erasers ...AccountEraser)
+	// RegisterDisableRevokers appends revokers run by DisableUser, exactly as
+	// WithDisableRevokers would at construction.
+	RegisterDisableRevokers(revokers ...AccountRevoker)
+}
+
 type service struct {
 	store                Store
 	hasher               passwords.Hasher
@@ -275,10 +313,48 @@ type service struct {
 	emailChangeTTL       time.Duration
 	phoneVerificationTTL time.Duration
 	recoveryEmailTTL     time.Duration
+	hooksMu              sync.RWMutex
 	erasers              []AccountEraser
 	disableRevokers      []AccountRevoker
 	events               event.Sink
 	now                  func() time.Time
+}
+
+var _ RevocationRegistry = (*service)(nil)
+
+// RegisterAccountErasers appends erasers run by DeleteAccount, ResetPassword and
+// SetTemporaryPassword. It is the post-construction form of WithAccountErasers (see
+// RevocationRegistry).
+func (s *service) RegisterAccountErasers(erasers ...AccountEraser) {
+	s.hooksMu.Lock()
+	defer s.hooksMu.Unlock()
+	// Copy on write: a concurrent reader iterates the slice header it already holds, so the
+	// existing backing array must never be appended into.
+	next := make([]AccountEraser, 0, len(s.erasers)+len(erasers))
+	next = append(next, s.erasers...)
+	s.erasers = append(next, erasers...)
+}
+
+// RegisterDisableRevokers appends revokers run by DisableUser. It is the post-construction form
+// of WithDisableRevokers (see RevocationRegistry).
+func (s *service) RegisterDisableRevokers(revokers ...AccountRevoker) {
+	s.hooksMu.Lock()
+	defer s.hooksMu.Unlock()
+	next := make([]AccountRevoker, 0, len(s.disableRevokers)+len(revokers))
+	next = append(next, s.disableRevokers...)
+	s.disableRevokers = append(next, revokers...)
+}
+
+func (s *service) accountErasers() []AccountEraser {
+	s.hooksMu.RLock()
+	defer s.hooksMu.RUnlock()
+	return s.erasers
+}
+
+func (s *service) accountRevokers() []AccountRevoker {
+	s.hooksMu.RLock()
+	defer s.hooksMu.RUnlock()
+	return s.disableRevokers
 }
 
 // ServiceOption configures optional behavior of the identity Service.
@@ -344,7 +420,7 @@ func WithRecoveryEmailTTL(d time.Duration) ServiceOption {
 // passkeys, etc. egauth keeps its modules decoupled, so the identity service cannot revoke
 // those itself; wire your other modules' revocation here. Erasers SHOULD be idempotent.
 func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
-	return func(s *service) { s.erasers = append(s.erasers, erasers...) }
+	return func(s *service) { s.RegisterAccountErasers(erasers...) }
 }
 
 // WithDisableRevokers registers cross-module revocation hooks run by DisableUser, in the order
@@ -354,8 +430,11 @@ func WithAccountErasers(erasers ...AccountEraser) ServiceOption {
 // data (MFA, passkeys) that the account needs again after EnableUser. Use tokens.NewAccountRevoker
 // to revoke refresh tokens and API keys, and sessions.Service.RevokeAllForUser for sessions.
 // Revokers SHOULD be idempotent.
+//
+// A composition root that only receives an already-built Service registers the same hooks through
+// RevocationRegistry instead.
 func WithDisableRevokers(revokers ...AccountRevoker) ServiceOption {
-	return func(s *service) { s.disableRevokers = append(s.disableRevokers, revokers...) }
+	return func(s *service) { s.RegisterDisableRevokers(revokers...) }
 }
 
 // WithEventSink registers a security-event sink (see the event package) that receives login
@@ -730,7 +809,7 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
 	// intact. Collect every eraser error so one failure does not mask another.
 	var errs []error
-	for _, erase := range s.erasers {
+	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
 		}
@@ -794,7 +873,7 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	}
 
 	var errs []error
-	for _, erase := range s.erasers {
+	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
 		}
@@ -890,7 +969,7 @@ func (s *service) DeleteAccount(ctx context.Context, tenantID string, userID uui
 	// an erased identity with still-live sessions. Collect every eraser's error so one failure
 	// does not mask another.
 	var errs []error
-	for _, erase := range s.erasers {
+	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
 		}
@@ -1323,7 +1402,7 @@ func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.
 	s.emit(ctx, event.Event{Type: event.AccountDisabled, UserID: userID.String(), TenantID: tenantID})
 
 	var errs []error
-	for _, revoke := range s.disableRevokers {
+	for _, revoke := range s.accountRevokers() {
 		if revoke == nil {
 			continue
 		}
@@ -1335,6 +1414,24 @@ func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// EnsureActive returns nil when the user is live, ErrAccountDisabled when administratively
+// suspended and ErrUserNotFound when unknown, soft-deleted or in another tenant.
+func (s *service) EnsureActive(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
+	if err != nil {
+		return err
+	}
+	// FindUserByID deliberately still returns soft-deleted rows (the inspection contract), so the
+	// DeletedAt gate lives here.
+	if user.DeletedAt != nil {
+		return ErrUserNotFound
+	}
+	if user.DisabledAt != nil {
+		return ErrAccountDisabled
+	}
+	return nil
 }
 
 // EnableUser re-activates an administratively disabled account by clearing DisabledAt.
@@ -1394,7 +1491,7 @@ func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, use
 	// distinguishes it from a self-service change so a SIEM can flag admin-initiated resets.
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID, Reason: "admin_temporary_password"})
 	var errs []error
-	for _, erase := range s.erasers {
+	for _, erase := range s.accountErasers() {
 		if erase == nil {
 			continue
 		}

@@ -314,6 +314,29 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   email address, which is PII); non-password (OAuth/OIDC) identity `provider_id` values are
   opaque external subject identifiers and are preserved intact so that `FindIdentityByProvider`
   can still locate the identity after deletion, allowing the `DeletedAt` check to fire.
+- **Deactivation ends access — but only when both halves are wired.** `DisableUser` /
+  `DeleteAccount` stamp the account and refuse every fresh authentication, yet an already-issued
+  refresh token lives in the `tokens` store, which the `identity` service cannot reach by design.
+  Ending access therefore takes two hooks, and **either one alone leaves a hole**:
+  1. **Revoke the stored credentials.** Register `tokens.NewAccountRevoker(store)` with
+     `identity.WithDisableRevokers` (and `WithAccountErasers` for deletion), plus
+     `sessions.Service.RevokeAllForUser` when you use the `sessions` module. Without it the user's
+     refresh families stay live and rotatable.
+  2. **Re-check status on refresh-token rotation.** `Rotate` resolves fresh claims through the
+     `ClaimsProvider`, and that provider is the **only** place a rotation can be refused. Wrap it
+     with `identity.ActiveClaimsProvider(svc, provider)` (it calls `identity.Service.EnsureActive`,
+     returning `ErrAccountDisabled` / `ErrUserNotFound`, which aborts `Rotate`; `RefreshHandler`
+     answers `401` and clears the cookies). A provider that always succeeds lets a suspended user
+     refresh **forever** — each rotation pushes the refresh expiry out to `now+RefreshTTL`, so
+     access is not merely retained, it is renewed.
+
+  `webapp.NewWebApp` wires both halves for you: it registers the account revoker on the
+  `identity.Service` it is handed (via `identity.RevocationRegistry`, since the service arrives
+  already constructed) and wraps its `ClaimsProvider` in `ActiveClaimsProvider`. It **refuses to
+  build** (`webapp.ErrIdentityNotRegisterable`) rather than mount a preset that cannot revoke.
+  What survives a fully wired deactivation: an **already-issued access token**, until it expires —
+  it is a stateless JWT and nothing consults a store to verify it, so keep `AccessTTL` short (the
+  preset defaults to 15 minutes). There is no way to retract an access token in flight.
 - **One-time passcodes (email/SMS OTP).** The `otp` module is delivery-agnostic — egauth never
   sends anything; `Issue` returns the plaintext code for the application to deliver, and `Verify`
   is single-use and **attempt-limited** (the code is burned after `MaxAttempts` wrong guesses).

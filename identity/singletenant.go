@@ -141,6 +141,11 @@ func (s *SingleTenant) EnableUser(ctx context.Context, userID uuid.UUID) error {
 	return s.svc.EnableUser(ctx, "", userID)
 }
 
+// EnsureActive calls Service.EnsureActive on the empty tenant.
+func (s *SingleTenant) EnsureActive(ctx context.Context, userID uuid.UUID) error {
+	return s.svc.EnsureActive(ctx, "", userID)
+}
+
 // PasswordChangeRequired calls Service.PasswordChangeRequired on the empty tenant.
 func (s *SingleTenant) PasswordChangeRequired(ctx context.Context, userID uuid.UUID) (bool, error) {
 	return s.svc.PasswordChangeRequired(ctx, "", userID)

@@ -18,18 +18,28 @@ import (
     identitymem "github.com/JLugagne/egauth/identity/memory"
     "github.com/JLugagne/egauth/passwords/argon2"
     "github.com/JLugagne/egauth/passwords/policy"
+    "github.com/JLugagne/egauth/tokens"
     "github.com/JLugagne/egauth/tokens/basic"
 )
 
-idStore := identitymem.NewStore()
-svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
+tokenStore := basic.NewMemoryStore()
 
-// claimsProvider re-derives claims on every refresh → disabled/role-changed users re-evaluated, not frozen.
-claims := basic.ClaimsProviderFunc(func(_ context.Context, uid uuid.UUID, tid string) (basic.Claims, error) {
+// revoker: DisableUser/DeleteAccount cascade into the token store (refresh families + API keys).
+revoker := tokens.NewAccountRevoker(tokenStore)
+idStore := identitymem.NewStore()
+svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
+    identity.WithDisableRevokers(revoker),
+    identity.WithAccountErasers(revoker),
+)
+
+// claimsProvider re-derives claims on every refresh → role changes are picked up, not frozen.
+// ActiveClaimsProvider adds the status re-check: rotation is REFUSED for a disabled/deleted
+// account. Without it a suspended user refreshes forever (each rotation extends the refresh TTL).
+claims := identity.ActiveClaimsProvider(svc, basic.ClaimsProviderFunc(func(_ context.Context, uid uuid.UUID, tid string) (basic.Claims, error) {
     return basic.Claims{Subject: uid, TenantID: tid}, nil
-})
+}))
 issuer := basic.NewIssuer(basic.Config{
-    Store:          basic.NewMemoryStore(),
+    Store:          tokenStore,
     Issuer:         "example-app",
     SecretKey:      secret,          // >= 32 bytes, from your secret store
     AccessTTL:      15 * time.Minute,
@@ -47,7 +57,7 @@ claimsOf := func(u *identity.User) basic.Claims { return basic.Claims{Subject: u
 mux := http.NewServeMux()
 mux.Handle("POST /login",   identity.LoginHandler(svc, issuer, claimsOf))
 mux.Handle("POST /refresh", basic.RefreshHandler(issuer)) // same-origin CSRF check on by default
-mux.Handle("POST /logout",  basic.LogoutHandler(basic.NewMemoryStore())) // revokes refresh family
+mux.Handle("POST /logout",  basic.LogoutHandler(tokenStore)) // revokes refresh family
 mux.Handle("GET /me", basic.RequireAuth(issuer,
     func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
         // actor.UserID / actor.TenantID authenticated
@@ -329,7 +339,7 @@ mux.Handle("POST /metrics", tokens.RequireAuth(issuer, handler,
 | `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
 | `api_key.purged` | expired-key sweep | `count` |
 
-**Revoke on disable:** to kill every credential a user holds when an account is suspended, wire `tokens.NewAccountRevoker(store)` (revokes all their refresh tokens + API keys) into `identity.WithDisableRevokers(...)` so `identity.DisableUser` cascades the revocation. See [identity.md](identity.md) and [tokens.md](tokens.md).
+**Revoke on disable:** wire `tokens.NewAccountRevoker(store)` (revokes all the user's refresh tokens + API keys) into `identity.WithDisableRevokers(...)` so `identity.DisableUser` cascades the revocation — and wrap the issuer's provider in `identity.ActiveClaimsProvider(svc, provider)` so a rotation racing the disable is refused too. An already-issued access token still runs out its `AccessTTL`. See [identity.md](identity.md) and [tokens.md](tokens.md).
 
 Details: [tokens.md](tokens.md).
 

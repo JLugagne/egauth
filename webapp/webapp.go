@@ -40,11 +40,24 @@ const DefaultAccessTTL = 15 * time.Minute
 // re-authenticate.
 const DefaultRefreshTTL = 30 * 24 * time.Hour
 
+// ErrIdentityNotRegisterable is returned by NewWebApp when Config.Identity does not implement
+// identity.RevocationRegistry. The preset needs that seam to register the tokens account revoker
+// on the service it is handed; without it identity.DisableUser could not revoke the refresh
+// families the preset issues, so a deactivated account would keep rotating its refresh cookie
+// indefinitely. The Service returned by identity.NewService implements it — a custom Service
+// implementation must too (embedding the real Service satisfies it).
+var ErrIdentityNotRegisterable = errors.New("webapp: Config.Identity must implement identity.RevocationRegistry so account deactivation revokes tokens")
+
 // Config configures NewWebApp. It is deliberately tiny and frozen under the v1 SemVer
 // promise: it composes the existing public identity + tokens API and adds nothing private.
 type Config struct {
 	// Identity is the account service that verifies credentials and manages the account
 	// lifecycle (typically identity.NewService(...)). Required.
+	//
+	// NewWebApp registers the tokens account revoker on it (see identity.RevocationRegistry), so
+	// DisableUser and DeleteAccount cascade into TokenStore, and wraps its EnsureActive check
+	// around the refresh-rotation ClaimsProvider. It must therefore implement
+	// identity.RevocationRegistry or NewWebApp returns ErrIdentityNotRegisterable.
 	Identity identity.Service
 	// TokenStore persists refresh tokens and API keys (it doubles as the logout
 	// family-revoker). Use basic.NewMemoryStore() for a single instance or
@@ -102,9 +115,19 @@ type Config struct {
 // secure cookies. Protect your own application routes with tokens.RequireAuth — that
 // per-route concern stays à-la-carte by design.
 //
+// ACCOUNT DEACTIVATION ENDS ACCESS. NewWebApp wires both halves of that guarantee on the Identity
+// service it is handed: it registers tokens.NewAccountRevoker(TokenStore) as a disable revoker and
+// account eraser (so identity.DisableUser / DeleteAccount revoke the user's refresh families and
+// API keys), and it wraps the refresh-rotation ClaimsProvider in identity.ActiveClaimsProvider (so
+// a refresh token minted before the disable is refused with 401 instead of rotating into a fresh
+// pair). Registering hooks on the caller's service is deliberate: Config.Identity arrives already
+// built, so identity.RevocationRegistry is the seam that keeps the preset's guarantee intact.
+// Wire the preset once, during startup, before serving traffic.
+//
 // NewWebApp returns an error when a required field (Identity, TokenStore, SigningKey,
-// Issuer) is missing. It does not bundle a router, mailer or config framework; mount the
-// returned handler under whatever prefix and middleware your application already uses.
+// Issuer) is missing, and ErrIdentityNotRegisterable when Identity cannot accept that revocation
+// wiring. It does not bundle a router, mailer or config framework; mount the returned handler
+// under whatever prefix and middleware your application already uses.
 func NewWebApp(cfg Config) (http.Handler, error) {
 	if cfg.Identity == nil {
 		return nil, errors.New("webapp: Config.Identity is required")
@@ -140,6 +163,19 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		sink = event.NewSlogSink(nil)
 	}
 
+	// Account deactivation must actually end access, and that takes BOTH halves of the wiring
+	// below. Refuse to build without the registration seam rather than mount a preset whose
+	// DisableUser leaves every refresh family live and rotatable.
+	registry, ok := cfg.Identity.(identity.RevocationRegistry)
+	if !ok {
+		return nil, ErrIdentityNotRegisterable
+	}
+	// Half one: DisableUser (and DeleteAccount / ResetPassword / SetTemporaryPassword) must
+	// cascade into the token store, revoking the user's refresh families and API keys.
+	revoker := tokens.NewAccountRevoker(cfg.TokenStore)
+	registry.RegisterDisableRevokers(revoker)
+	registry.RegisterAccountErasers(revoker)
+
 	// claimsForUser is the fresh-claims seam used both at issuance (claimsOf) and during
 	// refresh rotation (ClaimsProvider). The no-claims preset carries no custom data, so
 	// fresh claims are simply the subject + tenant; AuthTime/IssuedAt/ExpiresAt are stamped
@@ -155,9 +191,13 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		AccessTTL:  accessTTL,
 		RefreshTTL: refreshTTL,
 		EventSink:  sink,
-		ClaimsProvider: basic.ClaimsProviderFunc(func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
+		// Half two: a refresh token minted before the disable must not rotate. The
+		// ClaimsProvider is the only place rotation can be refused, so it re-checks account
+		// status on every refresh — without it a suspended user renews forever, each rotation
+		// pushing the refresh expiry out again.
+		ClaimsProvider: identity.ActiveClaimsProvider(cfg.Identity, basic.ClaimsProviderFunc(func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
 			return claimsForUser(userID, tenantID), nil
-		}),
+		})),
 	})
 
 	claimsOf := func(u *identity.User) basic.Claims {

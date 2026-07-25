@@ -85,7 +85,12 @@ func (s *Store) FindUserByEmail(ctx context.Context, tenantID string, email stri
 	return nil, identity.ErrUserNotFound
 }
 
-// UpdateUser updates an existing user.
+// UpdateUser persists the email and EmailVerifiedAt of an existing user. Every other field is
+// owned by a dedicated operation (DisableUser/EnableUser, UpdateUserPhone,
+// UpdateUserRecoveryEmail, DeleteUser) and is left untouched, mirroring the pgx backend's
+// narrow UPDATE. Writing the whole row would let a caller holding a copy read before an
+// administrative change replay stale values — clearing DisabledAt and re-activating a suspended
+// account.
 func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -114,10 +119,15 @@ func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.
 		}
 	}
 
-	uCopy := *user
-	uCopy.TenantID = tenantID
-	uCopy.UpdatedAt = time.Now()
-	s.users[user.ID] = &uCopy
+	now := time.Now()
+	existing.Email = user.Email
+	existing.EmailVerifiedAt = nil
+	if user.EmailVerifiedAt != nil {
+		v := *user.EmailVerifiedAt
+		existing.EmailVerifiedAt = &v
+	}
+	existing.UpdatedAt = now
+	user.UpdatedAt = now
 
 	return nil
 }

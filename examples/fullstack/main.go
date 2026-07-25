@@ -96,19 +96,27 @@ func BuildServer() (http.Handler, error) {
 	audit := event.NewSlogSink(slog.Default())
 
 	// ------------------------------------------------------------------ identity
+	// This app exposes /admin/disable, so it must make deactivation actually end access. That
+	// takes two hooks. First: the account revoker, so DisableUser (and DeleteAccount) revoke
+	// the user's refresh families and API keys in the token store.
+	tokenStore := tokenmem.NewStore[AppClaims]()
+	revoker := tokens.NewAccountRevoker(tokenStore)
 	idStore := identitymem.NewStore()
 	idSvc := identity.NewService(
 		idStore,
 		argon2.NewHasher(),
 		policy.NewDefaultPolicy(),
 		identity.WithEventSink(audit),
+		identity.WithDisableRevokers(revoker),
+		identity.WithAccountErasers(revoker),
 	)
 
 	// ------------------------------------------------------------------ tokens (custom claims)
 	// ClaimsProvider re-derives the user's role on every refresh, so a
 	// role change takes effect without waiting for the access token to expire.
-	tokenStore := tokenmem.NewStore[AppClaims]()
-	claimsProvider := tokens.ClaimsProviderFunc[AppClaims](
+	// Second hook: ActiveClaimsProvider refuses the rotation itself once the account is
+	// disabled or deleted — without it a suspended user keeps renewing their session.
+	claimsProvider := identity.ActiveClaimsProvider(idSvc, tokens.ClaimsProviderFunc[AppClaims](
 		func(_ context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[AppClaims], error) {
 			// In production, look up the user's role from your data store.
 			// Here every user is "user"; an admin would set Role: "admin".
@@ -118,7 +126,7 @@ func BuildServer() (http.Handler, error) {
 				Custom:   AppClaims{Role: "user"},
 			}, nil
 		},
-	)
+	))
 	issuer := jwt.New[AppClaims](jwt.Config[AppClaims]{
 		Store:          tokenStore,
 		Issuer:         "egauth-fullstack-example",

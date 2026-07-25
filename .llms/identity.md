@@ -33,6 +33,10 @@ type Service interface {
     DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
     DisableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
     EnableUser(ctx context.Context, tenantID string, userID uuid.UUID) error
+    // EnsureActive: nil for a live account, ErrAccountDisabled when suspended, ErrUserNotFound
+    // when unknown/soft-deleted/cross-tenant. The status gate for long-lived credential paths —
+    // above all refresh rotation (see ActiveClaimsProvider).
+    EnsureActive(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 ```
 
@@ -78,10 +82,14 @@ type Service interface {
 
 - `ClaimsBuilder[C any]` — `func(*User) tokens.Claims[C]`; maps an authenticated user to token claims for the handler layer
 
+- `ActiveChecker` — `interface { EnsureActive(ctx, tenantID, userID) error }`; the narrow status seam `Service` satisfies
+- `RevocationRegistry` — `interface { RegisterAccountErasers(...AccountEraser); RegisterDisableRevokers(...AccountRevoker) }`; post-construction form of `WithAccountErasers`/`WithDisableRevokers`, implemented by the `Service` from `NewService`. For a composition root handed an ALREADY-BUILT service (the `webapp` preset, a DI container) that can no longer pass `ServiceOption`s. Register during wiring, before serving traffic; hook lists are copied on write so registration is concurrency-safe, but a hook added after an operation started does not run for it.
+
 ## Constructors
 
 - `func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service` — panics on nil store; hasher and policy may be nil for OAuth-only deployments (password ops return `ErrPasswordHasherRequired`/`ErrPasswordPolicyRequired` instead of panicking)
 - `func NewSingleTenant(svc Service) *SingleTenant` — facade that hard-wires `tenantID=""` on every call; `(*SingleTenant).Service()` returns the wrapped `Service`
+- `func ActiveClaimsProvider[C any](checker ActiveChecker, next tokens.ClaimsProvider[C]) tokens.ClaimsProvider[C]` — wraps a claims provider with the `EnsureActive` re-check refresh rotation needs. Rotation's `ClaimsProvider` is the ONLY place a refresh can be refused, so without this a disabled or deleted user keeps rotating — and every rotation resets the refresh expiry to `now+RefreshTTL`, renewing access indefinitely. The wrapper returns `ErrAccountDisabled`/`ErrUserNotFound` verbatim, which aborts `Rotate` (the presented token stays unconsumed) and makes `RefreshHandler` answer `401` and clear the cookies. Panics on a nil checker or provider (startup failure, not a silently skipped check).
 - memory: `func NewStore() *memory.Store` — in-memory implementation of `Store`
 
 ## Service options (`ServiceOption`)
@@ -106,6 +114,10 @@ type Store interface {
     FindUserByID(ctx context.Context, tenantID string, id uuid.UUID) (*User, error)
     FindUserByEmail(ctx context.Context, tenantID string, email string) (*User, error)
     FindUserByPhone(ctx context.Context, tenantID string, phone string) (*User, error)
+    // UpdateUser persists ONLY Email + EmailVerifiedAt. Every other column belongs to a dedicated
+    // operation (DisableUser/EnableUser, UpdateUserPhone, UpdateUserRecoveryEmail, DeleteUser) and
+    // MUST NOT be written: a stale *User copy would otherwise clear DisabledAt and re-activate a
+    // suspended account. Rejects soft-deleted users with ErrUserNotFound.
     UpdateUser(ctx context.Context, tenantID string, user *User) error
     UpdateUserEmail(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string, verifiedAt time.Time) error
     UpdateUserPhone(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
@@ -395,7 +407,7 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.
 - `DeleteAccount` runs all `AccountErasers` first; a revocation failure aborts before the soft-delete (cleanly retriable). Erasers should be idempotent.
-- `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued tokens valid until expiry — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately.
+- `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued refresh families live and ROTATABLE — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately, and wrap the issuer's provider in `ActiveClaimsProvider` so a rotation racing the disable is refused too. An already-issued stateless access token always survives until its `AccessTTL` expires.
 - A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts.
 - `LinkOrCreateIdentity` refuses silent email-based account linking (returns `ErrEmailAlreadyExists` if provider email matches an existing account); explicit linking from an authenticated session is required.
 - Verification token scheme is selector/verifier: selector stored in clear for O(1) lookup; only SHA-256 of verifier stored. Helpers: `GenerateVerificationToken()`, `SplitVerificationToken()`, `HashVerifier()`, `CompareVerifier()`.

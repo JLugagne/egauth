@@ -31,6 +31,7 @@ type MockService struct {
 	DeleteAccountFunc                   func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	DisableUserFunc                     func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	EnableUserFunc                      func(ctx context.Context, tenantID string, userID uuid.UUID) error
+	EnsureActiveFunc                    func(ctx context.Context, tenantID string, userID uuid.UUID) error
 	PasswordChangeRequiredFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 	SetTemporaryPasswordFunc            func(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
 	AdminCreateUserFunc                 func(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error)
@@ -183,6 +184,16 @@ func (m *MockService) EnableUser(ctx context.Context, tenantID string, userID uu
 		panic("called not defined EnableUserFunc")
 	}
 	return m.EnableUserFunc(ctx, tenantID, userID)
+}
+
+// EnsureActive reports whether the account may still act. An unset func defaults to "active"
+// (nil) so the many tests that never touch the account lifecycle keep working; set
+// EnsureActiveFunc to model a disabled or deleted account.
+func (m *MockService) EnsureActive(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if m.EnsureActiveFunc == nil {
+		return nil
+	}
+	return m.EnsureActiveFunc(ctx, tenantID, userID)
 }
 
 // PasswordChangeRequired reports whether the credential is flagged for rotation. Because

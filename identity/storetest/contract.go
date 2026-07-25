@@ -915,3 +915,44 @@ func StoreUpdateUserSoftDeleteContract(t *testing.T, store identity.Store, tenan
 	assert.ErrorIs(t, err, identity.ErrUserNotFound,
 		"UpdateUser on a soft-deleted user must return ErrUserNotFound (resurrection gate)")
 }
+
+// StoreUpdateUserFieldScopeContract verifies that UpdateUser writes ONLY the email fields and
+// never overwrites state owned by a dedicated operation. UpdateUser takes a whole *User, so a
+// caller that read the row before an administrative write (DisableUser, UpdateUserPhone,
+// UpdateUserRecoveryEmail) still holds the old values in its copy; a backend that blind-writes
+// the whole row would replay them and, worst of all, CLEAR DisabledAt — letting a suspended
+// account authenticate again. Both the memory and pgx backends must agree.
+// Each backend's test must run this alongside StoreContractTesting.
+func StoreUpdateUserFieldScopeContract(t *testing.T, store identity.Store, tenant string) {
+	t.Helper()
+	ctx := context.Background()
+
+	const email = "update_field_scope_contract@example.com"
+	user, err := store.CreateUser(ctx, tenant, email)
+	require.NoError(t, err)
+
+	// The caller's copy: taken BEFORE the administrative writes below, so it carries no phone,
+	// no recovery email and no DisabledAt.
+	stale := *user
+
+	stamped := time.Now().UTC().Truncate(time.Second)
+	require.NoError(t, store.UpdateUserPhone(ctx, tenant, user.ID, "+15557771234", stamped))
+	require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenant, user.ID, "field_scope_recovery@example.com", stamped))
+	require.NoError(t, store.DisableUser(ctx, tenant, user.ID, stamped))
+
+	// The stale copy is written back by an unrelated flow (e.g. VerifyEmail marking the address
+	// verified). Only the email fields may land.
+	verifiedAt := time.Now()
+	stale.EmailVerifiedAt = &verifiedAt
+	require.NoError(t, store.UpdateUser(ctx, tenant, &stale))
+
+	got, err := store.FindUserByID(ctx, tenant, user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.EmailVerifiedAt, "UpdateUser must still persist EmailVerifiedAt")
+	assert.NotNil(t, got.DisabledAt,
+		"UpdateUser must not clear DisabledAt: a suspended account would be able to authenticate again")
+	assert.NotNil(t, got.Phone, "UpdateUser must not clear the verified phone")
+	assert.NotNil(t, got.PhoneVerifiedAt, "UpdateUser must not clear PhoneVerifiedAt")
+	assert.NotNil(t, got.RecoveryEmail, "UpdateUser must not clear the recovery email")
+	assert.NotNil(t, got.RecoveryEmailVerifiedAt, "UpdateUser must not clear RecoveryEmailVerifiedAt")
+}

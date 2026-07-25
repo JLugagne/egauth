@@ -43,8 +43,14 @@ type UserStore interface {
 	// flow's pre-flight uniqueness check.
 	FindUserByPhone(ctx context.Context, tenantID string, phone string) (*User, error)
 
-	// UpdateUser persists changes to an existing user. If the user record carries a non-empty
-	// TenantID that differs from tenantID, it returns ErrTenantMismatch.
+	// UpdateUser persists ONLY the Email and EmailVerifiedAt fields of an existing live user.
+	// Every other column is owned by a dedicated operation (DisableUser/EnableUser,
+	// UpdateUserPhone, UpdateUserRecoveryEmail, DeleteUser) and MUST be left untouched: the
+	// method takes a whole *User, so a caller holding a copy read before one of those
+	// administrative writes would otherwise replay stale values and — worst of all — clear
+	// DisabledAt, re-activating a suspended account. It returns ErrTenantMismatch when the record
+	// carries a non-empty TenantID that differs from tenantID, and ErrUserNotFound for an unknown,
+	// cross-tenant or soft-deleted user (a soft-deleted account is never resurrected).
 	UpdateUser(ctx context.Context, tenantID string, user *User) error
 
 	// UpdateUserEmail atomically changes a live user's email to newEmail, marks it verified
