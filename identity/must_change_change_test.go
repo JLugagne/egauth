@@ -36,7 +36,7 @@ func TestChangePasswordWithReissueHandler_MustChangeUser_ReceivesFreshPair(t *te
 	})
 
 	var captured tokens.Claims[struct{}]
-	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, capturingIssuer(&captured), testClaimsBuilder(), withUser)
+	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, capturingIssuer(&captured), testClaimsBuilder(), withUser, fullSessionAssurance())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, changePwForm(t, "old-pass", "NewValidPass123!"))
@@ -65,7 +65,7 @@ func TestChangePasswordWithReissueHandler_NormalUser_ReceivesFreshPair(t *testin
 	})
 
 	var captured tokens.Claims[struct{}]
-	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, capturingIssuer(&captured), testClaimsBuilder(), withUser)
+	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, capturingIssuer(&captured), testClaimsBuilder(), withUser, fullSessionAssurance())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, changePwForm(t, "old-pass", "NewValidPass123!"))
@@ -89,7 +89,7 @@ func TestChangePasswordWithReissueHandler_WrongPassword_Returns401(t *testing.T)
 		return &identity.User{ID: uuid.Must(uuid.NewV7())}, true
 	})
 
-	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, okIssuer(), testClaimsBuilder(), withUser)
+	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, okIssuer(), testClaimsBuilder(), withUser, fullSessionAssurance())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, changePwForm(t, "wrong", "NewValidPass123!"))
@@ -114,7 +114,7 @@ func TestChangePasswordWithReissueHandler_PolicyRejection_Returns400(t *testing.
 		return &identity.User{ID: uuid.Must(uuid.NewV7())}, true
 	})
 
-	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, okIssuer(), testClaimsBuilder(), withUser)
+	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, okIssuer(), testClaimsBuilder(), withUser, fullSessionAssurance())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, changePwForm(t, "old-pass", "x"))

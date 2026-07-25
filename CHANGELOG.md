@@ -9,6 +9,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### BREAKING
 
+- **MFA is now an ENFORCED control, not advisory.** The pre-step-up credential minted by an MFA-gated
+  login is stamped `tokens.Claims.Interim` (new field, JWT claim `interim`, omitted for ordinary
+  sessions) and is no longer accepted as a session:
+
+  - `tokens.RequireAuth` / `tokens.ContextMiddleware` refuse an interim credential with
+    `403 step_up_required` on **every** route unless the route opts in with the new
+    `tokens.WithInterimAllowed[C]()`. **Action required:** add that option to the route hosting
+    `mfa.StepUpHandler` (and any other endpoint that must be reachable before the second factor);
+    without it the step-up flow cannot complete.
+  - `mfa.DisableHandler` and `mfa.RegenerateRecoveryCodesHandler` now refuse any request whose
+    credential does not prove a second factor (`Claims.SatisfiesStepUp()`: AMR carries `mfa`, `otp`
+    or `hwk` and the credential is not interim) with `403 step_up_required`. A password-only session
+    can no longer strip MFA or invalidate the victim's recovery codes.
+  - `identity.ChangePasswordWithReissueHandler` (which mints a full renewable pair) and
+    `identity.DeleteAccountHandler` (irreversible) now refuse an interim credential with
+    `403 step_up_required`. With `identity.WithMFAGate` also passed, `DeleteAccountHandler`
+    additionally requires an MFA-enrolled user to present a step-up factor.
+  - All four checks **fail closed**: a request whose assurance cannot be resolved is refused. The
+    assurance is read from the new `tokens.AssuranceResolverFromContext` by default, so mounting the
+    handler behind `tokens.ContextMiddleware` is the only wiring needed. **Action required** for a
+    deployment whose access token is verified by a middleware of its own: supply
+    `mfa.WithAssuranceResolver` / `identity.WithAssuranceResolver`, or opt out explicitly with
+    `mfa.WithInsecureNoStepUpCheck()` / `identity.WithInsecureNoStepUpCheck()`.
+
+- **An MFA-gated login now CLEARS any existing refresh cookie.** The pre-step-up state claims not to
+  be renewable, so it no longer leaves a refresh cookie from an earlier session in the browser. A
+  client that observes a refresh cookie must therefore treat its disappearance after a login as
+  "second factor required", not as a bug.
+
+- **An MFA-gated login no longer replies `204`/`successURL`.** It was previously byte-identical to a
+  full login, leaving the client no signal to drive the second factor. The pre-step-up reply now
+  carries the `X-Egauth-MFA-Required: 1` header (`identity.MFARequiredHeader`) plus either
+  `200 {"mfa_required":true}` or, when the new `identity.WithMFARequiredRedirect(url)` /
+  `oauth.WithMFARequiredRedirect(url)` is set, a `303` to that URL. The full-login response is
+  unchanged. **Action required** for browser-driven deployments using `WithSuccessRedirect`:
+  configure the matching MFA-required redirect.
+
+- **`tokens.WithMaxAuthAge` is no longer documented as sufficient** to gate a factor-mutating or
+  destructive route: a freshly minted interim credential passes an `auth_time` freshness window
+  trivially. Use `tokens.WithRequiredAMR(tokens.AMRMFA)`, optionally alongside `WithMaxAuthAge` for a
+  sudo-mode window. The guidance in `mfa.Service.DisableTOTP`, `identity.Service.DeleteAccount`,
+  `identity.Service.RecoveryChannels`, `SECURITY.md` and `.llms/mfa.md` has been corrected.
+
 - **A configured tenant resolver that returns `""` now refuses the request** (`identity`, `tokens`,
   `otp`, `oauth`). Behavioural, not an API change: no signature moved. Previously `""` was passed
   through verbatim and the request operated on the empty tenant partition. A deployment that
@@ -17,6 +60,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   configure no resolver at all (single-tenant mode, where `""` remains the legitimate partition).
 
 ### Added
+
+- **The MFA login gate now covers every login path.** `identity.WithMFAGate` applies to
+  `MagicLinkLoginHandler` as well as `LoginHandler` (a magic link is a first factor: a compromised
+  mailbox no longer bypasses the second factor), and the new `oauth.WithMFAGate(checker)` +
+  `oauth.WithInterimTokenTTL(d)` bring the same gate to `CallbackHandler` /
+  `DynamicCallbackHandler`, so an IdP-account compromise no longer yields a full renewable local
+  session. An enrollment-check error fails closed on every path.
+
+- **`tokens.AccessTokenIssuer[C]`**, an optional extension of `tokens.Issuer` minting a standalone
+  access token with no refresh token and no persisted refresh-token family
+  (`IssueAccessToken(ctx, claims) (string, time.Time, error)`). `jwt.Service` and `jwt.SingleTenant`
+  implement it, and the MFA-gated login paths use it for the interim credential — which previously
+  minted a full pair and discarded its refresh token, leaving a full-`RefreshTTL` refresh row behind
+  for a session that was never granted. Implementing it in a custom issuer is optional: egauth
+  type-asserts and falls back to `IssueTokenPair`.
+
+- **Assurance helpers** for enforcing step-up outside the middleware: `tokens.Claims.SatisfiesStepUp()`,
+  `tokens.HasStepUpFactor(amr)`, `tokens.Claims.AsInterim(ttl)` (stamps `Interim`, strips every
+  step-up AMR marker, sets the short expiry), plus the non-generic context bridge
+  `tokens.Assurance`, `tokens.AssuranceResolver`, `tokens.AssuranceFromContext` and
+  `tokens.AssuranceResolverFromContext`.
 
 - **Forced-password-change for temporary credentials** (M7). Lets an admin provision a credential
   that requires the user to choose a new password at next login, without ever locking the user out:

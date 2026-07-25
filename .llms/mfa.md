@@ -168,7 +168,9 @@ var ErrTenantMismatch      = errors.New("mfa: tenant ID mismatch")
 
 **Recovery codes:** 80-bit random, base32-encoded, grouped as `ABCD-EFGH-IJKL-MNOP`. Stored as hex-encoded SHA-256. Normalization strips dashes/whitespace and uppercases before hashing (tolerates formatting variation on re-entry). Default count: 10. Regenerating invalidates all existing codes.
 
-**DisableTOTP:** idempotent; removes enrollment AND all recovery codes. Gate with `tokens.RequireAuth(..., tokens.WithMaxAuthAge(d))` to prevent a hijacked session silently stripping MFA.
+**DisableTOTP:** idempotent; removes enrollment AND all recovery codes. `DisableHandler` and `RegenerateRecoveryCodesHandler` ENFORCE step-up themselves: they refuse (403 `step_up_required`) any request whose credential does not prove a second factor (`tokens.Claims.SatisfiesStepUp` — AMR carries `mfa`/`otp`/`hwk` and the credential is not a pre-step-up interim one). The assurance comes from `mfa.WithAssuranceResolver`, defaulting to `tokens.AssuranceResolverFromContext`, so mounting them behind `tokens.ContextMiddleware` is all the wiring needed; a request with no resolvable assurance is refused (fail closed). Opt out with `mfa.WithInsecureNoStepUpCheck()`.
+
+Do NOT rely on `tokens.WithMaxAuthAge(d)` alone for these routes: a pre-MFA interim credential is freshly issued, so an `auth_time` freshness window passes trivially. Add `tokens.WithRequiredAMR(tokens.AMRMFA)` (optionally alongside `WithMaxAuthAge` for a sudo-mode window) to state the same requirement at the routing layer.
 
 **Rate limiting:** egauth does NOT apply per-IP rate limits to verify endpoints. Use `github.com/JLugagne/egauth/ratelimit.Middleware` to wrap `VerifyHandler` and `VerifyRecoveryHandler`.
 
@@ -200,9 +202,39 @@ mux.Handle("/mfa/enroll",             mfa.EnrollHandler(svc, mfa.WithUserResolve
 mux.Handle("/mfa/confirm",            mfa.ConfirmHandler(svc, mfa.WithUserResolver(resolve)))
 mux.Handle("/mfa/verify",             mfa.VerifyHandler(svc, mfa.WithUserResolver(resolve)))
 mux.Handle("/mfa/verify-recovery",    mfa.VerifyRecoveryHandler(svc, mfa.WithUserResolver(resolve)))
-mux.Handle("/mfa/recovery/regenerate",mfa.RegenerateRecoveryCodesHandler(svc, mfa.WithUserResolver(resolve)))
-mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolver(resolve)))
+
+// Factor-mutating routes enforce step-up: mount them behind ContextMiddleware so the default
+// tokens.AssuranceResolverFromContext can report the credential's assurance.
+mux.Handle("/mfa/recovery/regenerate", tokens.ContextMiddleware[C](verifier,
+    mfa.RegenerateRecoveryCodesHandler(svc, mfa.WithUserResolver(tokens.UserResolverFromContext)),
+    tokens.WithCookieAuth[C](cookies)))
+mux.Handle("/mfa/disable", tokens.ContextMiddleware[C](verifier,
+    mfa.DisableHandler(svc, mfa.WithUserResolver(tokens.UserResolverFromContext)),
+    tokens.WithCookieAuth[C](cookies)))
+
+// The step-up route is the ONLY one that may admit the pre-MFA interim credential.
+mux.Handle("/mfa/step-up", tokens.ContextMiddleware[C](verifier,
+    mfa.StepUpHandler[C](svc, issuer, stepUpClaimsOf,
+        mfa.WithUserResolver(tokens.UserResolverFromContext),
+        mfa.WithMustChangeResolver(tokens.MustChangeResolverFromContext[C])),
+    tokens.WithCookieAuth[C](cookies),
+    tokens.WithInterimAllowed[C]()))
 ```
+
+## Interim (pre-step-up) credential
+
+`identity.WithMFAGate` / `oauth.WithMFAGate` hand an MFA-enrolled user a short-lived INTERIM
+credential instead of a session: `tokens.Claims.Interim` is set, no step-up factor is present in its
+AMR, no refresh cookie is written (and any refresh cookie from an earlier session is CLEARED) and,
+with a `tokens.AccessTokenIssuer` (which `jwt.Service` implements), no refresh-token family is
+persisted. The gated login reply is deliberately
+distinguishable from a full login: header `X-Egauth-MFA-Required: 1` plus `200 {"mfa_required":true}`,
+or a 303 to `identity.WithMFARequiredRedirect` / `oauth.WithMFARequiredRedirect`.
+
+`tokens.RequireAuth` and `tokens.ContextMiddleware` refuse an interim credential with 403
+`step_up_required` on EVERY route unless it opts in with `tokens.WithInterimAllowed()` — put that on
+the step-up route only. `mfa.StepUpHandler` clears the interim state by re-issuing the full pair with
+`AMR=[pwd, otp, mfa]`.
 
 ## Gotchas
 
@@ -213,5 +245,7 @@ mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolv
 - `MarkTOTPUsed` returning `false` for a cryptographically correct code means replay; treated as failure (slot already consumed, counter NOT reset).
 - `WithNoAttemptLimit` leaves the factor online-brute-forceable; only use with an external rate limiter.
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
+- `DisableHandler` / `RegenerateRecoveryCodesHandler` return 403 `step_up_required` when they cannot resolve the request's assurance. If they 403 unexpectedly, the route is not behind `tokens.ContextMiddleware` (or needs `mfa.WithAssuranceResolver`).
+- Enroll / confirm / verify / verify-recovery are NOT step-up gated: they are how a factor is added or proven in the first place.
 - `NewService` panics (not errors) on nil store or invalid config — designed to fail at startup.
 - Data handlers (`EnrollHandler`, `ConfirmHandler`, `RegenerateRecoveryCodesHandler`) always return JSON even when `WithSuccessRedirect` is set; only action handlers (`VerifyHandler`, `DisableHandler`) redirect on success.

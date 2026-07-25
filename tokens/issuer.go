@@ -2,6 +2,7 @@ package tokens
 
 import (
 	"context"
+	"time"
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/google/uuid"
@@ -18,6 +19,21 @@ type Issuer[C any] interface {
 	// Claims.Subject is the key's own ID (a machine identity); for KeyTypePAT it is the user
 	// supplied on claims.Subject.
 	IssueAPIKey(ctx context.Context, prefix string, keyType KeyType, createdBy uuid.UUID, claims Claims[C]) (*APIKey[C], error)
+}
+
+// AccessTokenIssuer is the OPTIONAL extension of Issuer that mints a STANDALONE access token: no
+// refresh token is generated and NO refresh-token family is persisted. It exists for credentials
+// that must not be renewable — notably the PRE-STEP-UP interim credential of an MFA-gated login
+// (see Claims.Interim and Claims.AsInterim), where minting a full pair would persist a
+// full-RefreshTTL refresh row for a token that is deliberately discarded.
+//
+// Implementing it is optional and backward-compatible: egauth type-asserts for it and falls back to
+// IssueTokenPair (discarding the refresh half) when an Issuer does not implement it.
+// jwt.Service implements it.
+type AccessTokenIssuer[C any] interface {
+	// IssueAccessToken signs a standalone access token for claims and returns it with its expiry.
+	// Claims.ExpiresAt, when non-zero, overrides the issuer's configured access TTL.
+	IssueAccessToken(ctx context.Context, claims Claims[C]) (token string, expiresAt time.Time, err error)
 }
 
 // Verifier is responsible for validating tokens and extracting their claims.

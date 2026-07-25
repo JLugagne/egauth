@@ -131,6 +131,9 @@ WithFailureRedirect(url string) HandlerOption               // 303 redirect on f
 WithPersistentRefresh() HandlerOption                       // persistent refresh cookie ("remember me")
 WithTenantResolver(f func(*http.Request) string) HandlerOption // derive tenantID from request (allowlist-mapped); "" => unresolved => 403 tenant_unresolved (fail-closed)
 WithAllowUnverifiedEmail() HandlerOption                    // allow unverified emails (off by default)
+WithMFAGate(checker identity.MFAEnrollmentChecker) HandlerOption // MFA-enrolled user gets the INTERIM credential, not a session
+WithInterimTokenTTL(d time.Duration) HandlerOption          // lifetime of that interim credential (default 5m)
+WithMFARequiredRedirect(url string) HandlerOption           // 303 for the pre-step-up reply instead of 200 {"mfa_required":true}
 ```
 
 State cookie: `HttpOnly`, `Secure` (unless `WithInsecureCookies`), `SameSite=Lax` (fixed — Strict breaks provider redirect).
@@ -309,6 +312,7 @@ mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
 - **JWKS id_token verification**: signature checked against issuer's JWKS; JWKS host must match issuer host (`ErrJWKSHostMismatch`); `"none"` and HMAC algs always rejected.
 - **SSRF**: two-layer guard — `ValidateExternalURL` at registration time (https, no literal internal IP), `SafeHTTPClient` at dial time (post-DNS-resolution, DNS-rebinding-proof); env proxies ignored.
 - **Unverified email**: rejected by default (`WithAllowUnverifiedEmail` to opt in); prevents account squatting.
+- **MFA gate**: a federated identity is a FIRST factor. Without `WithMFAGate`, an IdP-account compromise yields a full, indefinitely renewable local session even for a user who enrolled a second factor. With it, an enrolled user receives the short-lived INTERIM credential (`tokens.Claims.Interim`, no step-up AMR marker, no refresh cookie, no persisted refresh family) and the reply carries `identity.MFARequiredHeader` + `200 {"mfa_required":true}` (or a 303 to `WithMFARequiredRedirect`). The interim credential is refused by every route that does not set `tokens.WithInterimAllowed()`; `mfa.StepUpHandler` completes the login. An enrollment-check error fails closed (`500 mfa_check_failed`, no cookies).
 - **Deferred config errors**: invalid provider config (non-https endpoint, bad OIDC config) is recorded at construction and surfaced on first use; never panics (safe for dynamic `ProviderStore` over tenant-controlled data).
 - **Apple**: no userinfo endpoint — `WithOIDC` is mandatory, not optional.
 - **Facebook**: no email-verified signal; `UserInfo.EmailVerified` is always `false`.

@@ -2,6 +2,7 @@ package jwt
 
 import (
 	"context"
+	"time"
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/event"
@@ -38,6 +39,12 @@ func (s *SingleTenant[C]) Service() *Service[C] { return s.svc }
 // IssueTokenPair calls Service.IssueTokenPair (tenant, if any, is carried on claims).
 func (s *SingleTenant[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]) (*tokens.TokenPair[C], error) {
 	return s.svc.IssueTokenPair(ctx, claims)
+}
+
+// IssueAccessToken calls Service.IssueAccessToken (tenant, if any, is carried on claims). It mints a
+// STANDALONE access token: no refresh token and no persisted refresh family.
+func (s *SingleTenant[C]) IssueAccessToken(ctx context.Context, claims tokens.Claims[C]) (string, time.Time, error) {
+	return s.svc.IssueAccessToken(ctx, claims)
 }
 
 // IssueAPIKey calls Service.IssueAPIKey (tenant, if any, is carried on claims).

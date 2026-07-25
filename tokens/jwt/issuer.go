@@ -29,7 +29,10 @@ type claimsWrapper[C any] struct {
 	Roles              []string             `json:"roles,omitempty"`
 	AMR                []string             `json:"amr,omitempty"`
 	MustChangePassword bool                 `json:"must_change_password,omitempty"`
-	Custom             C                    `json:"custom"`
+	// Interim marks a pre-step-up credential (see tokens.Claims.Interim). It is omitted for the
+	// ordinary case, so a full session's token keeps its existing wire format.
+	Interim bool `json:"interim,omitempty"`
+	Custom  C    `json:"custom"`
 }
 
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
@@ -402,60 +405,9 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 // time ONLY for a genuine fresh authentication and is never manufactured by a rotation.
 func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
 	now := s.now()
-	accessExpiresAt := now.Add(s.accessTTL)
-	if !claims.ExpiresAt.IsZero() {
-		accessExpiresAt = claims.ExpiresAt
-	}
-
-	// auth_time anchors step-up freshness. For the INITIAL pair it defaults to the issue time
-	// (the subject just authenticated); on rotation it is the family's preserved value, taken
-	// verbatim — a rotation must NEVER manufacture a fresh auth_time (that would let a silent
-	// refresh defeat the freshness gate). A legacy/zero auth_time therefore stays zero on
-	// rotation, so FreshAuth fails closed and a re-authentication is correctly forced.
-	authTime := claims.AuthTime
-	if authTime.IsZero() && initial {
-		authTime = now
-	}
-	var authTimeUnix int64
-	if !authTime.IsZero() {
-		authTimeUnix = authTime.Unix()
-	}
-
-	wrapper := claimsWrapper[C]{
-		RegisteredClaims: jwt.RegisteredClaims{
-			Issuer:    s.issuer,
-			Subject:   claims.Subject.String(),
-			Audience:  claims.Audiences,
-			ExpiresAt: jwt.NewNumericDate(accessExpiresAt),
-			IssuedAt:  jwt.NewNumericDate(now),
-			ID:        uuid.Must(uuid.NewV7()).String(),
-		},
-		TenantID:           claims.TenantID,
-		AuthTime:           authTimeUnix,
-		Kind:               claims.Kind,
-		Scopes:             claims.Scopes,
-		Groups:             claims.Groups,
-		Roles:              claims.Roles,
-		AMR:                claims.AMR,
-		MustChangePassword: claims.MustChangePassword,
-		Custom:             claims.Custom,
-	}
-
-	// Resolve the signing key for this tenant. With a KeyStore configured this is the tenant's
-	// active key (per-tenant cryptographic isolation); otherwise it is the static keyset.
-	signer, err := s.resolveSigningKey(ctx, claims.TenantID)
+	accessTokenStr, accessExpiresAt, authTime, err := s.signAccessToken(ctx, claims, now, initial)
 	if err != nil {
 		return nil, err
-	}
-	token := jwt.NewWithClaims(signer.Method(), wrapper)
-	// Tag the token with the active key id so verifiers can select the right key during a
-	// rollover. Legacy single-key mode leaves it empty, preserving the original (kid-less) format.
-	if kid := signer.KeyID(); kid != "" {
-		token.Header["kid"] = kid
-	}
-	accessTokenStr, err := token.SignedString(signer.SignKey())
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate opaque refresh token.
@@ -495,6 +447,82 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		RefreshTokenExpiresAt: refreshExpiresAt,
 		Claims:                claims,
 	}, nil
+}
+
+// IssueAccessToken signs a STANDALONE access token: no refresh token is minted and no
+// refresh-token family is persisted, so the credential cannot be renewed. It implements
+// tokens.AccessTokenIssuer, which the MFA-gated login paths use for the pre-step-up interim
+// credential (tokens.Claims.AsInterim).
+func (s *Service[C]) IssueAccessToken(ctx context.Context, claims tokens.Claims[C]) (string, time.Time, error) {
+	token, expiresAt, _, err := s.signAccessToken(ctx, claims, s.now(), true)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return token, expiresAt, nil
+}
+
+// signAccessToken signs the access JWT for claims at now, returning the token, the effective access
+// expiry and the resolved auth_time. initial reports a genuine fresh authentication (auth_time
+// defaults to the issue time); a rotation passes false so it can never manufacture a fresh
+// auth_time.
+func (s *Service[C]) signAccessToken(ctx context.Context, claims tokens.Claims[C], now time.Time, initial bool) (string, time.Time, time.Time, error) {
+	accessExpiresAt := now.Add(s.accessTTL)
+	if !claims.ExpiresAt.IsZero() {
+		accessExpiresAt = claims.ExpiresAt
+	}
+
+	// auth_time anchors step-up freshness. For the INITIAL pair it defaults to the issue time
+	// (the subject just authenticated); on rotation it is the family's preserved value, taken
+	// verbatim — a rotation must NEVER manufacture a fresh auth_time (that would let a silent
+	// refresh defeat the freshness gate). A legacy/zero auth_time therefore stays zero on
+	// rotation, so FreshAuth fails closed and a re-authentication is correctly forced.
+	authTime := claims.AuthTime
+	if authTime.IsZero() && initial {
+		authTime = now
+	}
+	var authTimeUnix int64
+	if !authTime.IsZero() {
+		authTimeUnix = authTime.Unix()
+	}
+
+	wrapper := claimsWrapper[C]{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    s.issuer,
+			Subject:   claims.Subject.String(),
+			Audience:  claims.Audiences,
+			ExpiresAt: jwt.NewNumericDate(accessExpiresAt),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ID:        uuid.Must(uuid.NewV7()).String(),
+		},
+		TenantID:           claims.TenantID,
+		AuthTime:           authTimeUnix,
+		Kind:               claims.Kind,
+		Scopes:             claims.Scopes,
+		Groups:             claims.Groups,
+		Roles:              claims.Roles,
+		AMR:                claims.AMR,
+		MustChangePassword: claims.MustChangePassword,
+		Interim:            claims.Interim,
+		Custom:             claims.Custom,
+	}
+
+	// Resolve the signing key for this tenant. With a KeyStore configured this is the tenant's
+	// active key (per-tenant cryptographic isolation); otherwise it is the static keyset.
+	signer, err := s.resolveSigningKey(ctx, claims.TenantID)
+	if err != nil {
+		return "", time.Time{}, time.Time{}, err
+	}
+	token := jwt.NewWithClaims(signer.Method(), wrapper)
+	// Tag the token with the active key id so verifiers can select the right key during a
+	// rollover. Legacy single-key mode leaves it empty, preserving the original (kid-less) format.
+	if kid := signer.KeyID(); kid != "" {
+		token.Header["kid"] = kid
+	}
+	accessTokenStr, err := token.SignedString(signer.SignKey())
+	if err != nil {
+		return "", time.Time{}, time.Time{}, errors.Join(errors.New("jwt: failed to sign token"), err)
+	}
+	return accessTokenStr, accessExpiresAt, authTime, nil
 }
 
 // ErrPATSubjectMismatch is returned by IssueAPIKey when a KeyTypePAT is issued with a
@@ -684,6 +712,7 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		Roles:              wrapper.Roles,
 		AMR:                wrapper.AMR,
 		MustChangePassword: wrapper.MustChangePassword,
+		Interim:            wrapper.Interim,
 		Custom:             wrapper.Custom,
 	}
 	if wrapper.AuthTime > 0 {

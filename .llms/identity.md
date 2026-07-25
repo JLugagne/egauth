@@ -150,7 +150,8 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 `func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `email`, `password`, `remember_me` from form
 - Success: issues access+refresh token pair, sets auth cookies → 204
-- Errors: `401 invalid_credentials`, `429 account_locked`, `500 login_failed`
+- With `WithMFAGate` and an MFA-enrolled user: issues the short-lived INTERIM credential (access cookie only, no refresh) and replies `X-Egauth-MFA-Required: 1` + `200 {"mfa_required":true}` (or 303 to `WithMFARequiredRedirect`) — never the 204/successURL of a full login
+- Errors: `401 invalid_credentials`, `429 account_locked`, `500 login_failed`, `500 mfa_check_failed` (gate error, fails closed)
 
 `func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `email`, `password`, `remember_me` from form
@@ -181,7 +182,14 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 `func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `token`, `remember_me` from form
 - Success: issues token pair, sets auth cookies → 204
-- Errors: `410 token_expired`, `400 invalid_token`, `500 token_issuance_failed`
+- `WithMFAGate` applies here TOO (a magic link is a first factor): an enrolled user gets the interim credential + `mfa_required` response, so a compromised mailbox cannot bypass the second factor
+- Errors: `410 token_expired`, `400 invalid_token`, `500 token_issuance_failed`, `500 mfa_check_failed`
+
+`func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
+- POST — requires `WithUserResolver`; same fields as `ChangePasswordHandler`
+- Success: changes the password AND re-issues a FRESH FULL pair (both cookies) → 204
+- REFUSES a pre-step-up interim credential — or an unresolvable assurance — with `403 step_up_required` (it would otherwise upgrade an interim credential into a full renewable session). Assurance comes from `WithAssuranceResolver` (default `tokens.AssuranceResolverFromContext`); mount behind `tokens.ContextMiddleware`
+- Errors: `403 step_up_required`, `401 invalid_credentials`, `400 password_rejected`, `401 unauthorized`
 
 `func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; reads `current_password`, `new_password` from form
@@ -217,7 +225,8 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 
 `func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc`
 - POST — requires `WithUserResolver`; clears auth cookies on success → 204
-- Errors: `404 not_found`, `401 unauthorized`, `500 internal_error`
+- Irreversible, so it ENFORCES step-up itself: refuses a pre-step-up interim credential — or an unresolvable assurance — with `403 step_up_required`. Pass `WithMFAGate` too and an MFA-enrolled user must present a credential carrying a step-up factor (`AMRMFA`/`AMROTP`/`AMRWebAuthn`)
+- Errors: `403 step_up_required`, `404 not_found`, `401 unauthorized`, `500 mfa_check_failed`, `500 internal_error`
 
 `func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSSender, opts ...HandlerOption) http.HandlerFunc`
 - POST — reads `email` from form
@@ -247,6 +256,11 @@ Every handler resolves the request tenant ONCE (via `WithTenantResolver`) and pi
 - `func WithMaxBodyBytes(n int64) HandlerOption` — request body cap (default 4096; non-positive disables)
 - `func WithDeliveryConcurrency(n int) HandlerOption` — cap concurrent async deliveries per handler instance (default 64; non-positive disables, drops overflow with DeliveryFailed event)
 - `func WithDeliveryTimeout(d time.Duration) HandlerOption` — per-delivery timeout (default 30s; non-positive disables)
+- `func WithMFAGate(checker MFAEnrollmentChecker) HandlerOption` — gate `LoginHandler` AND `MagicLinkLoginHandler` on enrollment: an enrolled user gets the INTERIM credential (`tokens.Claims.Interim`, no step-up AMR marker, no refresh cookie, no persisted refresh family) instead of a session. Also strengthens `DeleteAccountHandler` (an enrolled user must present a step-up factor). `mfa.Service` satisfies the interface
+- `func WithInterimTokenTTL(d time.Duration) HandlerOption` — lifetime of that interim credential (default `DefaultInterimTokenTTL` = 5 min; non-positive falls back to the default)
+- `func WithMFARequiredRedirect(url string) HandlerOption` — 303 to `url` for the pre-step-up reply instead of `200 {"mfa_required":true}`; the `X-Egauth-MFA-Required: 1` header (`identity.MFARequiredHeader`) is set either way
+- `func WithAssuranceResolver(f tokens.AssuranceResolver) HandlerOption` — supply the request's assurance to `ChangePasswordWithReissueHandler` / `DeleteAccountHandler`. DEFAULT `tokens.AssuranceResolverFromContext`; fails CLOSED (403 `step_up_required`) when nil or reporting `ok=false`
+- `func WithInsecureNoStepUpCheck() HandlerOption` — loud opt-out of that enforcement (only when no login path can mint an interim credential)
 
 ## Errors (sentinels)
 

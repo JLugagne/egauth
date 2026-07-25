@@ -131,12 +131,12 @@ func TestLoginHandler_ImpureResolverCannotSkipMFAGate(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
 
-	require.Equal(t, http.StatusNoContent, rec.Code)
+	// The gate fired, so the reply is the pre-step-up one (200 + mfa_required), not a full login's 204.
+	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "acme", authTenant)
 	assert.Equal(t, []string{"acme"}, gate.tenants,
 		"the MFA gate must be consulted with the tenant pinned at the start of the request")
-	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
-		"an enrolled user must not receive a renewable session on the password alone")
+	requireNoRenewableRefresh(t, rec)
 }
 
 func TestRequestPasswordResetHandler_UnresolvedTenantRefused(t *testing.T) {

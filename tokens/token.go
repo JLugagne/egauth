@@ -59,6 +59,15 @@ type Claims[C any] struct {
 	// RequireAuth middleware via WithRequiredAMR. On refresh it is whatever the ClaimsProvider
 	// returns, so the assurance level is re-evaluated rather than frozen at login.
 	AMR []string
+	// Interim marks a PRE-STEP-UP credential: the subject cleared a FIRST factor (password, magic
+	// link, federated IdP) but has NOT yet completed the second factor their account requires. It
+	// is stamped by the MFA-gated login paths (identity.WithMFAGate, oauth.WithMFAGate) and is NOT
+	// an ordinary session: RequireAuth and ContextMiddleware reject an interim credential with 403
+	// "step_up_required" unless the route explicitly opts in with WithInterimAllowed (mount that
+	// ONLY on the step-up route), and the factor-mutating / destructive handlers refuse it outright.
+	// It is cleared only by completing the second factor (mfa.StepUpHandler re-issues a full pair),
+	// never by refreshing: an interim credential is issued without a refresh token.
+	Interim bool
 	// MustChangePassword is a first-class advisory flag telling the middleware the subject must
 	// change their credential before proceeding. It is a soft gate: a flagged token still
 	// authenticates, but RequireAuth (with WithPasswordChangeGate) soft-redirects to the reset page.
@@ -83,6 +92,54 @@ func (c Claims[C]) FreshAuth(maxAge time.Duration) bool {
 		return false
 	}
 	return time.Since(c.AuthTime) <= maxAge
+}
+
+// HasStepUpFactor reports whether amr (RFC 8176) records a verified SECOND — or single strong,
+// phishing-resistant — factor. It accepts AMRMFA, AMROTP and AMRWebAuthn. AMRPassword alone is
+// not a second factor and never satisfies it, so a password-only (or pre-step-up) credential
+// fails closed.
+func HasStepUpFactor(amr []string) bool {
+	for _, v := range amr {
+		switch v {
+		case AMRMFA, AMROTP, AMRWebAuthn:
+			return true
+		}
+	}
+	return false
+}
+
+// SatisfiesStepUp reports whether these claims prove a completed second factor: the credential is
+// not an Interim (pre-step-up) one AND its AMR records a step-up factor (see HasStepUpFactor). It
+// is the predicate the factor-mutating and destructive handlers enforce (mfa.DisableHandler,
+// mfa.RegenerateRecoveryCodesHandler, identity.DeleteAccountHandler), so stripping or resetting a
+// second factor requires a token that carries one.
+func (c Claims[C]) SatisfiesStepUp() bool {
+	return !c.Interim && HasStepUpFactor(c.AMR)
+}
+
+// AsInterim returns a copy of c stamped as a short-lived PRE-STEP-UP interim credential: Interim is
+// set, every step-up factor marker is stripped from AMR (so an AMR gate can never be satisfied by a
+// credential that has not completed the second factor) and ExpiresAt is set to ttl from now. A
+// non-positive ttl leaves ExpiresAt untouched. Issue the result with an AccessTokenIssuer (or
+// discard the refresh half) — an interim credential must never be renewable.
+func (c Claims[C]) AsInterim(ttl time.Duration) Claims[C] {
+	c.Interim = true
+	if len(c.AMR) > 0 {
+		kept := make([]string, 0, len(c.AMR))
+		for _, v := range c.AMR {
+			switch v {
+			case AMRMFA, AMROTP, AMRWebAuthn:
+				continue
+			default:
+				kept = append(kept, v)
+			}
+		}
+		c.AMR = kept
+	}
+	if ttl > 0 {
+		c.ExpiresAt = time.Now().Add(ttl)
+	}
+	return c
 }
 
 // TokenPair represents an access and refresh token pair.

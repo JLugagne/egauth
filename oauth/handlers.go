@@ -37,6 +37,17 @@ type handlerConfig struct {
 	persistRefresh  bool
 
 	allowUnverifiedEmail bool
+
+	// mfaGate, when non-nil, turns CallbackHandler into an MFA-gated handler: a federated login by
+	// a user with a confirmed second factor yields the short-lived INTERIM credential instead of a
+	// full renewable pair (see WithMFAGate).
+	mfaGate identity.MFAEnrollmentChecker
+	// interimTTL is the lifetime of that interim credential. Zero means
+	// identity.DefaultInterimTokenTTL.
+	interimTTL time.Duration
+	// mfaRequiredURL is where a gated callback redirects (303) when the second factor is still
+	// required. Empty makes that response a 200 JSON {"mfa_required":true} instead.
+	mfaRequiredURL string
 }
 
 // HandlerOption configures the OAuth handlers (BeginHandler, CallbackHandler).
@@ -168,6 +179,39 @@ func WithAllowUnverifiedEmail() HandlerOption {
 	return func(h *handlerConfig) { h.allowUnverifiedEmail = true }
 }
 
+// WithMFAGate turns CallbackHandler into an MFA-gated handler, the federated counterpart of
+// identity.WithMFAGate. After the provider identity is linked it asks the checker whether the local
+// user has a confirmed second factor; an enrolled user is NOT granted the full access+refresh pair
+// but a short-lived INTERIM credential (tokens.Claims.Interim, no step-up factor in its AMR, no
+// refresh cookie), and the response carries identity.MFARequiredHeader plus either a 200 JSON
+// {"mfa_required":true} or the 303 of WithMFARequiredRedirect. The application then drives the second
+// factor (mfa.StepUpHandler), which re-issues the full pair.
+//
+// Without it, an IdP-account compromise yields a full, indefinitely renewable local session even for
+// a user who has enrolled a second factor. mfa.Service satisfies identity.MFAEnrollmentChecker
+// directly. An enrollment-check error fails CLOSED (500, no cookies).
+func WithMFAGate(checker identity.MFAEnrollmentChecker) HandlerOption {
+	return func(h *handlerConfig) { h.mfaGate = checker }
+}
+
+// WithInterimTokenTTL overrides the lifetime of the INTERIM credential issued by an MFA-gated
+// callback (default identity.DefaultInterimTokenTTL). A non-positive value falls back to the default
+// rather than minting a non-expiring credential.
+func WithInterimTokenTTL(d time.Duration) HandlerOption {
+	return func(h *handlerConfig) {
+		if d > 0 {
+			h.interimTTL = d
+		}
+	}
+}
+
+// WithMFARequiredRedirect makes an MFA-gated callback reply with a 303 redirect to url when the
+// second factor is still required, instead of the default 200 JSON {"mfa_required":true}. Point it at
+// the page that collects the second factor; the successURL of a full login is untouched.
+func WithMFARequiredRedirect(url string) HandlerOption {
+	return func(h *handlerConfig) { h.mfaRequiredURL = url }
+}
+
 // BeginHandler builds an HTTP handler that starts the OAuth flow: it mints a CSRF state and a
 // PKCE verifier, stores them in a short-lived secure cookie and redirects the browser to the
 // provider's authorization endpoint.
@@ -210,6 +254,10 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 // cookie (CSRF), exchanges the code (with PKCE), fetches the user info, links or
 // JIT-provisions the local account, then issues an access+refresh token pair and writes the
 // auth cookies. The state cookie is always cleared, and on any failure no auth cookie is set.
+//
+// With WithMFAGate configured, a user who has a confirmed second factor instead receives the
+// short-lived INTERIM credential and the distinct pre-step-up response described there — never a
+// full renewable session on the federated assertion alone.
 func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +339,24 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
+		// MFA gate: a federated identity is a FIRST factor, so an enrolled user must not receive a
+		// full renewable session on the IdP assertion alone. Fail closed on a check error.
+		if cfg.mfaGate != nil {
+			enrolled, gateErr := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
+			if gateErr != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled {
+				if err := issueInterim(w, r, cfg, issuer, claimsOf(user)); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				cfg.mfaRequired(w, r)
+				return
+			}
+		}
+
 		pair, err := issuer.IssueTokenPair(r.Context(), claimsOf(user))
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
@@ -300,6 +366,50 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
+}
+
+// issueInterim mints the short-lived PRE-STEP-UP credential for an MFA-enrolled federated login and
+// writes ONLY the access cookie. It mirrors the identity package's interim issuance: the claims are
+// stamped tokens.Claims.Interim with every step-up AMR marker stripped and a short expiry, and the
+// access-token-only issuance path is preferred so no refresh-token family is persisted for a
+// credential that must never be renewable.
+func issueInterim[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claims tokens.Claims[C]) error {
+	ttl := cfg.interimTTL
+	if ttl <= 0 {
+		ttl = identity.DefaultInterimTokenTTL
+	}
+	claims = claims.AsInterim(ttl)
+	token := ""
+	if accessIssuer, ok := issuer.(tokens.AccessTokenIssuer[C]); ok {
+		issued, _, err := accessIssuer.IssueAccessToken(r.Context(), claims)
+		if err != nil {
+			return err
+		}
+		token = issued
+	} else {
+		pair, err := issuer.IssueTokenPair(r.Context(), claims)
+		if err != nil {
+			return err
+		}
+		token = pair.AccessToken
+	}
+	// Set ONLY the access cookie, and CLEAR any refresh cookie an earlier full session left behind:
+	// the interim state must leave no renewable credential in the browser.
+	cfg.cookies.SetAccess(w, token)
+	cfg.cookies.ClearRefresh(w)
+	return nil
+}
+
+// mfaRequired writes the pre-step-up response of an MFA-gated callback: the machine-readable
+// identity.MFARequiredHeader plus either the configured 303 redirect (WithMFARequiredRedirect) or a
+// 200 JSON {"mfa_required":true}. It is deliberately NOT the 204/successURL of a full login.
+func (cfg handlerConfig) mfaRequired(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(identity.MFARequiredHeader, "1")
+	if cfg.mfaRequiredURL != "" {
+		http.Redirect(w, r, cfg.mfaRequiredURL, http.StatusSeeOther)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]bool{"mfa_required": true})
 }
 
 // setStateCookie writes the short-lived CSRF/PKCE cookie. It is always HttpOnly and

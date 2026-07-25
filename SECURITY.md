@@ -167,13 +167,40 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
     `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. It fails **closed**: a
     token that does not carry the required AMR value never passes, so a password-only session can
     never satisfy `WithRequiredAMR(AMRMFA)`.
-  - *Production.* `identity.WithMFAGate(mfaSvc)` makes `LoginHandler` check `IsEnrolled` after a
-    correct password; an enrolled user receives a **short-lived interim access token**
-    (`AMR=[AMRPassword]`, default 5 min, configurable via `WithInterimTokenTTL`) and **no refresh
-    cookie**, so the pre-MFA state is not an indefinitely renewable session. The second factor is
-    then driven by `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full**
-    access+refresh pair with `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the
-    interim access cookie. Users with no enrolled factor are unaffected and receive the full pair.
+  - *Production.* `identity.WithMFAGate(mfaSvc)` makes **`LoginHandler` and
+    `MagicLinkLoginHandler`** check `IsEnrolled` after a successful FIRST factor, and
+    `oauth.WithMFAGate(mfaSvc)` does the same in the OAuth/OIDC callback — so a password, a mailbox
+    and a federated IdP account are all gated, not just the password form. An enrolled user receives
+    a **short-lived interim credential** (`tokens.Claims.Interim`, `AMR=[AMRPassword]` with every
+    step-up marker stripped, default 5 min, configurable via `WithInterimTokenTTL`) and **no refresh
+    cookie** — any refresh cookie an earlier full session left in the browser is actively CLEARED, and
+    when the issuer implements `tokens.AccessTokenIssuer` (as `jwt.Service` does) no refresh-token
+    family is persisted at all. The second factor is then driven by
+    `mfa.StepUpHandler`, which on a correct TOTP re-issues the **full** access+refresh pair with
+    `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the interim access cookie.
+    Users with no enrolled factor are unaffected and receive the full pair.
+  - *The interim credential is not a session, and that is **enforced**, not documented.*
+    `tokens.RequireAuth` / `tokens.ContextMiddleware` refuse an interim credential with 403
+    `step_up_required` on **every** route unless the route opts in with
+    `tokens.WithInterimAllowed()` — mount that on the step-up endpoint **only**. Independently of the
+    routing layer, the handlers that could otherwise be abused refuse it themselves:
+    `mfa.DisableHandler` and `mfa.RegenerateRecoveryCodesHandler` (which additionally require a
+    credential that *carries* a step-up factor, so a stolen password-only session cannot strip MFA),
+    `identity.ChangePasswordWithReissueHandler` (which would otherwise upgrade the interim credential
+    into a full renewable pair) and `identity.DeleteAccountHandler` (irreversible). Those checks fail
+    **closed**: a request whose assurance cannot be resolved is refused. They read the assurance from
+    `tokens.AssuranceResolverFromContext` by default, so mounting the handler behind
+    `tokens.ContextMiddleware` is the only wiring required; `WithAssuranceResolver` supplies it from a
+    custom middleware and `WithInsecureNoStepUpCheck` is the loud opt-out.
+  - *An MFA-gated login is distinguishable on the wire.* The pre-step-up reply is **not** the 204 (or
+    `successURL` redirect) of a full login: it carries the `X-Egauth-MFA-Required: 1` header plus
+    either `200 {"mfa_required":true}` or a 303 to `identity.WithMFARequiredRedirect` /
+    `oauth.WithMFARequiredRedirect`. A client must treat that response as "second factor required",
+    POST the code to the step-up endpoint, and only then consider itself logged in — the interim
+    credential will be refused everywhere else, and expires within minutes.
+  - *`WithMaxAuthAge` alone does NOT gate a sensitive route.* An interim credential is freshly
+    issued, so its `auth_time` freshness window passes trivially. Use
+    `WithRequiredAMR(AMRMFA)` — optionally *alongside* `WithMaxAuthAge` for a sudo-mode window.
 
   Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
   application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
@@ -268,8 +295,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   and a recovery email may not equal the primary address (`ErrRecoveryEmailIsPrimary`). The
   recovery email is a contact attribute, not a login key (it is not unique, never re-keys an
   identity, and cannot be authenticated against). `RecoveryChannels(...).Any()` is the gate
-  primitive: pair it with a freshness/step-up check (`tokens.WithMaxAuthAge`) to require an
-  independent verified channel before a sensitive factor-reset. `RequestPasswordResetViaRecovery`
+  primitive: pair it with a step-up check (`tokens.WithRequiredAMR(tokens.AMRMFA)`, optionally with
+  `tokens.WithMaxAuthAge` for a freshness window — freshness alone is satisfied by a freshly minted
+  pre-MFA interim credential) to require an independent verified channel before a sensitive
+  factor-reset. `RequestPasswordResetViaRecovery`
   directs the reset token to a verified recovery channel **instead of** the primary inbox, so a
   compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
   account, an OAuth-only account, and a known account with no recovery channel all produce the

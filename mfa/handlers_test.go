@@ -11,10 +11,19 @@ import (
 
 	"github.com/JLugagne/egauth/mfa"
 	"github.com/JLugagne/egauth/mfa/memory"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// steppedUp supplies the assurance of a session that has completed a second factor, which the
+// factor-mutating handlers (DisableHandler, RegenerateRecoveryCodesHandler) require. Production
+// wiring gets it from tokens.AssuranceResolverFromContext by mounting the handler behind
+// tokens.ContextMiddleware.
+var steppedUp = mfa.WithAssuranceResolver(func(*http.Request) (tokens.Assurance, bool) {
+	return tokens.Assurance{StepUp: true}, true
+})
 
 func mfaPost(form url.Values) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
@@ -74,9 +83,10 @@ func TestHandlers_FullFlow(t *testing.T) {
 	mfa.VerifyRecoveryHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {confirm.RecoveryCodes[0]}}))
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 
-	// Disable → 204.
+	// Disable → 204. The route is factor-mutating, so it requires a credential that proves a second
+	// factor (in production that assurance comes from tokens.AssuranceResolverFromContext).
 	rec = httptest.NewRecorder()
-	mfa.DisableHandler(svc, resolver)(rec, mfaPost(url.Values{}))
+	mfa.DisableHandler(svc, resolver, steppedUp)(rec, mfaPost(url.Values{}))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
@@ -137,8 +147,8 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyHandler", mfa.VerifyHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver, trusted), url.Values{"code": {"abc"}}},
-		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted), url.Values{}},
-		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted), url.Values{}},
+		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted, steppedUp), url.Values{}},
+		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted, steppedUp), url.Values{}},
 	}
 
 	for _, h := range handlers {

@@ -180,8 +180,10 @@ type Service interface {
 	// RecoveryChannels reports which INDEPENDENT verified recovery channels userID has enrolled
 	// (a verified recovery email and/or a verified phone). It is the gate primitive for
 	// sensitive recovery/factor-reset: a consumer requires RecoveryChannels(...).Any() (plus a
-	// freshness/step-up check, see tokens.WithMaxAuthAge) before allowing such an operation. It
-	// returns ErrUserNotFound for an unknown/soft-deleted/cross-tenant user.
+	// step-up check — tokens.WithRequiredAMR(tokens.AMRMFA), optionally with tokens.WithMaxAuthAge
+	// for a freshness window; freshness alone is satisfied by a freshly minted pre-MFA interim
+	// credential) before allowing such an operation. It returns ErrUserNotFound for an
+	// unknown/soft-deleted/cross-tenant user.
 	RecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) (RecoveryChannels, error)
 	// RequestPasswordResetViaRecovery mints a password-reset token for the account owning email
 	// but, unlike RequestPasswordReset, directs it to a VERIFIED INDEPENDENT recovery channel
@@ -199,12 +201,18 @@ type Service interface {
 	// email/identity slots for re-registration). Erasers run first so a revocation failure
 	// aborts before anything is deleted, leaving the operation cleanly retriable; the identity
 	// is soft-deleted only once every eraser succeeds. Returns ErrUserNotFound when no live user
-	// matches. Deletion is sensitive and irreversible: callers SHOULD gate it behind a
-	// re-authentication / step-up check (fresh proof of presence) in addition to the session —
-	// this is a stronger bar than the ambient session alone, matching how ChangePassword
-	// re-verifies the current password. Enforce it by wrapping DeleteAccountHandler's route with
-	// tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)): the auth_time freshness gate works for
-	// any factor, so it also covers OAuth-only accounts that cannot re-verify a password.
+	// matches.
+	//
+	// Deletion is irreversible, so DeleteAccountHandler ENFORCES a step-up bar itself: it refuses a
+	// pre-step-up interim credential — and any request whose assurance cannot be resolved — and, with
+	// WithMFAGate configured, requires an MFA-enrolled user to present a credential carrying a
+	// step-up factor. A caller invoking this method directly MUST apply an equivalent bar.
+	//
+	// Gate the route with tokens.RequireAuth(..., tokens.WithRequiredAMR(tokens.AMRMFA)) to state the
+	// requirement at the routing layer too. tokens.WithMaxAuthAge is NOT sufficient on its own: a
+	// pre-MFA interim credential is freshly issued, so an auth_time freshness window passes trivially.
+	// Add it alongside the AMR gate for a "sudo mode" window (it works for any factor, so it also
+	// covers OAuth-only accounts that cannot re-verify a password).
 	DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// DisableUser administratively suspends an account: it sets the user's DisabledAt so subsequent
 	// authentication is refused (Authenticate returns ErrAccountDisabled) and pending token-gated

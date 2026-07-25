@@ -81,7 +81,24 @@ type handlerConfig struct {
 	mfaGate MFAEnrollmentChecker
 	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
 	interimTTL time.Duration
+	// mfaRequiredURL is where an MFA-gated login redirects (303) when the user must still complete
+	// a second factor. Empty makes that response a 200 JSON {"mfa_required":true} instead, so the
+	// pre-step-up outcome is never indistinguishable from a full login (see WithMFARequiredRedirect).
+	mfaRequiredURL string
+	// assuranceResolver reports the assurance of the credential behind the request. It backs the
+	// step-up enforcement of ChangePasswordWithReissueHandler and DeleteAccountHandler and defaults
+	// to tokens.AssuranceResolverFromContext (see WithAssuranceResolver). It fails CLOSED: a
+	// request whose assurance cannot be resolved is refused.
+	assuranceResolver tokens.AssuranceResolver
+	// noStepUpCheck disables that enforcement entirely (see WithInsecureNoStepUpCheck).
+	noStepUpCheck bool
 }
+
+// MFARequiredHeader is set (to "1") on the response of an MFA-gated login whose user must still
+// complete a second factor, on every response shape — the 303 of WithMFARequiredRedirect and the
+// default 200 JSON alike. It is the machine-readable marker a client can read without access to the
+// HttpOnly auth cookies, so an MFA-gated login is never indistinguishable from a full one.
+const MFARequiredHeader = "X-Egauth-MFA-Required"
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
 type HandlerOption func(*handlerConfig)
@@ -103,6 +120,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		deliveryConcurrency:  DefaultDeliveryConcurrency,
 		deliveryTimeout:      DefaultDeliveryTimeout,
 		interimTTL:           DefaultInterimTokenTTL,
+		assuranceResolver:    tokens.AssuranceResolverFromContext,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -318,6 +336,110 @@ func WithDeliveryTimeout(d time.Duration) HandlerOption {
 	return func(h *handlerConfig) { h.deliveryTimeout = d }
 }
 
+// WithMFARequiredRedirect makes an MFA-gated login reply with a 303 redirect to url when the user
+// must still complete a second factor, instead of the default 200 JSON {"mfa_required":true}. It is
+// the pre-step-up counterpart of WithSuccessRedirect: a browser-driven deployment SHOULD configure
+// both, pointing this one at the page that collects the second factor. The response also carries the
+// MFARequiredHeader either way, and the successURL of a full login is untouched.
+func WithMFARequiredRedirect(url string) HandlerOption {
+	return func(h *handlerConfig) { h.mfaRequiredURL = url }
+}
+
+// WithAssuranceResolver supplies the assurance of the credential behind the request to the handlers
+// that enforce step-up: ChangePasswordWithReissueHandler (which must never upgrade a pre-step-up
+// interim credential into a full renewable pair) and DeleteAccountHandler (irreversible).
+//
+// It DEFAULTS to tokens.AssuranceResolverFromContext, so mounting those handlers behind
+// tokens.ContextMiddleware needs no extra wiring. Supply your own only when the access token is
+// verified by a middleware of your own; then map its verified tokens.Claims with
+// Claims.SatisfiesStepUp / Claims.Interim.
+//
+// It fails CLOSED: when the resolver is nil or reports ok=false, those handlers refuse the request
+// with 403 "step_up_required" rather than guessing that the credential is a full session. Use
+// WithInsecureNoStepUpCheck to opt out deliberately.
+func WithAssuranceResolver(f tokens.AssuranceResolver) HandlerOption {
+	return func(h *handlerConfig) { h.assuranceResolver = f }
+}
+
+// WithInsecureNoStepUpCheck disables the step-up enforcement of ChangePasswordWithReissueHandler
+// and DeleteAccountHandler.
+//
+// By default those handlers refuse any request whose credential is a pre-step-up interim one, or
+// whose assurance cannot be resolved at all (fail closed), because re-issuing a full pair to — or
+// irreversibly deleting an account from — a credential that has not completed the account's second
+// factor defeats MFA entirely. This option turns that protection OFF. It is named "Insecure"
+// deliberately: only reach for it when no login path in the deployment can mint an interim
+// credential (no identity.WithMFAGate, no oauth.WithMFAGate) or in trusted test setups. Prefer
+// WithAssuranceResolver to supply the missing signal rather than removing the check.
+func WithInsecureNoStepUpCheck() HandlerOption {
+	return func(h *handlerConfig) { h.noStepUpCheck = true }
+}
+
+// mfaRequired writes the pre-step-up response of an MFA-gated login: the machine-readable
+// MFARequiredHeader plus either the configured 303 redirect (WithMFARequiredRedirect) or a 200 JSON
+// {"mfa_required":true}. It is deliberately NOT the 204/successURL of a full login: the consumer
+// must be able to tell the two apart to drive the second factor (mfa.StepUpHandler).
+func (cfg handlerConfig) mfaRequired(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set(MFARequiredHeader, "1")
+	if cfg.mfaRequiredURL != "" {
+		http.Redirect(w, r, cfg.mfaRequiredURL, http.StatusSeeOther)
+		return
+	}
+	httputil.WriteJSON(w, http.StatusOK, map[string]bool{"mfa_required": true})
+}
+
+// resolveAssurance reports the assurance of the credential behind the request, failing closed when
+// no resolver is configured.
+func (cfg handlerConfig) resolveAssurance(r *http.Request) (tokens.Assurance, bool) {
+	if cfg.assuranceResolver == nil {
+		return tokens.Assurance{}, false
+	}
+	return cfg.assuranceResolver(r)
+}
+
+// requireNotInterim refuses a request carried by a PRE-STEP-UP interim credential (and any request
+// whose assurance cannot be resolved) with 403 "step_up_required". It is what stops an interim
+// credential from being upgraded into a full renewable pair. It reports whether the caller may
+// proceed.
+func (cfg handlerConfig) requireNotInterim(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.noStepUpCheck {
+		return true
+	}
+	assurance, ok := cfg.resolveAssurance(r)
+	if !ok || assurance.Interim {
+		cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+		return false
+	}
+	return true
+}
+
+// requireStepUp is the bar for an irreversible action: the credential must not be a pre-step-up
+// interim one and, when an MFA gate is configured and the user has a confirmed second factor, the
+// credential must actually carry a step-up factor. It reports whether the caller may proceed.
+func (cfg handlerConfig) requireStepUp(w http.ResponseWriter, r *http.Request, tenant string, userID uuid.UUID) bool {
+	if cfg.noStepUpCheck {
+		return true
+	}
+	assurance, ok := cfg.resolveAssurance(r)
+	if !ok || assurance.Interim {
+		cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+		return false
+	}
+	if assurance.StepUp || cfg.mfaGate == nil {
+		return true
+	}
+	enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, userID)
+	if err != nil {
+		cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+		return false
+	}
+	if enrolled {
+		cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+		return false
+	}
+	return true
+}
+
 // parseLimitedForm bounds the request body to cfg.maxBodyBytes before parsing the form. It
 // protects the argon2 hashing path from unbounded attacker-controlled input. On failure it
 // writes the error response (413 when the body is too large, 400 when malformed) and returns
@@ -331,6 +453,11 @@ func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request
 //
 // The request is expected as application/x-www-form-urlencoded with email, password and an
 // optional remember_me field; remember_me makes the refresh cookie persistent.
+//
+// With WithMFAGate configured, a user who has a confirmed second factor instead receives the
+// short-lived INTERIM credential and the distinct pre-step-up response described there (the
+// MFARequiredHeader plus a 200 JSON {"mfa_required":true}, or the 303 of WithMFARequiredRedirect) —
+// never the 204/successURL of a full login.
 func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -374,10 +501,10 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		}
 
 		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
-		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
-		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
-		// the full pair. Users without an enrolled factor fall through below. When the user is
-		// also must-change, the flag is carried onto the interim token so step-up preserves it.
+		// the password alone. They receive a short-lived interim credential (Claims.Interim,
+		// AMR=[pwd], no refresh cookie) and must complete the second factor (see mfa.StepUpHandler)
+		// to obtain the full pair. Users without an enrolled factor fall through below. When the user
+		// is also must-change, the flag is carried onto the interim token so step-up preserves it.
 		if cfg.mfaGate != nil {
 			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
 			if err != nil {
@@ -385,11 +512,15 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 				return
 			}
 			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, mustChange); err != nil {
+				interim := claimsOf(user)
+				// Stamp the password factor only, overriding whatever AMR the consumer's builder
+				// produced for this pre-MFA credential.
+				interim.AMR = []string{tokens.AMRPassword}
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, interim, mustChange); err != nil {
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
-				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				cfg.mfaRequired(w, r)
 				return
 			}
 		}
@@ -783,6 +914,10 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 // token pair and writes the auth cookies — exactly like LoginHandler, but authenticated by the
 // emailed token instead of a password. The optional remember_me field makes the refresh cookie
 // persistent.
+//
+// A magic link is a FIRST factor, so WithMFAGate applies here exactly as it does to LoginHandler: an
+// MFA-enrolled user receives the short-lived INTERIM credential and the pre-step-up response instead
+// of a renewable session, so a compromised mailbox cannot bypass the account's second factor.
 func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -820,6 +955,26 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
+		}
+
+		// MFA gate: a magic link is a FIRST factor like a password, so an enrolled user must not be
+		// handed a full renewable session by mailbox possession alone. The gate applies here exactly
+		// as in LoginHandler — the AMR is left as the consumer's builder produced it (minus any
+		// step-up marker, stripped by AsInterim) since no password was verified on this path.
+		if cfg.mfaGate != nil {
+			enrolled, gateErr := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
+			if gateErr != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf(user), mustChange); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				cfg.mfaRequired(w, r)
+				return
+			}
 		}
 
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
@@ -902,6 +1057,13 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 // The new pair is issued AFTER svc.ChangePassword returns, so it is never caught by the
 // AccountErasers that revoke prior refresh-token families. remember is always false for the
 // re-issued refresh cookie: a password change is not a "remember me" affirmation.
+//
+// Because it MINTS a full renewable session, this handler refuses any request carried by a
+// pre-step-up interim credential — or whose assurance cannot be resolved at all — with 403
+// "step_up_required" (see WithAssuranceResolver, which defaults to
+// tokens.AssuranceResolverFromContext; WithInsecureNoStepUpCheck opts out). Otherwise a password
+// holder who has not completed the account's second factor could upgrade their interim credential
+// into a full session and bypass MFA entirely.
 func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -925,6 +1087,12 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 		user, ok := cfg.userResolver(r)
 		if !ok || user == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// A pre-step-up interim credential must NOT be upgradable: re-issuing a full renewable pair
+		// here would let anyone who knows the password (and so holds an interim credential) escape
+		// the account's second factor entirely. Refuse before touching the password.
+		if !cfg.requireNotInterim(w, r) {
 			return
 		}
 		if !cfg.parseLimitedForm(w, r) {
@@ -1065,12 +1233,19 @@ func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerF
 // their own account. The current user is obtained via WithUserResolver (typically reading
 // whatever the application's auth middleware stashed on the request); if no resolver is
 // configured or it reports no user, the handler responds 401. On success it clears the auth
-// cookies (the account is gone) and responds 204 (or redirects). Deletion is sensitive and
-// irreversible: you SHOULD gate it behind a re-authentication / step-up check (fresh proof of
-// presence) in front of this handler in addition to the session, and configure WithTrustedOrigins
-// so the CSRF origin check is active. For a first-class enforceable step-up, gate the route with
-// tokens.WithRequiredAMR(tokens.AMRMFA) and produce MFA-bearing tokens via identity.WithMFAGate +
-// mfa.StepUpHandler.
+// cookies (the account is gone) and responds 204 (or redirects).
+//
+// Deletion is irreversible, so the handler ENFORCES a step-up bar itself rather than trusting the
+// route to be gated: a request carried by a pre-step-up interim credential — or one whose assurance
+// cannot be resolved at all — is refused with 403 "step_up_required" (see WithAssuranceResolver,
+// which defaults to tokens.AssuranceResolverFromContext, so mounting this handler behind
+// tokens.ContextMiddleware is all the wiring it needs; WithInsecureNoStepUpCheck opts out). Pass
+// WithMFAGate as well and an MFA-enrolled user must additionally present a credential carrying a
+// step-up factor (tokens.AMRMFA/AMROTP/AMRWebAuthn).
+//
+// Also configure WithTrustedOrigins so the CSRF origin check covers your front-end, and gate the
+// route with tokens.WithRequiredAMR(tokens.AMRMFA) — optionally alongside tokens.WithMaxAuthAge for
+// a freshness ("sudo mode") window — to make the requirement explicit at the routing layer too.
 func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -1094,6 +1269,13 @@ func DeleteAccountHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 		user, ok := cfg.userResolver(r)
 		if !ok || user == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		// Deletion is irreversible, so the handler enforces the step-up bar itself rather than
+		// trusting the route to be gated: a pre-step-up interim credential is refused outright, and
+		// when an MFA gate is configured a user with a confirmed second factor must present a
+		// credential that actually carries it.
+		if !cfg.requireStepUp(w, r, tenant, user.ID) {
 			return
 		}
 
@@ -1448,16 +1630,27 @@ type MFAEnrollmentChecker interface {
 	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
-// WithMFAGate turns LoginHandler into an MFA-gated handler. After a correct password it asks
-// the checker whether the user has a confirmed second factor enrolled. An enrolled user is NOT
-// granted the full access+refresh pair; instead they receive a short-lived INTERIM access token
-// stamped AMR=[tokens.AMRPassword] (never the MFA marker) and NO refresh cookie, so the pre-MFA
-// state is not an indefinitely renewable session. The application then drives the second factor
-// (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR including tokens.AMRMFA. Users
-// without an enrolled factor are unaffected and still receive the full pair.
+// WithMFAGate turns LoginHandler AND MagicLinkLoginHandler into MFA-gated handlers. After a
+// successful FIRST factor (a correct password, or a consumed magic-link token) it asks the checker
+// whether the user has a confirmed second factor enrolled. An enrolled user is NOT granted the full
+// access+refresh pair; instead they receive a short-lived INTERIM credential stamped
+// tokens.Claims.Interim with no step-up factor in its AMR and NO refresh cookie, and the response
+// carries the MFARequiredHeader (see WithMFARequiredRedirect). The application then drives the second
+// factor (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR including tokens.AMRMFA.
+// Users without an enrolled factor are unaffected and still receive the full pair.
+//
+// The interim credential is not a session: tokens.RequireAuth and tokens.ContextMiddleware refuse it
+// with 403 "step_up_required" on every route that does not opt in with tokens.WithInterimAllowed —
+// mount that option on the step-up route ONLY. It is also refused outright by the factor-mutating and
+// destructive handlers (mfa.DisableHandler, mfa.RegenerateRecoveryCodesHandler,
+// ChangePasswordWithReissueHandler, DeleteAccountHandler).
+//
+// Passing it to DeleteAccountHandler additionally requires an MFA-enrolled user to present a
+// credential carrying a step-up factor before their account can be deleted.
 //
 // This is the producing half of the AMR/step-up model whose enforcing half is
-// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly.
+// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly. The oauth callback has
+// its own oauth.WithMFAGate.
 func WithMFAGate(checker MFAEnrollmentChecker) HandlerOption {
 	return func(h *handlerConfig) { h.mfaGate = checker }
 }
@@ -1473,33 +1666,50 @@ func WithInterimTokenTTL(d time.Duration) HandlerOption {
 	}
 }
 
-// issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
-// who has passed the password step but not yet the second factor, and writes ONLY the access
-// cookie. The interim token carries AMR=[tokens.AMRPassword] (so tokens.WithRequiredAMR with the
-// MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
-// pre-step-up state is not a renewable session. The application completes the flow with
-// mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
-func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, mustChange bool) error {
-	claims := claimsOf(user)
-	// Stamp the password factor only and force a short explicit access-token expiry, overriding
-	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
-	claims.AMR = []string{tokens.AMRPassword}
+// issueInterimAndSetCookie issues the short-lived INTERIM credential for an MFA-enrolled user who
+// has cleared the first factor but not the second, and writes ONLY the access cookie.
+//
+// The credential is stamped Claims.Interim (so tokens.RequireAuth / ContextMiddleware refuse it on
+// every route that does not opt in with tokens.WithInterimAllowed, and the factor-mutating and
+// destructive handlers refuse it outright), carries no step-up factor in its AMR (so
+// tokens.WithRequiredAMR(tokens.AMRMFA) rejects it) and expires after cfg.interimTTL. No refresh
+// cookie is written and — when the issuer implements tokens.AccessTokenIssuer — no refresh-token
+// family is persisted at all, so the pre-step-up state is not a renewable session. The application
+// completes the flow with mfa.StepUpHandler, which re-issues the full pair with the MFA factor.
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claims tokens.Claims[C], mustChange bool) error {
 	// When the credential is ALSO flagged for rotation, carry the advisory flag on the interim
-	// token so the step-up re-issuance (mfa.StepUpHandler, TASK-065) can preserve it: an
-	// MFA-enrolled must-change user must not escape the gate by completing the second factor.
+	// token so the step-up re-issuance (mfa.StepUpHandler) can preserve it: an MFA-enrolled
+	// must-change user must not escape the gate by completing the second factor.
 	claims.MustChangePassword = mustChange
 	ttl := cfg.interimTTL
 	if ttl <= 0 {
 		ttl = DefaultInterimTokenTTL
 	}
-	claims.ExpiresAt = time.Now().Add(ttl)
-	pair, err := issuer.IssueTokenPair(r.Context(), claims)
-	if err != nil {
-		return err
+	claims = claims.AsInterim(ttl)
+
+	// Prefer the access-token-only path: minting a full pair here would persist a refresh-token row
+	// for a refresh token that is deliberately never surfaced to the client.
+	token := ""
+	if accessIssuer, ok := issuer.(tokens.AccessTokenIssuer[C]); ok {
+		issued, _, err := accessIssuer.IssueAccessToken(r.Context(), claims)
+		if err != nil {
+			return err
+		}
+		token = issued
+	} else {
+		pair, err := issuer.IssueTokenPair(r.Context(), claims)
+		if err != nil {
+			return err
+		}
+		// The refresh token minted by the issuer is deliberately dropped, never surfaced to the
+		// client, so the interim state cannot be renewed via /refresh.
+		token = pair.AccessToken
 	}
-	// Deliberately set ONLY the access cookie: the refresh token (minted by the issuer) is not
-	// surfaced to the client, so the interim state cannot be renewed via /refresh.
-	cfg.cookies.SetAccess(w, pair.AccessToken)
+	// Set ONLY the access cookie, and CLEAR any refresh cookie a previous full session left in the
+	// browser: this login attempt supersedes it, and the interim state must leave no renewable
+	// credential behind.
+	cfg.cookies.SetAccess(w, token)
+	cfg.cookies.ClearRefresh(w)
 	return nil
 }
 

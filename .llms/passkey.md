@@ -225,7 +225,12 @@ mux.Handle("POST /passkey/login/begin",     passkey.BeginLoginHandler(svc, passk
 mux.Handle("POST /passkey/login/finish",    passkey.FinishLoginHandler(svc,
     passkey.WithUserResolver(resolver),
     passkey.WithLoginSuccess(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID) {
-        // issue session token
+        // Issue the session token yourself. STAMP THE FACTOR: set
+        // Claims.AMR = []string{tokens.AMRWebAuthn} (the same "hwk" the audit event records).
+        // egauth's factor-mutating and destructive handlers (mfa.DisableHandler,
+        // mfa.RegenerateRecoveryCodesHandler, identity.DeleteAccountHandler) require a credential
+        // whose AMR carries a step-up factor, and they fail CLOSED — a passkey session with an empty
+        // AMR is refused with 403 step_up_required.
     }),
 ))
 

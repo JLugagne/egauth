@@ -29,6 +29,10 @@ type authConfig[C any] struct {
 	maxAuthAge             time.Duration
 	passwordChangeGate     bool
 	passwordChangeResetURL string
+	// interimAllowed opts the route in to PRE-STEP-UP interim credentials (Claims.Interim). It is
+	// false by default: an interim credential is rejected with 403 "step_up_required" on every
+	// route that does not explicitly allow it (see WithInterimAllowed).
+	interimAllowed bool
 	// gate is the application-supplied predicate invoked after all built-in gates. A nil gate is a no-op.
 	gate func(egauth.Actor, C) error
 }
@@ -109,6 +113,20 @@ func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
 }
 
+// WithInterimAllowed admits a PRE-STEP-UP interim credential (Claims.Interim) to this route.
+//
+// By default EVERY route rejects an interim credential with 403 "step_up_required": the credential
+// minted by an MFA-gated login (identity.WithMFAGate, oauth.WithMFAGate) proves only the first
+// factor, so it is not a session. Mount this option ONLY on the endpoints that exist to complete the
+// second factor — mfa.StepUpHandler (and, if you expose them separately, the verify/recovery-code
+// endpoints and logout) — never on an ordinary application route.
+//
+// It does not weaken the other gates: WithRequiredAMR(AMRMFA) still rejects the interim credential,
+// because an interim credential never carries a step-up factor in its AMR.
+func WithInterimAllowed[C any]() AuthOption[C] {
+	return func(a *authConfig[C]) { a.interimAllowed = true }
+}
+
 // WithRequiredScopes gates the route on token scopes: the verified token's Scopes claim must
 // contain ALL of the given values, otherwise the request is rejected with 403
 // "insufficient_scope". No effect when no scopes are required (opt-in only).
@@ -152,9 +170,12 @@ func RequireHuman[C any]() AuthOption[C] {
 // d (or whose token carries no auth_time) is rejected with 403 "step_up_required" and should
 // re-authenticate to mint a fresh token.
 //
-// This is the enforceable primitive for sensitive actions such as disabling MFA, deleting the
-// account, or changing security settings: wrap their routes with it (it works for any factor, so
-// it covers OAuth-only accounts that cannot re-verify a password). A non-positive d disables the
+// It is a FRESHNESS gate, not an assurance gate, and is NOT sufficient on its own for a sensitive
+// action such as disabling MFA or deleting the account: the pre-step-up interim credential of an
+// MFA-gated login is freshly issued, so it passes trivially. Combine it with
+// WithRequiredAMR(AMRMFA) — which fails closed for any credential that has not proven a second
+// factor — and use this option for the "sudo mode" window on top (it works for any factor, so it
+// also covers OAuth-only accounts that cannot re-verify a password). A non-positive d disables the
 // check. See also Claims.FreshAuth for gating outside an HTTP handler.
 func WithMaxAuthAge[C any](d time.Duration) AuthOption[C] {
 	return func(a *authConfig[C]) { a.maxAuthAge = d }
@@ -353,10 +374,16 @@ func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
 	return actor
 }
 
-// stepUpSatisfied reports whether the claims clear BOTH step-up gates: the required AMR factors
-// (WithRequiredAMR) and the authentication-freshness window (WithMaxAuthAge). Either gate is a
-// no-op when not configured.
+// stepUpSatisfied reports whether the claims clear the step-up gates: the credential must not be a
+// PRE-STEP-UP interim one (unless the route opted in with WithInterimAllowed), and it must carry the
+// required AMR factors (WithRequiredAMR) within the authentication-freshness window
+// (WithMaxAuthAge). The AMR and freshness gates are no-ops when not configured; the interim
+// rejection is ALWAYS on, so an interim credential is not a session anywhere it was not explicitly
+// admitted.
 func (cfg *authConfig[C]) stepUpSatisfied(claims *Claims[C]) bool {
+	if claims.Interim && !cfg.interimAllowed {
+		return false
+	}
 	return cfg.amrSatisfied(claims) && claims.FreshAuth(cfg.maxAuthAge)
 }
 

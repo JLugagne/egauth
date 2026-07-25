@@ -33,6 +33,14 @@ type Issuer[C any] interface {
     ListAPIKeysByCreator(ctx context.Context, tenantID string, createdBy uuid.UUID) ([]*APIKey[C], error)
 }
 
+// AccessTokenIssuer is the OPTIONAL extension of Issuer for a credential that must NOT be
+// renewable: it mints a standalone access token with no refresh token and no persisted refresh
+// family. egauth type-asserts for it and falls back to IssueTokenPair when absent.
+// jwt.Service (and jwt.SingleTenant) implement it. Used for the pre-step-up interim credential.
+type AccessTokenIssuer[C any] interface {
+    IssueAccessToken(ctx context.Context, claims Claims[C]) (token string, expiresAt time.Time, err error)
+}
+
 type Verifier[C any] interface {
     // Tenant-bound access-token verification; rejects ErrTenantMismatch unless the signed
     // tenant_id == tenantID. tenantID="" for single-tenant. RequireAuth uses this when a
@@ -124,11 +132,31 @@ type Claims[C any] struct {
     // for the access token to expire. JWT claim name: "must_change_password" (omitempty). Lives
     // here, not in Custom, so the middleware can enforce it generically regardless of C.
     MustChangePassword bool
-    Custom             C
+    // Interim marks a PRE-STEP-UP credential: the subject cleared a first factor (password, magic
+    // link, federated IdP) but has NOT completed the second factor their account requires. Stamped
+    // by identity.WithMFAGate / oauth.WithMFAGate. RequireAuth and ContextMiddleware refuse an
+    // interim credential with 403 step_up_required on EVERY route that does not opt in with
+    // WithInterimAllowed (put it on the step-up route only), and the factor-mutating / destructive
+    // handlers refuse it outright. Cleared only by mfa.StepUpHandler re-issuing a full pair; never
+    // by refresh (an interim credential is issued without a refresh token).
+    // JWT claim name: "interim" (omitempty).
+    Interim bool
+    Custom  C
 }
 
 func (c Claims[C]) FreshAuth(maxAge time.Duration) bool
 // Returns true if time.Since(AuthTime) <= maxAge. maxAge<=0 always true; zero AuthTime fails closed.
+
+func (c Claims[C]) SatisfiesStepUp() bool
+// true when the credential is NOT Interim AND its AMR carries a step-up factor (mfa/otp/hwk).
+// The predicate the factor-mutating and destructive handlers enforce.
+
+func HasStepUpFactor(amr []string) bool
+// true when amr contains AMRMFA, AMROTP or AMRWebAuthn. AMRPassword alone is NOT a second factor.
+
+func (c Claims[C]) AsInterim(ttl time.Duration) Claims[C]
+// Copy stamped as a pre-step-up credential: Interim=true, every step-up AMR marker stripped,
+// ExpiresAt=now+ttl (ttl<=0 leaves ExpiresAt untouched). Issue it with an AccessTokenIssuer.
 ```
 
 `basic.Claims` = `tokens.Claims[struct{}]`
@@ -498,6 +526,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithAuthTenantResolver[C](func(*http.Request) string)` | Tenant-aware mode: resolve tenantID per request; verify via `VerifyAccessTokenForTenant` and scope auto-refresh. `""` return → 401 (fail-closed) |
 | `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
+| `WithInterimAllowed[C]()` | Admit a PRE-STEP-UP interim credential (`Claims.Interim`) on this route. Interim credentials are refused with `403 step_up_required` everywhere by default — mount this on the step-up endpoint ONLY. Does not weaken the other gates: `WithRequiredAMR(AMRMFA)` still rejects an interim credential. |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
 | `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
 | `WithRequiredScopes[C](scopes ...string)` | Require ALL listed scopes present in `Claims.Scopes`; rejects with `403 insufficient_scope`. Opt-in only — no default scope policy. |
@@ -570,7 +599,8 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **SHA-256 at rest / no clear-text retrieval**: refresh tokens and API keys are stored as `HashToken(raw)` (SHA-256 hex); the clear-text value is never persisted and is unrecoverable after issuance. `IssueAPIKey` returns `APIKey.Token` exactly once; subsequent reads (e.g. via `ListAPIKeysByCreator`) always return a blank `Token` field. Revocation is therefore always by key ID (`RevokeAPIKey`), not by token value.
 - **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
 - **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths.
-- **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
+- **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it. `WithMaxAuthAge` ALONE is not a step-up gate: a pre-MFA interim credential is freshly issued, so its freshness window passes trivially — pair it with `WithRequiredAMR(AMRMFA)`.
+- **Interim (pre-step-up) credentials**: `Claims.Interim` is refused by `RequireAuth`/`ContextMiddleware` with `403 step_up_required` on every route without `WithInterimAllowed()`. `AssuranceFromContext` / `AssuranceResolverFromContext` expose the assurance (`Assurance{StepUp, Interim}`) non-generically so `identity` and `mfa` handlers can enforce it themselves; both fail closed when no assurance is available.
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
 - **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
 - **Cookie security**: always `HttpOnly`; `Secure` is opt-out (`Insecure bool`, defaults false = secure); `SameSite=Lax` by default.
@@ -585,6 +615,23 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
   password changes; to force a change on live sessions, an admin revokes the user's families.
   `tokens.MustChangeResolverFromContext` adapts the verified claims for `mfa.WithMustChangeResolver`,
   preserving the flag through the MFA step-up flow.
+
+### Context bridge (`tokens/context.go`)
+
+`ContextMiddleware[C]` verifies the access token through the same fail-closed path as `RequireAuth`
+and injects the `Actor` + `Claims[C]`. Consumers:
+
+| Helper | Shape | Consumed by |
+|--------|-------|-------------|
+| `ActorFromContext(ctx)` | `(egauth.Actor, bool)` | any handler |
+| `ClaimsFromContext[C](ctx)` | `(*Claims[C], bool)` | any handler (C must match) |
+| `UserResolverFromContext(r)` | `(uuid.UUID, string, bool)` | `mfa.WithUserResolver` |
+| `SubjectResolverFromContext(r)` | `(uuid.UUID, bool)` | `otp.WithSubjectResolver` |
+| `MustChangeResolverFromContext[C](r)` | `bool` | `mfa.WithMustChangeResolver` |
+| `AssuranceFromContext(ctx)` / `AssuranceResolverFromContext(r)` | `(Assurance{StepUp, Interim}, bool)` | `mfa.WithAssuranceResolver`, `identity.WithAssuranceResolver` (their DEFAULT) |
+
+Every one of them returns `ok=false` for a request that did not pass an authenticated
+`ContextMiddleware`, and every consumer fails closed on it.
 
 ## Wiring
 
@@ -632,10 +679,13 @@ mux.Handle("/api/profile", basic.RequireAuth(issuer,
     tokens.WithCookieAuth[struct{}](cookies),
 ))
 
-// 5b. Sensitive route with step-up gate.
+// 5b. Sensitive route with step-up gate: the AMR gate is the assurance bar (it fails closed for
+// any credential that has not proven a second factor); WithMaxAuthAge only adds a sudo-mode window
+// and is NOT sufficient alone (a pre-MFA interim credential is freshly issued).
 mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
     deleteAccountHandler,
     tokens.WithCookieAuth[struct{}](cookies),
+    tokens.WithRequiredAMR[struct{}](tokens.AMRMFA),
     tokens.WithMaxAuthAge[struct{}](5*time.Minute),
 ))
 ```

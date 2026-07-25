@@ -90,10 +90,10 @@ func TestLoginHandler_MustChange_MFAEnrolledCarriesFlag(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// The MFA-gated pre-step-up response is distinguishable from a full login's 204.
+	assert.Equal(t, http.StatusOK, rec.Code)
 	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "interim access cookie expected")
-	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
-		"MFA-gated pre-step-up login must NOT receive a refresh cookie")
+	requireNoRenewableRefresh(t, rec)
 	assert.Equal(t, []string{tokens.AMRPassword}, captured.AMR, "interim AMR must be [pwd]")
 	assert.True(t, captured.MustChangePassword,
 		"an MFA-enrolled must-change user's interim token must carry the flag for step-up to preserve")

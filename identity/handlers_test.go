@@ -38,6 +38,44 @@ func okIssuer() *issuertest.MockIssuer[struct{}] {
 	}
 }
 
+// requireNoRenewableRefresh asserts the response leaves the client with NO usable refresh cookie:
+// either none was written at all, or one was written as an expiring (cleared) cookie. The MFA-gated
+// interim login does the latter, so a refresh cookie left over from an earlier full session cannot
+// survive the pre-step-up state.
+func requireNoRenewableRefresh(t *testing.T, rec *httptest.ResponseRecorder) {
+	t.Helper()
+	c := cookieByName(rec, tokens.DefaultRefreshCookieName)
+	if c == nil {
+		return
+	}
+	assert.Empty(t, c.Value, "a pre-step-up response must not carry a refresh token value")
+	assert.Less(t, c.MaxAge, 0, "any refresh cookie on a pre-step-up response must be an expiring one")
+}
+
+// fullSessionAssurance supplies the assurance of an ORDINARY full session — not a pre-step-up
+// interim credential — to the handlers that enforce step-up (ChangePasswordWithReissueHandler,
+// DeleteAccountHandler). Those handlers fail CLOSED without it; production wiring gets it for free
+// from tokens.AssuranceResolverFromContext by mounting the handler behind tokens.ContextMiddleware.
+func fullSessionAssurance() identity.HandlerOption {
+	return identity.WithAssuranceResolver(func(*http.Request) (tokens.Assurance, bool) {
+		return tokens.Assurance{}, true
+	})
+}
+
+// steppedUpAssurance supplies the assurance of a session that has completed a second factor.
+func steppedUpAssurance() identity.HandlerOption {
+	return identity.WithAssuranceResolver(func(*http.Request) (tokens.Assurance, bool) {
+		return tokens.Assurance{StepUp: true}, true
+	})
+}
+
+// interimAssurance supplies the assurance of a PRE-STEP-UP interim credential.
+func interimAssurance() identity.HandlerOption {
+	return identity.WithAssuranceResolver(func(*http.Request) (tokens.Assurance, bool) {
+		return tokens.Assurance{Interim: true}, true
+	})
+}
+
 func loginForm(t *testing.T, path, email, password, remember string) *http.Request {
 	t.Helper()
 	form := url.Values{}

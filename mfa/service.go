@@ -33,12 +33,20 @@ type Service interface {
 	VerifyTOTP(ctx context.Context, tenantID string, userID uuid.UUID, code string) error
 	// VerifyRecoveryCode consumes a single-use recovery code.
 	VerifyRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, code string) error
-	// RegenerateRecoveryCodes invalidates the user's existing codes and returns a fresh set.
+	// RegenerateRecoveryCodes invalidates the user's existing codes and returns a fresh set. Like
+	// DisableTOTP it is factor-mutating, so RegenerateRecoveryCodesHandler refuses a request whose
+	// credential does not prove a second factor, and a direct caller MUST apply the same bar.
 	RegenerateRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) ([]string, error)
 	// DisableTOTP removes the enrollment and all recovery codes. Idempotent. Disabling a second
-	// factor is sensitive: callers SHOULD gate its route behind step-up re-authentication by
-	// wrapping DisableHandler with tokens.RequireAuth(..., tokens.WithMaxAuthAge(d)) so a stale
-	// or hijacked session cannot silently strip MFA.
+	// factor is the most destructive MFA operation, so DisableHandler ENFORCES step-up itself: it
+	// refuses any request whose credential does not prove a second factor (see DisableHandler and
+	// WithAssuranceResolver). A caller invoking this method directly MUST apply the same bar —
+	// tokens.Claims.SatisfiesStepUp — before calling it.
+	//
+	// Gate the route with tokens.RequireAuth(..., tokens.WithRequiredAMR(tokens.AMRMFA)) to state
+	// the requirement at the routing layer too. tokens.WithMaxAuthAge is NOT sufficient on its own:
+	// a pre-MFA interim credential is freshly issued, so an auth_time freshness window passes
+	// trivially. Add it only alongside the AMR gate, for a "sudo mode" window.
 	DisableTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error
 	// IsEnrolled reports whether the user has a CONFIRMED TOTP factor.
 	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)

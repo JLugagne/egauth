@@ -41,7 +41,8 @@ func TestDeleteAccountHandler_SuccessClearsCookies(t *testing.T) {
 		},
 	}
 	h := identity.DeleteAccountHandler(svc,
-		identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+		identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+		fullSessionAssurance())
 	rec := httptest.NewRecorder()
 	h(rec, postForm(url.Values{}))
 
@@ -75,7 +76,8 @@ func TestDeleteAccountHandler_ErrorMapping(t *testing.T) {
 				},
 			}
 			h := identity.DeleteAccountHandler(svc,
-				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }))
+				identity.WithUserResolver(func(*http.Request) (*identity.User, bool) { return user, true }),
+				fullSessionAssurance())
 			rec := httptest.NewRecorder()
 			h(rec, postForm(url.Values{}))
 			assert.Equal(t, tc.wantCode, rec.Code)

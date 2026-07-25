@@ -59,18 +59,46 @@ func TestLoginHandler_MFAGate_EnrolledGetsInterimNoRefresh(t *testing.T) {
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
 
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	// The pre-step-up outcome is DISTINGUISHABLE from a full login (which replies 204): the client
+	// needs a signal to drive the second factor.
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "1", rec.Header().Get(identity.MFARequiredHeader))
+	assert.Contains(t, rec.Body.String(), "mfa_required")
 
 	// An enrolled user gets the interim access cookie but NO refresh cookie: the pre-MFA state
 	// must not be an indefinitely renewable full session.
 	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "interim access cookie expected")
-	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName),
-		"MFA-gated pre-step-up login must NOT receive a refresh cookie")
+	requireNoRenewableRefresh(t, rec)
 
 	// The interim token carries only the password factor — never the MFA marker.
 	assert.Equal(t, []string{tokens.AMRPassword}, captured.AMR, "interim AMR must be [pwd]")
 	assert.NotContains(t, captured.AMR, tokens.AMRMFA, "interim token must not carry the MFA factor")
 	assert.False(t, captured.ExpiresAt.IsZero(), "interim token must carry a short explicit expiry")
+	assert.True(t, captured.Interim,
+		"the pre-step-up credential must be stamped Interim so every gate can refuse it")
+	assert.False(t, captured.SatisfiesStepUp(), "an interim credential never satisfies step-up")
+}
+
+// TestLoginHandler_MFAGate_InterimRedirectTarget proves the pre-step-up branch honours its own
+// redirect target, so a browser-driven deployment lands on the second-factor page instead of the
+// success page.
+func TestLoginHandler_MFAGate_InterimRedirectTarget(t *testing.T) {
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
+		identity.WithMFAGate(stubMFAGate{enrolled: true}),
+		identity.WithSuccessRedirect("/app"),
+		identity.WithMFARequiredRedirect("/mfa/step-up"))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	assert.Equal(t, http.StatusSeeOther, rec.Code)
+	assert.Equal(t, "/mfa/step-up", rec.Header().Get("Location"))
+	assert.Equal(t, "1", rec.Header().Get(identity.MFARequiredHeader))
 }
 
 // TestLoginHandler_MFAGate_NotEnrolledGetsFullPair confirms the gate is transparent for users

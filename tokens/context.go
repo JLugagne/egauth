@@ -41,6 +41,61 @@ type actorCarrier interface {
 
 func (a authContext[C]) actor() egauth.Actor { return a.actorValue }
 
+// assuranceCarrier exposes the assurance summary without naming C, so AssuranceFromContext can
+// stay non-generic — the identity and mfa handlers enforce it without knowing the claims type.
+type assuranceCarrier interface {
+	assurance() Assurance
+}
+
+func (a authContext[C]) assurance() Assurance {
+	if a.claims == nil {
+		return Assurance{}
+	}
+	return Assurance{StepUp: a.claims.SatisfiesStepUp(), Interim: a.claims.Interim}
+}
+
+// Assurance is the assurance-relevant summary of the credential that authenticated a request. The
+// identity and mfa handlers consume it to enforce step-up on their factor-mutating and destructive
+// routes without importing the claims type.
+type Assurance struct {
+	// StepUp reports whether the credential proves a completed second factor
+	// (Claims.SatisfiesStepUp): its AMR records AMRMFA, AMROTP or AMRWebAuthn and it is not
+	// interim.
+	StepUp bool
+	// Interim reports whether the credential is a PRE-STEP-UP interim one (Claims.Interim): the
+	// first factor passed but the required second factor has not been completed.
+	Interim bool
+}
+
+// AssuranceResolver reports the Assurance of the credential that authenticated the request. ok is
+// false when the assurance cannot be determined, and every consumer MUST fail closed on it — an
+// undeterminable assurance is never treated as a satisfied one. AssuranceResolverFromContext is
+// the first-party implementation for handlers mounted behind ContextMiddleware.
+type AssuranceResolver func(r *http.Request) (Assurance, bool)
+
+// AssuranceFromContext returns the Assurance of the credential injected by ContextMiddleware. ok is
+// false on any request that did not pass an authenticated ContextMiddleware, so callers MUST check
+// it and fail closed. It is non-generic so the resolver-based modules can call it without knowing
+// the claims type.
+func AssuranceFromContext(ctx context.Context) (Assurance, bool) {
+	carrier, ok := ctx.Value(ctxKey{}).(assuranceCarrier)
+	if !ok {
+		return Assurance{}, false
+	}
+	return carrier.assurance(), true
+}
+
+// AssuranceResolverFromContext adapts AssuranceFromContext to the AssuranceResolver shape used by
+// identity.WithAssuranceResolver and mfa.WithAssuranceResolver. It is their DEFAULT, so mounting a
+// factor-mutating or destructive handler behind ContextMiddleware is all the wiring their step-up
+// enforcement needs:
+//
+//	mux.Handle("/mfa/disable", tokens.ContextMiddleware(verifier,
+//	    mfa.DisableHandler(svc, mfa.WithUserResolver(tokens.UserResolverFromContext))))
+func AssuranceResolverFromContext(r *http.Request) (Assurance, bool) {
+	return AssuranceFromContext(r.Context())
+}
+
 // ContextMiddleware verifies the access token using the SAME fail-closed path as
 // RequireAuth (header/cookie source, tenant resolver, auto-refresh, AMR and max-auth-age
 // options all apply) and, on success, injects the egauth.Actor and Claims[C] into the

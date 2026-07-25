@@ -38,6 +38,13 @@ type handlerConfig struct {
 	maxBodyBytes int64
 	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true on the re-issued full pair. The pair is renewable, but the refresh family persists the flag (Rotate replays it on every refresh), so a verified interim token carrying the flag cannot escape the forced-change gate after a second factor. Nil (default) leaves the flag unset.
 	mustChangeResolve func(r *http.Request) bool
+	// assuranceResolver reports the assurance of the credential behind the request. It backs the
+	// step-up enforcement of the factor-mutating handlers (DisableHandler,
+	// RegenerateRecoveryCodesHandler) and defaults to tokens.AssuranceResolverFromContext (see
+	// WithAssuranceResolver). It fails CLOSED: an unresolvable assurance is refused.
+	assuranceResolver tokens.AssuranceResolver
+	// noStepUpCheck disables that enforcement entirely (see WithInsecureNoStepUpCheck).
+	noStepUpCheck bool
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -45,10 +52,11 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		accountField: "account",
-		codeField:    "code",
-		cookies:      tokens.DefaultCookies(),
-		maxBodyBytes: DefaultMaxBodyBytes,
+		accountField:      "account",
+		codeField:         "code",
+		cookies:           tokens.DefaultCookies(),
+		maxBodyBytes:      DefaultMaxBodyBytes,
+		assuranceResolver: tokens.AssuranceResolverFromContext,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -127,6 +135,35 @@ func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
 }
 
+// WithAssuranceResolver supplies the assurance of the credential behind the request to the
+// factor-mutating handlers (DisableHandler, RegenerateRecoveryCodesHandler), which refuse anything
+// that does not prove a second factor.
+//
+// It DEFAULTS to tokens.AssuranceResolverFromContext, so mounting those handlers behind
+// tokens.ContextMiddleware — the same wiring WithUserResolver already needs — is enough. Supply your
+// own only when the access token is verified by a middleware of your own; then map its verified
+// tokens.Claims with Claims.SatisfiesStepUp / Claims.Interim.
+//
+// It fails CLOSED: a nil resolver, or one reporting ok=false, refuses the request with 403
+// "step_up_required". Use WithInsecureNoStepUpCheck to opt out deliberately.
+func WithAssuranceResolver(f tokens.AssuranceResolver) HandlerOption {
+	return func(h *handlerConfig) { h.assuranceResolver = f }
+}
+
+// WithInsecureNoStepUpCheck disables the step-up enforcement of the factor-mutating handlers
+// (DisableHandler, RegenerateRecoveryCodesHandler).
+//
+// By default those handlers refuse a request whose credential does not prove a second factor, so a
+// stolen password-only or pre-MFA interim session cannot strip the victim's MFA or invalidate their
+// recovery codes. This option turns that protection OFF, restoring the pre-v1 behavior where the
+// ambient session was enough. It is named "Insecure" deliberately: only reach for it when an
+// equivalent step-up gate is enforced in front of the route (e.g.
+// tokens.RequireAuth(..., tokens.WithRequiredAMR(tokens.AMRMFA))) or in trusted test setups. Prefer
+// WithAssuranceResolver to supply the missing signal rather than removing the check.
+func WithInsecureNoStepUpCheck() HandlerOption {
+	return func(h *handlerConfig) { h.noStepUpCheck = true }
+}
+
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
 // for the client to render (e.g. as a QR code). The factor is not active until confirmed.
 func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
@@ -191,9 +228,13 @@ func VerifyRecoveryHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 
 // RegenerateRecoveryCodesHandler issues a fresh set of recovery codes (invalidating the old)
 // and returns them as JSON.
+//
+// It is FACTOR-MUTATING (it destroys every existing recovery code), so like DisableHandler it
+// requires a credential that carries a step-up factor and refuses anything less with 403
+// "step_up_required". See DisableHandler for the wiring and the opt-out.
 func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+	return cfg.guardedStepUp(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
 		codes, err := svc.RegenerateRecoveryCodes(r.Context(), tenant, uid)
 		if err != nil {
 			cfg.failErr(w, r, err)
@@ -204,9 +245,22 @@ func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.Han
 }
 
 // DisableHandler removes the user's TOTP factor and recovery codes, replying 204 (or 303).
+//
+// Stripping the second factor is the single most destructive MFA operation, so the handler ENFORCES
+// step-up itself rather than trusting the route to be gated: the request must be carried by a
+// credential that proves a second factor (tokens.Claims.SatisfiesStepUp — its AMR carries
+// tokens.AMRMFA, AMROTP or AMRWebAuthn and it is not a pre-step-up interim credential). Anything
+// less — a password-only session, a pre-MFA interim credential, or a request whose assurance cannot
+// be resolved at all — is refused with 403 "step_up_required".
+//
+// The assurance comes from WithAssuranceResolver, which defaults to
+// tokens.AssuranceResolverFromContext: mounting this handler behind tokens.ContextMiddleware (the
+// same wiring WithUserResolver already needs) is all it takes. Deployments that produce their own
+// tokens must stamp Claims.AMR after verifying the second factor (mfa.StepUpHandler does it for
+// you). WithInsecureNoStepUpCheck opts out.
 func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
-	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+	return cfg.guardedStepUp(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
 		if err := svc.DisableTOTP(r.Context(), tenant, uid); err != nil {
 			cfg.failErr(w, r, err)
 			return
@@ -243,6 +297,38 @@ func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uui
 		}
 		fn(w, r, uid, tenant)
 	}
+}
+
+// guardedStepUp is guarded() plus the step-up bar the factor-mutating handlers enforce: the
+// credential behind the request must prove a second factor. The check runs after guarded()'s
+// preamble and immediately before the action, so no factor is ever mutated by a request that does
+// not clear it.
+func (cfg handlerConfig) guardedStepUp(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
+	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if !cfg.stepUpSatisfied(w, r) {
+			return
+		}
+		fn(w, r, uid, tenant)
+	})
+}
+
+// stepUpSatisfied reports whether the request may perform a factor-mutating action, writing the 403
+// "step_up_required" response when it may not. It fails CLOSED: a missing resolver, an
+// unresolvable assurance, an interim credential and an AMR without a step-up factor are all refused.
+func (cfg handlerConfig) stepUpSatisfied(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.noStepUpCheck {
+		return true
+	}
+	if cfg.assuranceResolver == nil {
+		cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+		return false
+	}
+	assurance, ok := cfg.assuranceResolver(r)
+	if !ok || !assurance.StepUp {
+		cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+		return false
+	}
+	return true
 }
 
 // parseLimitedForm wraps r.Body with http.MaxBytesReader (when maxBodyBytes > 0), parses the
@@ -340,8 +426,11 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		}
 		claims := claimsOf(r.Context(), uid, tenant)
 		// The factor set is now password + a verified TOTP, so the token reaches the MFA
-		// assurance level. AMR is set here (not by the builder) so it is authoritative.
+		// assurance level. AMR is set here (not by the builder) so it is authoritative, and the
+		// pre-step-up marker is cleared for the same reason: the second factor was just verified, so
+		// the pair this handler mints is a full session everywhere.
 		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
+		claims.Interim = false
 		// Carry the forced-change gate forward: if the verified interim token was flagged
 		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
 		// refresh family persists the flag and Rotate replays it onto every silent refresh — so an
