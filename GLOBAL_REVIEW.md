@@ -1,474 +1,1012 @@
-# egauth — Global Adversarial Review
+# egauth — Global Deep Review & Security Audit
 
-> **Verdict: PROMOTE with fixes.** No CONFIRMED finding is a direct authentication *bypass*; every one of the eight fails **closed** (broken feature, dropped control, availability outage, or audit/attribution gap) rather than open. The one **High** — Google OIDC id_token validation being impossible — is a broken headline feature, not a hole. The library's core crypto (JWT alg-confusion defense, argon2id, constant-time compares, CSRF/origin fail-closed, tenant scoping) held up under adversarial reading.
+> **Verdict: DO NOT SHIP AS-IS for a multi-tenant SaaS.** The cryptographic core is genuinely
+> strong — 150 separate attack hypotheses about randomness, AEAD, JWT algorithm confusion, kid
+> handling, constant-time comparison and SQL injection were tested and **held**. What does not hold
+> is the layer above it: **MFA is not actually enforced on any non-password login path**, the
+> shipped `webapp` preset lets a **disabled account refresh forever**, tenant resolution **fails
+> open into the `""` partition**, and several documented options **silently disable the control they
+> claim to harden** or **panic at request time**. Nine HIGH findings are confirmed with reproducible
+> failing tests. None is a remote-unauthenticated crypto break; most require a stolen password, a
+> hijacked session, or one line of documented-but-broken configuration — which is exactly the threat
+> model a commercial SaaS must survive.
 
-Whole-project review (not a diff) of module `github.com/JLugagne/egauth` (Go 1.26, ~54k LOC, 3 modules: core, `adapters/pgx`, `adapters/otel`). Methodology: review-detractor (refute-first) — 12 focused Opus agents, one per unit, 3 in parallel per wave. Deterministic tooling was run centrally; each unit was then read adversarially. Every CONFIRMED finding below was **re-verified by hand against the source** by the reviewer.
+Whole-project review (not a diff) of module `github.com/JLugagne/egauth` at `HEAD = ce6aeef`
+(Go 1.26.5, ~55k LOC, 3 modules: core, `adapters/pgx`, `adapters/otel`).
 
-**Totals:** 8 confirmed (blocking) · 37 risks (advisory) · 94 nits (advisory).
+**Totals:** 132 distinct findings · **9 confirmed HIGH** · **35 confirmed MEDIUM** · 23 confirmed
+LOW · 2 refuted · 2 plausible-but-unproven · 61 advisory (low/info, not sent to refutation) ·
+150 attack hypotheses tested and cleared.
 
 ---
 
-## 1. Deterministic tooling (baseline)
+## Method
 
-| Check | Core | adapters/pgx | adapters/otel |
+Eleven independent adversarial lenses, three running in parallel, model-tiered by task
+(Opus/xhigh for tenant isolation, cryptography and the identity state machine; Opus/high for the
+HTTP boundary, token lifecycle, second factors and doc-vs-code; Sonnet/high for the pgx adapter,
+concurrency, and idiom/supply-chain). Deterministic tooling was run centrally once.
+
+Every lens that produced a medium-or-worse finding was then handed to a **separate Opus refuter in
+its own isolated git worktree**, instructed to *disprove* the claim and told that reasoning alone is
+insufficient. A finding is **CONFIRMED** only if the refuter produced a reproducible failure — a
+failing assertion, a panic, a compile error, or verbatim command output. Otherwise it is
+**PLAUSIBLE** or **REFUTED**. The refuters also reported defects the finders had missed; those are
+marked *(refuter-found)* and carry the same evidence, but were not themselves independently
+re-refuted.
+
+Two finder claims were **refuted** and are documented in §6 rather than quietly dropped.
+
+### Deterministic baseline
+
+| Check | Core | `adapters/pgx` | `adapters/otel` |
 |---|---|---|---|
-| `gofmt -l` | clean | clean | clean |
-| `go build ./...` | ok | ok | ok |
+| `go build ./...` | clean | clean | clean |
 | `go vet ./...` | clean | clean | clean |
-| `go test ./...` | 1384 pass / 44 pkg | pass (`-short`) | pass |
-| `golangci-lint` (default) | 0 issues | — | — |
+| `go test ./...` | **1396 pass / 44 pkgs** | pass (`-short`) | pass |
+| `gofmt -l` | clean | **1 file dirty** (`tokens/store.go`) | clean |
+| `golangci-lint v2.12.2` | 0 issues | — | — |
+| `govulncheck v1.1.4` | 0 reachable | 0 reachable | not run in CI |
 
-No `.golangci.yml` exists in the repo, so the strict suite the skill assumes is not configured; a broad ad-hoc linter run surfaced ~91 core / 27 pgx / 4 otel low-severity items (mostly test files: `revive` exported-comment on mocks, `unparam` in helpers, `usestdlibvars`). `go fix` modernizers flagged hand-rolled loops replaceable with `slices` (e.g. `actor.go` `HasScope`). The three `nilerr` hits in `identity/service.go` were investigated and are **not bugs** — each is a deliberate enumeration-uniform return path.
+Two caveats on that green baseline, both findings in their own right:
 
----
-
-## 2. Confirmed findings (blocking)
-
-Ranked by severity. Each was reproduced-in-reasoning by the agent and verified against source by the reviewer.
-
-| # | Sev | Unit | Finding | Location |
-|---|---|---|---|---|
-| C1 | **HIGH** | oauth | Google OIDC id_token validation is impossible: sameHost issuer↔JWKS binding rejects Google's own jwks_uri, and the documented Google+WithOIDC setup always fails login | `oauth/providers/google.go:25` |
-| C2 | **MEDIUM** | tokens-core | actorFromClaims drops Actor.KeyID and mis-sets Actor.UserID for Service/PAT JWTs, violating the Actor contract | `tokens/middleware.go:326` |
-| C3 | **MEDIUM** | identity | Re-lockout after expiry never emits AccountLocked (brute-force audit blind spot) | `identity/memory/store.go:389` |
-| C4 | **MEDIUM** | sessions | WithNoMaxLifetime() then WithMaxLifetime(d) leaves the absolute-lifetime cap disabled, contradicting docs and silently dropping a security control | `sessions/service.go:250` |
-| C5 | **MEDIUM** | mfa-otp | IssueHandler synchronous svc.Issue creates an account-existence timing oracle it claims not to have | `otp/handlers.go:190` |
-| C6 | **MEDIUM** | keystore | Re-provision after RevokeTenantKeys is a silent no-op; documented recovery leaves tenant permanently keyless | `keystore/manager.go:119` |
-| C7 | **MEDIUM** | pgx | oauth GetProvider decrypts client_secret before the cache check, so a transient KEK failure defeats a warm cache and every cached OIDC login pays a KEK round-trip | `adapters/pgx/oauth/store.go:162` |
-| C8 | **LOW** | passkey | ErrAttestationRejected returns HTTP 500 instead of a 4xx client error | `passkey/handlers.go:344` |
-
-### C1 · [HIGH] Google OIDC id_token validation is impossible: sameHost issuer↔JWKS binding rejects Google's own jwks_uri, and the documented Google+WithOIDC setup always fails login
-
-- **Unit:** oauth  ·  **Location:** `oauth/providers/google.go:25`  ·  **Verified:** ✅ against source
-- **Failure path:** GoogleIssuer = "https://accounts.google.com" and GoogleJWKSURL = "https://www.googleapis.com/oauth2/v3/certs" live on DIFFERENT hosts. Repro exactly as documented in google.go:21-23: p := providers.Google(id, secret, oauth.WithOIDC(oauth.OIDCConfig{Issuer: providers.GoogleIssuer, JWKSURL: providers.GoogleJWKSURL})). Inside WithOIDC → newOIDCVerifier (oauth/oidc.go:107): jwksOverride="https://www.googleapis.com/..."; at oidc.go:125 !sameHost(jwksOverride, cfg.Issuer) is TRUE (sameHost at oidc_discovery.go:52-63 requires exact case-insensitive host equality; "www.googleapis.com" != "accounts.google.com"), so newOIDCVerifier returns ErrJWKSHostMismatch. WithOIDC (provider.go:85-100) records p.configErr and leaves p.oidc nil. At runtime Provider.Exchange (provider.go:215-217) returns configErr on the FIRST line, so CallbackHandler (handlers.go:224-228) always fails with 'exchange_failed'. The discovery fallback is equally broken: leaving JWKSURL empty makes discoverJWKSURL fetch accounts.google.com/.well-known/openid-configuration, get jwks_uri=www.googleapis.com/..., then fail the identical sameHost check at oidc_discovery.go:114 (ErrJWKSHostMismatch) inside verify(). Either way, Google id_token validation can never succeed.
-- **Impact:** OIDC id_token validation — the package's headline security feature — is completely unusable for Google, one of the most common IdPs, and for any spec-compliant issuer whose jwks_uri host differs from the issuer host (the OIDC spec permits this). Following the shipped documentation yields a provider on which every login attempt fails at the callback with 'exchange_failed'. Fails closed (not an auth bypass), so severity is high rather than critical, but the feature is broken and no test covers it.
-
-### C2 · [MEDIUM] actorFromClaims drops Actor.KeyID and mis-sets Actor.UserID for Service/PAT JWTs, violating the Actor contract
-
-- **Unit:** tokens-core  ·  **Location:** `tokens/middleware.go:326`  ·  **Verified:** ✅ against source
-- **Failure path:** An application uses the documented API-key-backed JWT flow: issue a token with Claims{Kind: egauth.Service, Subject: keyID, Scopes:...} (Claims.Kind's doc: 'set by the issuer when minting API-key-backed tokens (PAT or Service) ... used by actorFromClaims to propagate the classification'), the JWT carries Kind (jwt/issuer.go:435) but there is NO KeyID claim. A request with that Bearer token hits RequireAuth (the documented RequireMachine use). actorFromClaims returns egauth.Actor{UserID: claims.Subject, TenantID, Kind: Service, Scopes} — KeyID is left uuid.Nil and UserID is set to the KEY's own ID. This contradicts egauth.Actor's field docs ('KeyID Non-zero for PAT and Service actors'; 'for Service actors the subject is the key's own ID, which is stored in KeyID rather than [UserID]') and diverges from ActorFromAPIKey (actor.go:38-40) which for KeyTypeService sets KeyID=key.ID and leaves UserID zero. So the same Service principal yields KeyID=keyID,UserID=Nil via VerifyAPIKey but KeyID=Nil,UserID=keyID via the JWT middleware.
-- **Impact:** Broken/ambiguous machine-principal attribution: an app that audits or authorizes machine actions by actor.KeyID (as the Actor docs instruct) reads uuid.Nil on the middleware path, and an app that treats a non-zero actor.UserID as 'a human user' sees the key's UUID for a Service actor. IsMachine()/WithRequiredKind still work (Kind-based), so exploitability is limited to attribution/authorization confusion rather than direct escalation, but the two code paths produce contradictory Actor shapes for the same credential.
-
-### C3 · [MEDIUM] Re-lockout after expiry never emits AccountLocked (brute-force audit blind spot)
-
-- **Unit:** identity  ·  **Location:** `identity/memory/store.go:389`  ·  **Verified:** ✅ against source
-- **Failure path:** FailedAttempts is only zeroed on successful auth (service.go:589) or password update (memory/store.go:278) — never when a lock expires. Repro with WithLockout(threshold=2, short duration): fail twice -> IncrementFailedAttempts sets FailedAttempts=2, before=1, justLocked = 1<2 = true -> service.go:581 emits AccountLocked (once). Wait out the lock window so LockedUntil.After(now) is false (service.go:549). Fail once more: Authenticate proceeds to Compare, calls IncrementFailedAttempts with before=2, FailedAttempts=3, 3>=2 so LockedUntil is re-set (account is locked AGAIN), but justLocked = before(2) < threshold(2) = false. service.go:581 therefore does NOT emit AccountLocked, even though the account just transitioned unlocked->locked. Every lockout cycle after the first is silent.
-- **Impact:** A SIEM/alert that keys on the AccountLocked event sees only the very first lockout for an account. An attacker who paces guesses to one per lock-window keeps the account perpetually locked while generating zero further lock events, and a legitimate user's repeated lockouts are invisible to monitoring. This defeats the documented once-per-lock-crossing contract (store.go:135-142) for all cycles past the first because `before` is permanently >= threshold once the counter is never reset on expiry.
-
-### C4 · [MEDIUM] WithNoMaxLifetime() then WithMaxLifetime(d) leaves the absolute-lifetime cap disabled, contradicting docs and silently dropping a security control
-
-- **Unit:** sessions  ·  **Location:** `sessions/service.go:250`  ·  **Verified:** ✅ against source
-- **Failure path:** WithNoMaxLifetime (service.go:264-269) sets s.noMaxLifetime=true AND s.maxLifetime=0. WithMaxLifetime (service.go:250-257) only sets s.maxLifetime=d (when d>0); it never clears s.noMaxLifetime. absoluteDeadline (service.go:274-279) returns 'no cap' when `s.noMaxLifetime || s.maxLifetime<=0`. Repro: NewService(store, WithNoMaxLifetime(), WithMaxLifetime(1*time.Hour)) yields noMaxLifetime=true, maxLifetime=1h -> absoluteDeadline returns (zero,false) -> ValidateSession/clampExpiry never enforce a cap. A developer who disabled then re-enabled a cap (order No-before-Max) gets NO absolute cap: a stolen-but-kept-warm token can be Touched indefinitely and lives forever.
-- **Impact:** A configured absolute session-lifetime cap is silently ignored. The WithMaxLifetime doc (service.go:262-263) explicitly promises 'the last option wins', but that only holds for the Max-before-No order; the No-before-Max order leaves the secure control off. Security-relevant misconfiguration that fails open (no cap) with no error or warning.
-
-### C5 · [MEDIUM] IssueHandler synchronous svc.Issue creates an account-existence timing oracle it claims not to have
-
-- **Unit:** mfa-otp  ·  **Location:** `otp/handlers.go:190`  ·  **Verified:** ✅ against source
-- **Failure path:** IssueHandler resolves the subject, then only when ok==true calls svc.Issue synchronously on the response path (line 191) before responding; when ok==false it skips svc.Issue entirely and responds immediately (line 197). svc.Issue performs a store write (SaveOTP -> an INSERT/UPSERT round-trip on the documented pgx production backend, ~ms). The subjectResolver runs in both branches so its latency is common-mode; the ONLY differential is the Issue store write, which happens exclusively for a resolved (existing) subject. Concrete repro: attacker POSTs email A (maps to a real subject -> ok=true -> extra DB write) and email B (no subject -> ok=false -> no write); over many samples the A responses are measurably slower, revealing which emails have accounts. This defeats the guarantee stated verbatim in the doc comment (lines 161-166): 'ALWAYS responds uniformly ... so it leaks no account-existence signal.' The delivery was correctly detached to avoid a timing oracle, but the Issue store write was left on the response path.
-- **Impact:** Account/subject enumeration via response-latency measurement against the OTP issue endpoint, contradicting a documented security guarantee. Negligible on the in-memory store, but measurable on the recommended pgx backend where Issue is a network round-trip. Enables targeted follow-on attacks (credential stuffing, phishing) against confirmed-existing accounts.
-
-### C6 · [MEDIUM] Re-provision after RevokeTenantKeys is a silent no-op; documented recovery leaves tenant permanently keyless
-
-- **Unit:** keystore  ·  **Location:** `keystore/manager.go:119`  ·  **Verified:** ✅ against source
-- **Failure path:** RevokeTenantKeys -> memory Store.RevokeTenantKeys (memory/store.go:203) sets s.tenants[tenantID] = make(map...), i.e. the tenant record STAYS PRESENT with zero keys. The RevokeTenantKeys doc comment (manager.go:209) states 're-provision or renew to restore signing'. But ProvisionTenant (manager.go:115-121) gates idempotency on store.TenantExists, and memory TenantExists (store.go:75) returns true for the present empty map. Repro: mgr.ProvisionTenant(ctx,"t"); mgr.RevokeTenantKeys(ctx,"t"); mgr.ProvisionTenant(ctx,"t") -> returns nil with NO key minted and NO EventTenantProvisioned; then mgr.ActiveSigningKey(ctx,"t") -> ErrNoActiveKey forever. An operator who follows the documented 're-provision' recovery sees a success return yet the tenant can never issue tokens (auth outage). Only the undocumented-as-primary 'renew' half works.
-- **Impact:** A tenant is left permanently unable to sign JWTs after an emergency key revocation when the operator uses the documented ProvisionTenant recovery, because that call returns success while doing nothing. Availability/correctness outage masked by a false-success. Root cause: TenantExists conflates 'tenant record present' with 'tenant has an active key', and revoke does not clear the record. Fix: either base ProvisionTenant idempotency on the presence of an active key rather than TenantExists, make RevokeTenantKeys remove the tenant record, or correct the doc to state re-provision does not restore signing (renew does).
-
-### C7 · [MEDIUM] oauth GetProvider decrypts client_secret before the cache check, so a transient KEK failure defeats a warm cache and every cached OIDC login pays a KEK round-trip
-
-- **Unit:** pgx  ·  **Location:** `adapters/pgx/oauth/store.go:162`  ·  **Verified:** ✅ against source
-- **Failure path:** GetProvider fetches the row (QueryRow) then, at lines 162-173, base64-decodes and s.kek.Open()s the client_secret UNCONDITIONALLY, before the providerCache lookup at lines 177-182. On a cache HIT the freshly-decrypted clientSecret is discarded (line 180 returns cp.provider). Repro: (1) GetProvider(tenant,provider) builds and caches the provider; (2) a second GetProvider with the row unchanged reaches line 168 again — if s.kek.Open returns a transient error (KMS/network blip, common for a remote KEK), line 170 returns that error and the valid cached provider at line 178 is never reached, so OIDC login fails despite a warm cache. Even on success, every single OIDC login performs a KEK.Open (a network call for a KMS-backed KEK), which the cache was partly meant to avoid — TestGetProviderCachesBuiltProvider asserts 2 DB reads for 2 calls, confirming per-call work on the hot path.
-- **Impact:** OIDC logins for an already-cached provider become hard-dependent on per-request KEK availability and latency; a brief KEK outage takes down logins that a warm cache should have served, and every login incurs an avoidable decrypt. Fix: move the cache-hit check (compare updatedAt) ahead of the decode/decrypt, and only Open the secret on a cache miss/stale entry.
-
-### C8 · [LOW] ErrAttestationRejected returns HTTP 500 instead of a 4xx client error
-
-- **Unit:** passkey  ·  **Location:** `passkey/handlers.go:344`  ·  **Verified:** ✅ against source
-- **Failure path:** Configure a Service with Attestation.ProhibitedAAGUIDs (or a PermittedAAGUIDs allow-list). A client registers with an authenticator whose AAGUID is on the deny-list / off the allow-list. FinishRegistrationHandler calls svc.FinishRegistration, which maps the go-webauthn policy_restriction error to ErrAttestationRejected (service.go:215-218) and returns it. cfg.fail(w, err) runs the switch, but ErrAttestationRejected is not one of the cases (ErrSessionInvalid/ErrNoCredentials/ErrCredentialCloned/ErrCredentialNotFound/ErrCredentialExists/*protocol.Error), so it falls through to the default branch and emits http.Error(w, "internal_error", 500). A legitimate client whose authenticator is refused by policy therefore receives a 500 server error rather than a 4xx client/policy rejection, mislabeling a client-side condition as a server fault and generating false operator alerts.
-- **Impact:** Attestation-policy rejections (a normal, client-driven outcome) are surfaced as HTTP 500 internal_error instead of a 4xx, causing incorrect client behavior and spurious 5xx alerting. No data exposure. Not covered by any handler-level test (attestation_test.go only asserts the service-level error).
+- **There is no `.golangci.yml`.** `make lint` and the CI lint job therefore run only golangci-lint's
+  five *default* linters (`errcheck`, `govet`, `ineffassign`, `staticcheck`, `unused`). The strict
+  suite the project's own docs assume (`revive`, `errorlint`, `wrapcheck`, `err113`, `errname`,
+  `godot`, `misspell`, `dupword`, `perfsprint`, `intrange`) never runs. A `--default=all` run
+  surfaces 3000+ additional diagnostics.
+- **A green test suite is not evidence of these guarantees.** Every one of the nine HIGH findings
+  below reproduces on a tree where all 1396 tests pass.
 
 ---
 
-## 3. Risks (advisory — reasoned, not reproduced)
+## 1. What to fix before you put this in front of paying tenants
 
-### OAuth / OIDC (`oauth/`, `oauth/providers/`)
+Ordered by what I would actually block a launch on.
 
-- **requestScheme trusts X-Forwarded-Proto unconditionally when deriving redirect_uri** — `oauth/handlers.go:317`  
-  When WithRedirectURL is not set, resolveRedirectURL (handlers.go:306-311) builds redirect_uri from requestScheme(r)+"://"+r.Host+r.URL.Path, and requestScheme blindly honours a client-supplied X-Forwarded-Proto header (and r.Host). Behind a misconfigured/absent trusted proxy an attacker could influence the scheme/host used in the authorization request and the token-exchange redirect_uri. Real impact is bounded because the provider enforces the registered redirect_uri, and the docs say to set WithRedirectURL in production — hence a risk, not confirmed. Consider only trusting X-Forwarded-Proto behind an explicit proxy opt-in.
-- **stringifyID uses float64 for numeric sub/id — precision loss above 2^53 can collide or shift identities** — `oauth/providers/gitlab.go:75`  
-  stringifyID (also used by oidcUserInfoFetcher in okta.go for Okta/Auth0/Keycloak/Cognito/generic-OIDC userinfo) decodes a numeric JSON sub as float64 then strconv.FormatInt(int64(id),10). JSON numbers above 2^53 lose integer precision, so two distinct large numeric subjects could map to the same ProviderID (identity collision → account takeover) or a subject's ProviderID could change. Most listed IdPs use string subs so exposure is limited; still, decoding into json.Number (or json.RawMessage) and rejecting non-integers would be safer.
-
-### Tokens — core (`tokens/`: handlers, middleware, cookies)
-
-- **Claims.Groups and Claims.Roles are unreachable on the RequireAuth/WithGate path** — `tokens/middleware.go:183`  
-  The JWT carries Groups and Roles (jwt/issuer.go:437-438) and VerifyAccessTokenForTenant returns them in Claims, but RequireAuth invokes next(w, r, actor, claims.Custom) and actorFromClaims copies only Scopes onto the Actor. Neither the AuthenticatedHandlerFunc nor WithGate's predicate (which receives only (egauth.Actor, C)) can observe Claims.Groups/Roles; role/group-based authorization is impossible unless the app duplicates them into the custom-claims type C. Only ContextMiddleware+ClaimsFromContext exposes the full Claims. This is a silent capability gap for the primary middleware surface rather than a memory-safety bug.
-- **Auto-refresh consumes a rotation and rewrites cookies before a post-refresh gate rejection** — `tokens/middleware.go:274`  
-  In serveAuthenticated's auto-refresh branch the new pair is minted and SetAccess/SetRefresh are written, then stepUpSatisfied/scopesSatisfied/passwordChangeBlocked/gate are evaluated and may return 403. Each request to a gated-but-refreshable route with an expired access token therefore burns one refresh rotation even though the request is rejected. Behaviorally acceptable (the client keeps a valid fresh cookie and AuthTime is preserved so step-up is still enforced), but a high-frequency gated endpoint drives continuous rotation churn; worth confirming this is intended.
-
-### Identity (`identity/`)
-
-- **Timing enumeration oracle on unauthenticated Request* endpoints** — `identity/service.go:623`  
-  RequestPasswordReset (and RequestMagicLink:1036, RequestPasswordResetViaRecovery:1264) do measurably more synchronous work for an existing account (FindUserByEmail hit + FindIdentitiesByUserID + CreateVerificationToken, which runs crypto/rand + SHA-256 + a store insert) than for an unknown account (FindUserByEmail miss -> early return at :627). Unlike Authenticate, there is NO decoy work to equalize this. dispatchDelivery correctly moves the Mailer latency off-path (handlers.go:457 context.WithoutCancel), and the comment at handlers.go:440 claims that removes the side channel, but it does not address the token-minting asymmetry that stays in the request path. For a security library that goes to lengths (decoyHash) to equalize Authenticate, this is an inconsistent gap. Not marked confirmed because a single extra DB round-trip + hash is likely below network-jitter noise for a remote attacker.
-- **UpdateIdentityPassword / SetTemporaryPassword lack a live-user gate on the memory store** — `identity/memory/store.go:270`  
-  UpdateIdentityPassword matches the password identity purely by UserID+tenant+provider and never checks the owning user's DeletedAt. DeleteUser (store.go:166) soft-deletes the user and anonymizes the password ProviderID but keeps the identity row and its PasswordHash. So SetTemporaryPassword (service.go:1369, no liveness gate) and ResetPassword succeed against a soft-deleted account's identity and re-arm a usable hash. Not exploitable via login on this store (the user email is anonymized to a random UUID, so FindUserByEmail can't reach it), but it diverges from every other write path which gates on DeletedAt, and may diverge from the pgx backend's `WHERE deleted_at IS NULL` join — a store-contract inconsistency.
-- **ConfirmRecoveryEmail does not re-check independence from the primary email at confirm time** — `identity/service.go:1215`  
-  RequestRecoveryEmail rejects a recovery email equal to the primary (ErrRecoveryEmailIsPrimary, :1201), but ConfirmRecoveryEmail sets it unconditionally. If the primary email is changed to the pending recovery address (via ConfirmEmailChange) between request and confirm, the recovery channel is set equal to the new primary, defeating the documented independence invariant. Low severity: exercising this requires the same actor to prove control of the same address twice, so it is a self-inflicted edge case, not a takeover vector.
-
-### Sessions (`sessions/`)
-
-- **Rotate, BindUser and CreateSession emit no audit event; only logout is audited** — `sessions/service.go:164`  
-  WithEventSink is wired but emit() is only called from RevokeSession (service.go:226) and RevokeAllForUser (service.go:298). Rotate (privilege-change / step-up, line 164) and BindUser (anonymous->authenticated login, line 190) are exactly the security-significant transitions an audit trail wants, and CreateSession (line 99) is session establishment. None emit. A SIEM fed by the event.Sink sees logouts but never logins, rotations, or privilege upgrades from this module. Likely a deliberate scope decision (identity may emit login events) but worth confirming the audit story is complete.
-- **RevokeSession is not idempotent while RevokeAllForUser is** — `sessions/service.go:217`  
-  RevokeSession calls FindSessionByHash (line 217) and returns its error directly; an already-expired or unknown token yields ErrSessionNotFound. RevokeAllForUser is idempotent (returns nil for a user with no sessions). A logout handler that receives a double-submit, or logs out a token that just crossed idle/absolute expiry, gets a spurious error and cannot easily distinguish 'already logged out' from a real failure. Also, no Logout event is emitted on that path since the function returns before emit().
-- **Memory store expiry/eviction uses wall-clock time.Now() instead of the service's injected clock** — `sessions/memory/store.go:39`  
-  FindSessionByHash (store.go:39), DeleteExpired (store.go:200) and evictOne (store.go:238) all call time.Now(). The service ValidateSession uses s.now() (WithClock). In production both are wall clock so behaviour agrees, but the two clocks are independent: any deployment that ever set a non-wall clock, or a test that freezes the service clock, gets divergent expiry decisions (the store may evict a row the service still considers live, or retain one the service rejects). The Store contract documents 'expired => not found' but pins it to real time, not the caller's clock.
-- **BoundedStore.evictOne can evict a live, in-use session to admit a new one** — `sessions/memory/store.go:249`  
-  When the cap is reached and no expired session exists, evictOne (store.go:249-266) deletes the soonest-expiring LIVE session. Under sustained load at the cap this silently logs out active users (their next request 401s) to make room for new sessions — an availability/logout footgun. Documented in NewBoundedStore, but a caller sizing the cap too small gets surprising forced logouts rather than a CreateSession error.
-- **Module never sets the session cookie, so Secure/HttpOnly/SameSite are entirely the consumer's responsibility** — `sessions/middleware.go:35`  
-  RequireSession only READS the cookie; there is no Set-Cookie helper. The __Host- 'secure by default' guarantees only apply if the consumer actually writes the cookie with the __Host- name plus Secure/HttpOnly/SameSite. A consumer that sets a plain, non-HttpOnly cookie gets none of the advertised hardening, and nothing in this module enforces it. Doc-only mitigation; consider shipping a cookie-writer helper.
-
-### MFA & OTP (`mfa/`, `otp/`)
-
-- **A valid recovery code is rejected while the TOTP factor is locked out** — `mfa/service.go:309`  
-  VerifyRecoveryCode gates on the shared TOTP attempt budget: when an enrollment exists it calls reserveAttempt/overLimit BEFORE ConsumeRecoveryCode (lines 309-320). Once FailedAttempts >= maxAttempts (IncrementTOTPAttempts returns count+1 without decaying, memory/store.go:97-100), overLimit is true and the method returns ErrTooManyAttempts before ever checking the recovery code. So an attacker (or the user) who burns the TOTP attempt budget with wrong codes also locks out the recovery-code escape hatch for the whole LockoutDuration (default 15m). Recovery codes are the intended fallback when the authenticator is unavailable; coupling them to the TOTP lockout lets a party who knows only the password (interim/step-up session) deny the victim BOTH factors. It is a deliberate, commented design choice (brute-force parity) and the 80-bit codes are not realistically guessable, so it is a DoS tradeoff rather than a break — but it deserves an explicit product decision.
-- **Concurrent verification floods amplify AccountBlocked events** — `otp/service.go:135`  
-  Under a burst of N concurrent wrong-code verifies, IncrementOTPAttempts hands out counts 1..N; every caller with n > maxAttempts (otp/service.go:135-139) and the caller at n == maxAttempts (line 142-146) each emit an AccountBlocked event, so one burst against a single code emits up to N duplicate events. mfa has the same shape (service.go:270-273 and 317-320 emit on every over-limit reserve). A sink that pages/writes per event can be amplified by an attacker who can drive concurrency, and duplicate events pollute audit logs. Not a correctness bug, but worth de-duping (emit once at the transition into the blocked state).
-- **Concurrent double-ConfirmTOTP hands one caller unstored recovery codes** — `mfa/service.go:245`  
-  Two concurrent ConfirmTOTP calls with the same valid code both pass validateTOTP, both SaveTOTP, then both call mintRecoveryCodes -> ReplaceRecoveryCodes. The second Replace overwrites the first, so the first caller receives a recovery-code set that is never persisted and will not verify. Requires a self-inflicted concurrent confirm on one account, so low impact, but the returned codes silently do not work.
-
-### Keystore (`keystore/`)
-
-- **No zeroization of opened plaintext key material** — `keystore/resolve.go:73`  
-  openKey replaces key.Secret with the KEK-decrypted plaintext (HMAC secret or PKCS#8 DER private key) and hands it out to callers (ActiveSigningKey/VerificationKeys/Keyset/JWKS), which pass it into jwt signers. Nothing ever wipes these buffers; they live as GC-managed heap for the lifetime of the caller's references and may be swapped to disk or appear in a core dump. The KEK/store docs promise material is sealed 'at rest', which holds, but the runtime plaintext is retained without a subtle/mem-wipe. This is likely an accepted tradeoff (per the project's documented secret-handling model / SECURITY.md) since Go makes reliable zeroization hard, but for a security library it is worth an explicit decision/comment rather than silence.
-- **Nondeterministic active-key selection on CreatedAt ties** — `keystore/memory/store.go:112`  
-  ActiveSigningKey picks the active key with the latest CreatedAt using k.CreatedAt.After(best.CreatedAt); on an exact tie the winner is whichever the (randomized) map iteration reaches first. Not reachable through the normal Manager flow (RenewSigningKey retires the prior active key before adding the new one, so at most one active key exists), but a fixed test clock plus a direct Store.PutSigningKey of two non-retired keys with equal CreatedAt would yield a nondeterministic active key. Defensive tie-break (e.g. by KeyID) would make it total.
-- **DeleteTenant emits EventTenantDeleted for a tenant that never existed** — `keystore/manager.go:233`  
-  DeleteTenant always emits EventTenantDeleted after store.DeleteTenant, but memory Store.DeleteTenant (store.go:208-213) is a silent no-op for an absent tenant (delete on missing map key). So DeleteTenant on a never-provisioned tenant, and the second call in an idempotent double-delete, both emit a 'tenant.deleted' security event with nothing deleted, polluting the audit trail. Consider gating emission on whether a record was actually removed.
-
-### Adapter — Postgres (`adapters/pgx/`)
-
-- **keystore CreateTenant loses the ErrTenantExists guarantee on the non-transactional fallback path** — `adapters/pgx/keystore/store.go:58`  
-  When s.db does not satisfy txBeginner (lines 58-61) CreateTenant runs createTenantChecked with no advisory lock and no transaction, reintroducing the exact TOCTOU the advisory-lock path fixes: two concurrent CreateTenant for the same tenant both see TenantExists==false, then both PutSigningKey (INSERT ... ON CONFLICT DO UPDATE) succeed, so neither returns keystore.ErrTenantExists and the 'first writer wins' contract is silently violated. Not reproducible in normal deployments because *pgxpool.Pool and pgx.Tx both implement Begin, so the locked path is always taken — but any custom DBQuerier wrapper without Begin degrades unsafely and silently.
-- **mfa SaveTOTP ON CONFLICT overwrites last_used_step, which can reset TOTP replay protection** — `adapters/pgx/mfa/store.go:71`  
-  The upsert's DO UPDATE sets last_used_step = EXCLUDED.last_used_step (line 74). MarkTOTPUsed advances this counter to block step replay; if any caller re-invokes SaveTOTP for an already-enrolled user carrying a stale/zero LastUsedStep (e.g. to update metadata), the step counter is rolled back and a previously-consumed TOTP code becomes replayable within its window. Safe only as long as the service uses SaveTOTP exclusively for enroll/replace (fresh secret) and never for in-place metadata edits — a fragile invariant not enforced by the store.
-- **IncrementFailedAttempts re-extends locked_until after expiry and never re-fires justLocked** — `adapters/pgx/identity/store.go:471`  
-  failed_attempts is never zeroed when a lock expires (only ResetFailedAttempts on success clears it). After locked_until passes, the service (service.go:549) lets the next failed attempt through to IncrementFailedAttempts; with failed_attempts already >= threshold, the CASE at lines 471-474 sets locked_until = now()+duration again on the FIRST wrong password, re-locking for the full duration. Meanwhile the RETURNING predicate (line 477) is true only on the exact crossing (post==threshold), so justLocked is false on every re-lock. If callers key a 'your account was locked' notification off justLocked, re-locks after expiry are silent. Likely intended sliding-window behavior, but the silent re-lock/no-event asymmetry is worth confirming against the memory store.
-- **mfa transactional helpers silently lose atomicity/serialization on the non-beginner fallback** — `adapters/pgx/mfa/store.go:185`  
-  IncrementTOTPAttempts (185-187), ReplaceRecoveryCodes (229-231) and ConsumeRecoveryCode (271-273) each fall back to running their multi-statement logic directly on s.db when it lacks Begin. In that path IncrementTOTPAttempts' SELECT ... FOR UPDATE locks and immediately releases per autocommit statement (no serialization → lost-update races on the counter), and ReplaceRecoveryCodes' DELETE+INSERTs auto-commit individually (a mid-loop failure wipes the code set — the very hazard the transaction is documented to prevent). Not reachable with *pgxpool.Pool/pgx.Tx (both have Begin), so only a custom handle degrades.
-
-### Passkey / WebAuthn (`passkey/`)
-
-- **NewService does not reject an empty RPID** — `passkey/service.go:123`  
-  NewService validates the store, cookie key, and challenge store, but never checks RPID. go-webauthn's Config.validate() (types.go:141) only validates RPID when it is non-empty, so RPID="" with valid RPOrigins passes webauthn.New. Every subsequent ceremony then compares the authenticator's rpIdHash against SHA256(""), which never matches a real domain, so all logins/registrations fail. This fails closed (no auth bypass) but is a silent misconfiguration a fail-fast constructor should catch, matching the package's stated secure-by-default/fail-fast contract.
-- **A verified login can be turned into a 404 if the stored credential cannot be re-found** — `passkey/service.go:265`  
-  After go-webauthn verifies the assertion, FinishLogin/FinishDiscoverableLogin call findStoredCredential then applyLoginMetadata. If findStoredCredential returns nil (existing==nil) — e.g. the denormalized Credential.ID diverges from the ID inside the Data JSON that go-webauthn returned, or a concurrent delete — applyLoginMetadata still calls UpdateCredential, which returns ErrCredentialNotFound, so a cryptographically successful login is reported as 404 credential_not_found. Not reachable in the normal path (IDs are written together at registration), but there is no guard and the mismatch would convert a valid auth into a confusing client error.
-- **Orphaned challenge entry when storeSession fails after recordChallenge** — `passkey/handlers.go:141`  
-  In all Begin handlers recordChallenge (Put) runs before storeSession. If storeSession fails (cookieKeyFor returns a 500 because a per-tenant WithTenantCookieKeys resolver errors or yields a short key), the challenge is already recorded but no usable cookie is issued, leaving an entry that can never be consumed. It is pruned lazily at its TTL and cannot be exploited (no cookie means no Finish), so this is only a minor resource leak, not a security hole.
-
-### Tokens — JWT (`tokens/jwt/`, `basic`, `memory`)
-
-- **Rotate consumes the refresh token before the replacement is durably issued (non-atomic)** — `tokens/jwt/issuer.go:794`  
-  ConsumeRefreshToken (line 794) marks the presented token single-use, then issuePair (line 830 -> SaveRefreshToken line 481, or the signing step line 456) mints and persists the successor. If that successor step fails transiently (store error / signing error), the old token is already consumed but no replacement exists. The client's retry with the same (now consumed) token yields ErrRefreshConcurrent within the 10s grace, and AFTER the grace window it is treated as theft and RevokeFamily logs the user out of every session in the family. A single transient DB blip during rotation can therefore escalate to a full family logout ~10s later. Rotation is not transactional across consume+save, so the fix would be to order issuance-before-consume or make the pair atomic in the store.
-- **CachingKeyStore grows without bound (no eviction cap / LRU)** — `tokens/jwt/keycache.go:128`  
-  entries are only removed by lookup-when-expired (line 109) or explicit Invalidate/InvalidateAll. A tenant cached once and never resolved again keeps its (stale-past-TTL) cachedKeyset in the map forever. In a deployment with a large, churning tenant population this is an unbounded memory footprint holding key material; there is no max-size or periodic sweep. Consider a bounded cache or a background reaper.
-- **Config doc claims a static-keyset fallback for unknown tenants that the Service does not implement** — `tokens/jwt/issuer.go:104`  
-  Config.KeyStore's doc (lines 103-108) states 'The static keyset still serves the single-tenant partition ("") and is the fallback when a tenant is unknown to the KeyStore.' But when keyStore != nil, resolveSigningKey (keystore.go:28) always delegates to keyStore.ActiveSigningKey (including tenant "") and tenantKeyFunc (keystore.go:45) always uses keyStore.VerificationKeys — the static s.active/s.verifySigners are never consulted for signing/verifying, only for PublicJWKS. The behavior fails closed (unknown tenant -> KeyStore error -> issue fails / token rejected) so it is not a security hole, but an operator relying on the documented fallback will be surprised, and the required-but-unused static SecretKey is a usability wart.
-- **Reuse-grace window is measured with wall-clock time.Since, bypassing the injected Clock** — `tokens/jwt/issuer.go:755`  
-  Every other time comparison in the Service uses the injected s.now (exp/nbf via WithTimeFunc, refresh expiry line 714/772, API-key expiry line 970), but the reuse-grace decision uses time.Since(*rt.ConsumedAt) (real wall clock). This is self-consistent for the memory store (which stamps ConsumedAt with time.Now().UTC()), but for a store whose ConsumedAt comes from a different clock (e.g. a DB server skewed from the app, or an app running a deliberately skewed Config.Clock), the grace window is computed across two different time sources and can misclassify benign concurrency as theft (family revocation) or vice-versa.
-
-### Passwords (`passwords/`: argon2, breach, policy)
-
-- **DefaultPolicy performs no breach/denylist screening** — `passwords/policy/default.go:35`  
-  DefaultPolicy enforces only length + character-class composition. A weak-but-compliant secret like "Password1!" or "Qwerty123!" passes Verify. An operator who wires DefaultPolicy (the older/complexity-style policy) into identity.NewService gets zero compromised-credential protection, unlike PassphrasePolicy which supports a denylist and BreachChecker. This is intentional (two policies are offered) and documented, but it is a real deployment foot-gun: complexity rules are known to be weak, and nothing in DefaultPolicy nudges the operator toward breach screening.
-- **offline WithThreshold silently ignored for bare-hash lines** — `passwords/breach/offline/offline.go:67`  
-  LoadHashes only applies the count threshold when a line contains ":"; a bare 40-char hash line is always loaded as breached (documented at WithThreshold, offline.go:38). If an operator feeds a mixed corpus and sets WithThreshold(N) expecting all sub-N entries to be dropped, any bare-hash rows are still treated as breached regardless of N. Benign for a pure HIBP-count dump, but a mismatch between operator intent and behavior for custom blocklists.
-- **DefaultPolicy MaxLength not coordinated with hasher MaxPasswordLength** — `passwords/policy/default.go:43`  
-  A custom DefaultPolicy with MaxLength=0 (no max) or a large value accepts a multi-thousand-rune password that then fails at hash time with ErrPasswordTooLong (hasher caps at 1024 bytes). PassphrasePolicy's default (256 runes = at most 1024 bytes) is coincidentally exactly aligned with MaxPasswordLength, but DefaultPolicy has no such coordination, so a registration can pass policy and fail hashing. Not a security hole (the hasher guards the DoS), but produces a confusing late error rather than a clean policy rejection.
-
-### Facade & internal (`actor.go`, `doc.go`, `internal/`)
-
-- **OriginAllowed permissive default is a footgun and is dead code in production** — `internal/httputil/httputil.go:60`  
-  OriginAllowed returns true unconditionally when trustedOrigins is empty (line 61-63). No production caller uses it: identity/handlers.go:500 and tokens/handlers.go re-implement a strict copy precisely BECAUSE OriginAllowed's empty-allowlist default is permissive (see the explicit comment at identity/handlers.go:499). The function is referenced only by its own test. A future maintainer who reaches for the shared helper named OriginAllowed for CSRF protection, and constructs it with an empty/nil allowlist (e.g. before config is populated), gets accept-all with no compile-time or runtime signal. Either delete it or invert the default to fail-closed. Not confirmed because there is no current call path that misbehaves.
-- **doctest symbolExists can report a nonexistent symbol as present (false green)** — `internal/doctest/main.go:245`  
-  symbolExists keys off substrings in `go doc` output and returns true whenever output is non-empty and none of the known error phrases match (line 249-258). If `go doc importPath symbol` fails for a reason whose message differs from the hard-coded phrases (a future Go wording change, a toolchain/module-download error printed to stderr and captured by CombinedOutput), the non-empty error text is treated as a successful resolution, so genuine doc drift passes CI silently — the exact failure this tool exists to catch. Low impact (CI-only guard tool), not reproduced against the current toolchain.
-- **doctest silently skips files that fail to parse** — `internal/doctest/main.go:202`  
-  goPackageDocRefs returns nil on any ParseFile error (line 202-204, the nilerr the brief flagged). A .go file whose package clause/doc comment cannot be parsed is dropped from the drift scan with no diagnostic, so drift in that file's package doc goes unnoticed. The behavior is deliberate (comment says so) and PackageClauseOnly rarely errors, so this is a robustness risk, not a confirmed miss; consider emitting a warning under -v.
-
-### Supporting (`event`, `ratelimit`, `janitor`, `health`, `webapp`, `examples`, `adapters/otel`)
-
-- **Janitor silently swallows a panicking cleanup fn, re-introducing the memory-leak DoS the package exists to prevent** — `janitor/janitor.go:104`  
-  The tick loop wraps fn() in `defer func(){ _ = recover() }()`, discarding the recovered value with no log — unlike event.safeEmit (event.go:119-125) which logs. If a caller's cleanup fn panics on every tick (e.g. a store bug or a nil map deref inside DeleteExpired), eviction never runs, the in-memory maps grow without bound, and there is zero signal that the janitor is broken. The package doc (janitor.go:14-16) explicitly frames unbounded growth as 'a trivial denial-of-service vector', so a silently-dead janitor recreates exactly that with no observability. Not CONFIRMED because it requires a caller-supplied fn that panics; recommend logging the recovered value via slog and documenting the recover in Start's doc.
-- **webapp accepts TrustedOrigins together with InsecureNoOriginCheck and silently runs insecure** — `webapp/webapp.go:169`  
-  The build guard (line 122) only rejects EMPTY TrustedOrigins without the insecure opt-in. If a consumer sets both TrustedOrigins (lines 169-172 wire WithTrustedOrigins) AND InsecureNoOriginCheck=true (lines 173-178 wire WithInsecureNoOriginCheck last), the origin allowlist they provided is silently overridden and every origin is accepted. A user who supplied origins reasonably expects them enforced; the combination should arguably error at build time rather than silently disabling CSRF. Not CONFIRMED as a vuln because InsecureNoOriginCheck is a documented explicit opt-out, but it is a real footgun with no diagnostic.
+1. **Enforce MFA on every login path, or document loudly that it isn't.** `WithMFAGate` currently
+   guards exactly one handler. (§2.A)
+2. **Make the shipped `webapp` preset re-check account status**, or stop shipping a `ClaimsProvider`
+   that can't. Right now `DisableUser` does not end access. (§2.B)
+3. **Fail closed on an unresolved tenant** in the identity/oauth/otp/tokens handler families, the
+   way `sessions` and `tokens` middleware already do. (§2.C)
+4. **Fix the `__Host-` cookie panic** — validate `Cookies` at construction instead of panicking on
+   the request path, including the read path. One documented config line takes down every protected
+   route. (§2.E)
+5. **Fix `WithLockout(negative, …)`** — it disables brute-force lockout while both the godoc and
+   `SECURITY.md` promise the opposite. (§2.E)
+6. **Give the identity Store a per-user verification-token purge seam** so a password reset can
+   actually end an account takeover. There is currently no consumer-side mitigation. (§2.B)
+7. **Add an advisory lock to the pgx migration runner** before your first rolling deploy. (§3)
+8. **Add the `(tenant_id, user_id)` index on `identities`** before your first thousand tenants. (§3)
+9. **Wire `adapters/pgx/keystore` into `keystore/keystoretest`.** It currently *fails* the core
+   conformance suite, and `RevokeTenantKeys` is silently reversible on Postgres. (§2.D)
+10. **Do not use `passkey` in a multi-pod deployment yet** — the only shipped `ChallengeStore` is
+    per-process, and `SECURITY.md` names a `passkey/pgx` package that does not exist. (§3)
 
 ---
 
-## 4. Nits (advisory — style, comments, typos, modern Go, coverage)
+## 2. Confirmed HIGH findings
 
-### OAuth / OIDC (`oauth/`, `oauth/providers/`)
+### A. MFA is not an enforced control — it is advisory
 
-- `oauth/oidc.go:195` **[error-handling]** fmt.Errorf("%w: %v", ErrIDTokenInvalid, err) wraps the sentinel via %w but flattens the underlying jwt error with %v, so it is not unwrappable and mixes styles. House style is errors.Join(ErrIDTokenInvalid, err).
-  - *Fix:* return nil, errors.Join(ErrIDTokenInvalid, err)
-- `oauth/oidc.go:328` **[error-handling]** Same %w+%v pattern (also :333, :341, :413, :492, :517): underlying error flattened to %v, non-unwrappable, inconsistent with the errors.Join house style.
-  - *Fix:* errors.Join(errors.New("building JWKS request"), err) (and analogously for the others)
-- `oauth/providers/oidc.go:143` **[modern-go]** fmt.Errorf with a constant format string and no arguments (perfsprint) — should be errors.New. Same at oidc.go:141 for the issuer-match message.
-  - *Fix:* return nil, errors.New("oidc discovery: document missing authorization_endpoint or token_endpoint")
-- `oauth/provider.go:241` **[error-handling]** Exchange/GetJSON use fmt.Errorf("%w: %v", ErrExchangeFailed/ErrUserInfoFailed, err) (also :251, :284, :292): underlying transport/decode error flattened to %v. Prefer errors.Join to match house style and keep the cause unwrappable.
-  - *Fix:* errors.Join(ErrExchangeFailed, err)
-- `oauth/oidc.go:274` **[comment]** The jwksCache doc comment's first two lines (274-275) are duplicated verbatim at 276-277 (dupword-style duplication).
-  - *Fix:* Delete the duplicated lines 274-275, keeping the single doc block starting at 276.
-- `oauth/provider.go:123` **[comment]** Stale/misleading doc: New's comment says an invalid endpoint configErr is 'surfaced eagerly by AuthCodeURL/Exchange', and WithOIDC's comment (provider.go:76-84) similarly implies AuthCodeURL surfaces it — but AuthCodeURL (provider.go:160-183) never inspects p.configErr; only Exchange (provider.go:215) does. A misconfigured provider still builds a (malformed) auth URL and redirects; the error only surfaces at Exchange.
-  - *Fix:* Either make AuthCodeURL return/emit configErr, or correct the comments to say the deferred error is surfaced by Exchange only.
-- `oauth/oidc.go:238` **[dead-code]** audienceValues has a case []string that jwt.MapClaims never produces (JSON arrays decode to []any), so it is unreachable for the real call site at oidc.go:210. Harmless but dead.
-  - *Fix:* Drop the []string case, or add a comment noting it exists only for direct callers.
-- `oauth/providers/oidc_providers_test.go:80` **[test-coverage]** No test constructs Google (or any issuer whose jwks_uri host differs from the issuer host) with oauth.WithOIDC and asserts verification succeeds. TestOIDCConfig_ExplicitJWKSHostMatchAccepted only covers same-host; Cognito's test builds JWKS as issuer+suffix (same host). This gap is exactly why the confirmed Google breakage ships unnoticed.
-  - *Fix:* Add a test that builds a provider with a cross-host jwks_uri (mirroring Google's topology) through WithOIDC and asserts a valid id_token verifies (which currently fails), pinning the intended cross-host behaviour.
-- `oauth/oidc.go:57` **[comment]** OIDCConfig doc says Exchange 'validates ... plus the iss / aud / exp / iat and nonce claims' but the verifier also relies on jwt defaults for nbf and enforces azp (OIDC 3.1.3.7) — the doc omits azp/nbf. Minor accuracy gap on an exported type.
-  - *Fix:* Mention azp (authorized-party) validation in the OIDCConfig doc comment.
+Four confirmed defects. A consumer who wires `identity.WithMFAGate(mfaSvc)` exactly as
+`SECURITY.md:170-177` prescribes does **not** get an enforced second factor. This is the single
+most consequential cluster in the review: it makes the MFA feature approximately decorative against
+a stolen password.
 
-### Tokens — core (`tokens/`: handlers, middleware, cookies)
+#### A1 · [HIGH] `MagicLinkLoginHandler` and the OAuth callback ignore the MFA gate entirely
 
-- `tokens/middleware.go:470` **[comment]** WithGate's doc says the predicate 'runs after all built-in gates (kind, scopes, AMR, auth-age, password-change)', but kindSatisfied is enforced in RequireAuth/ContextMiddleware's onAuth callback (middleware.go:179, context.go:62) AFTER cfg.gate runs inside serveAuthenticated (middleware.go:234/288). So the app gate actually runs before the kind gate, and runs even for principals the kind gate will reject.
-  - *Fix:* Correct the doc to list kind as running after the app gate, or move the kindSatisfied check into serveAuthenticated ahead of cfg.gate so the stated ordering holds.
-- `tokens/middleware.go:312` **[error-handling]** extractAccessToken does strings.Split(authHeader, " ") and requires len(parts)==2, so a header with extra internal whitespace like 'Bearer  <token>' (two spaces) or trailing space is silently treated as no token.
-  - *Fix:* Use strings.Fields(authHeader) (len==2) or strings.SplitN with a trimmed token to tolerate benign whitespace.
-- `tokens/cookies.go:175` **[edge-case]** SetRefresh persistent branch computes maxAge := max(int(time.Until(expiresAt).Seconds()), 1); when expiresAt is already in the past this emits a 1-second PERSISTENT cookie (with Expires in the past) rather than declining persistence, which is a confusing artifact for an expired token.
-  - *Fix:* If time.Until(expiresAt) <= 0, fall back to writing a session cookie (skip MaxAge/Expires) instead of clamping to 1s.
-- `tokens/context.go:119` **[lint]** dupword lint fires on the repeated 'string' tokens in the passkey example signature '(uuid.UUID, string, string, string, bool)' embedded in the doc comment; it is a false positive from a code sample, not prose.
-  - *Fix:* Ignore via linter config, or reword the example to avoid three consecutive identical types (e.g. add a short //nolint or annotate the params).
-- `tokens/redact.go:42` **[consistency]** APIKey.String()/LogValue() render Hash (the at-rest lookup key / stored credential) in cleartext logs. It is a deliberate documented choice ('prefix and hash are not secret'), but the refresh-token hash is the exact value stored server-side for lookup, so logs become sufficient to correlate/enumerate stored records.
-  - *Fix:* Consider truncating the hash (e.g. first 8 hex chars) in log/string output, or document explicitly in SECURITY.md that full hashes may appear in logs; low priority.
+`identity/handlers.go:753` · `oauth/handlers.go:255` · category `auth-bypass`
 
-### Identity (`identity/`)
+`LoginHandler` has an `if cfg.mfaGate != nil { … IsEnrolled … }` branch at
+`identity/handlers.go:345-359`. `MagicLinkLoginHandler` (`identity/handlers.go:718-758`) has **no
+such block** — it runs `svc.LoginWithMagicLink`, then `PasswordChangeRequired`, then goes straight
+to `issuePairAndSetCookies` at line 753. The OAuth callback has the same gap, and the `oauth`
+package exposes no MFA-gate option at all.
 
-- `identity/service.go:933` **[correctness]** VerifyEmail uses `time.Now()` directly for EmailVerifiedAt instead of the injected `s.now()` clock. Every other Confirm*/Reset flow (ConfirmEmailChange:849, ConfirmPhoneVerification:1145, ConfirmRecoveryEmail:1226) uses s.now(). This makes VerifyEmail's timestamp non-deterministic under WithClock and inconsistent with the rest of the service.
-  - *Fix:* Change `now := time.Now()` to `now := s.now()`.
-- `identity/identity.go:45` **[comment]** The doc comment `// Identity represents an authentication method linked to a User.` is duplicated on lines 44 and 45 (dupword/copy-paste).
-  - *Fix:* Delete the duplicate line 45.
-- `identity/handlers.go:1323` **[naming]** RequestPasswordResetViaRecoveryHandler delivers a PASSWORD-RESET token through the SMSSender.PhoneVerification callback and a PhoneVerificationSMS struct. The application receiving that callback cannot tell a reset token from a phone-verification code, and the struct name mislabels the payload.
-  - *Fix:* Either add a dedicated PasswordResetSMS callback/struct to SMSSender, or document explicitly on SMSSender.PhoneVerification that it is reused to carry recovery-reset tokens.
-- `identity/servicetest/contract.go:125` **[test-coverage]** MockService.AuthenticateFunc drops the `rc ...event.RequestContext` variadic (the wrapper at :129 discards it), so any handler/service test using this mock cannot assert that the request context (client IP / UA) is forwarded into login.* events.
-  - *Fix:* Give AuthenticateFunc the `rc ...event.RequestContext` parameter and forward it, so RequestContext propagation is testable through the mock.
-- `identity/service.go:1215` **[test-coverage]** No test covers the ConfirmRecoveryEmail-equals-new-primary independence edge case, nor the re-lockout-after-expiry event behavior (the confirmed finding). events_test.go asserts AccountLocked fires once on the first crossing but never re-authenticates after a lock expires.
-  - *Fix:* Add a test that authenticates past a threshold, advances the clock past LockedUntil, fails once more, and asserts a second AccountLocked event is (should be) emitted.
-- `identity/service.go:1339` **[error-handling]** PasswordChangeRequired is an exported Service method with no doc comment (unlike its siblings). Minor house-style gap.
-  - *Fix:* Add a one-line doc comment describing the enumeration-safe/false-on-OAuth-only behavior.
+The refute test constructed the handler *with* the gate configured and the user *enrolled*:
 
-### Sessions (`sessions/`)
+```
+$ GOWORK=off go test ./identity/ -run TestRefute -v
+=== RUN   TestRefuteSF3_MagicLinkIgnoresMFAGate
+    magic-link login for an MFA-ENROLLED user: refresh cookie=true AMR=[]
+    Error: Expected nil, but got: &http.Cookie{Name:"__Host-refresh_token", ...}
+    Messages: MagicLinkLoginHandler must not hand an MFA-enrolled user a renewable refresh cookie
+--- FAIL: TestRefuteSF3_MagicLinkIgnoresMFAGate
+```
 
-- `sessions/service.go:94` **[error-handling]** generateToken uses fmt.Errorf("...: %w", err); house style (CLAUDE.md) is errors.Join(errors.New("failed to generate random session token"), err).
-  - *Fix:* return "", errors.Join(errors.New("sessions: failed to generate random session token"), err)
-- `sessions/service.go:262` **[correctness]** WithMaxLifetime doc says 'If you call both WithMaxLifetime and WithNoMaxLifetime the last option wins' — this is false for the WithNoMaxLifetime-then-WithMaxLifetime order (see confirmed finding). Fix the code so WithMaxLifetime(d>0) also clears s.noMaxLifetime, then the comment becomes accurate.
-  - *Fix:* In WithMaxLifetime, when d>0 also set s.noMaxLifetime=false so a later WithMaxLifetime genuinely re-enables the cap.
-- `sessions/service.go:114` **[consistency]** CreateSession sets ExpiresAt = now+duration with no clamp to the absolute deadline, unlike Touch/Rotate/BindUser which clampExpiry. A duration greater than maxLifetime produces an ExpiresAt beyond the cap. Harmless (ValidateSession still enforces the cap) but inconsistent with the slide paths.
-  - *Fix:* session.ExpiresAt = s.clampExpiry(session, now.Add(duration)) after CreatedAt is set.
-- `sessions/service.go:99` **[input-validation]** CreateSession does not reject a non-positive duration; duration<=0 mints an already-expired session (TestTouchAndRotate_RejectExpiredSession relies on this). A guard or doc note would prevent accidental zero-duration sessions.
-  - *Fix:* Document that duration must be >0, or return an error for duration<=0.
-- `sessions/lifetime_test.go:125` **[test-coverage]** No test exercises the WithNoMaxLifetime()+WithMaxLifetime() combination in either order; the confirmed cap-disable bug slips through. Add a test asserting NewService(store, WithNoMaxLifetime(), WithMaxLifetime(1h)) still enforces a 1h absolute cap.
-  - *Fix:* Add TestMaxLifetime_NoThenMaxReenablesCap covering both orderings.
-- `sessions/service_test.go:16` **[test-coverage]** No test covers WithClock(nil) falling back to time.Now (the guard at service.go:77-79) nor a lowercase 'bearer ' Authorization prefix (CutPrefix is case-sensitive, middleware.go:57).
-  - *Fix:* Add a WithClock(nil) construction test and a lowercase-Bearer 401 test.
-- `sessions/memory/store.go:22` **[efficiency]** FindSessionByHash takes the full write Lock (needed only for the opportunistic eviction). Reads on live sessions could use RLock with a deferred upgrade, but the current code is simple and correct; low priority.
-  - *Fix:* Optional: RLock fast-path, upgrade to Lock only when eviction is needed.
+**Impact.** Mailbox compromise (magic link) or IdP-account compromise (OAuth) yields a
+full-privilege, indefinitely renewable session with no second factor. Nothing in `SECURITY.md`,
+`README.md` or `.llms/` discloses this.
 
-### MFA & OTP (`mfa/`, `otp/`)
+**Fix.** Apply the same `mfaGate` branch in `MagicLinkLoginHandler`, and add an MFA-gate option to
+the oauth callback. Until then, document that `WithMFAGate` only covers password login.
 
-- `otp/memory/store.go:34` **[dupword]** The doc comment line 'Store is an in-memory implementation of otp.Store.' is duplicated verbatim on lines 33 and 34 (copy-paste). This is the dupword-class issue flagged in the brief for this package.
-  - *Fix:* Delete the duplicated line 34.
-- `mfa/service.go:310` **[comment]** The sentence 'Reserve a slot before the lookup/compare so a locked factor cannot be brute-forced through the recovery path either.' appears twice — once at lines 303-304 and again at lines 310-311 inside the `case gated:` block.
-  - *Fix:* Remove the redundant repetition at lines 310-311.
-- `mfa/service.go:100` **[doc-mismatch]** WithLockoutDuration's doc (lines 100-107) states 'Once the window elapses, the next attempt is treated as a fresh budget,' but IncrementTOTPAttempts only applies decay when FailedAttempts >= maxAttempts (mfa/memory/store.go:92-106). A partial counter below the limit (e.g. 4 of 5 fails) never ages out, so a user returning after the window still has only 1 attempt left. Behavior is more conservative than documented, not a security bug.
-  - *Fix:* Reword the doc to say decay applies only once the factor is locked (>= maxAttempts), matching the TOTPStore.IncrementTOTPAttempts contract and the implementation.
-- `mfa/memory/store.go:137` **[consistency]** ConsumeRecoveryCode compares stored vs submitted code hashes with plain `==` (c.CodeHash == codeHash), whereas otp/code.go and mfa/totp.go use subtle.ConstantTimeCompare. Both sides are server-side SHA-256 hashes of high-entropy (80-bit) codes, so the timing leak is not exploitable (SHA-256 preimage resistance), but it is inconsistent with the constant-time discipline used everywhere else in the unit.
-  - *Fix:* Optional: use subtle.ConstantTimeCompare for the hash equality for consistency, or document why the hashed-lookup path is exempt.
-- `otp/code.go:13` **[comment]** generateCode's comment says it uses 'rejection-free big.Int sampling.' crypto/rand.Int is NOT rejection-free — it performs internal rejection sampling to avoid modulo bias. The conclusion (no modulo bias) is correct but the mechanism description is wrong.
-  - *Fix:* Reword to 'uniform crypto/rand.Int sampling (rejection sampling internally), so there is no modulo bias.'
-- `mfa/service_test.go:1` **[test-coverage]** No test appears to cover VerifyRecoveryCode being rejected with ErrTooManyAttempts while the TOTP factor is locked (the risk noted above). Given it is a deliberate and security-relevant behavior, a regression test would pin the contract that recovery codes share and are blocked by the TOTP lockout.
-  - *Fix:* Add a test: enroll+confirm, exhaust maxAttempts with wrong TOTP codes, then assert a KNOWN-valid recovery code returns ErrTooManyAttempts (not success) until decay/UnlockMFA.
-- `otp/handlers_test.go:1` **[test-coverage]** issue_delivery_bounds_test.go covers the delivery fan-out cap, but there is no test asserting the response-latency uniformity property the IssueHandler doc claims (the confirmed timing-oracle finding). A test that measures/asserts svc.Issue is not on the response path (or documents that it is) would prevent silent regressions of the enumeration guarantee.
-  - *Fix:* Either move svc.Issue off the response path (dispatch it alongside delivery) and add a test, or update the doc comment to drop the 'leaks no account-existence signal' claim for DB-backed stores.
+#### A2 · [HIGH] A pre-MFA interim token can strip the victim's second factor — through the gate the docs recommend
 
-### Keystore (`keystore/`)
+`mfa/service.go:40` · category `auth-bypass`
 
-- `keystore/manager.go:333` **[unparam]** emit's reason parameter is dead: all four call sites (lines 133, 185, 214, 233) pass "", so event.Event.Reason is never populated for any keystore lifecycle event. Either drop the reason parameter (unparam) or populate a meaningful machine reason (e.g. "revoked"/"deleted") to make the emitted events more useful for auditing.
-- `keystore/resolve.go:37` **[consistency]** Lazy provisioning is honored only by ActiveSigningKey (resolve.go:17) but not by VerificationKeys (:37), JWKS (via VerificationKeys), NotAfter (:92) or NeedsRenewal (:103). With WithLazyProvisioning enabled, ActiveSigningKey auto-creates an unknown tenant while a concurrent/first JWKS or NeedsRenewal call on the same unknown tenant returns ErrTenantNotFound. Document that only the sign path auto-provisions, or route the read paths through the same lazy hook for consistent behavior.
-- `keystore/manager.go:209` **[stale-comment]** RevokeTenantKeys doc says '(re-provision or renew to restore signing)', but re-provision is a no-op after revoke (see confirmed finding). Correct the comment to say renewal (RenewSigningKey) restores signing; re-provision does not.
-- `keystore/jwks_test.go:12` **[test-coverage]** JWKS tests cover only RSA (N/E) and HS256 (oct metadata). There is no test asserting the EC (Kty=EC, Crv, X, Y from pub.Bytes() SEC1 split at jwks.go:107-116) or EdDSA (Kty=OKP, Crv=Ed25519, X at :117-126) public-parameter output. Add a round-trip test that decodes the published X/Y/Crv and rebuilds the public key so a coordinate-slicing regression is caught.
-- `keystore/keystoretest/contract.go:209` **[test-coverage]** testRevokeKeys asserts no active/verification keys remain after revoke but never re-provisions or renews afterward. A follow-up assertion (renew restores an active key; re-provision behavior is defined) would have caught the confirmed re-provision-after-revoke no-op. Add it to the shared contract so every backend is checked.
-- `keystore/jwtadapter.go:98` **[test-coverage]** The ES256/384/512 curve-vs-stored-alg cross-check (rejecting e.g. Alg "ES256" on a P-384 key) is a key-confusion guard with no test. Add a test that constructs a SigningKey with a mismatched Alg/curve and asserts signerFor returns the 'does not match its curve-derived alg' error.
-- `keystore/resolve.go:73` **[test-coverage]** No test exercises openKey's error path (a stored Secret that is not valid KEK ciphertext, or sealed under a different KEK) through ActiveSigningKey/VerificationKeys to confirm ErrCiphertextCorrupt propagates rather than a panic or empty key. KEK.Open is unit-tested directly but not via the Manager resolve path.
+The interim token minted at `identity/handlers.go:1374` carries `AMR=[pwd]`, and because
+`claims.AuthTime` is left unset the issuer stamps `auth_time = now`
+(`tokens/jwt/issuer.go:415-418`). So `tokens.WithMaxAuthAge` — the gate `mfa/service.go:40-41` and
+`.llms/mfa.md:171` recommend for `DisableHandler` — passes trivially. `mfa/handlers.go:220-244`
+(`guarded`) checks only method, same-origin and `cfg.resolve(r)`, so `DisableTOTP` runs and deletes
+the enrollment **and every recovery code**.
 
-### Adapter — Postgres (`adapters/pgx/`)
+```
+$ GOWORK=off go test ./mfa/ -run TestRefute -v
+=== RUN   TestRefuteSF1_InterimTokenStripsMFAThroughRecommendedMaxAuthAgeGate
+    DisableHandler behind WithMaxAuthAge, driven by the pre-MFA interim token: status=204
+    IsEnrolled after the interim-token disable call = false
+--- FAIL
+=== RUN   TestRefuteSF1_AMRGateDoesBlock
+    same call behind WithRequiredAMR(AMRMFA): status=403 body="step_up_required"
+--- PASS
+```
 
-- `adapters/pgx/identity/migrations/001_create_tables.sql:11` **[migration-idempotency]** idx_users_email_tenant (line 11) and idx_identities_provider_tenant (line 25) use bare CREATE UNIQUE INDEX with no IF NOT EXISTS, violating the pgxmigrate authoring contract (every file MUST be idempotent) and diverging from every other migration in the module, all of which use CREATE [UNIQUE] INDEX IF NOT EXISTS. Harmless on a fresh DB (version row commits atomically) but fails permanently if the table/index pre-existed outside migration tracking.
-  - *Fix:* Add IF NOT EXISTS to both CREATE UNIQUE INDEX statements.
-- `adapters/pgx/identity/store.go:1` **[doc-comment]** Missing package doc comment (revive). Same for sessions/store.go:1, oauth/store.go:1, tokens/store.go:1 — mfa/otp/passkey/keystore have one.
-  - *Fix:* Add a `// Package pgx ...` doc comment to each of these four files' package clause.
-- `adapters/pgx/identity/store.go:66` **[doc-comment]** Numerous exported methods lack doc comments: identity CreateUser:66, FindUserByID:87, FindUserByEmail:107, UpdateUser:127, AddIdentity:231, FindIdentitiesByUserID:275, FindIdentityByProvider:312, FindUserByPhone:516; mfa SaveTOTP:59, GetTOTP:94, DeleteTOTP:129, MarkTOTPUsed:134, IncrementTOTPAttempts:147, ReplaceRecoveryCodes:203, ConsumeRecoveryCode:243, DeleteRecoveryCodes:285, ResetTOTPAttempts:300; otp SaveOTP:47, GetOTP:69, IncrementOTPAttempts:86, ConsumeOTP:103, DeleteOTP:114.
-  - *Fix:* Add a one-line doc comment to each exported method (they implement store interfaces but are still exported symbols).
-- `adapters/pgx/tokens/store.go:241` **[dead-code]** FindAPIKeyByHash scans the user_id column into &key.Claims.Subject (line 241), then json.Unmarshal(claimsJSON, &key.Claims) at line 254 overwrites the entire Claims struct including Subject, making the scan into Subject dead. Same pattern in ListAPIKeysByCreator (scan at line 332, unmarshal at line 339).
-  - *Fix:* Scan user_id into a throwaway (or drop it from the SELECT), or move the json.Unmarshal before re-applying the DB Subject if the column is meant to be authoritative.
-- `adapters/pgx/keystore/store.go:109` **[efficiency]** ActiveSigningKey (109), VerificationKeys (138) and RevokeTenantKeys (211) each issue a separate TenantExists round-trip before the main query solely to distinguish ErrTenantNotFound from ErrNoActiveKey/empty, doubling DB round-trips on the hot verification path.
-  - *Fix:* Fold existence detection into the main query (e.g. left-join a per-tenant marker, or return ErrTenantNotFound only when the tenant truly has zero rows) to save a round-trip.
-- `adapters/pgx/mfa/store.go:182` **[duplication]** The anonymous `interface{ Begin(context.Context) (pgx.Tx, error) }` assertion is repeated in IncrementTOTPAttempts:182, ReplaceRecoveryCodes:226 and ConsumeRecoveryCode:268; keystore already defines a named txBeginner for exactly this.
-  - *Fix:* Extract a package-level named interface (mirroring keystore.txBeginner) and assert against it in all three sites.
-- `adapters/pgx/internal/pgxmigrate/pgxmigrate.go:85` **[robustness]** Run appends `\nINSERT INTO schema_migrations ...` directly after the file body; if a migration file's final statement lacks a trailing semicolon the INSERT concatenates onto it and produces a syntax error. All current files end with ';', so this is latent, but the contract relies on an unstated 'end every file with ;' rule.
-  - *Fix:* Prepend a defensive separator, e.g. `string(content) + ";\n" + INSERT...`, or document the trailing-semicolon requirement in the package contract.
-- `adapters/pgx/oauth/cache_internal_test.go:72` **[test-coverage]** Cache tests cover the happy path and invalidation but not the failure the confirmed finding describes: a KEK.Open error on a cache HIT. No test asserts that a cached provider survives a transient decrypt failure (currently it does not).
-  - *Fix:* Add a test with a KEK whose Open fails on the 2nd call and assert GetProvider still returns the cached provider (after the suggested reorder).
-- `adapters/pgx/keystore/store_test.go:1` **[test-coverage]** No coverage for the non-txBeginner CreateTenant fallback (store.go:58-61) nor the mfa non-beginner fallbacks (mfa/store.go:185/229/271); their degraded semantics are untested, so a regression that made these the default path would pass CI.
-  - *Fix:* Add a DBQuerier stub without Begin and assert the fallback still behaves (or is intentionally rejected).
+The correct gate exists — `WithRequiredAMR(AMRMFA)` blocks it with 403. The documentation points at
+the wrong one.
 
-### Passkey / WebAuthn (`passkey/`)
+**Fix.** Change the recommendation in `mfa/service.go:40-41`, `.llms/mfa.md:171` and
+`identity/service.go:196-207` from `WithMaxAuthAge` to `WithRequiredAMR(tokens.AMRMFA)`. Better:
+have `DisableHandler` reject an `AMR` lacking an MFA factor on its own, so the gate is not the
+consumer's to remember.
 
-- `passkey/handlers.go:401` **[modern-go]** consumeChallenge takes parameters in the order (w http.ResponseWriter, ctx context.Context, ...). Go convention (and lint) is that context.Context is the first parameter. Reorder to consumeChallenge(ctx, w, tenant, session) for consistency with the rest of the codebase.
-  - *Fix:* func (cfg handlerConfig) consumeChallenge(ctx context.Context, w http.ResponseWriter, tenant string, session webauthn.SessionData) bool
-- `passkey/attestation_test.go:76` **[test-coverage]** Attestation rejection is only asserted at the service level (ErrAttestationRejected). There is no handler-level test asserting the HTTP status FinishRegistrationHandler returns for a policy-rejected registration, which is why the 500-instead-of-4xx mapping (confirmed finding) went unnoticed.
-  - *Fix:* Add a FinishRegistrationHandler test with a deny-list AAGUID asserting the intended 4xx status once fail() maps ErrAttestationRejected.
-- `passkey/service.go:517` **[naming]** handle := userID followed by handle[:] is an unnecessary copy of the uuid array; userID[:] slices the array directly.
-  - *Fix:* Use protocol.URLEncodedBase64(userID[:]) and drop the handle local.
-- `passkey/handlers.go:511` **[simplification]** cred is captured then discarded via `_ = cred`. Discard it directly at the call to avoid the dead assignment.
-  - *Fix:* _, uid, err := svc.FinishDiscoverableLogin(r.Context(), tenant, session, r)
-- `passkey/service.go:221` **[consistency]** FinishRegistration returns the *Credential produced by toStored, whose TenantID is empty (""). SaveCredential only sets TenantID on its internal clone, not on the caller's pointer, so the returned record's TenantID does not reflect the tenant it was saved under. A caller reading stored.TenantID sees an empty string.
-  - *Fix:* Set stored.TenantID = tenantID before returning (or after SaveCredential) so the returned record is self-consistent.
-- `passkey/handlers.go:123` **[error-handling]** WithCookieKey accepts any key including a short or empty one; the too-short check is deferred to cookieKeyFor at request time (fails closed with 500). This is safe but a construction-time foot-gun; consider documenting that a short per-handler key silently disables the handler with a 500.
-  - *Fix:* Document the >= MinCookieKeyLength requirement on WithCookieKey (already covered in the doc comment) — optionally log at first use.
+*Related (refuter-found, MEDIUM):* the same interim token can **irreversibly delete the account**
+through the same recommended gate — `identity/service.go:206`, `DeleteAccountHandler` reached with
+status 204. Note `identity/handlers.go:983-985` *does* additionally recommend
+`WithRequiredAMR(AMRMFA)`, so the two doc surfaces disagree and only one is sufficient.
 
-### Tokens — JWT (`tokens/jwt/`, `basic`, `memory`)
+#### A3 · [HIGH] `ChangePasswordWithReissueHandler` upgrades an interim token into a full renewable pair
 
-- `tokens/jwt/issuer.go:621` **[comment]** Stale doc: verifyAccessToken's comment says it is 'the shared core used by the public VerifyAccessToken (single-tenant) and VerifyAccessTokenForTenant', but no exported VerifyAccessToken exists — the only public entry point is VerifyAccessTokenForTenant.
-  - *Fix:* Drop the reference to the non-existent 'public VerifyAccessToken (single-tenant)'; say it is the shared core behind VerifyAccessTokenForTenant.
-- `tokens/jwt/issuer.go:835` **[comment]** Stale doc: VerifyAccessTokenForTenant's comment says 'It first runs the full ... validation of VerifyAccessToken', referencing a method that no longer exists.
-  - *Fix:* Reference verifyAccessToken (the unexported core) instead of VerifyAccessToken.
-- `tokens/jwt/issuer.go:663` **[error-handling]** fmt.Errorf("%w: %v", tokens.ErrInvalidToken, err) renders the underlying parser error with %v, so it is not joinable/matchable (only the sentinel is). Against the project's errors.Join house style.
-  - *Fix:* errors.Join(tokens.ErrInvalidToken, err) so callers can errors.Is/As the underlying cause too.
-- `tokens/jwt/issuer.go:757` **[error-handling]** fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr) swallows rerr with %v (only the sentinel is matchable). The RevokeFamily failure cause is lost to callers.
-  - *Fix:* errors.Join(tokens.ErrRefreshTokenReused, errors.New("family revocation failed"), rerr).
-- `tokens/jwt/issuer.go:458` **[house-style]** fmt.Errorf("...: %w", err) wrapping is used at several exported-path return sites (issuer.go:458 sign, :464 refresh gen, :521 apikey gen; keystore.go:34, :49, :61) whereas CLAUDE.md mandates errors.Join instead of %w.
-  - *Fix:* Convert %w wraps to errors.Join(errors.New("..."), err) for consistency with the rest of the codebase.
-- `tokens/jwt/issuer.go:458` **[error-handling]** Exported issue paths return ad-hoc inline errors (fmt.Errorf("failed to sign token"), fmt.Errorf("failed to generate refresh token"), fmt.Errorf("failed to generate api key")) rather than declared sentinels, so callers cannot match them; contrast ErrPATSubjectMismatch which is a proper sentinel.
-  - *Fix:* Introduce sentinels (e.g. ErrSignFailed, ErrTokenGen) and join the cause, so callers can distinguish signing/entropy failures.
-- `tokens/memory/store.go:192` **[godot]** Comment '// Verify interface compliance' has no trailing period (godot) and is awkwardly placed mid-file between RevokeAPIKey and the other methods rather than near the type.
-  - *Fix:* End with a period and move the var _ tokens.Store assertion next to the Store type declaration.
-- `tokens/jwt/issuer.go:538` **[robustness]** IssueAPIKey's else branch treats ANY non-KeyTypeService value (including an empty/invalid KeyType) as a PAT — enforcing the PAT subject rules and pinning Subject=createdBy for an unclassified type. ActorFromAPIKey later maps the unknown type to egauth.User, so the stored Type and the derived Kind disagree.
-  - *Fix:* Validate keyType is one of KeyTypePAT/KeyTypeService up front and reject unknown values, or document that non-Service is deliberately coerced to PAT semantics.
-- `tokens/jwt/issuer.go:150` **[consistency]** Config.Validate flags a weak SecretKey unconditionally and never consults InsecureAllowWeakKey, while New honors it — so a valid test config (InsecureAllowWeakKey + short key) passes New but fails Validate. The interaction is undocumented on Validate.
-  - *Fix:* Either skip the length check when InsecureAllowWeakKey is set, or document that Validate is intentionally stricter than New here.
-- `tokens/jwt/redact.go:66` **[consistency]** Config.LogValue emits fewer fields than Config.String (String includes RefreshLength/APIKeyLength/ReuseGracePeriod and the *Set booleans; LogValue omits them), so the two redaction surfaces diverge. Both are safe, just inconsistent.
-  - *Fix:* Align the two representations to emit the same non-secret field set.
-- `tokens/jwt/jwks.go:39` **[test-coverage]** PublicJWKS only serves the static-path verifySigners; when a KeyStore is configured, per-tenant verification keys are never published, so an external verifier of per-tenant tokens cannot obtain keys from PublicJWKS. This limitation is stated only implicitly ('static-path') and has no test asserting the KeyStore-mode behavior.
-  - *Fix:* Document the KeyStore limitation on PublicJWKS explicitly and/or add a per-tenant JWKS accessor; add a test pinning that PublicJWKS ignores KeyStore keys.
-- `tokens/jwt/keystore.go:45` **[test-coverage]** No test covers the failure mode where a KeyStore-resolved active signer returns an empty KeyID: issuePair then stamps no kid, but tenantKeyFunc rejects kid-less tokens (line 52), so the service would fail to verify its own freshly issued token. issuePair does not guard against an empty KeyID from a KeyStore.
-  - *Fix:* Assert (or enforce) that a KeyStore-backed active signer has a non-empty KeyID at issuance; add a regression test.
+`identity/handlers.go:873` · category `auth-bypass`
 
-### Passwords (`passwords/`: argon2, breach, policy)
+`cfg.userResolver(r)` resolves the user from the interim access token; nothing inspects the
+request's `AMR`. Line 873 then calls `issuePairAndSetCookies`, which builds claims from
+`claimsOf(user)` — **the user, not the request** — and writes both cookies. This directly violates
+`SECURITY.md:170-176` ("not an indefinitely renewable session").
 
-- `passwords/argon2/hasher.go:204` **[error-handling]** fmt.Errorf("%w: %v", passwords.ErrHashFailed, err) formats the crypto/rand error with %v, dropping it from the unwrap chain (errors.Is/As on the rand error fails). This is the errorlint hit flagged in the brief and deviates from the project's errors.Join house style.
-  - *Fix:* return "", errors.Join(passwords.ErrHashFailed, err) (add errors import).
-- `passwords/policy/default.go:78` **[comment]** Comment "// Verify interface compliance" has no trailing period (godot), and is inconsistent with passwords/policy/passphrase.go:144 which reads "// Verify interface compliance." with a period. The wording is also slightly misleading since it reads like it refers to the Verify method.
-  - *Fix:* Make it "// Verify interface compliance." (or "// Compile-time interface check.") to match the sibling file.
-- `passwords/breach/hibp/hibp.go:183` **[test-coverage]** scanForSuffix's malformed-count error path (strconv.Atoi failure on a "SUFFIX:notanumber" line) has no test; hibp_test.go only exercises well-formed counts.
-  - *Fix:* Add a rangeServer case emitting "<suffix>:notanumber" and assert IsBreached returns an error under fail-closed.
-- `passwords/breach/hibp/hibp.go:130` **[test-coverage]** The WithAddPadding(false) branch (Add-Padding header omitted) is never tested; all tests use the default (header present).
-  - *Fix:* Add a test with WithAddPadding(false) asserting the handler received no Add-Padding header.
-- `passwords/breach/offline/offline.go:71` **[test-coverage]** LoadHashes malformed-count path ("<40hex>:notanumber" -> error) is untested; offline_test only covers a valid count and a wrong-length hash.
-  - *Fix:* Add a LoadHashes case with a non-numeric count and assert an error is returned.
-- `passwords/breach/offline/offline.go:130` **[test-coverage]** normalizeHash's hex.DecodeString failure branch (a 40-char but non-hex string, e.g. 40 'G' chars) is untested; TestLoadHashes_RejectsMalformed uses a 21-char string that only hits the length!=40 branch.
-  - *Fix:* Add a case with a 40-char non-hex string and assert an error.
-- `passwords/hashertest/contract.go:21` **[missing-doc]** Exported method MockHasher.Hash (and MockHasher.Compare at line 28) on this public importable helper package lack doc comments; exported fields HashFunc/CompareFunc are also undocumented.
-  - *Fix:* Add one-line doc comments (e.g. "// Hash delegates to HashFunc, panicking if it is unset.").
-- `passwords/policy/default.go:57` **[simplification]** The strings.ContainsRune(" !\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~", char) clause is almost entirely redundant with unicode.IsPunct(char)||unicode.IsSymbol(char); every listed rune except space is already punct or symbol, so the long literal only adds ' ' (space) as a special char.
-  - *Fix:* Drop the ContainsRune literal and, if space should count, replace with an explicit char==' ' (or unicode.IsSpace) check to make the intent obvious.
-- `passwords/policy/passphrase.go:47` **[test-coverage]** WithMaxLength(0) (disable the maximum) is documented but not tested; passphrase_test only exercises the default max.
-  - *Fix:* Add a test with WithMaxLength(0) verifying an arbitrarily long passphrase passes the length check.
+```
+$ GOWORK=off go test ./identity/ -run TestRefute -v
+=== RUN   TestRefuteSF2_ChangePasswordWithReissueUpgradesInterimSession
+    reissue from an interim (pre-MFA) session: access=true refresh=true AMR=[]
+    Error: Expected nil, but got: &http.Cookie{Name:"__Host-refresh_token", ...}
+--- FAIL
+```
 
-### Facade & internal (`actor.go`, `doc.go`, `internal/`)
+The handler was built *with* `WithMFAGate(enrolled: true)` wired — it is accepted and ignored.
 
-- `actor.go:66` **[modern-go]** HasScope hand-rolls a linear scan; the go fix modernizer already flagged this.
-  - *Fix:* return slices.Contains(a.Scopes, s) (import "slices"). HasAllScopes/HasAnyScope then remain as-is since they delegate to HasScope.
-- `doc.go:5` **[stale-comment]** Package doc says the root "exports only Actor", but the root package also exports PrincipalKind and the User/PAT/Service constants (actor.go:11-26).
-  - *Fix:* Reword to e.g. "it exports only Actor and its PrincipalKind classification" so the doc matches the actual exported surface.
-- `internal/httputil/httputil.go:60` **[dead-code]** OriginAllowed has no production caller (only httputil_test.go references it); every handler family uses its own strict copy instead.
-  - *Fix:* Remove OriginAllowed (and its test) or, if kept as the intended shared primitive, make production handlers call it and invert the empty-allowlist default to fail-closed.
-- `internal/doctest/main.go:133` **[redundant-check]** `verbose != nil` is always true: verbose is the *bool returned by flag.Bool, which is never nil.
-  - *Fix:* Drop the nil guard: `if *verbose && !seen[k] {`.
-- `internal/httputil/httputil.go:16` **[error-handling]** WriteJSON discards the json.Encode error after WriteHeader has already committed the status; a mid-encode failure leaves a truncated body with a success status and no signal.
-  - *Fix:* Acceptable for a best-effort writer, but consider encoding into a buffer first (or at least documenting that the error is intentionally dropped) so partial writes can't masquerade as complete responses.
-- `internal/httputil/httputil.go:72` **[doc]** Fail's `status` argument is silently ignored on the redirect branch (always 303 SeeOther); only the http.Error branch honors it.
-  - *Fix:* The doc comment is technically correct but the dropped-status behavior is a caller footgun; state explicitly that status is used only when failureURL is empty.
-- `internal/httputil/httputil.go:13` **[test-coverage]** WriteJSON, WithErrorParam, Fail, and RedirectOrStatus have no direct unit tests (only OriginAllowed, RequestOriginHost, and ParseLimitedForm are covered in httputil_test.go).
-  - *Fix:* Add table tests: WriteJSON content-type/status/body; WithErrorParam replace-vs-append and unparseable-input passthrough; Fail redirect-vs-plain branches; RedirectOrStatus empty-vs-nonempty URL.
-- `internal/httputil/httputil.go:21` **[test-coverage]** WithErrorParam's documented "returned unchanged when rawURL cannot be parsed" branch (line 22-24) is untested, as is the existing-error-param replacement path.
-  - *Fix:* Add cases for an unparseable rawURL and for a URL that already carries ?error= to lock in the replace-not-duplicate behavior.
-- `internal/doctest/main.go:245` **[test-coverage]** symbolExists's error-phrase matching (the core of the drift check) has no unit test.
-  - *Fix:* Extract the output-classification logic into a pure helper and table-test it against real `go doc` output samples (present symbol, "no symbol", "no such package", build-constraint exclusion).
+**Fix.** Carry the interim marker in the claims and refuse to reissue a full pair from a request
+whose `AMR` lacks an MFA factor.
 
-### Supporting (`event`, `ratelimit`, `janitor`, `health`, `webapp`, `examples`, `adapters/otel`)
+#### A4 · (refuter-found, MEDIUM) An MFA-gated login is indistinguishable on the wire from a full login
 
-- `adapters/otel/sink.go:47` **[deprecated-api]** trace.NewNoopTracerProvider() is deprecated (confirmed in the pinned go.opentelemetry.io/otel/trace@v1.44.0/noop.go:18 — 'Deprecated: Use go.opentelemetry.io/otel/trace/noop.NewTracerProvider instead').
-  - *Fix:* Import go.opentelemetry.io/otel/trace/noop and use noop.NewTracerProvider().Tracer("") for the nil-tracer fallback.
-- `ratelimit/tokenbucket.go:134` **[stale-comment]** The WithMaxKeys doc (line 134) and evictOne doc (line 157) both claim 'Fully-refilled buckets are always preferred for eviction', but evictOne only samples 5 keys (lines 166-181). With more than 5 tracked keys a fully-refilled bucket outside the random sample is NOT necessarily chosen, so 'always' overpromises.
-  - *Fix:* Reword to 'among a small random sample, the least-pressured (most-refilled) bucket is evicted' in both doc blocks (and the package doc at lines 20-21).
-- `adapters/otel/sink.go:70` **[efficiency]** Extra Attrs are flattened with fmt.Sprintf("%v", v), collapsing every value to a string; ints/bools/durations lose their native OTel attribute type (attribute.Int, attribute.Bool, etc.), which hurts backend filtering/aggregation.
-  - *Fix:* Type-switch on v (int/int64->attribute.Int64, bool->attribute.Bool, string->attribute.String, default->Sprintf) as slogSink does implicitly via slog.Any.
-- `webapp/webapp.go:82` **[missing-doc]** Config.Routes is the only exported Config field without a doc comment; every other field (lines 47-81) is documented, so this is an inconsistency.
-  - *Fix:* Add e.g. '// Routes overrides the default /auth/* route patterns; an empty Routes keeps the defaults.'
-- `adapters/otel/go.mod:10` **[stale-dependency]** require github.com/JLugagne/egauth v0.3.0 while the core module is at v0.7.0 (masked locally by the replace at line 26). If the maintainer's release re-tidy is ever skipped, consumers resolve an old core.
-  - *Fix:* Bump the require to match the current core tag during the release two-tag dance (already flagged by RELEASING.md); low priority.
-- `janitor/janitor_test.go:1` **[test-coverage]** The recover path in Start (janitor.go:102-107) is never exercised: no test passes an fn that panics to prove the janitor recovers and keeps ticking. Given this is the safety net for a DoS-relevant loop, it should be covered.
-  - *Fix:* Add a test with an fn that panics on the first N ticks then succeeds, asserting later ticks still run and Stop returns cleanly.
-- `ratelimit/ratelimit_test.go:93` **[test-coverage]** Middleware is only tested on the retryAfter>0 path; the branch where allowed==false and retryAfter==0 (ratelimit.go:82) — which must omit the Retry-After header while still returning 429 — is untested.
-  - *Fix:* Add a fake Limiter returning (false, 0) and assert 429 with no Retry-After header.
-- `adapters/otel/sink_test.go:121` **[test-coverage]** TestSpanSink_ExtraAttrs only asserts key presence, not the stringified value, so the fmt.Sprintf("%v") behavior (e.g. int 3 -> "3") is unverified; there is also no contract/negative test asserting the sink emits nothing beyond Type/TenantID/UserID/Reason/Attrs/Err (the 'no secret leakage' invariant the brief calls out).
-  - *Fix:* Assert attrs["egauth.attempt"]=="3" and add a test that an Event with only the documented fields produces exactly the expected attribute set.
+`identity/handlers.go:356` · category `api-footgun`
+
+Both the interim branch (line 356) and the full-pair branch (line 369) end with the identical
+`httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)`. Two logins over the same
+handler produce byte-identical status, body and non-`Set-Cookie` headers; the only difference is an
+`HttpOnly` cookie browser JS cannot observe.
+
+**Impact.** A consumer has no reliable signal to drive `mfa.StepUpHandler`. Either the SPA treats
+204 as "logged in" and the user is silently ejected when the 5-minute interim token expires, or the
+integrator keeps the user on the interim token — which, per A2/A3, is over-privileged.
+
+**Fix.** Add a distinguishing signal (a `mfa_required` body field, a distinct status, or a separate
+`mfaSuccessURL` option).
 
 ---
 
-## 5. Per-unit summaries
+### B. Account-status and revocation controls do not hold
 
-### OAuth / OIDC (`oauth/`, `oauth/providers/`)  — 1 confirmed · 2 risks · 9 nits
+#### B1 · [HIGH] The only `ClaimsProvider` egauth ships never re-checks account status — a disabled user refreshes forever
 
-The OIDC id_token verifier is well hardened: alg-confusion (RS→HS/none) is blocked via WithValidMethods over an asymmetric-only allowlist, iss/aud/exp/iat are enforced, azp confused-deputy is checked, the nonce is mandatory and constant-time compared, JWKS parsing is bounded (key count, RSA modulus/exponent, EC on-curve), and SSRF is defended at dial time (DNS-rebind safe). State/PKCE/nonce generation uses crypto/rand and packState binds provider+tenant. However, the JWKS "same host as issuer" binding is stricter than the OIDC spec and is functionally incompatible with Google (issuer accounts.google.com vs jwks_uri www.googleapis.com): the shipped Google constants + WithOIDC produce a provider that can never log a user in. One medium risk (X-Forwarded-Proto trust) and several house-style/error-wrapping and doc nits round it out.
+`webapp/webapp.go:154` · category `auth-bypass`
 
-### Tokens — core (`tokens/`: handlers, middleware, cookies)  — 1 confirmed · 2 risks · 5 nits
+The batteries-included preset installs its own provider at `webapp/webapp.go:154-156`:
 
-The top-level tokens package (HTTP handlers, RequireAuth/ContextMiddleware, cookies, redaction, gates) is mature, well-documented, and heavily tested; cookie flags (__Host- prefix, HttpOnly always-on, Secure-by-default via Insecure opt-out, SameSite), the secure-by-default CSRF origin check, fail-closed tenant resolution, and the concurrent-refresh anti-lockout path are all sound and correctly covered by tests. The one substantive defect is that actorFromClaims (the documented consumer of Claims.Kind for API-key-backed JWTs) never populates Actor.KeyID and mis-populates Actor.UserID for Service/PAT principals, diverging from both the egauth.Actor field contract and ActorFromAPIKey. Remaining items are documentation/robustness nits: an incorrect gate-ordering claim in WithGate's doc, Claims.Groups/Roles being invisible on the RequireAuth path, and minor parsing/edge cases.
+```go
+func(_ context.Context, userID uuid.UUID, tenantID string) (basic.Claims, error) {
+    return basic.Claims{Subject: userID, TenantID: tenantID}, nil
+}
+```
 
-### Identity (`identity/`)  — 1 confirmed · 3 risks · 6 nits
+It takes `_ context.Context`, never touches `cfg.Identity`, and **cannot return an error**. The
+preset also never registers `tokens.NewAccountRevoker(cfg.TokenStore)` — and it cannot, because
+`cfg.Identity` is already constructed by the caller — so the `s.disableRevokers` loop at
+`identity/service.go:1316` is empty and the user's refresh rows survive `DisableUser`.
 
-The identity service is carefully built: tenant scoping is enforced on every store method, the selector/verifier token scheme uses crypto/rand + constant-time SHA-256 comparison, decoy hashing equalizes the Authenticate failure paths, and single-use tokens are consumed atomically. The 3 flagged nilerr hits (service.go:621, :1034, :1262) are NOT bugs — each is a deliberate enumeration-uniform return (`return "", nil, nil`) on the malformed-email branch, documented and mirroring the unknown-account path; they are false positives for this security model. The one real defect I could reproduce is an account-lockout audit gap: because FailedAttempts is never reset when a lock expires, every re-lockout after the first is silent (no AccountLocked event). Remaining issues are timing-asymmetry risks on the unauthenticated Request* endpoints and several nits.
+```
+$ GOWORK=off go test ./webapp/ -run TestRefute -v
+=== RUN   TestRefuteLIFE1_DisabledUserCanRefreshForever
+    refresh #1 after disable => 204   (Error: must not obtain a fresh token pair)
+    refresh #2 after disable => 204
+    refresh #3 after disable => 204
+    refresh #4 after disable => 204
+    refresh #5 after disable => 204
+--- FAIL
+```
 
-### Sessions (`sessions/`)  — 1 confirmed · 5 risks · 7 nits
+Each rotation also resets the refresh expiry to `now + RefreshTTL` (`tokens/jwt/issuer.go:468`), so
+access is not merely retained — it is renewed indefinitely.
 
-The sessions module is well-designed and heavily tested: 256-bit crypto/rand tokens, SHA-256-hashed at rest, compare-and-set rotation (Rotate/BindUser) that defeats fixation, a __Host- secure-default cookie, tenant-scoped store operations with fail-closed tenant resolution, and a documented absolute-lifetime cap (SEC-08). One confirmed correctness/security bug exists in option composition: WithNoMaxLifetime() followed by WithMaxLifetime(d>0) silently leaves the absolute cap DISABLED, contradicting the documented "last option wins" and dropping a security control. Secondary concerns are an audit-event gap (Rotate/BindUser/CreateSession emit nothing), non-idempotent RevokeSession, and the memory store hardcoding time.Now() instead of the service clock.
+**Impact.** Complete loss of account deactivation for anyone using the shipped preset or the README
+quickstart without hand-wiring `identity.WithDisableRevokers`. Offboarded employees, banned tenants
+and self-service deletions keep working. This defeats termination, GDPR erasure and compromise
+response simultaneously.
 
-### MFA & OTP (`mfa/`, `otp/`)  — 1 confirmed · 3 risks · 7 nits
+**Fix.** Have the preset's `ClaimsProvider` load the user and return an error when
+`DisabledAt`/`DeletedAt` is set, and register the account revoker inside the preset (accept a
+constructor callback rather than a built `Identity` if necessary).
 
-The TOTP/OTP crypto core is solid: 160-bit and 80-bit secrets from crypto/rand, uniform big.Int code sampling (no modulo bias), constant-time TOTP compare, monotonic LastUsedStep replay guard, atomic reserve-before-compare rate limiting with a well-reasoned concurrency proof in the contract suite, single-use recovery/OTP codes with hash-guarded consume, and consistent tenant scoping. No memory-safety, entropy, replay, or tenant-isolation defects were found. The one substantive issue is an account-enumeration timing differential in otp.IssueHandler that contradicts its own documented "leaks no account-existence signal" guarantee. The rest are design-tradeoff risks (recovery codes blocked while the TOTP factor is locked; event amplification under a concurrent flood) and comment/consistency nits.
+#### B2 · [HIGH] Password reset never invalidates outstanding verification tokens — takeover survives the documented remediation
 
-### Keystore (`keystore/`)  — 1 confirmed · 3 risks · 7 nits
+`identity/service.go:714` · category `auth-bypass`
 
-The keystore package is well-structured and its core crypto is sound: KEK is AES-256-GCM with per-seal random 96-bit nonces, HS256 secrets are never published in JWKS, asymmetric public-parameter extraction (RSA N/E, EC X/Y via SEC1, Ed25519 X) is correct, and the ES256/384/512 curve-vs-stored-alg cross-check in signerFor guards against key-confusion. Tenant isolation is enforced by map partitioning plus guardTenant. The one concrete defect is a lifecycle contract violation: after RevokeTenantKeys the memory store leaves an empty-but-present tenant partition, so the documented "re-provision to restore signing" recovery path is a silent no-op that leaves the tenant permanently unable to sign. Secondary concerns are the absence of any zeroization of opened plaintext key material and several test-coverage gaps (EC/EdDSA JWKS output, re-provision-after-revoke, the ES alg-mismatch guard).
+1. Attacker holds a live session on the victim's account — the exact scenario `ResetPassword` is
+   documented to remediate.
+2. Attacker POSTs `RequestRecoveryEmailHandler` with `recovery_email=attacker@evil`
+   (`identity/handlers.go:1223` → `service.go:1176`). Only rejected if it equals the primary
+   (`service.go:1201`). A `KindRecoveryEmailVerification` token with a **24h TTL** is mailed to the
+   attacker.
+3. Victim performs the canonical recovery: `ResetPassword` (`service.go:693`) rewrites the hash and
+   the `AccountErasers` revoke every session and refresh family (`service.go:723-733`). The attacker
+   loses their session.
+4. **Nothing deletes the pending verification-token rows.** The Store exposes only
+   `CreateVerificationToken` / `ConsumeVerificationToken` / `DeleteExpiredVerificationTokens`
+   (`identity/store.go:110-127`) — there is **no per-user purge seam**, so the consumer cannot fix
+   this either.
+5. Attacker POSTs `ConfirmRecoveryEmailHandler` — token-authenticated, no session needed.
+   `consumeForLiveUser` re-checks only `DeletedAt`/`DisabledAt` (`service.go:677-686`), so it
+   succeeds. The account now has an attacker-controlled verified recovery channel, which drives
+   `RequestPasswordResetViaRecovery`.
 
-### Adapter — Postgres (`adapters/pgx/`)  — 1 confirmed · 4 risks · 9 nits
+```
+$ GOWORK=off go test ./identity/ -run TestRefute -v
+=== RUN   TestRefuteTEN1_ResetPasswordLeavesAttackerTokensLive
+    Error: An error is expected but got nil.
+    Messages: recovery-email token minted before the reset must not still be usable
+    recovery email now on the account: attacker@evil.test
+    attacker-controlled recovery channel now drives resets: recovery=attacker@evil.test
+    Error: An error is expected but got nil.
+    Messages: attacker must not be able to authenticate after the victim's recovery
+    Error: An error is expected but got nil.
+    Messages: email-change token minted before the reset must not still be usable
+--- FAIL
+```
 
-The adapters/pgx module is high quality: every query is fully parameterized (no SQL injection surface), every WHERE clause is tenant-scoped, all pgx.Rows are defer-Closed with rows.Err() checked, nullable time columns are correctly scanned through *time.Time, and the recently-hardened atomic paths (identity CTE-based DeleteUser/UpdateUserEmail, keystore advisory-locked CreateTenant, mfa transactional replace/consume) are sound. The migration runner's single-implicit-transaction trick (appending the version INSERT to the argless Exec) makes version recording atomic with each file. One confirmed medium-severity availability/perf defect: oauth GetProvider decrypts the client_secret on every call before the cache check, so a KEK blip defeats a warm cache and every cached OIDC login still pays a KEK round-trip. Remaining items are non-reproducible edge-case risks (degraded non-transactional fallback paths) and a batch of documentation/idempotency-consistency nits.
+**Impact.** Full account takeover that **survives the library's own documented remediation**. For a
+SaaS this defeats incident response: "force a password reset" does not recover the account, and
+there is no supported mitigation short of raw SQL against `verification_tokens`.
 
-### Passkey / WebAuthn (`passkey/`)  — 1 confirmed · 3 risks · 6 nits
+**Fix.** Add `DeleteVerificationTokensForUser(ctx, tenant, userID, kinds...)` to the Store contract
+(both backends) and call it from `ResetPassword`, `ChangePassword` and `SetTemporaryPassword`.
 
-The passkey (WebAuthn) unit is unusually well-hardened: secure-by-default UV (zero value coerced to VerificationRequired and propagated into SessionData, verified by tests), fail-fast NewService (nil store, <32-byte cookie key, missing ChallengeStore all rejected), HMAC-SHA256 authenticated ceremony cookie compared with hmac.Equal (constant time), server-side single-use challenge consumption before verification that correctly closes the sign-count-0 replay hole for both username and discoverable flows, tenant-scoped credential lookups, and proper clone-counter rejection. Challenge entropy comes from go-webauthn (crypto/rand) and origin/RPID validation is delegated to go-webauthn v0.17.4 (which requires RPOrigins). I found no critical/high/medium correctness or security defect. The only confirmed issue is a wrong HTTP status code for attestation-policy rejections. The remainder are risks (fail-closed edge cases) and idiomatic nits.
+*Related (refuter-found, MEDIUM):* the memory store's `UpdateUser` blind-writes the whole row
+(`identity/memory/store.go:117-120`), so a stale `VerifyEmail` copy **silently clears `DisabledAt`**
+— an administratively suspended account can log in again. The pgx backend is immune (it writes only
+`email`/`email_verified_at`).
 
-### Tokens — JWT (`tokens/jwt/`, `basic`, `memory`)  — 0 confirmed · 4 risks · 12 nits
+---
 
-The JWT core is unusually well-hardened: the alg-confusion defense (resolve signer by kid THEN pin token.Method.Alg() to the signer's algorithm) is correct for both the static keyfunc and the per-tenant keyfunc, "none" and RS256->HS256 confusion are rejected, JWKS never emits HMAC "k" material, weak HMAC keys are refused unless the test-only InsecureAllowWeakKey is set, refresh tokens/API keys use crypto/rand with enforced minimum lengths, and tenant binding on the verify path cannot be bypassed (verifyAccessToken is unexported and only reachable through VerifyAccessTokenForTenant, which enforces claims.TenantID == tenantID). The CachingKeyStore generation-guard correctly prevents caching a pre-invalidation keyset. I found no reproducible critical/high defect in the signing/verification/rotation paths. The concerns that remain are a non-atomic consume-then-issue window in Rotate, unbounded memory growth in CachingKeyStore, and a cluster of doc/house-style nits (stale references to a non-existent public VerifyAccessToken, %w wrapping vs the errors.Join house style, and an inaccurate KeyStore-fallback doc).
+### C. Tenant resolution fails open
 
-### Passwords (`passwords/`: argon2, breach, policy)  — 0 confirmed · 3 risks · 9 nits
+#### C1 · [HIGH] identity / oauth / otp / tokens handlers fall into the `""` partition when the resolver cannot resolve
 
-The passwords unit (argon2 hasher, hibp/offline breach checkers, default/passphrase policies, hashertest contract) is well-engineered and heavily regression-tested. Argon2id uses crypto/rand salt, subtle.ConstantTimeCompare, cost floors clamped up to OWASP-2021 minimums, a MaxMemoryKiB ceiling and per-thread-min guard that prevent OOM/panic on tampered stored hashes, empty-password and oversized-input short-circuits that preserve timing symmetry with the decoy path, and context-cancellation checks before the KDF. HIBP correctly sends only the 5-char SHA-1 prefix (k-anonymity), caps the response, distinguishes truncation from not-breached, and honors an explicit fail-open/closed posture; offline mirrors the same threshold semantics. Policies count runes not bytes and normalize denylist entries against re-spacing. I found no CONFIRMED reproducible defect; findings are style/consistency nits, a few test-coverage gaps on error paths, and low-severity posture risks that are documented-by-design.
+`identity/handlers.go:431` · `tokens/handlers.go:273` · category `cross-tenant-leak`
 
-### Facade & internal (`actor.go`, `doc.go`, `internal/`)  — 0 confirmed · 3 risks · 9 nits
+A resolver returning `""` for an unknown `Host` — the natural implementation of a map or DB lookup —
+is passed through verbatim. There is no unresolved-tenant rejection, so the request authenticates
+against the **empty tenant partition**, which in single-tenant/bootstrap deployments is exactly
+where operator accounts live.
 
-The facade unit (root actor.go/doc.go plus internal httputil and doctest tool) is small, defensive, and well-tested. The Actor/Principal scope helpers are correct and exhaustively covered; httputil's origin/CSRF helpers use strict exact-match semantics with safe fail-closed behavior. I found no reproducible correctness or security defect (nothing for confirmed[]). The notable observations are advisory: httputil.OriginAllowed is dead code in production (its permissive empty-allowlist default is a documented footgun that prod handlers deliberately bypass with their own strict copy), the doctest tool silently swallows parse errors and can false-green on unexpected `go doc` failures, doc.go slightly overstates the root API surface, and several httputil helpers lack direct tests.
+```
+$ GOWORK=off go test ./identity/ -run TestRefute -v
+=== RUN   TestRefuteTEN1_UnresolvedTenantFallsIntoEmptyPartition
+    status for unmapped Host with resolver configured: 204
+    FAIL-OPEN: login against the "" partition succeeded from an unmapped Host
+--- FAIL
+=== RUN   TestRefuteTEN1_RegisterLandsInEmptyPartition
+    FAIL-OPEN: account 019f95de-… created in the "" partition from an unmapped Host (status 204)
+--- FAIL
+```
 
-### Supporting (`event`, `ratelimit`, `janitor`, `health`, `webapp`, `examples`, `adapters/otel`)  — 0 confirmed · 2 risks · 8 nits
+Same fall-through in `RegisterHandler` (:395), `RequestPasswordResetHandler` (:570),
+`ResetPasswordHandler` (:601), `VerifyEmail` (:672), magic link (:703/:737), `DeleteAccount`
+(:1008), `oauth.CallbackHandler` (`oauth/handlers.go:248`), `otp.VerifyHandler`
+(`otp/handlers.go:244`), `tokens` Refresh/Logout (`tokens/handlers.go:161`/`:213`).
 
-This unit is small, defensive, and generally high quality. All TokenBucket map access is correctly serialized under a single mutex (Allow/Cleanup/KeyCount/evictOne), the maxKeys cap invariant holds (exactly one eviction before each insert), event emission recovers and logs sink panics, and webapp enforces CSRF-by-default by refusing to build without TrustedOrigins. I could not construct a concrete, reproducible failure/panic/security hole in any non-test source here, so there are no CONFIRMED blocking findings. Findings are limited to a deprecated OTel API, a misleading eviction doc, a silently-swallowed janitor panic (observability/DoS-signal gap), one webapp misconfiguration footgun, and coverage gaps.
+**The library already knows this is wrong.** `sessions/middleware.go:70-73` explains that failing
+open into `""` would let such requests reach bootstrap/admin sessions, and
+`sessions/middleware.go:77-80` plus `tokens/middleware.go:205-208` **do** reject with 401. The four
+handler families do not.
+
+Compounding it, `.llms/sessions.md:222` teaches consumers (and LLM agents) to use the raw `Host`
+header as the tenant id with no allowlist or canonicalisation — confirmed MEDIUM
+(`tenant/TEN-6`).
+
+**Fix.** Add an explicit unresolved-tenant rejection to the four handler families, mirroring
+`tokens/middleware.go:205-208`. Correct `.llms/sessions.md` to require an allowlist.
+
+*Related (refuter-found, MEDIUM):* `identity.LoginHandler` resolves the tenant **three separate
+times** (`:322` for `Authenticate`, `:334` for `PasswordChangeRequired`, `:346` for
+`mfaGate.IsEnrolled`). An impure resolver — an expiring cache entry, a transient DB error — makes
+`IsEnrolled(ctx, "", …)` return false and the MFA branch is skipped entirely:
+
+```
+    status=204 authTenant="acme" gateTenants=[""] refreshCookieIssued=true
+    MFA BYPASS: authenticated in "acme" but the MFA gate was consulted in ""
+```
+
+The authors already know the hazard — `oauth/handlers.go:379` pins the tenant once precisely so
+behaviour is "consistent even if the supplied resolver is not perfectly pure". `LoginHandler`
+should do the same.
+
+---
+
+### D. Keystore revocation is reversible on Postgres
+
+#### D1 · [HIGH] `RevokeTenantKeys` is silently undone by lazy provisioning on the pgx backend
+
+`adapters/pgx/keystore/store.go:109` · category `crypto`
+
+`keystore/resolve.go:17` auto-provisions on **exactly one sentinel**:
+`if m.lazy && errors.Is(err, ErrTenantNotFound) { m.ProvisionTenant(…) }`. Which sentinel the store
+returns after a revoke is therefore security-relevant.
+
+- pgx: `RevokeTenantKeys` runs `DELETE FROM keystore_keys WHERE tenant_id = $1` (`store.go:218`),
+  leaving zero rows. `TenantExists` is `SELECT 1 FROM keystore_keys …` (`store.go:80`), so it now
+  returns **false**, and `ActiveSigningKey` returns **`ErrTenantNotFound`** (`store.go:109-115`) —
+  the lazy branch fires and mints a brand-new active key.
+- memory: `RevokeTenantKeys` keeps an empty per-tenant map (`keystore/memory/store.go:203`), so
+  `TenantExists` stays true, `ActiveSigningKey` returns `ErrNoActiveKey`, and the revocation holds.
+
+Reproduced against real Postgres:
+
+```
+$ cd adapters/pgx && go test ./keystore/ -run TestRefuteTEN2 -v
+    pgx ActiveSigningKey after revoke -> keystore: tenant not found
+    pgx TenantExists after revoke -> false
+    lazy Manager ActiveSigningKey after revoke -> keyID="oKklQnD3af8PRnxxxKpeYQ" err=<nil>
+    REVOCATION REVERSED: lazy provisioning re-minted signing key for a tenant whose keys
+    were revoked (old key "1EzewNH2Z3v73S3UjySWxw")
+```
+
+**Impact.** After the documented emergency response to a suspected key compromise, the tenant
+silently regains the ability to mint tokens on the very next request. Same operator action, same
+library version, **opposite security outcome depending on which store is wired**. Previously-issued
+tokens do stay dead and `EventTenantProvisioned` is emitted, which is the only reason this is not
+critical.
+
+#### D2 · (refuter-found, MEDIUM) The pgx keystore store *fails* the core conformance suite
+
+`adapters/pgx/keystore/store.go:143`
+
+`keystore/keystoretest/contract.go:222-225` pins the contract: after `RevokeTenantKeys`,
+`VerificationKeys` **must succeed and return an empty set**. The pgx store cannot satisfy it —
+`store.go:138-144` returns `ErrTenantNotFound`. Proven by running the core suite against a store
+faithfully mirroring the pgx semantics:
+
+```
+$ GOWORK=off go test ./keystore/ -run TestRefute -v
+=== RUN   TestRefutePgxSemanticsPassesCoreContract/RevokeKeys
+    contract.go:224: VerificationKeys after revoke: keystore: tenant not found
+--- FAIL
+```
+
+`Manager.JWKS` (`keystore/jwks.go:57-59`) propagates it, so a `/.well-known/jwks.json` handler
+errors out after an emergency revoke instead of publishing an empty key set.
+
+**This is not caught today because `adapters/pgx` never imports `keystoretest`** — confirmed
+separately as `tenant/TEN-3` (MEDIUM): `AUDIT.md:28` and the README claim cross-backend conformance
+coverage that the keystore does not have. `adapters/pgx/keystore/store_test.go:62-65` documents a
+*deliberate* reason (the suite needs an injectable clock the pgx store does not expose), so the fix
+is to make the clock injectable or to split the clock-dependent cases out — not to silently skip
+the suite while advertising it.
+
+---
+
+### E. Documented options that silently disable a control, or panic
+
+#### E1 · [HIGH] The `__Host-` cookie panic — one documented config line takes down every protected route
+
+`tokens/cookies.go:135` (write path) and `tokens/cookies.go:220` (read path) · category `api-footgun`
+
+`DefaultCookies()` sets `__Host-` names (`tokens/cookies.go:61-70`). `Validate()` rejects a
+`__Host-` name paired with a non-empty `Domain`, a `Path != "/"`, or `Insecure == true`
+(`:80-113`). `withDefaults()` **panics** on any such error (`:135`) — and it is called by every
+`Set*`/`Clear*`/`Access`/`Refresh` method.
+
+The convenience options mutate one field and leave the `__Host-` names in place:
+`tokens.WithCookieDomain` (`tokens/handlers.go:52`), `WithCookiePath` (:62),
+`WithRefreshCookiePath` (:70), `WithInsecureCookies` (:85), the four identical `identity.*`
+(`identity/handlers.go:136,146,154,159`), `oauth.*`, and the SemVer-frozen
+`webapp.Config.CookieDomain` (`webapp/webapp.go:165-168`). `Cookies.Validate()` is **never called at
+construction**, even though `tokens/cookies.go:76-79` documents it as exported precisely so callers
+can catch this at startup. `NewWebApp` returns a nil error.
+
+```
+$ GOWORK=off go test ./webapp/ -run TestRefute -v
+    NewWebApp returned no error with CookieDomain=example.com
+    CONFIRMED: register panicked: tokens.Cookies: invalid __Host- cookie configuration:
+      cookie "__Host-access_token": __Host- prefix requires Domain to be empty, got "example.com"
+--- FAIL
+```
+
+The refuter then escalated this: **`Cookies.Access` and `Cookies.Refresh` are pure read helpers that
+call `withDefaults()` as their first statement, before `r.Cookie` is even consulted.** So
+`tokens.RequireAuth` with a domain-scoped `Cookies` panics on **every request to every protected
+route, including an unauthenticated GET with no cookie**:
+
+```
+$ GOWORK=off go test ./tokens/ -run TestRefuteRequireAuthSurvivesCookieDomain -v
+    CONFIRMED: an unauthenticated GET to a protected route panicked: tokens.Cookies:
+      invalid __Host- cookie configuration: … requires Domain to be empty, got "example.com"
+```
+
+`WithInsecureCookies()` — the documented *local HTTP development* option — is broken the same way
+(refuter-found, MEDIUM, `tokens/handlers.go:85`), and its existing test suite is blind to it.
+
+**Impact.** Total, deterministic outage of every authenticated route, triggered by a one-line
+documented option, with a clean build, clean vet, and nil error from the constructor. Fails closed,
+so not a bypass — but on a SaaS it is a full outage with no HTTP status to diagnose it by. The login
+path also panics *after* `IssueTokenPair` has persisted a refresh row, leaking an orphaned family
+per attempt.
+
+**Fix.** Call `Validate()` in every handler constructor and return an error (or panic *there*, at
+startup, not per-request). Better: have `WithCookieDomain`/`WithCookiePath`/`WithInsecureCookies`
+drop the `__Host-` prefix automatically, since a caller passing them has already opted out of it.
+
+#### E2 · [HIGH] `WithLockout(negative, …)` silently disables brute-force lockout — docs promise the opposite
+
+`identity/service.go:412` · category `silent-control-loss`
+
+`SECURITY.md:62-66` claims lockout is "hardened against misconfiguration: `identity.WithLockout(0,
+0)` does NOT disable it — a non-positive argument falls back to the safe default". `WithLockout`'s
+godoc (`identity/service.go:280-284`) repeats it verbatim.
+
+`NewService` normalises (`identity/service.go:409-414`):
+
+```go
+case s.lockThreshold == 0:  s.lockThreshold = DefaultLockThreshold
+case s.lockThreshold < 0:   s.lockThreshold = 0 // explicitly disabled via WithNoLockout
+```
+
+So `0` does fall back — but any **negative** threshold, which is equally "non-positive", maps to the
+internal *off* value.
+
+```
+$ GOWORK=off go test ./identity/ -run TestRefute -v
+=== RUN   TestRefuteIdentityWithLockoutNegativeThreshold
+    expected: "identity: account locked"  in chain: "identity: invalid credentials"
+    Messages: WithLockout(-1, 15m) is documented as falling back to DefaultLockThreshold (5),
+              but 16 failed logins never locked the account
+--- FAIL
+```
+
+`mfa.WithMaxAttempts(negative)` — the convention `SECURITY.md` cites as the model — has the same
+defect.
+
+**Fix.** Clamp negative to the default (as documented) and keep `WithNoLockout` as the only way to
+disable. Or, if the current behaviour is intended, say "zero" rather than "non-positive" in all
+three places.
+
+*Sibling (MEDIUM, confirmed):* `mfa.WithLockoutDuration(0)` is documented in **three** places
+(`SECURITY.md:125-127`, `mfa/service.go:63-65`, `mfa/service.go:100-104`) to make the MFA lockout
+permanent until `UnlockMFA`. `NewService` overwrites the deliberate `0` with the 15-minute default
+(`mfa/service.go:166-168`); the factor self-unlocked after 24h with no `UnlockMFA` call. The
+"permanent" semantics exist in the store but are unreachable through the public option.
+
+---
+
+## 3. Confirmed MEDIUM findings
+
+Grouped by theme. All reproduced.
+
+### Crypto and secret handling
+
+| ID | Location | Finding |
+|---|---|---|
+| `crypto/CRY-1` | `keystore/kek.go:60` | **KEK `Seal`/`Open` pass nil GCM associated data**, so a sealed blob is portable between rows, tenants and subsystems — a signing key ciphertext and a TOTP-secret ciphertext are interchangeable at the storage layer. Bind tenant + key id + column as AAD. |
+| `crypto/CRY-3` | `passwords/argon2/hasher.go:282` | **Argon2id verify caps the memory parameter from a stored hash but not the iteration count.** One tampered stored hash (or a hostile import) drives unbounded CPU on the login path. Cap `t` as well as `m`. |
+| `crypto/CRY-4`, `tenant/TEN-4` | `tokens/jwt/keycache.go:165` | `CachingKeyStore.VerificationKeys` calls the delegate's `ActiveSigningKey` on a **verification-path** miss. With `keystore.WithLazyProvisioning` an unauthenticated verify request provisions a tenant and mints a key — attacker-driven key creation and DB writes from an unauthenticated endpoint. |
+
+### Identity lifecycle and atomicity
+
+| ID | Location | Finding |
+|---|---|---|
+| `identity/TEN-3`, `http/HTTP-2` | `identity/service.go:727`, `:791` | **The new password hash is written before sessions are revoked, on the client-cancellable request context.** A client that aborts mid-request leaves the new password active and every old session alive. Use `context.WithoutCancel` for the revocation cascade, or revoke first. |
+| `identity/TEN-5` | `identity/service.go:935` | `VerifyEmail` read-modify-writes the whole user row; a concurrent `ConfirmEmailChange` is partially lost. |
+| `identity/TEN-6` | `identity/service.go:198` | After `DeleteAccount` an **OAuth identity is permanently unusable** — every re-login/re-signup with the same provider account fails. |
+| `identity/TEN-7` | `identity/handlers.go:475` | The off-response-path delivery goroutine runs consumer `Mailer`/`SMSSender` callbacks with **no `recover()`** — a panic in consumer code takes down the process. |
+| `identity/TEN-8` | `identity/service.go:1005` | `LinkOrCreateIdentity` leaks an orphan user when the `emailVerified` `UpdateUser` fails, permanently blocking that email. |
+
+### Tokens and sessions
+
+| ID | Location | Finding |
+|---|---|---|
+| `lifecycle/LIFE-2` | `tokens/jwt/issuer.go:468` | **Refresh families have no absolute lifetime cap** — every rotation resets the full `RefreshTTL`, so a family lives forever under a kept-warm stolen token. Contrast `sessions`, which does have an absolute cap. |
+| `lifecycle/KIND-2` | `tokens/jwt/issuer.go:811` | **`Claims.Kind` is silently dropped on refresh rotation**, so a `WithRequiredKind` / `RequireHuman` gate flips after one rotation. |
+| `lifecycle/REV-1` | `tokens/revoke.go:10` | `NewAccountRevoker`'s godoc claims it "invalidates EVERY token a user holds" and kills "every active session"; it does neither in full. |
+
+### Postgres adapter
+
+| ID | Location | Finding |
+|---|---|---|
+| `pgx/PG-1` | `adapters/pgx/internal/pgxmigrate/pgxmigrate.go:47` | **Migrations take no lock.** Reproduced: on every schema-changing rolling deploy, N-1 of N replicas fail startup. `.llms/storage-pgx.md:266` tells every instance to call `Migrate` at startup and says it is "always safe". Add a `pg_advisory_lock`. |
+| `pgx/PG-2` | `adapters/pgx/identity/store.go:279` | **`identities` has no `(tenant_id, user_id)` index** — the per-login lookup degenerates to a full parallel Seq Scan. |
+
+### Availability
+
+| ID | Location | Finding |
+|---|---|---|
+| `conc/AVAIL-1`, `tenant/TEN-7` | `passkey/memory/challengestore.go:34` | The only shipped `ChallengeStore` runs a **full O(n) map sweep under one global mutex on every `Put`**, driven by unauthenticated `BeginRegistration`/`BeginLogin`. Quadratic under load; `pruneLocked` cost tracks peak map size, not live entries, so one burst degrades it permanently. |
+| `mfa/SF-4` | `SECURITY.md:151` | **`SECURITY.md` claims a `passkey/pgx` ChallengeStore exists. It does not** (`go list …/passkey/pgx` → *no required module provides package*). `NewService` hard-requires a `ChallengeStore`, so every deployment runs the per-process memory one; passkey login therefore breaks on any multi-pod deployment, and the pressure-relief valve a rushed operator finds is `InsecureNoChallengeStore` — silently removing SEC-05 replay protection. |
+
+### Documentation that misstates the security model
+
+| ID | Location | Finding |
+|---|---|---|
+| `claims/DOC-1`, `tenant/TEN-5` | `SECURITY.md:370` | **The central multi-tenant hardening instruction names three APIs that do not exist**: `jwt.Config.MultiTenant`, `tokens.ErrTenantBindingRequired`, and `VerifyAccessToken` (only `VerifyAccessTokenForTenant` exists). The `docs/` code block does not compile — proven by transcribing it verbatim: `unknown field MultiTenant`, `svc.VerifyAccessToken undefined`, `undefined: tokens.ErrTenantBindingRequired`. |
+| `claims/DOC-6`, `http/HTTP-4` | `llms.txt:52` | **`llms.txt` and four `.llms/*.md` files state the CSRF same-origin check is opt-in / the consumer's responsibility.** It is ON by default in all four handler families; a handler built with zero options returned `403 cross_site_blocked`. `SECURITY.md:427-475` is correct; the LLM-facing surfaces contradict it — including `llms.txt`, a build-enforced disclosure surface. |
+| `claims/DOC-5` | `SECURITY.md:571` | **`SECURITY.md` tells custom-store authors the shipped contract suites "assert the atomic behaviours … under parallel load".** Only `mfa/storetest` has a concurrency test; `identity/storetest` and `tokens/storetest` are purely sequential — a deliberately non-atomic adapter passes them clean. |
+| `http/HTTP-3` | `webapp/webapp.go:70` | `webapp.Config.TrustedOrigins` godoc says to supply scheme-qualified origins; the check compares hosts. |
+| `ops/REL-3` | `adapters/otel/go.mod:8` | `adapters/otel` pins core `v0.3.0` (vs `v0.7.0` for pgx), is absent from `RELEASING.md` entirely, and is never covered by the CI `govulncheck`/lint jobs despite those jobs being named "both modules". |
+
+---
+
+## 4. Confirmed LOW (23)
+
+Full table in the appendix. The ones worth acting on:
+
+- `crypto/CRY-2` — `tokens/jwt/issuer.go:680`: `verifyAccessToken` dereferences the **optional**
+  `iat`/`exp` `NumericDate` pointers unguarded; a validly-signed token missing either panics.
+- `lifecycle/KIND-1` — `tokens/token.go:39`: `Claims.Kind` is **never stamped by any egauth issuer**,
+  contradicting the godoc that `WithRequiredKind` relies on.
+- `lifecycle/CLOCK-1` — `tokens/jwt/issuer.go:755`: the refresh reuse-grace window compares the **app
+  wall clock** against a `consumed_at` written by the **database** clock; skew either falsely trips
+  theft detection or widens the reuse window. Also bypasses the injected clock seam used elsewhere.
+- `mfa/SF-6` — `mfa/handlers.go:336`: no shipped handler converts a recovery code into a session
+  (`StepUpHandler` is TOTP-only), so recovery-code self-service is unreachable — users who lose their
+  authenticator have no path back in.
+- `identity/TEN-2` — `identity/service.go:141`: `RequestEmailChange`'s godoc overclaims; a
+  session-only email change to an attacker-controlled address is possible (no re-auth, no step-up).
+- `ops/REL-2` — `RELEASING.md:166` and `adapters/pgx/go.mod:5-15`: both describe a `replace`
+  directive that `adapters/pgx/go.mod` **does not contain** (`grep -c '^replace'` → 0).
+- `ops/SUPPLY-1` — `.github/dependabot.yml:3`: only `directory: "/"` is declared, so
+  `adapters/pgx` and `adapters/otel` get no automated dependency bumps.
+- *(refuter-found)* `adapters/pgx/identity/migrations/001_create_tables.sql:11` violates the
+  migration runner's documented idempotency contract.
+
+---
+
+## 5. Plausible but not proven (2)
+
+Both need a live Postgres to settle; every *code* fact was verified, only the runtime effect was not.
+
+- `lifecycle/APIKEY-1` — `adapters/pgx/tokens/store.go:192`: pgx rewrites an empty API-key `Type` to
+  `KeyTypeService` before INSERT; memory copies it unchanged. `tokens/actor.go:37-48` then classifies
+  the same key as a **machine principal on Postgres and a user principal in memory**, against the
+  stated "never as a machine" fail-safe. The memory half was proven; the pgx half needs Docker.
+- `lifecycle/IDX-1` — `adapters/pgx/tokens/store.go:304`: no index on `tokens.id` or
+  `tokens.created_by`, so `RevokeAPIKey`, `ListAPIKeysByCreator` and the account-disable cascade
+  sequential-scan the highest-churn table. Schema facts confirmed; the plan was not measured.
+
+---
+
+## 6. Refuted claims (recorded, not hidden)
+
+Two finder claims did not survive refutation. Both are recorded because a review that only reports
+hits is not calibrated.
+
+**`identity/TEN-4` — REFUTED.** Claimed the godoc unconditionally promises that reset/change-password
+revokes sessions. The *behaviour* is real (with no erasers registered, nothing is revoked), but the
+godoc says "runs **the registered** AccountErasers" (`identity/service.go:97-99`) and
+`DeleteAccount` says "every **registered** AccountEraser" (`:195-197`). The docs are accurate; the
+opt-in design is a documented choice, not a doc mismatch.
+
+**`ops/REL-1` — REFUTED.** Claimed the missing `replace` in `adapters/pgx/go.mod` means the adapter
+ships bound to core behaviour predating the keystore fix, and that neither test mode covers it. The
+refuter disproved the mechanism:
+
+- **No CI job runs pgx under `GOWORK=off`.** The `test-adapters-pgx` job sets no `GOWORK`
+  (`ci.yml:55-85`), and in `test-short` the `GOWORK: "off"` env is scoped to the **core** step only
+  (`ci.yml:152-155`) while the pgx step deliberately omits it (`:156-159`). Every CI pgx run compiles
+  against HEAD core; the stale-core resolution is a local-developer condition only.
+- The bug commit `616f300` fixed requires a store whose tenant record *survives* revocation — that is
+  the **memory** store. On pgx, `TenantExists` is false after a revoke, so even the old
+  `ProvisionTenant` took the `CreateTenant` branch and restored signing.
+- `RELEASING.md:186-198` step 2 mandates `go mod edit -require=…@vX.Y.Z` before tagging, so the
+  "tagged with a stale require" scenario contradicts the runbook.
+- Not using `keystoretest` is documented as deliberate at `adapters/pgx/keystore/store_test.go:62-65`
+  (the suite needs an injectable clock the pgx store does not expose).
+
+**I stated the weaker version of this claim earlier in the session and it was wrong.** The residue
+that *is* real: the stale comment (`ops/REL-2`, LOW) — and, far more seriously, the reason the suite
+is skipped turned out to matter, because the pgx keystore store **actually fails that conformance
+suite** (§2.D2).
+
+---
+
+## 7. Prior review: 8 of 8 fixed
+
+The `GLOBAL_REVIEW.md` in `HEAD` claimed 8 confirmed findings. All eight are fixed at `ce6aeef`,
+each with a named regression test, and every fix commit verified as an ancestor of HEAD.
+
+| # | Area | Fix | Regression test |
+|---|---|---|---|
+| C1 | oauth cross-host JWKS (was HIGH) | `bcfd1b2` | `oidc_test.go` "jwks override on a different host accepted" + `oidc_crosshost_internal_test.go` |
+| C2 | `actorFromClaims` KeyID/UserID | `9e1c788` | `TestActorFromClaims_PrincipalMapping` |
+| C3 | re-lockout `AccountLocked` event | `7efa0e0` | `storetest/contract.go` (shared memory+pgx) |
+| C4 | session absolute-lifetime option order | `ccc6b3f` | `sessions/lifetime_test.go:190-248` (both orderings) |
+| C5 | OTP issue timing oracle | `033efea` | `TestIssueHandler_MintOffResponsePath`, `…UniformResponse…` |
+| C6 | keystore re-provision after revoke | `616f300` | `keystoretest/contract.go` (shared memory+pgx) |
+| C7 | pgx provider cache before decrypt | `23f6780` | `TestGetProviderCacheHitSkipsDecrypt`, `…SurvivesKEKFailure` |
+| C8 | passkey attestation 403 | `8e1fd3b` | `TestFinishRegistrationHandler_AttestationRejectedIs403` |
+
+Note C6's fix is what makes §2.D1 exploitable: it added a lazy-provisioning path keyed on
+`ErrTenantNotFound`, and the pgx store returns exactly that sentinel after a revoke. The fix is
+correct for memory and turns a fail-closed outage into a fail-open revocation bypass on Postgres.
+
+---
+
+## 8. What held up under attack (150 cleared hypotheses)
+
+This matters as much as the findings. The following were specifically attacked and **did not
+break**. Highlights:
+
+**Randomness and entropy** — `grep -rn "math/rand"` returns **zero hits across all three modules,
+including tests**. Every generator uses `crypto/rand`, every read's error is checked. Measured
+entropy: session token 32B, refresh token 32B (with `MinTokenLength=16` enforced in both `Validate`
+and `New`), API key 32B, OAuth state 16B, PKCE verifier, TOTP secret, recovery codes. No modulo
+bias: `otp/code.go:15-21` uses `rand.Int(rand.Reader, 10^digits)` (big.Int rejection sampling);
+recovery codes base32-encode raw bytes.
+
+**JWT algorithm confusion** — both keyfuncs resolve the `Signer` **first** by `kid`, then compare
+`token.Method.Alg()` against that signer's pinned alg (`tokens/jwt/issuer.go:589-598`,
+`tokens/jwt/keystore.go:59-65`). A token claiming HS256 against an RSA kid is rejected. `"none"` is
+unreachable. `grep` for `ParseUnverified` / `SkipClaimsValidation` finds nothing — no claim is ever
+read before signature verification. `kid` is only ever a Go map index, never a path, URL or SQL
+fragment.
+
+**AEAD nonce handling** — `keystore/kek.go:54-61` generates a fresh 12-byte nonce from `crypto/rand`
+per `Seal`, prefixes it, never derives/increments/reuses. `Open` length-checks before slicing. (The
+*missing AAD* is a real finding — `crypto/CRY-1` — but nonce discipline is correct.)
+
+**SQL injection** — no query in `adapters/pgx` interpolates a caller-controlled value; all user data
+goes through `$N` placeholders.
+
+**Constant-time comparison** — the password path reaches `subtle.ConstantTimeCompare` structurally,
+and the `decoyHash` enumeration defence is present on every enumeration-safe branch of
+`Authenticate`. (One nuance: `claims/DOC-12`, LOW — two pre-KDF early returns branch on the
+*candidate* rather than only on the stored hash's shape, so the guarantee is very slightly
+overstated in `SECURITY.md:27`.)
+
+Full per-lens list in the appendix.
+
+---
+
+## 9. Go idiom, supply chain, CI posture
+
+**Idiom (advisory).** `go fix -diff` flags 4 real modernizer gaps (e.g. `actor.go:66` hand-rolled
+loop → `slices.Contains`). The house rule "`errors.Join(errors.New(…), err)`, never
+`fmt.Errorf("%w")`" is violated in **258 places** across the codebase — including
+`adapters/pgx/mfa` throughout — so either the rule or the code should change. Several exported
+constructors return ad-hoc `errors.New(…)` at the return site instead of a declared sentinel
+(`tokens/jwt/issuer.go:155` and others), which callers cannot match with `errors.Is`.
+
+**CI gaps for a security library.** No `.golangci.yml` (see baseline). No SAST — no `gosec`, no
+CodeQL, no semgrep. No fuzzing, and **no `Fuzz*` targets exist at all**, which is notable for code
+that parses JWTs, CBOR attestation objects, encoded Argon2 hashes and cookies from untrusted input.
+`govulncheck` is pinned to `v1.1.4` while `v1.5.0` is current. `adapters/otel` is excluded from the
+`govulncheck` and lint jobs even though both are labelled "both modules". Dependabot covers only the
+root module.
+
+**Dependencies.** All direct dependencies are current at review time. `govulncheck` reports one
+vulnerability in a required-but-uncalled module — not reachable, worth tracking.
+
+**`examples/fullstack`** would not be safe to copy: `main()` uses `http.ListenAndServe` with no
+read/write/idle timeouts (`:406`), and the passkey ceremony `CookieKey` is an **all-zero 32-byte
+slice** (`:157`) that passes the library's length check while providing no integrity at all —
+`MinCookieKeyLength` validates length but not entropy.
+
+---
+
+## 10. Bottom line for SaaS use
+
+The primitives are sound and the enumeration/timing work is unusually careful. The risk is
+concentrated in three places, all above the crypto layer:
+
+1. **Composition.** Controls exist but are not wired together. `WithMFAGate` guards one handler of
+   several. `WithDisableRevokers` must be remembered or deactivation silently does nothing. The
+   shipped preset cannot wire either correctly.
+2. **Configuration.** Documented options disable the control they claim to harden
+   (`WithLockout(-1, …)`, `WithLockoutDuration(0)`) or panic at request time
+   (`WithCookieDomain`, `WithInsecureCookies`). Nothing validates at construction.
+3. **Documentation drift.** `SECURITY.md`'s central multi-tenant instruction names APIs that do not
+   exist; `llms.txt` and the `.llms/` guides state the CSRF default backwards; `SECURITY.md` claims
+   a `passkey/pgx` store and parallel-load contract suites that do not exist. For a library whose
+   security story *is* its documentation, and one increasingly consumed by LLM agents reading
+   `llms.txt`, this is a first-class defect class — six confirmed findings.
+
+None of that is unfixable, and most of it is a day or two of work. But "no surprises" is not the
+current state: a competent integrator following the shipped documentation ends up with unenforced
+MFA, ineffective account deactivation, and a tenant resolver that fails open.
+
+---
+
+## Appendix
+
+### Advisory findings (low / info tier, not sent to refutation)
+
+Status `—` means the finding was not routed to the refutation pass (only medium-and-above were).
+Locations and code facts were established by the finder but not independently reproduced.
+
+### LOW tier (62)
+
+| ID | Status | Category | Location | Finding | Fix |
+|---|---|---|---|---|---|
+| `claims/DOC-10` | — | dos | `SECURITY.md:511` | The documented eviction/GC checklist is incomplete: tokens/memory and the verification-token table (memory AND Postgres) grow without bound and are named nowhere | Extend the SECURITY.md eviction section, janitor's package doc and llms.txt:50 to the full set: add `tokens/memory.Store.DeleteExpired` and — in its own subsection, because it is backend-independent — |
+| `claims/DOC-11` | — | doc-mismatch | `AUDIT.md:9` | AUDIT.md claims the audit-status sentence's presence is build-enforced on the CHANGELOG entry; disclosure_test.go never reads CHANGELOG.md, and the test's own comment falsely says it is "checked separately" | Either add CHANGELOG.md to the enforced set (a `TestDisclosureChangelogPresent` mirroring `TestDisclosureLedgerPresent`) or correct AUDIT.md:8-10 and the disclosure_test.go:24-25 comment to state that |
+| `claims/DOC-12` | — | doc-mismatch | `SECURITY.md:27` | The structural constant-time Compare guarantee is stated too strongly: two pre-KDF early returns branch on the CANDIDATE PASSWORD, not only on the shape of the stored hash | Restate the guarantee accurately: Compare reaches the constant-time comparison for any well-formed stored hash AND any in-bounds non-empty candidate; the empty-candidate and oversized-candidate reject |
+| `claims/DOC-7` | — | race | `tokens/jwt/issuer.go:755` | Refresh-reuse grace window compares a DB-written consumed_at against the app's wall clock via time.Since, bypassing the injectable Clock — DB/app clock skew silently widens or collapses the documented theft tripwire | Replace `time.Since(*rt.ConsumedAt)` with `s.now().Sub(*rt.ConsumedAt)` so the reuse-grace decision uses the same clock as every other time decision in the service, and either (a) have the store retur |
+| `claims/DOC-8` | — | doc-mismatch | `SECURITY.md:306` | "No internal logging — egauth performs no logging of its own (silent by default)" is false for the webapp v1 preset, which defaults to slog.Default() and writes user IDs, tenant IDs, client IPs and User-Agents to stderr | Qualify SECURITY.md:306-308: the core packages are silent by default, but `webapp.NewWebApp` deliberately defaults to `event.NewSlogSink(nil)` ("silent auth is un-auditable auth") and therefore writes |
+| `claims/DOC-9` | — | doc-mismatch | `identity/handlers.go:1134` | The "Account-existence disclosure (by design)" section claims to be exhaustive but omits the phone_taken 409 enumeration oracle, and its own count is internally inconsistent ("Three responses" / four bullets / "the four disclosures") | Add a fifth bullet to SECURITY.md's disclosure section for `phone_taken` → 409 on `RequestPhoneVerificationHandler` (and its `ConfirmPhoneVerification` counterpart), with the same shape as the accepte |
+| `conc/AVAIL-2` | — | dos | `sessions/memory/store.go:220` | sessions/memory.DeleteSessionsByUserID scans the entire store (every tenant's sessions), not just the calling tenant's — an authenticated 'logout everywhere' call costs O(total sessions across all tenants) and holds the single mutex for the | Maintain a secondary (tenantID,userID) -> []sessionID index (mirroring the existing byHash index) so DeleteSessionsByUserID is O(sessions for that user) instead of O(total store size). This is a refer |
+| `crypto/CRY-10` | — | go-idiom | `tokens/jwt/issuer.go:755` | Refresh-reuse grace window and step-up freshness use the wall clock, bypassing the injected clock seam used by every other time decision | Replace issuer.go:755 with `s.now().Sub(*rt.ConsumedAt) > s.reuseGrace`. For FreshAuth, add a clock-taking variant (e.g. `FreshAuthAt(now time.Time, maxAge time.Duration) bool`) and have the middlewar |
+| `crypto/CRY-2` | CONFIRMED | error-handling | `tokens/jwt/issuer.go:680` | verifyAccessToken dereferences the optional iat/exp NumericDate pointers unguarded: a validly-signed token missing either claim panics with a nil dereference instead of returning ErrInvalidToken | Add `jwt.WithExpirationRequired()` to the opts slice at issuer.go:630 and nil-guard both dereferences (e.g. `if wrapper.ExpiresAt != nil { claims.ExpiresAt = wrapper.ExpiresAt.Time }`, same for Issued |
+| `crypto/CRY-5` | — | doc-mismatch | `oauth/oidc.go:76` | OIDCConfig.AllowedAlgs documents that "none" and HMAC are always rejected regardless of the list, but the caller's list is passed through verbatim | In newOIDCVerifier, filter the caller's list against an explicit denylist (`none`, `HS256`, `HS384`, `HS512`, case-insensitively) and return a configuration error rather than silently dropping — so a  |
+| `crypto/CRY-6` | — | secret-exposure | `keystore/keystore.go:66` | Redaction coverage stops at tokens/ and tokens/jwt/: the per-tenant PLAINTEXT signing key, TOTP enrollment secret and OTP code have no String/GoString/LogValue | Add a keystore/redact.go giving `SigningKey`, `Keyset` and the `Manager` the same String/GoString/LogValue treatment as tokens/jwt/redact.go (print KeyID/TenantID/Alg/NotAfter/RetiredAt, render Secret |
+| `crypto/CRY-7` | — | doc-mismatch | `SECURITY.md:631` | SECURITY.md claims the Argon2 cost-upgrade enumeration gap self-heals through transparent rehash-on-login, but nothing in egauth ever calls NeedsRehash | Pick one and make everything agree. Preferred: wire it in — after a successful Compare in identity Authenticate, type-assert the hasher to an interface { NeedsRehash(string) bool } and, when true, re- |
+| `crypto/CRY-8` | — | crypto | `examples/fullstack/main.go:157` | Shipped reference application uses an all-zero passkey ceremony-cookie HMAC key, and MinCookieKeyLength only validates length so it is accepted | In the example, generate the key with crypto/rand at startup (or read it from an env var and fail fast when unset) rather than shipping a zero buffer. In the library, harden the guard so a degenerate  |
+| `crypto/CRY-9` | — | crypto | `mfa/totp.go:58` | TOTP verification accepts an empty or truncated shared secret; an empty secret yields a zero-length HMAC key and a publicly computable code | Add a `MinTOTPSecretBytes` constant (16, or 20 to match secretBytes) and make decodeSecret return an error when the decoded key is shorter, so validateTOTP/GenerateCode fail closed on a blank or trunc |
+| `http/HTTP-10` | — | dos | `passkey/handlers.go:274` | The passkey ceremony cookie is not __Host- prefixed and accepts a Domain, so a sibling subdomain can toss a same-named cookie and wedge every passkey ceremony — undocumented, unlike the equivalent oauth-state case | Default passkey.DefaultSessionCookieName to "__Host-passkey_ceremony" (the cookie is already Secure + Path=/ + Domain-less by default, so it satisfies the prefix rules out of the box) and validate tha |
+| `http/HTTP-4` | CONFIRMED | doc-mismatch | `llms.txt:52` | llms.txt and four .llms/*.md lines still describe the CSRF origin check as opt-in / the consumer's responsibility, contradicting the code and SECURITY.md | Update llms.txt:52 and the four .llms/*.md lines to "strict same-origin check ON by default; WithTrustedOrigins WIDENS the allowlist; WithInsecureNoOriginCheck is the explicit opt-out", matching SECUR |
+| `http/HTTP-5` | — | api-footgun | `identity/handlers.go:504` | The same-origin gate rejects every origin-less POST, so non-browser clients cannot use any identity/tokens/mfa/otp endpoint, and the only escape hatch disables CSRF protection for browsers too | Add a scoped escape hatch rather than an all-or-nothing one — e.g. an option that exempts requests carrying a required custom header (the standard 'this cannot be sent by a cross-site HTML form' proof |
+| `http/HTTP-6` | — | error-handling | `webapp/webapp.go:78` | webapp.Config.EventSink is documented as receiving login, registration and logout events, but the preset never wires it into the tokens handlers — no event.Logout is ever emitted, so the v1 preset's sign-out is un-auditable | Add `tkOpts = append(tkOpts, tokens.WithEventSink(sink))` next to the identity wiring at webapp/webapp.go:163, and correct the Config.EventSink godoc to state precisely which events flow through it (l |
+| `http/HTTP-7` | — | auth-bypass | `passkey/handlers.go:531` | passkey handlers have no same-origin/CSRF check at all and no WithTrustedOrigins option; RenameCredentialHandler is an authenticated state-changing POST with no Content-Type enforcement, so a cross-site text/plain form renames a victim's pa | Add the same originAllowed gate plus WithTrustedOrigins/WithInsecureNoOriginCheck to the passkey package (at minimum to RenameCredentialHandler and the Begin* handlers), and enforce Content-Type: appl |
+| `http/HTTP-8` | — | crypto | `internal/httputil/httputil.go:13` | No Cache-Control: no-store / Pragma / X-Content-Type-Options on responses that carry TOTP secrets, recovery codes, WebAuthn challenges or freshly minted auth cookies | Set `Cache-Control: no-store` (and `Pragma: no-cache` for HTTP/1.0 intermediaries) plus `X-Content-Type-Options: nosniff` inside httputil.WriteJSON, and add the same two headers on the cookie-writing  |
+| `http/HTTP-9` | — | api-footgun | `oauth/handlers.go:313` | oauth requestScheme trusts X-Forwarded-Proto with no proxy opt-in and no scheme validation, and resolveRedirectURL derives the redirect_uri from the raw Host header | Require WithRedirectURL for BeginHandler (return a construction error, or fail the request closed, when it is unset) instead of silently deriving it from request headers. Gate the X-Forwarded-Proto re |
+| `identity/TEN-10` | — | auth-bypass | `identity/service.go:538` | Authenticate never asserts that the identity it verifies belongs to the user it returns, so any store-side keying bug becomes direct cross-account authentication | After the identity lookup, add `if ident.UserID != user.ID { s.decoyHash(ctx, password); loginFailed(user.ID.String(), "invalid_credentials", "password"); return nil, ErrInvalidCredentials }` (keeping |
+| `identity/TEN-11` | — | doc-mismatch | `identity/handlers.go:1133` | 409 phone_taken is a fifth account-existence oracle (tenant-wide phone-number enumeration) while SECURITY.md states the four listed disclosures are the only intentional exceptions | Add a fifth bullet to the SECURITY.md disclosure ledger for `phone_taken` (with the same 'drop the pre-flight FindUserByPhone and rely on the unique index at confirm time' escape hatch already offered |
+| `identity/TEN-12` | — | dos | `identity/service.go:549` | Account lockout is per-identity and keyed on a public identifier, giving anyone a trivial repeatable DoS against a chosen victim account — an availability trade-off absent from SECURITY.md's otherwise exhaustive ledger | Disclose the targeted-DoS trade-off in SECURITY.md alongside the lockout bullet, and offer the mitigations the mfa module already has: an administrative `UnlockAccount` (wrapping Store.ResetFailedAtte |
+| `identity/TEN-13` | — | doc-mismatch | `SECURITY.md:645` | SECURITY.md understates the password-reset-request work asymmetry: the known-account path costs two extra reads plus an INSERT, and there are three distinguishable timing classes, not two | Restate the residual accurately: 'two extra indexed reads and one durable INSERT for a known password account; two extra reads for a known OAuth-only account; one read for an unknown account'. Same co |
+| `identity/TEN-14` | — | doc-mismatch | `.llms/identity.md:377` | .llms/identity.md tells consumers (and LLM agents) that the CSRF origin check is off by default and that Store is a monolithic interface — both contradict the code | Update .llms/identity.md:240 and :377 to 'the same-origin check is ON by default; WithTrustedOrigins WIDENS the allowlist; WithInsecureNoOriginCheck turns it off', fix the same sentence in architectur |
+| `identity/TEN-15` | — | api-footgun | `identity/handlers.go:1322` | RequestPasswordResetViaRecoveryHandler delivers a password-reset credential through the SMSSender.PhoneVerification callback, so the victim receives a 'verify your phone' message that actually carries a reset token | Add a dedicated `SMSSender.PasswordReset func(ctx, PasswordResetSMS) error` callback (with its own struct) and use it here; keep PhoneVerification strictly for the enrollment flow. If the extra seam i |
+| `identity/TEN-16` | — | error-handling | `identity/service.go:26` | normalizeEmail enforces no maximum address length, so an oversized address passes validation and fails deep in Postgres as an opaque error — including a 500 that burns a change-email token | Bound the address in normalizeEmail (RFC 5321: 64-octet local part, 255-octet domain, 254 total) and return ErrInvalidEmail — one check that fixes Register, RequestEmailChange, RequestRecoveryEmail an |
+| `identity/TEN-2` | CONFIRMED | api-footgun | `identity/service.go:141` | RequestEmailChange godoc overclaims: a session-only email change to an attacker-controlled address is possible, and the route carries none of the step-up guidance DeleteAccount gives | Either (a) require proof of the current credential in RequestEmailChange (re-verify currentPassword like ChangePassword does, and/or require the confirmation to be co-signed by a token sent to the OLD |
+| `identity/TEN-9` | — | error-handling | `adapters/pgx/identity/store.go:351` | UpdateIdentityPassword is not gated on the user being live in either backend, so ChangePassword and SetTemporaryPassword succeed on a soft-deleted (erased) account | Add the liveness gate to UpdateIdentityPassword in both backends (pgx: `AND EXISTS (SELECT 1 FROM users WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL)`; memory: check the users map) and exte |
+| `lifecycle/APIKEY-1` | PLAUSIBLE | cross-backend-divergence | `adapters/pgx/tokens/store.go:192` | pgx and memory token stores classify an unclassified API key oppositely (service vs user), violating the stated 'never as a machine' fail-safe, and the shared contract suite does not catch it | Make `IssueAPIKey` reject a keyType that is not exactly KeyTypePAT or KeyTypeService (fail fast at the boundary), align the pgx default with `ActorFromAPIKey`'s documented 'never as a machine' fail-sa |
+| `lifecycle/APIKEY-2` | — | cross-tenant-leak | `tokens/memory/store.go:165` | APIKey.Claims.TenantID is never validated or normalised against the row's tenant, and VerifyAPIKey returns it to the caller | In both stores, either reject a non-empty `key.Claims.TenantID` that differs from the tenantID argument (same ErrTenantMismatch treatment as the outer field) or overwrite it, and do the same in `SaveR |
+| `lifecycle/CLOCK-1` | CONFIRMED | race | `tokens/jwt/issuer.go:755` | Refresh reuse-grace comparison uses real wall clock against a consumed_at written by the database clock, so app/DB skew silently disables theft detection | Replace `time.Since(*rt.ConsumedAt)` with `s.now().Sub(*rt.ConsumedAt)` so the grace window honours the injected clock, and have the store stamp consumed_at from the application clock (pass it in, as  |
+| `lifecycle/GATE-1` | — | doc-mismatch | `tokens/middleware.go:481` | WithGate's godoc promises it runs after the principal-kind gate; it actually runs before it | Move the `kindSatisfied` check into `serveAuthenticated` ahead of the other gates (it needs only `actorFromClaims(claims)`, which is already computed there for the gate call) so one fail-closed orderi |
+| `lifecycle/GROW-1` | — | dos | `tokens/jwt/issuer.go:468` | Every rotation inserts a new refresh row that lives a full RefreshTTL, so an active session retains RefreshTTL/AccessTTL rows (2880 at the webapp defaults) | Document the retained-row formula (RefreshTTL/AccessTTL per active session) in the TokenReaper godoc and SECURITY.md's capacity notes, and consider capping consumed-row retention to a short detection  |
+| `lifecycle/IDX-1` | PLAUSIBLE | dos | `adapters/pgx/tokens/store.go:304` | The Postgres tokens table has no index on id or created_by, so API-key revoke/list and the account-disable cascade sequential-scan the largest table in the schema | Add a migration creating `CREATE INDEX ... ON tokens (tenant_id, id) WHERE claims IS NOT NULL` and `CREATE INDEX ... ON tokens (tenant_id, created_by) WHERE claims IS NOT NULL` (partial on claims IS N |
+| `lifecycle/KIND-1` | CONFIRMED | doc-mismatch | `tokens/token.go:39` | Claims.Kind is never stamped by any egauth issuer, contradicting the godoc that the WithRequiredKind gate relies on | Either make `IssueAPIKey` stamp `claims.Kind` from `keyType` (and add a jwt-level test asserting it survives to the Actor), or correct both godocs to state plainly that Claims.Kind is caller-supplied  |
+| `lifecycle/TEN-1` | — | cross-tenant-leak | `tokens/handlers.go:273` | RefreshHandler/LogoutHandler fall back to the "" tenant partition when a configured tenant resolver cannot map the request, while the middleware deliberately 401s | Make `tenant` distinguish 'no resolver' from 'resolver returned empty' (e.g. return (string, bool)) and have RefreshHandler/LogoutHandler reject with 401 unresolved_tenant when a configured resolver y |
+| `mfa/SF-10` | — | crypto | `mfa/handlers.go:343` | StepUpHandler unconditionally asserts AMR=[pwd, otp, mfa], claiming a password factor that may never have been used | Derive the base AMR from the verified incoming token (union it with AMROTP/AMRMFA) rather than hard-coding AMRPassword, or add the TOTP factors to whatever the StepUpClaimsBuilder returns and document |
+| `mfa/SF-5` | CONFIRMED | dos | `passkey/memory/challengestore.go:34` | memory.ChallengeStore does a full-map prune on every Put, so insertion cost is linear in the live set (quadratic total) behind an unauthenticated endpoint | Add a bounded constructor (NewBoundedChallengeStore(max int)) that rejects/evicts on overflow, replace the per-Put full scan with amortized pruning (a min-heap by expiry, or prune at most k entries pe |
+| `mfa/SF-6` | CONFIRMED | api-footgun | `mfa/handlers.go:336` | No shipped handler converts a recovery code into a session (StepUpHandler is TOTP-only), so recovery-code self-service must be hand-rolled | Ship a StepUpRecoveryHandler (or a WithRecoveryFallback option on StepUpHandler) that calls VerifyRecoveryCode and, on success, re-issues the full pair with AMR=[AMRPassword, AMRMFA] exactly like Step |
+| `mfa/SF-7` | — | enumeration | `otp/handlers.go:240` | otp.VerifyHandler leaks account existence through response timing, contradicting WithSubjectResolver's documented 'no account-existence signal' guarantee | Either equalize the work (on ok=false, hash the submitted code against a dummy value and, if cheap, issue a same-shaped no-op store read) or narrow the documented guarantee in otp/handlers.go:74-79 to |
+| `mfa/SF-8` | — | doc-mismatch | `SECURITY.md:117` | SECURITY.md states the mfa store persists the TOTP secret in clear; the pgx store envelope-encrypts it and its constructor panics without a KEK | Update SECURITY.md:111-117 and .llms/mfa.md's Gotchas to state that adapters/pgx/mfa seals the secret with a caller-supplied KEK (constructor-enforced), that the in-memory store keeps it in process me |
+| `mfa/SF-9` | — | csrf | `passkey/handlers.go:244` | The passkey handler family has no same-origin/CSRF check, unlike every other handler family | Add the same WithTrustedOrigins / originAllowed / WithInsecureNoOriginCheck triple to the passkey handlers (at minimum to RenameCredentialHandler and the Begin* handlers), and either way state explici |
+| `ops/CI-1` | — | error-handling | `.github/workflows/ci.yml:284` | No .golangci.yml means CI's lint job only runs the 5 default linters; a --default=all run surfaces 3000+ additional findings across 20+ linters the strict Go community config expects, including a real (if low-severity) gosec hit in shipped  | If the maintainer wants a stricter bar, add a committed .golangci.yml enabling errorlint, gosec, revive, and err113 at minimum (the ones with clear security/correctness value), leaving the purely styl |
+| `ops/EX-1` | — | api-footgun | `examples/fullstack/main.go:406` | examples/fullstack's main() starts the HTTP server with http.ListenAndServe (no read/write/idle timeouts), the one insecure-for-production shortcut in that file NOT called out in a comment | Use an &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: ..., ReadTimeout: ..., WriteTimeout: ..., IdleTimeout: ...} and add the same '// In production, tune these for your workload' style |
+| `ops/EX-2` | — | api-footgun | `examples/fullstack/main.go:157` | examples/fullstack's passkey CookieKey is an all-zero 32-byte slice -- it passes the library's length check but is a fully predictable HMAC key | Generate the demo key with crypto/rand even in the example (it costs nothing and removes the footgun entirely), or have passkey.NewService additionally reject an all-zero key as a cheap defense-in-dep |
+| `ops/REL-1` | REFUTED | supply-chain | `adapters/pgx/go.mod:5` | adapters/pgx/go.mod's header comment describes a replace directive the file does not have; the reprovision-after-revoke coverage gap it is blamed for is inert on Postgres (that bug was memory-store-only) | Either add the replace directive the comment claims exists (matching what RELEASING.md describes), or fix the comment to say the replace lives only in the workspace go.work; either way, add a pgx-spec |
+| `ops/REL-2` | CONFIRMED | doc-mismatch | `RELEASING.md:166` | RELEASING.md:166-172 and adapters/pgx/go.mod:5-15 both describe a replace directive adapters/pgx/go.mod does not have, so GOWORK=off commands there silently test against cached core v0.7.0 instead of the local tree | Correct RELEASING.md (and the adapters/pgx/go.mod header comment) to state plainly that the replace lives only in the root go.work for local dev/CI, and that adapters/pgx/go.mod's own require is the o |
+| `ops/REL-4` | — | supply-chain | `.github/workflows/ci.yml:260` | CI pins govulncheck to a stale version (v1.1.4) while the current release is v1.5.0 | Bump the pinned govulncheck version in ci.yml (both occurrences) to a current release, and consider Dependabot-tracking it too (it's a plain go run version string, invisible to gomod-ecosystem Dependa |
+| `ops/SUPPLY-1` | CONFIRMED | supply-chain | `.github/dependabot.yml:3` | dependabot.yml declares only directory "/", so adapters/pgx and adapters/otel get no automated dependency-bump PRs (CI govulncheck still covers pgx, not otel) | Add gomod entries with directory: "/adapters/pgx" and "/adapters/otel" to dependabot.yml. |
+| `pgx/PG-3` | — | availability-dos | `adapters/pgx/tokens/store.go:317` | No index on tokens.created_by backs API-key-by-creator queries against a high-churn table | Add a migration creating a partial index, e.g. CREATE INDEX IF NOT EXISTS idx_tokens_tenant_created_by ON tokens (tenant_id, created_by) WHERE claims IS NOT NULL; which serves both ListAPIKeysByCreato |
+| `pgx/PG-5` | — | race | `adapters/pgx/mfa/store.go:182` | SELECT ... FOR UPDATE provides no real serialization in the non-transactional fallback path (mfa.IncrementTOTPAttempts) | Either require DBQuerier to embed the Beginner capability (making the fallback unrepresentable), or make increment() explicitly begin its own transaction when q is not already inside one (rather than  |
+| `pgx/PG-6` | — | race | `adapters/pgx/passkey/store.go:98` | passkey.UpdateCredential is a non-CAS full-record replace, allowing a lost-update race on sign_count | Add a monotonic guard to the UPDATE, e.g. 'AND ($5 = 0 OR sign_count < $5)' (sign_count 0 is the valid 'authenticator does not support counters' case per WebAuthn spec) and treat 0 rows affected as a  |
+| `tenant/TEN-10` | — | doc-mismatch | `SECURITY.md:115` | SECURITY.md states the mfa store persists the TOTP secret in clear and tells operators to add envelope encryption, but the shipped pgx mfa store already mandates a KEK and seals it | Rewrite the caveat per backend: adapters/pgx/mfa requires a KEK and stores the secret KEK-sealed (AES-256-GCM); mfa/memory holds it in process memory in clear and is for tests / single-process use; a  |
+| `tenant/TEN-11` | — | doc-mismatch | `tokens/middleware.go:159` | tokens.RequireAuth always binds the token to a tenant ("" when no resolver) but its godoc says it verifies without tenant binding, so webapp.Config.Tenant plus RequireAuth 401s every request | Correct the godoc: with no resolver, RequireAuth binds to the empty tenant and therefore REQUIRES tokens issued under ""; fix the option name to WithAuthTenantResolver. Add a note on webapp.Config.Ten |
+| `tenant/TEN-12` | — | cross-tenant-leak | `adapters/pgx/tokens/store.go:179` | tokens.Store SaveAPIKey validates the record's TenantID but ignores the embedded Claims.TenantID that VerifyAPIKey returns to callers | Extend the guard in both backends to reject key.Claims.TenantID != "" && key.Claims.TenantID != tenantID, and pin key.Claims.TenantID = tenantID on save. On read, overwrite key.Claims.TenantID from th |
+| `tenant/TEN-13` | — | dos | `identity/handlers.go:460` | The identity Request* delivery semaphore is shared across all tenants, so one tenant's reset/magic-link volume silently drops other tenants' mail while still returning success | The drop-on-full policy itself is a deliberate, documented backpressure choice; the missing piece is per-tenant fairness. Add a per-tenant sub-cap (e.g. a small per-tenant counter under the global sem |
+| `tenant/TEN-14` | — | doc-mismatch | `ratelimit/tokenbucket.go:134` | TokenBucket.WithMaxKeys documents that fully-refilled buckets are always preferred for eviction, but evictOne samples only 5 random buckets and can evict a bucket still under brute-force pressure | Soften the godoc to say a small random sample (5) is inspected and the most-refilled of the sample is evicted, so eviction is best-effort and a pressured bucket can be reclaimed under sustained key ch |
+| `tenant/TEN-5` | CONFIRMED | doc-mismatch | `SECURITY.md:370` | SECURITY.md AND the published docs site document the multi-tenant token-binding control via three identifiers that do not exist (Config.MultiTenant, VerifyAccessToken, ErrTenantBindingRequired) | Rewrite the SECURITY.md bullet to describe the API as shipped: VerifyAccessTokenForTenant is the ONLY access-token entry point, it always compares the signed tenant_id claim against the supplied tenan |
+| `tenant/TEN-8` | — | dos | `sessions/memory/store.go:249` | Bounded in-memory sessions and OTP stores evict across tenant boundaries, so one tenant's insert pressure logs out / breaks OTP for other tenants | Either document explicitly that NewBoundedStore is single-tenant-only (and have the multi-tenant guidance point at a per-tenant cap or the pgx backend), or add a per-tenant quota so eviction can only  |
+| `tenant/TEN-9` | — | crypto | `keystore/kek.go:60` | KEK envelope encryption uses no additional authenticated data, so a sealed signing key or TOTP secret can be moved between tenant rows without the KEK | Bind the AAD to the record identity: KEK.Seal(plaintext, aad []byte) / Open(sealed, aad []byte), with aad = tenantID // 0x00 // keyID for keystore rows and tenantID // 0x00 // userID for mfa rows. Kee |
+
+### INFO tier (10)
+
+| ID | Status | Category | Location | Finding | Fix |
+|---|---|---|---|---|---|
+| `claims/DOC-13` | — | doc-mismatch | `SECURITY.md:251` | SECURITY.md states the api_key.auth.failed reason set exhaustively ("is one of") but omits `revoked`, and its api-key event list omits api_key.revoked entirely | Add `revoked` to the SECURITY.md:251-252 reason list and add an `api_key.revoked` bullet (Attrs: key_id) so SECURITY.md matches README.md:250-257 and the code. Consider a small table-driven test that  |
+| `claims/DOC-14` | — | doc-mismatch | `llms.txt:51` | llms.txt's "Handlers are POST-only with a pre-auth body cap" is false for the oauth handlers, and doc.go's quickstart omits the ClaimsProvider that Rotate requires, so the copied example can never refresh | Scope llms.txt:51 to the form/JSON handler families (identity, tokens, mfa, otp, passkey Finish) and note that the oauth Begin/Callback handlers are GET redirect endpoints with no method gate or body  |
+| `http/HTTP-11` | — | api-footgun | `internal/httputil/httputil.go:60` | internal/httputil.OriginAllowed is a permissive-by-default origin helper that no production code uses, kept alive by a test that pins the permissive semantics | Delete OriginAllowed (and its test), or invert it to the strict policy and have identity/tokens/mfa/otp share it — replacing four duplicated implementations with one, so there is exactly one origin de |
+| `identity/TEN-4` | REFUTED | error-handling | `identity/service.go:103` | Session/token revocation on reset, change-password and delete is entirely opt-in with no startup validation, so the documented "attacker holding a live session is evicted immediately" is silently false in the default configuration | Make the absence of erasers loud: log a startup warning (or expose identity.WithNoAccountErasers() as an explicit, greppable opt-out, mirroring the WithNoLockout convention already used for lockout at |
+| `lifecycle/HDR-1` | — | api-footgun | `tokens/middleware.go:305` | A cookie always shadows an explicitly presented Authorization: Bearer token, and the header parse rejects any non-single-space form | Prefer the Authorization header over the cookie (an explicit credential should win over an ambient one), or at least document the precedence on `WithCookieAuth`. Use `strings.Fields`/`strings.Cut` wit |
+| `mfa/SF-11` | — | go-idiom | `adapters/pgx/mfa/store.go:86` | adapters/pgx/mfa wraps errors with fmt.Errorf("%w") against the project's errors.Join standard | Replace with errors.Join(errors.New("mfa pgx: sealing secret"), err) etc., per the house standard. |
+| `ops/IDIOM-1` | — | go-idiom | `actor.go:66` | go fix -diff (Go 1.26 modernizers) flags 4 real idiom gaps across the repo | Run go fix ./... (both modules) and commit; add modernize to the default lint set if the maintainer wants this enforced going forward (it is NOT in golangci-lint's default set, see CI-1). |
+| `ops/IDIOM-2` | — | error-handling | `oauth/oidc.go:114` | House rule 'errors.Join(errors.New(...), err) not fmt.Errorf %w' is violated everywhere in the codebase -- 258 fmt.Errorf(...%w...) call sites across ~29 files, zero errors.Join(errors.New(...),...) call sites anywhere | Either update the stated house rule to match the codebase's actual (and arguably more standard) fmt.Errorf(%w) convention, or, if errors.Join is genuinely preferred going forward, treat it as a delibe |
+| `ops/IDIOM-3` | — | error-handling | `tokens/jwt/issuer.go:155` | Several exported constructors return ad hoc errors.New(...) at the return site rather than a declared sentinel, so callers cannot errors.Is-match a specific validation failure | No action needed unless the maintainer wants uniform sentinel errors even for constructor validation; if so, a shared configError helper type per package would avoid the current one-off strings. |
+| `pgx/PG-4` | — | style | `adapters/pgx/tokens/store.go:216` | gofmt formatting violation: stray blank line in tokens/store.go | Run gofmt -w adapters/pgx/tokens/store.go to delete the extra blank line at line 216-217. |
+
+
+---
+
+### Attack hypotheses tested and cleared (150)
+
+**crypto** (24)
+
+- math/rand used anywhere for security material — `grep -rn "math/rand" --include=*.go .` over all three modules returns zero hits, including tests. Every generator uses crypto/rand.
+- Unchecked or short crypto/rand reads yielding a partly-zero secret — Enumerated every crypto/rand call site in non-test code (identity/verification.go:78,82; sessions/service.go:93; mfa/totp.go:25; mfa/recovery.go:43; passwords/argon2/hasher.go:203; oauth/state.go:32,41; tokens/jwt/issuer.go:463,520; keystor
+- Insufficient entropy in any generated credential — Measured in bytes: session token 32 (sessions/service.go:92), refresh token 32 default with MinTokenLength=16 enforced in both Validate and New (tokens/jwt/issuer.go:143,352-365), API key 32 same enforcement, OAuth state 16 / PKCE verifier 
+- Modulo bias in digit or charset generation — otp/code.go:15-21 uses `rand.Int(rand.Reader, 10^digits)` — big.Int rejection sampling, uniform by construction, no modulo. Recovery codes (mfa/recovery.go:46) base32-encode raw random bytes, so no reduction occurs. The only modulo is RFC 4
+- AES-GCM nonce reuse, derivation, counters or zero nonces in the KEK — keystore/kek.go:54-61 generates a fresh NonceSize() (12-byte) nonce from crypto/rand for every Seal, prefixes it to the blob, and never derives/increments/reuses it. Open (:65-75) length-checks before slicing and collapses any authenticatio
+- JWT algorithm confusion: alg taken from the header, "none", HS-vs-RS substitution — Both keyfuncs resolve the Signer FIRST (by kid) and only then compare `token.Method.Alg()` to the resolved signer's own pinned alg — tokens/jwt/issuer.go:589-598 and tokens/jwt/keystore.go:59-65. A token claiming HS256 against an RSA kid is
+- kid used as an unsafe lookup key (injection, path traversal, unbounded key fetch) — kid is only ever a plain Go map index into an in-memory set built at construction or from the tenant's resolved keyset (tokens/jwt/issuer.go:609, tokens/jwt/keystore.go:59) — never a filesystem path, URL or SQL fragment. A present-but-non-s
+- Claims read before signature verification, or an unverified parse anywhere — `grep -rn "ParseUnverified|SkipClaimsValidation|WithoutClaimsValidation|UnsafeAllowNone"` finds hits only in _test.go files (tokens/jwt/keyset_test.go:38, asymmetric_test.go:72, algconfusion_test.go:81, oauth/oidc_test.go:245). Production c
+- Cross-tenant token acceptance under a shared signing key — Two independent layers. With a KeyStore, tenantKeyFunc consults only tenantID's keys (tokens/jwt/keystore.go:47), so another tenant's token cannot resolve a key. Without one, VerifyAccessTokenForTenant compares the SIGNED tenant_id claim ag
+- OIDC id_token validation: iss/aud/exp/iat, azp confused deputy, nonce replay, JWKS poisoning/size — oauth/oidc.go:184-191 passes WithValidMethods, WithIssuer, WithAudience, WithExpirationRequired, WithIssuedAt and a bounded leeway (1 min default). azp is enforced per OIDC Core 3.1.3.7 including the subtle multi-audience-without-azp reject
+- A revoked or stale JWKS/keyset validating a forged token — jwksCache.refresh replaces the whole key map (oauth/oidc.go:343-346), so a revoked kid disappears on the next refresh; staleness is bounded by the 1 h TTL and cached() refuses to serve past c.exp (:307). A failed refresh leaves publicKey re
+- Timing side channels in secret comparison — Every secret comparison is either subtle.ConstantTimeCompare / hmac.Equal or a SHA-256-then-indexed-equality lookup: derived password key (passwords/argon2/hasher.go:309), OTP code (otp/code.go:37), TOTP code (mfa/totp.go:119), verification
+- Symmetric (HS256) secret accidentally published in a JWKS — Both JWKS builders special-case symmetric keys to metadata only, never emitting "k": keystore/jwks.go:67-70 (`JWK{Kty: "oct", Use: "sig", Alg: "HS256", Kid: kid}`) and tokens/jwt/jwks.go:92-95 (default branch for []byte and any unknown key 
+- Weak or wrong-type key material accepted on the keystore path — keystore/jwtadapter.go:64-114 routes HS256 through jwt.NewHMACSigner, which enforces MinSecretKeyLength=32 (tokens/jwt/signer.go:89-94) with no allowWeak escape on that path; asymmetric algs enforce RSA>=2048 bits (signer.go:107), a named s
+- TOTP replay within the skew window; concurrent brute force exceeding the attempt budget — validateTOTP returns the ACCEPTED step (mfa/totp.go:120) and MarkTOTPUsed applies only when `last_used_step < $3` (adapters/pgx/mfa/store.go:136-144), so no step is ever accepted twice — including the enrollment-confirming code, which is re
+- Recovery codes: entropy, hashed at rest, single-use, count — 10 codes by default, each 80 bits of crypto/rand base32-encoded (mfa/recovery.go:13,41-46). Only the SHA-256 hash of the normalised code is stored (:18-21) and normalisation is applied identically on generation and verification, so the dash
+- Argon2id parameters below current OWASP guidance, or tunable downward — Defaults are m=65536 KiB (64 MiB), t=1, p=4, keyLen=32, saltLen=16 (passwords/argon2/hasher.go:28-32) — at or above the OWASP 2021 Argon2id guidance for concurrent workloads. Crucially the WithMemory/WithTime/WithThreads options clamp UP, n
+- Malformed stored PHC hash causing a panic in the KDF — Compare explicitly guards the three known panic sources in x/crypto argon2 before calling IDKey — time<1 and threads<1 (deriveKey panics) and keyLen==0 (nil-deref in extractKey/blake2bHash) — plus the memory<8*threads clamp mismatch, all ma
+- Decoy-hash cost equivalence and the empty-password timing oracle — Both halves short-circuit symmetrically on the degenerate inputs: Hash returns immediately for password=="" (passwords/argon2/hasher.go:188) and for oversized input (:192), and Compare mirrors both (:227, :234) with the reasoning documented
+- OAuth state cookie is not integrity-protected, so a tampered cookie could downgrade PKCE or the nonce — The cookie is plaintext HMAC-less (oauth/handlers.go:269-280) but every consumer of its fields fails closed rather than skipping a check. A blanked nonce hits oauth/oidc.go:215 `expectedNonce == ""` → ErrNonceMismatch, so nonce verification
+- Passkey ceremony cookie forgery or cross-tenant replay — The cookie is HMAC-SHA256 sealed and verified with hmac.Equal in constant time, with a length precondition before slicing (passkey/handlers.go:309-329). The key is required at construction (>=32 bytes, ErrCookieKeyMissing at passkey/service
+- JWKS response content-type not validated — Not a control here. The response is size-capped at 1 MiB (oauth/oidc.go:335), the status must be exactly 200 (:332), and json.Unmarshal is type-strict — a non-JSON or wrong-shaped body simply fails to decode into the jwk struct and yields '
+- jwt.Config redaction leaving the newer pluggable Signers field exposed — Config.String()/LogValue() omit the Signers slice entirely rather than printing it (tokens/jwt/redact.go:52-59, :75-82), and Config implements Stringer so fmt uses the redacting method for %v/%+v/%#v. SecretKey is rendered as REDACTED while
+- Refresh-token rotation allowing replay or family-revocation bypass — Only the hash is stored (tokens/jwt/issuer.go:467 via tokens.HashToken), consumption is atomic through the store with the losing racer mapped to the distinct ErrRefreshConcurrent so a benign parallel-tab race does not revoke the family (:79
+
+**identity** (16)
+
+- Verification-token cross-purpose replay: can a password-reset token be presented as an email-verification/magic-link token (or vice versa)? — The kind is part of the atomic consume predicate in BOTH backends — memory store checks `vt.Kind != kind` inside the same mutex (identity/memory/store.go:335) and pgx puts `AND kind = $3` in the lookup (adapters/pgx/identity/store.go:406). 
+- Double-spend of a single-use token under concurrency (two simultaneous confirms). — Memory: lookup, verify, expiry check and delete all happen under one held s.mu.Lock (identity/memory/store.go:324-346). pgx: the SELECT is followed by a guarded DELETE whose RowsAffected()==0 is mapped to ErrVerificationTokenNotFound (adapt
+- Token brute-force / hashing at rest / timing on the verifier. — Selector is 128 bits and verifier 256 bits from crypto/rand (identity/verification.go:76-89); only the hex SHA-256 of the verifier is persisted and it is compared with subtle.ConstantTimeCompare (verification.go:110-113). Unsalted SHA-256 i
+- Email-verification tokens carry no email binding, so consuming an old one could mark a NEW (unproven) address verified. — Examined and not exploitable in the shipped flows: the only paths that change users.email are ConfirmEmailChange and UpdateUserEmail, and both already require confirming a token delivered to the new address and mark it verified in the same 
+- Pre-registration takeover / squatting via an email that is pending an email-change for someone else. — Both directions are closed by the live-row unique index, not just by the advisory pre-flight. If the victim registers first, the attacker's ConfirmEmailChange fails with ErrEmailAlreadyExists at UpdateUserEmail (adapters/pgx/identity/store.
+- OAuth identity silently auto-linked onto a pre-existing local account that shares the email (classic takeover vector). — Explicitly refused: LinkOrCreateIdentity returns ErrEmailAlreadyExists when the provider email matches any live account and the provider identity is not already linked (identity/service.go:986-995), and the shipped callback additionally ref
+- Email case/Unicode normalization used to create a duplicate account or hijack a victim's address (homoglyphs, NFC/NFD, IDN U-label vs punycode, whitespace). — normalizeEmail trims, NFC-normalizes and lowercases the local part and folds the domain to its IDN A-label via idna.Lookup.ToASCII (identity/service.go:26-55), so case variants, NFC/NFD pairs and Unicode/punycode domain pairs collapse to on
+- Lockout bypass by varying the email casing, or via a parallel login flow that shares no counter (magic link, OTP, passkey). — Casing cannot bypass it: Authenticate normalizes providerID before the lookup (identity/service.go:519-527), so all variants hit the same identity row and the same counter. Magic link and the token-gated paths do ignore LockedUntil, but the
+- IncrementFailedAttempts atomicity and the account.locked event firing more than once under concurrent failed logins. — Both backends derive justLocked inside the single atomic operation — pgx via `RETURNING $3 > 0 AND failed_attempts >= $3 AND failed_attempts - 1 < $3` on the post-update row (adapters/pgx/identity/store.go:489), memory via `before < lockThr
+- Soft-deleted account still able to authenticate, be reset, receive a magic link, or be re-registered inheriting old data. — DeleteUser anonymizes users.email and the password identity's provider_id and purges pending tokens atomically (adapters/pgx/identity/store.go:200-218), so FindUserByEmail misses (`deleted_at IS NULL`), Authenticate cannot resolve either th
+- Disabled (suspended) accounts still able to consume pending magic-link/email-change tokens. — consumeForLiveUser rejects DisabledAt with ErrUserNotFound (identity/service.go:684-686), which reliably revokes pending token-gated actions while the suspension holds, and LinkOrCreateIdentity's already-linked branch refuses disabled accou
+- Non-password provider passed to the credential login form (passwordless bypass on identifier alone). — Authenticate hard-rejects any provider other than "password" after a decoy hash (identity/service.go:602-613), so WithProvider("google") cannot turn LoginHandler into an identifier-only bypass, and the rejection is timing-equalized with the
+- Pre-authentication argon2 CPU amplification via an unbounded password field, and unbounded delivery goroutine fan-out / mail-toll fraud on the unauthenticated Request* endpoints. — Every form handler bounds the body at DefaultMaxBodyBytes = 4 KiB before parsing (identity/handlers.go:28, :293-295), and dispatchDelivery caps in-flight deliveries with a per-handler-instance buffered semaphore acquired non-blocking, dropp
+- Enumeration via the authenticated Request* endpoints leaking whether an arbitrary userID is a live same-tenant account. — RequestEmailVerification deliberately swallows ErrUserNotFound and returns an empty token so a bogus userID produces the same 204 as a real one (identity/service.go:915-923, tested at identity/service_test.go:54), and the handler only dispa
+- WithClock skew affecting the lockout window (service clock gates the lock, DB clock stamps it). — Acknowledged in the option's godoc (identity/service.go:358-362: 'Note the lockout STAMP ... is computed by the Store, not the service, so it is not affected by this clock'). Worst case the effective lock duration is off by the app/DB clock
+- SingleTenant wrapper leaking across tenants. — Every method hard-wires tenantID="" (identity/singletenant.go:36-157) and the type doc states the single-tenant-only contract and the mixing hazard explicitly (singletenant.go:15-21). It cannot reach another partition.
+
+**tenant** (14)
+
+- Every method on every Store interface (identity, sessions, tokens, mfa, otp, passkey, oauth, keystore, passkey.ChallengeStore) takes a tenant parameter — Verified mechanically: awk over all nine interface files for 'ctx context.Context' lines lacking tenantID/tenant returned zero results. There is no tenant-less lookup anywhere in the persistence contract.
+- pgx SQL might look up by an opaque id/hash alone (token hash, session hash, credential id, selector, provider name, API key id) — Read every statement in all eight adapters/pgx/*/store.go files. Every SELECT/INSERT/UPDATE/DELETE carries tenant_id in its WHERE clause or key tuple, including the multi-CTE statements (identity UpdateUserEmail lines 156-169 and DeleteUser
+- verification_tokens has 'selector VARCHAR PRIMARY KEY' (global, not per-tenant), and the memory store keys its map on the selector alone — Not exploitable: the selector is a server-generated 128-bit random value the client cannot choose, and every read/consume/delete is still scoped - identity/store.go:406 'WHERE selector = $1 AND tenant_id = $2 AND kind = $3', identity/store.
+- JWT signed with tenant A's key validating for tenant B (kid handling / JWKS selection / shared static key) — Two independent defences and both hold. With a KeyStore, tokens/jwt/keystore.go:45-67 tenantKeyFunc resolves kid ONLY from that tenant's VerificationKeys and then pins token.Method.Alg() to the signer's alg. With the shared static keyset, t
+- Per-tenant caches poisoning or leaking across tenants (jwt key cache, keystore JWKS, pgx oauth provider cache, passkey challenge store, sessions byHash index) — All correctly composite-keyed: tokens/jwt/keycache.go entries map is keyed by tenantID and Invalidate/InvalidateAll bump a generation counter so an invalidation racing an in-flight fill is not lost (lines 128-135); adapters/pgx/oauth/store.
+- The singletenant.go facades could be mixed with a multi-tenant store and collapse tenants — All five facades (identity, sessions, mfa, otp, passkey, tokens/jwt) hard-wire the literal "" at every call site - verified line by line in identity/singletenant.go:37-157 and tokens/jwt/singletenant.go:39-100. They cannot reach a non-empty
+- Service-layer code dropping the tenant on the way to the store — Enumerated every store call in the five services: identity/service.go (48 call sites), sessions/service.go (8), mfa/service.go (16), otp/service.go (8), passkey/service.go (7). Every single one passes tenantID through. In jwt Rotate the ten
+- Passkey discoverable (usernameless) login resolves the account from a client-supplied user handle, which could cross tenants — The handle only selects a user id; the credential lookup that actually authenticates stays tenant-scoped. passkey/service.go:309 calls s.loadUser(ctx, tenantID, uid, ...) -> store.GetCredentials(ctx, tenantID, userID), so presenting tenant 
+- OAuth callback state replay across tenants / providers in the bring-your-own-SSO model — oauth/handlers.go:206-213 constant-time-compares both the cookie's provider name and the cookie's tenant against the request's, rejecting with provider_mismatch / tenant_mismatch. DynamicBegin/DynamicCallbackHandler resolve the tenant exact
+- List*/Count*/prune/janitor operations spanning tenants — None do. Every reaper takes a tenantID and filters on it: DeleteExpired in sessions/tokens/otp/identity (both backends), identity DeleteExpiredVerificationTokens, keystore RetireExpiredKeys. ListAPIKeysByCreator is scoped 'WHERE tenant_id =
+- Unique indexes not scoped to the tenant, letting one tenant block another's registration or collide on a key — Every uniqueness constraint is tenant-first: users (tenant_id, email) partial-unique on deleted_at IS NULL, users (tenant_id, phone) partial-unique, identities (tenant_id, provider, provider_id), sessions (tenant_id, token_hash), tokens PK 
+- sessions.BindUser accepts any userID with no check that the user belongs to the tenant — Structurally unavoidable and not a library defect: the sessions module has no users table and no dependency on identity, so it cannot verify the binding. The identity module does add the equivalent guard where it can (identity pgx AddIdenti
+- The pgx cross-tenant conformance tests may never actually execute (they need Docker, which is unavailable here) — CI does run them. .github/workflows/ci.yml:84 runs the full untagged adapters/pgx suite on ubuntu-latest where testcontainers works, and a dedicated job (lines 86-132) runs the integration-tagged suite against a real Postgres service via TE
+- otel adapter putting the attacker-controlled tenant id into telemetry (metric-cardinality blowup) — adapters/otel/sink.go:60-61 sets egauth.tenant_id as a SPAN attribute, not a metric label or dimension. Span attributes carry no cardinality cost in the metrics pipeline, and the adapter registers no metric instruments at all.
+
+**http** (16)
+
+- SSRF guard bypass via IPv6, alternate IPv4 notations, cloud metadata, CGNAT, DNS rebinding, HTTP redirect chains, or env proxies (oauth/ssrf.go) — I tried each vector against oauth/ssrf.go:113-165 and could not break it. isBlockedIP covers loopback (all of 127/8, plus ::1 and ::ffff:127.0.0.1 because To4() normalises the mapped form), 0.0.0.0/:: (IsUnspecified), 169.254.0.0/16 incl. 1
+- SSRF guard not applied to every outbound call on the bring-your-own-SSO path (token exchange, userinfo, JWKS, OIDC discovery, HIBP) — adapters/pgx/oauth/store.go:212 builds one SafeHTTPClient and injects it into BOTH the provider (oauth.WithHTTPClient(safeClient), line 227) and the OIDC verifier (OIDCConfig.HTTPClient, line 216), so token exchange, discovery and JWKS all 
+- Unbounded outbound response bodies or leaked response bodies on the server-side fetch paths — Every outbound read is size-capped and every body is closed: oauth/provider.go:243-244 and 286-287 (maxResponseBytes), oauth/providers/oidc.go:130-131 (discoveryMaxBytes), oauth/oidc.go:331/335 (maxJWKSBytes), oauth/oidc_discovery.go:76/80 
+- Host-header poisoning into emailed password-reset / magic-link URLs (the classic identity/delivery.go vector) — identity/delivery.go builds no URLs at all. PasswordResetMail, EmailVerificationMail, MagicLinkMail, EmailChangeMail, RecoveryEmailMail and PhoneVerificationSMS carry only *User, the plaintext token, and (for change/recovery flows) the norm
+- Query-string parameter injection into credential fields (email/password/token/code) via r.ParseForm merging query and body — r.ParseForm merges the query string into r.Form but keeps body-only values in r.PostForm. Every handler reads r.PostForm.Get exclusively — identity/handlers.go:318-320, 391-393, 599-600, 671, 734, 796-797, 914, 966, 1127, 1222, 1270, 1303; 
+- Origin/Referer parsing failing open on null origin, unparseable headers, or a relative Referer — httputil.RequestOriginHost (internal/httputil/httputil.go:35-55) fails closed on all three: Origin "null" returns "" and explicitly does NOT fall back to the weaker Referer (line 41-43); an unparseable Origin returns "" rather than falling 
+- The origin check running after body parsing, letting a cross-site POST burn argon2 cycles pre-auth — Ordering is correct everywhere: method check, then originAllowed, then parseLimitedForm, then the service call — identity/handlers.go:305-322, tokens/handlers.go:144-154, mfa/handlers.go:222-242, otp/handlers.go:177-192. A rejected cross-si
+- tokens.ContextMiddleware silently skipping the gates that RequireAuth enforces (WithRequiredKind in particular), i.e. a security control lost on the context bridge — Both entry points share serveAuthenticated (tokens/middleware.go:193), which applies the step-up/AMR, max-auth-age, scope, password-change and application-gate checks on both the verified-token path (lines 222-239) and the auto-refresh path
+- HTTP method not enforced, allowing GET-triggered state changes (link prefetchers, email scanners) — Every state-changing handler is POST-only with a correct Allow header: all 14 identity handlers, tokens Refresh/Logout (tokens/handlers.go:144-148, 202-206), the shared mfa guarded() preamble (mfa/handlers.go:222-226), both otp handlers, an
+- Open redirect via a user-controlled redirect target (return_to / next / failure URL / state) — No handler derives a redirect target from request data. httputil.Fail and RedirectOrStatus (internal/httputil/httputil.go:73-108) redirect only to cfg.failureURL / cfg.successURL, which are operator-supplied at handler construction via With
+- __Host- prefix guarantees being cosmetic rather than enforced for the auth and session cookies — The prefix defaults are real and enforced. tokens.DefaultCookies uses __Host-access_token / __Host-refresh_token (tokens/cookies.go:18-19, 61-70) and sessions.RequireSession defaults to __Host-session_token (sessions/middleware.go:16, 36-38
+- OAuth state cookie being unsigned, and cross-provider / cross-tenant state replay — The cookie is a plain concatenation (oauth/state.go:55-63) with no MAC, but the integrity model is sound for what it defends and is fully disclosed at SECURITY.md:398-414, including the plaintext PKCE verifier and nonce and the recommendati
+- health package exposing an unauthenticated HTTP endpoint that leaks backend detail — health/health.go is 19 lines containing only the Pinger interface — no HTTP handler, no mux registration, no response writing anywhere in the package. There is no attack surface, and the probe wiring is left entirely to the consumer.
+- Error bodies leaking internal detail (SQL text, wrapped store errors, provider errors, stack traces) to clients — Every client-visible body is a fixed literal code, never a formatted error. identity mapAuthError/mapVerificationError/mapRegisterError (identity/handlers.go:520-536, 1026-1057, 1073-1081), oauth mapLinkError (oauth/handlers.go:332-346), mf
+- Off-response-path mail/SMS goroutine fan-out as an unauthenticated DoS / toll-fraud amplifier — Both dispatchers are bounded correctly. identity/handlers.go:456-491 and otp/handlers.go:273-298 acquire from a semaphore created ONCE per handler instance in newHandlerConfig (identity/handlers.go:113-115, otp/handlers.go:68-70) — not per 
+- Enumeration oracles in the uniform-response Request* handlers — The uniform-response shape is genuinely uniform: RequestPasswordResetHandler, RequestMagicLinkHandler and RequestPasswordResetViaRecoveryHandler discard the service error entirely (identity/handlers.go:570, 703, 1308) with an in-code ration
+
+**lifecycle** (14)
+
+- Refresh rotation atomicity and the two-concurrent-refresh race — is the consume a compare-and-swap in BOTH backends, or a read-then-write? — Both are genuine CAS. pgx: `UPDATE tokens SET consumed_at = now() WHERE tenant_id=$1 AND token_hash=$2 AND claims IS NULL AND consumed_at IS NULL` and it branches on RowsAffected (adapters/pgx/tokens/store.go:104-132), so exactly one of N r
+- Can step-up (WithRequiredAMR / WithMaxAuthAge) be evaded by refreshing, and is AuthTime forged or made unsatisfiable? — AuthTime is defaulted to the issue time ONLY when `initial` is true (issuer.go:415-418), and Rotate calls issuePair with initial=false after pinning `claims.AuthTime = rt.AuthTime` (issuer.go:816, 830), so a rotation can never manufacture f
+- Is the WithRequiredKind gate silently skipped on the ContextMiddleware path (it lives in RequireAuth's closure, not in shared code)? — No — ContextMiddleware performs the identical check in its own onAuth closure before injecting the Actor (tokens/context.go:60-65), mirroring RequireAuth (middleware.go:178-182). Both paths enforce it; only the ORDER relative to WithGate is
+- Auto-refresh writes both cookies before the step-up/scope/password-change/gate checks run — does that leak a credential to an unauthorized request? — This is correct and necessary. The rotation has already atomically consumed the old refresh token by the time the cookies are written (middleware.go:254 → issuer.go:794), so withholding the freshly minted refresh cookie would strand the cli
+- Scope/authorization helper semantics — substring/prefix matching, case-insensitivity, wildcards, or an empty-scope-means-all footgun? — All exact string equality with no wildcard or hierarchy: `Actor.HasScope` is a linear `sc == s` (actor.go:65-72); `HasAllScopes` is vacuously true only for a ZERO-argument call and false on any missing scope (actor.go:77-84); `HasAnyScope` 
+- Session fixation: is the session identifier rotated on privilege change (anonymous→authenticated via BindUser, and on step-up), and is pre-auth data carried over? — Yes. `BindUser` mints a brand-new token, re-binds UserID and writes both through `BindSession` as a compare-and-set on the OLD token hash (sessions/service.go:190-212), so the pre-auth token stops validating atomically with the promotion; `
+- Session expiry: idle vs absolute, and whether an expired-but-unpruned row can ever be treated as valid — Enforced twice, independently, on every read. The store contract requires expired rows to read as not-found and both backends honour it (memory evicts the matched row opportunistically at sessions/memory/store.go:39-43; pgx adds `expires_at
+- Actor mapping consistency between ActorFromAPIKey and actorFromClaims — Consistent for the classified kinds. For Service, `IssueAPIKey` sets `claims.Subject = keyID` (issuer.go:538-539), so ActorFromAPIKey's `KeyID = key.ID` (tokens/actor.go:33) and actorFromClaims' `KeyID = claims.Subject` (middleware.go:338-3
+- API key storage and verify path: hash-only at rest, revocation and expiry enforcement, and whether a revoked key can slip through any verify entry point — Only the SHA-256 hex hash is persisted; the memory store explicitly blanks `Token` before storing (tokens/memory/store.go:170) and the pgx INSERT never includes a token column (adapters/pgx/tokens/store.go:202-208). Revocation is a single c
+- Refresh-token reuse grace window as a theft-detection hole, and lockout of a legitimate double-submitting client — Documented and accepted in SECURITY.md:71-88 with the reasoning spelled out, and the implementation matches the disclosure: within the grace window the replay is still REJECTED (only the family survives), so the replayer gains nothing; ErrR
+- Does the JWT verify path allow alg confusion, 'none', a kid-less token forged past a keyset, or cross-tenant replay under a shared signing key? — The signer is resolved from the kid FIRST and the token's alg is then pinned to that signer's alg (issuer.go:589-618 and the per-tenant twin at keystore.go:45-68), so alg:HS256 against an RSA kid and alg:none both fail. A present-but-malfor
+- CachingKeyStore serving a revoked tenant keyset after a keystore key revocation — Bounded two ways as documented: entries expire after the TTL (keycache.go:109-112) and `EmitEvent` invalidates the tenant immediately on tenant.keys_renewed/keys_revoked/tenant.deleted when wired as a Manager sink (keycache.go:197-202). The
+- LogoutHandler idempotency and whether a store error can leave a family un-revoked while reporting success — Correct. A missing token is an idempotent 204 with no spurious logout event emitted (which would otherwise let a client manufacture audit records by replaying the call); a RevokeFamily failure or any other store error clears the cookies but
+- Session/token stores using time.Now() instead of the injected clock (sessions/memory FindSessionByHash, DeleteExpired; tokens/memory ConsumeRefreshToken; pgx expires_at >= NOW()) — Not a production defect for these paths. The reference stores are documented as clock-less and the service re-checks expiry with the injected clock on top of the store's filter, so the stricter of the two wins and the result is always fail-
+
+**mfa** (15)
+
+- TOTP replay of the SAME code inside the ±skew window, and reuse of the enrolling code for a login — Correct. mfa/service.go:288-297 accepts only a step strictly newer than LastUsedStep, and both stores implement the monotonic guard atomically: mfa/memory/store.go:74-76 (`if step <= e.LastUsedStep { return false, nil }`) and adapters/pgx/m
+- Is a TOTP secret usable before the enrollment is confirmed? — No. mfa/service.go:258-260 rejects with ErrNotConfirmed, and Confirmed() requires a non-nil ConfirmedAt (mfa/mfa.go:66). EnrollTOTP also refuses to overwrite a CONFIRMED factor (service.go:179-181), so a momentary session cannot silently sw
+- Concurrent brute force of TOTP / recovery codes exceeding MaxAttempts (TOCTOU on the stale GetTOTP read) — Correctly handled. The attempt slot is reserved atomically BEFORE the constant-time compare in all three verify paths (ConfirmTOTP service.go:215-222, VerifyTOTP service.go:266-273, VerifyRecoveryCode service.go:312-320), and the reservatio
+- Lockout used as a perpetual-DoS loop (an attacker keeps bumping LastAttemptAt so the 15-minute decay never fires) — Explicitly defended. When the factor is already locked and has not decayed, both stores return an over-limit count WITHOUT incrementing or bumping LastAttemptAt: mfa/memory/store.go:97-100 and adapters/pgx/mfa/store.go:167-171. So the decay
+- Recovery-code entropy, at-rest form, single-use atomicity, and whether regeneration invalidates the old set — All sound. 80 bits from crypto/rand per code (mfa/recovery.go:13, 42-46), stored only as hex SHA-256 of the normalized value (recovery.go:18-21), 10 per set by default. Consumption is a guarded single-use UPDATE (`... AND used_at IS NULL` +
+- OTP single-use under concurrency and the Issue/Verify TOCTOU (a stale verify burning a freshly reissued code) — Correct and well-reasoned. ConsumeOTP is guarded on the exact hash the verifier compared against (otp/service.go:157, otp/memory/store.go:109-115), so only one of N parallel correct-code verifications wins AND a superseded code neither auth
+- OTP code entropy / charset bias and a misconfigured digit count — No modulo bias: crypto/rand.Int over exactly 10^digits (otp/code.go:15-22), zero-padded. NewService panics for digits outside [6,10] (otp/service.go:75-77) and floors non-positive TTL / MaxAttempts to the defaults (service.go:78-83). Expire
+- WebAuthn credential-ID to user binding — can credential X be claimed by user Y, or a username-bound ceremony cookie be replayed at the discoverable endpoint? — No. go-webauthn enforces the bindings egauth relies on: session.UserID must equal user.WebAuthnID() (webauthn/login.go:217, registration.go:141), a supplied userHandle must equal the user ID (login.go:311), the asserted RawID must be presen
+- Passkey user-verification default and whether it is actually enforced (UV downgrade by the client) — Enforced end to end. Config zero value is normalized to protocol.VerificationRequired at construction (passkey/service.go:138-141), wired into AuthenticatorSelection.UserVerification (service.go:151-153), copied by go-webauthn into SessionD
+- Ceremony expiry and challenge single-use / guessability — Both hold. Timeouts are Enforce:true with a 5-minute bound (passkey/service.go:154-157), so SessionData.Expires is populated and re-checked server-side at Finish (go-webauthn login.go:221, login.go:258, registration.go:145). Single-use is s
+- Sign-count regression / cloned-authenticator detection, and metadata clobbering on the full-record UpdateCredential — Handled in both login paths: cred.Authenticator.CloneWarning is checked and the login rejected with ErrCredentialCloned plus an AccountBlocked event (passkey/service.go:255-258, 316-319). applyLoginMetadata (service.go:474-484) deliberately
+- passkey BeginLogin's no_credentials response as a passkey-enrolment enumeration oracle — Already identified, documented and accepted, with a build-enforcing test: passkey/no_credentials_oracle_test.go records the accepted remediation (disclose in SECURITY.md + rate-limit BeginLoginHandler) and asserts the SECURITY.md text is pr
+- Absence of per-IP rate limiting on the mfa / passkey verify endpoints — A disclosed, accepted non-objective, not a silent omission: SECURITY.md ('MFA verification is not rate-limited by egauth' and the passkey checklist's 'Rate-limit ceremony attempts in front of the handlers'), mfa/handlers.go:163-167 and pass
+- CSRF on the state-changing mfa/otp endpoints (a cross-site POST stripping MFA or invalidating recovery codes) — Closed by default. Both families enforce a strict same-origin check even with an empty allowlist, rejecting a POST whose Origin/Referer host is neither the request Host nor allow-listed, and treating a POST with neither header as untrusted:
+- mfa.NewService misconfiguration producing unverifiable or trivially guessable codes, or silently disabling the attempt limit — Fail-fast and secure-by-default: NewService panics on a nil store, digits outside RFC 6238's 6-8, a sub-second period, negative skew, non-positive recovery count and a nil clock (mfa/service.go:124-154); WithMaxAttempts(0) falls back to the
+
+**pgx** (8)
+
+- oauth Store.GetProvider decrypting client_secret via KEK.Open on every call, including cache hits (a prior finding, commit 23f6780) — Verified fixed: the cache lookup (store.go lines 167-172) happens BEFORE the base64-decode/KEK.Open block (lines 174-185), so a cache hit returns without touching the KEK. This is explicitly covered by adapters/pgx/oauth/cache_internal_test
+- pgxmigrate.Run building the applied-migration INSERT via string concatenation ('...+strings.ReplaceAll(version, "'", "''")+...') instead of a bound parameter — looks like classic SQL injecti — The interpolated value is the embedded migration filename from go:embed migrations/*.sql — a build-time, source-controlled value, never derived from any runtime/caller/tenant input. Quotes are defensively escaped anyway. This is correctly d
+- identity.Store.ConsumeVerificationToken and CreateVerificationToken keying verification_tokens by a global (non-tenant-scoped) PRIMARY KEY 'selector' — looks like a cross-tenant unique-index — selector is a server-generated, high-entropy random value (identity.GenerateVerificationToken), never caller-controlled, so a global PK does not create a functional cross-tenant collision risk the way a global email/username unique index wo
+- identity.Store.IncrementFailedAttempts' single UPDATE with nested CASE expressions in both SET and RETURNING clauses — looked suspicious for getting the pre/post-increment semantics wrong (c — Traced the CASE logic by hand: RETURNING sees the POST-update failed_attempts (Postgres UPDATE...RETURNING always reflects the row's final state), so 'failed_attempts >= $3 AND failed_attempts - 1 < $3' correctly reduces to 'the pre-increme
+- keystore.Store.CreateTenant's fallback path (createTenantChecked called directly on s.db when s.db is not a txBeginner) doing TenantExists-then-PutSigningKey with no lock — looks like a TOCT — Real but same-class issue as PG-5 (mfa fallback): in every shipped wiring s.db is *pgxpool.Pool or pgx.Tx, both of which implement Begin and take the pg_advisory_xact_lock(hashtext($1)) branch (lines 58-73), so the unguarded fallback is not
+- All rows.Next() loops (identity.FindIdentitiesByUserID, passkey.GetCredentials, tokens.ListAPIKeysByCreator, keystore.VerificationKeys) — checked whether rows.Err() is verified after the loo — Every loop in the adapter correctly defers rows.Close() immediately after the Query call and checks rows.Err() after the for loop before returning success (e.g. identity/store.go:285,305-307; tokens/store.go:324,344-346; keystore/store.go:1
+- Nullable timestamp/string columns (consumed_at, revoked_at, email_verified_at, phone, recovery_email, disabled_at, deleted_at, auth_time, last_attempt_at, retired_at, not_after) scanned dire — Checked every struct definition backing these columns (tokens.RefreshToken.ConsumedAt, tokens.APIKey.RevokedAt, identity.User.{EmailVerifiedAt,PhoneVerifiedAt,RecoveryEmailVerifiedAt,DeletedAt,DisabledAt,Phone,RecoveryEmail}, keystore.Signi
+- Unmapped driver errors (mapError's default branch, and every store method that returns 'return err' or 'return nil, err' verbatim on a non-constraint pgconn.PgError) propagating a raw *pgcon — Within the pgx adapter itself this is a standard Go store-layer pattern (return the underlying error for the caller to log/wrap) and every constraint violation that maps to a user-facing outcome IS translated to a domain sentinel (23505 -> 
+
+**concurrency** (8)
+
+- ratelimit.TokenBucket unbounded map growth when WithMaxKeys is not used and Cleanup is not scheduled — Explicitly documented in the package doc (ratelimit/tokenbucket.go:14-28) with two concrete, correctly-implemented mitigations: WithMaxKeys (verified: floors n at 1, evicts the least-pressured of a random 5-sample in O(1), correctly compare
+- keystore/memory.Store and CachingKeyStore (tokens/jwt/keycache.go) unbounded per-tenant map growth — Both are keyed by real tenantID, and the write paths that populate them (Manager.CreateTenant/PutSigningKey for the store; CachingKeyStore.store, only reached after a successful delegate.ActiveSigningKey+VerificationKeys round trip) are gat
+- CachingKeyStore.store/Invalidate generation-counter race (a fill racing an Invalidate could cache a pre-rotation keyset) — Correctly handled: generation() is captured before the delegate read, and store() only writes if c.gen is unchanged (tokens/jwt/keycache.go:118-135), so an Invalidate that lands mid-fill causes the stale result to be discarded rather than c
+- event.Emit/safeEmit and MultiSink — could a slow or panicking Sink block or crash the auth path? — safeEmit (event/event.go:119-126) wraps every EmitEvent call in a defer/recover and logs the recovered panic via slog rather than swallowing it silently; MultiSink (event/event.go:133-141) wraps each fan-out member individually so one sink'
+- janitor.Start/Stop goroutine lifecycle: leaks, double-Stop, Stop-while-running, panic in fn — Start correctly floors a non-positive interval to 1ns (avoiding a busy spin turning into an error case; it still ticks, just fast, which is intended), derives a child context via context.WithCancel so either the parent ctx or Stop() termina
+- passkey/memory.Store and mfa/memory.Store copy-on-return / lock discipline for every getter (GetCredentials, GetTOTP, etc.) — Every read path takes RLock/Lock as appropriate and returns a deep-cloned value (clone() in passkey/memory/store.go:30-46 explicitly deep-copies ID/PublicKey/Data/Transports/LastUsedAt; mfa/memory/store.go's GetTOTP does `cpy := *e; return 
+- identity/memory, passkey/memory and mfa/memory doing O(n) linear scans for non-ID lookups (FindUserByEmail, FindIdentityByProvider, credential-ID uniqueness check in SaveCredential, etc.) — These packages are consistently and explicitly documented as 'primarily for tests and single-process use' with production guidance pointing to the indexed pgx backends (identity/memory/store.go, passkey/memory/store.go, mfa/memory/store.go 
+- ratelimit's own documented limitation that Cleanup() only reaps fully-refilled buckets, so a sustained slow-drip flood (never letting any bucket fully refill) defeats janitor-scheduled Clean — This exact behavior and its implication are explicitly called out in the TokenBucket package doc (ratelimit/tokenbucket.go:19-26): 'Cleanup drops only fully-refilled buckets, so it does not reset any key that is still under pressure' with W
+
+**ops** (10)
+
+- gosec G124 on passkey/handlers.go:274 and :332 (http.Cookie missing/insecure Secure, HttpOnly, SameSite attribute) — Read both http.SetCookie calls directly: both set HttpOnly:true, Secure:!cfg.insecureCookies (defaults to true), and SameSite:cfg.cookieSameSite (defaults Lax) explicitly. gosec's static analyzer cannot verify a variable-driven Secure/SameS
+- gosec G401/G505 sha1 usage in passwords/breach/hibp/hibp.go and passwords/breach/offline/offline.go — SHA-1 here is the mandated hash for the HIBP k-anonymity breach-check API protocol (first 5 hex chars of SHA-1(password) sent to the API) -- required by the third-party wire format, not a cryptographic choice made by this library, and not u
+- gosec G115 integer overflow conversions in mfa/totp.go:53 (int64->uint64) and passwords/argon2/hasher.go:151,157,270 (int->uint32) — totp.go converts a Unix-time-derived time-step counter (always non-negative in practice) to uint64 for HOTP; the argon2 conversions are uint32(len(...)) on decoded salt/hash byte slices, which are bounded by realistic password-hash sizes (f
+- govulncheck's single reported vulnerability (GO-2026-5932, golang.org/x/crypto/openpgp, 'unmaintained, unsafe by design') — Verified via go mod why -m golang.org/x/crypto: the only import path is passwords/argon2 -> golang.org/x/crypto/argon2. libauth never imports the openpgp subpackage; govulncheck itself confirms '0 vulnerabilities in packages you import' and
+- testcontainers-go (and its large transitive graph: docker/moby/containerd, grpc, protobuf) is a direct, non-indirect require in adapters/pgx/go.mod — Confirmed via grep that every import of 'testcontainers' in adapters/pgx is confined to _test.go files (identity, sessions, mfa, oauth, tokens, keystore, otp, passkey store_test.go plus pgxmigrate_test.go and the integration test). None of 
+- CI's -race, fuzz, and Docker-suite coverage — -race is actually run comprehensively: test-core (3-OS matrix), test-adapters-pgx, test-adapters-pgx-integration, and adapters/otel's test job all pass -race. 6 Fuzz* targets exist and each gets a 30s pass on every push (passwords/argon2, o
+- GitHub Actions pinning and job permissions in ci.yml/pages.yml — Every actions/* step is pinned to a full commit SHA with a version comment (e.g. actions/checkout@9c091bb...# v7.0.0); the workflow-level permissions block is contents:read only, and pages.yml's broader pages:write/id-token:write is correct
+- Typos in comments and string literals (JSON fields, HTTP headers/params, error strings) across all three modules — Ran go run github.com/client9/misspell/cmd/misspell@latest . against the core module, adapters/pgx, and adapters/otel independently; zero hits in all three. Also grepped for a broad list of common English misspellings across all *.go files;
+- Direct dependency staleness across all three go.mod files — GOWORK=off go list -m -u -mod=mod all in each module (network reachable in this session) shows every DIRECT dependency at its latest available version with no update bracket (cbor v2.9.2, go-webauthn v0.17.4, jwt/v5 v5.3.1, uuid v1.6.0, tes
+- interface{} usage (vs any) anywhere in non-test code — Searched the whole repo (grep -rn 'interface{}' excluding _test.go); zero hits. The codebase already uses any uniformly.
+
+**claims** (25)
+
+- SECURITY.md: "The library enforces a minimum token byte length (jwt.MinTokenLength = 16) for RefreshLength and APIKeyLength: Config.Validate returns an error and New panics if either is set  — Exactly true. `MinTokenLength = 16` (tokens/jwt/issuer.go:143); `Validate` errors on a non-zero sub-minimum value (issuer.go:233-238); `New` substitutes the 32-byte default for zero FIRST and only then panics (issuer.go:352-365), so 0 means
+- SECURITY.md: "every enumeration-safe branch in Authenticate calls decoyHash" — Verified branch-by-branch in identity/service.go:518-613. All seven failure paths spend a decoy Argon2id pass: malformed email (:523), unknown user (:533), missing identity (:540), locked account (:550), disabled account (:559), nil Passwor
+- SECURITY.md names four timing-evidence benchmarks; do they exist and still pass, and are the deltas within noise? — All exist and pass. passwords/argon2/timing_bench_test.go:52 BenchmarkCompare_CorrectPassword, :72 BenchmarkCompare_WrongPassword; identity/authenticate_bench_test.go:71 ValidUser_WrongPassword, :86 UnknownUser, :100 NonPasswordProvider. Ra
+- Brute-force lockout defaults and the WithLockout(0,0) hardening claim — DefaultLockThreshold=5, DefaultLockDuration=15m (identity/service.go:59-60). `WithLockout(0, 0)` genuinely keeps the defaults (identity/service.go:409-419) and `WithNoLockout()` is the explicit, greppable opt-out (:296-300). Covered by iden
+- Alg pinning, iss/aud verification, and alg:none / alg-confusion rejection — Correct and well-ordered: `verificationKey` resolves the Signer from the kid (or the kid-less legacy signer) BEFORE consulting the alg, then requires `token.Method.Alg() == signer.Method().Alg()` (tokens/jwt/issuer.go:589-598), so HS256-aga
+- Refresh rotation: single-use, family theft detection, issuer-controlled access TTL, immutable tenant, preserved auth_time, MustChangePassword carry-forward — All implemented as documented in tokens/jwt/issuer.go:734-831: consumed-token replay outside the grace revokes the family and a failed revocation is surfaced rather than swallowed (:754-758); consume is atomic and losing the race yields the
+- Secure-by-default cookies and the __Host- claim — `DefaultCookies()` yields __Host- names, Path=/, SameSite=Lax, HttpOnly always, and Secure via the zero value of an opt-OUT `Insecure` bool (tokens/cookies.go:61-70) — so a partially-initialized or zero-value Cookies is still secure. `Valid
+- Pre-auth body caps against hashing DoS — Present on every form/JSON handler family: identity (handlers.go:102 default, :293-295 via httputil.ParseLimitedForm), mfa (handlers.go:51, :249-263), otp (handlers.go:58, :317), passkey Finish handlers (handlers.go:71, :171, :228, :505, :5
+- OAuth PKCE-S256 + single-use state cookie + constant-time state comparison + provider/tenant binding + unverified-email refusal + no silent account linking — All hold. PKCE is on by default (`usePKCE: true`, oauth/handlers.go:50) with S256 (state.go:39-48); the state cookie is HttpOnly/Secure/SameSite=Lax with a TTL (handlers.go:269-280) and is cleared unconditionally before any validation (:182
+- OAuth SSRF guard on tenant-supplied URLs (bring-your-own-SSO) — Two genuine layers, correctly ordered. Registration-time `ValidateExternalURL` requires https and rejects literal internal IPs (oauth/ssrf.go:47-69), and `SafeHTTPClient` enforces the authoritative dial-time check against the RESOLVED addre
+- WebAuthn user-verification default and ceremony-cookie integrity — `NewService` maps the zero-value `UserVerification` to `protocol.VerificationRequired` (passkey/service.go:136-141) and wires it into `AuthenticatorSelection`, which go-webauthn copies into SessionData and enforces at Finish across register
+- Strict same-origin CSRF check really applied to every handler SECURITY.md names — Verified call-site by call-site. identity: 20 `originAllowed` gates covering login, register and every authenticated mutation (identity/handlers.go:310,383,557,591,621,663,694,726,779,837,897,958,994,1110,1172,1205,1262,1295). tokens: Refre
+- passkey handlers have no same-origin CSRF check although every other handler family does — Correct by construction rather than an omission: a WebAuthn Finish request cannot be forged cross-site because the authenticator signs the caller's origin into clientDataJSON and go-webauthn validates it against `Config.RPOrigins` (passkey/
+- passkey/memory ChallengeStore could accumulate abandoned ceremony challenges (unbounded growth), like sessions/memory and otp/memory — It self-evicts: `Put` runs a full `pruneLocked(time.Now())` sweep on every insert (passkey/memory/challengestore.go:36-39, :61-68) and `Consume` deletes the entry regardless of expiry (:50-53). No janitor scheduling is required, so its abse
+- Argon2id cost-parameter bounds-checking on the verify path (OOM DoS from a tampered stored hash) — Implemented exactly as documented. `Compare` parses m/t/p from the stored PHC string and rejects time<1, threads<1, keyLen==0 (passwords/argon2/hasher.go:282-284), memory < 8*threads (:289-291) and memory > MaxMemoryKiB (:297-299) — all as 
+- Single-use verification tokens: selector/verifier, atomic consumption, live/same-tenant gate, and "never burned for nothing" — Confirmed. `ResetPassword` validates the policy and hashes BEFORE consuming, so a weak password or hashing failure cannot burn the token (identity/service.go:696-712). `consumeForLiveUser` re-checks liveness as belt-and-suspenders (:668-669
+- tokens.RequireAuth could fall open to the tenant-unaware verify path when no tenant resolver is configured — It cannot. `serveAuthenticated` always calls `VerifyAccessTokenForTenant` — with the resolved tenant when a resolver is set, and with "" otherwise (tokens/middleware.go:216-220); there is no tenant-unaware method to fall back to. A configur
+- Step-up / AAL: WithRequiredAMR fails closed with 403, and the MFA gate really withholds a renewable session — `amrSatisfied` requires every configured AMR value to be present in the token, so a password-only session can never satisfy WithRequiredAMR(AMRMFA) (tokens/middleware.go:355-369), and the rejection is 403 step_up_required (:418-420) — as do
+- OTP single-use and attempt-limiting "hold under concurrency" as claimed — The service-layer logic matches the claim precisely: the attempt slot is reserved via the atomic `IncrementOTPAttempts` BEFORE the code is compared, so the gate is the counter and not the stale read (otp/service.go:127-139); success consume
+- MFA construction-time validation and the documented RFC 6238 digit range — `NewService` panics for digits outside 6-8, sub-second period, negative skew, non-positive recovery-code count and a nil clock (mfa/service.go:140-154), exactly as SECURITY.md:110-112 and the godoc claim, with coverage in mfa/newservice_tes
+- "No internal logging" for the core packages (passwords/tokens/hashes never written anywhere) — Holds for every core package. `grep -rn 'fmt\.Print|println\(|log\.|os\.Stderr|os\.Stdout'` over non-test, non-example code returns only the redaction helpers in tokens/redact.go and tokens/jwt/redact.go (which render secrets as a placehold
+- AUDIT.md's claim of "cross-backend conformance suites exercising the in-memory and PostgreSQL (pgx) stores against the same contract" — Genuinely wired into CI, not aspirational: .github/workflows/ci.yml has a `test-adapters-pgx` job running the Docker/testcontainers conformance suites (lines 55-84) plus a separate `test-adapters-pgx-integration` job against a real Postgres
+- Session absolute-lifetime cap semantics (WithMaxLifetime(0) vs WithNoMaxLifetime, and option ordering) — Matches SECURITY.md:416-425 exactly, and is unusually well tested. `WithMaxLifetime(0)` keeps the 30-day default rather than disabling the cap (sessions/service.go:241-249 godoc; sessions/lifetime_test.go:155 TestWithMaxLifetime_ZeroKeepsDe
+- Token/session/API-key hashing at rest — `tokens.HashToken` is SHA-256 hex (tokens/hashing.go:8-12) and is what is persisted for refresh tokens (issuer.go:467-471) and API keys; `sessions` hashes its token the same way (sessions/service.go:235-239) and `sessions.Session` stores on
+- go.mod retract block's stated reasons ("insecure-by-default passkey, stale go directive, no tokens/basic") — All three are now true of the shipped code: passkey is secure-by-default (UV required, CookieKey and ChallengeStore mandatory at construction — passkey/service.go:123-141), the go directive is `go 1.26.5`, and `tokens/basic` exists and is t
 
