@@ -53,6 +53,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
+	c.cookies.MustValidate()
 	return c
 }
 

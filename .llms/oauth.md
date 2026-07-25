@@ -118,10 +118,10 @@ Callback query params read: `state` (CSRF), `code` (authorization code), `error`
 ### HandlerOption
 
 ```go
-WithCookies(c tokens.Cookies) HandlerOption                 // replace auth-cookie config wholesale
-WithCookieDomain(domain string) HandlerOption               // scope cookies to domain
+WithCookies(c tokens.Cookies) HandlerOption                 // replace auth-cookie config wholesale (validated at construction)
+WithCookieDomain(domain string) HandlerOption               // scope cookies to domain; demotes __Host- names to __Secure-
 WithSameSite(mode http.SameSite) HandlerOption              // override SameSite on auth cookies
-WithInsecureCookies() HandlerOption                         // dev-only: disable Secure attribute
+WithInsecureCookies() HandlerOption                         // dev-only: disable Secure attribute; demotes names to bare form
 WithRedirectURL(rawURL string) HandlerOption                // explicit redirect_uri (required in prod)
 WithStateCookieName(name string) HandlerOption              // default: "oauth_state"
 WithStateTTL(d time.Duration) HandlerOption                 // default: 10m

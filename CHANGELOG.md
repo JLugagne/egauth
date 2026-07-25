@@ -54,6 +54,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Zero behavior change unless a credential is explicitly flagged via admin provisioning.
 
+### Fixed
+
+- **Cookie configuration no longer panics at request time** (`tokens`, `identity`, `oauth`, `mfa`,
+  `webapp`). `tokens.Cookies.withDefaults` panicked whenever a `__Host-` cookie name was paired with
+  a `Domain`, a `Path != "/"` or `Insecure`, and it ran on the request path — including inside the
+  pure read helpers `Cookies.Access` / `Cookies.Refresh`. Consequences: `webapp.Config.CookieDomain`
+  broke every cookie-writing endpoint while `NewWebApp` reported no error; `WithCookieDomain`,
+  `WithCookiePath`, `WithRefreshCookiePath` and `WithInsecureCookies` each produced an unusable
+  handler; and `tokens.RequireAuth` with domain-scoped cookies panicked on EVERY request to a
+  protected route, even an unauthenticated `GET` carrying no cookie at all.
+
+  Those options are now self-consistent: they DEMOTE a cookie name that still carries the `__Host-`
+  prefix to `__Secure-` (while the cookie stays `Secure` with `Path="/"`) or to its bare form,
+  because setting a `Domain`, a path scope or `Insecure` is already an opt-out of host-lock
+  semantics. New demoting derivations on `tokens.Cookies` — `WithDomain`, `WithPath`,
+  `WithRefreshPath`, `WithInsecure` — plus `MustValidate`, expose the same behavior for hand-built
+  values. `Validate` additionally rejects a `__Secure-` name on a non-`Secure` cookie.
+
+  Validation moved to CONSTRUCTION: `tokens`/`identity`/`oauth`/`mfa` handler constructors and
+  `tokens.RequireAuth` / `tokens.ContextMiddleware` call `MustValidate` (a startup panic on a
+  genuinely invalid hand-built value), and `webapp.NewWebApp` returns it as an error. `DefaultCookies`
+  is unchanged — `__Host-` remains the default.
+
 ### Security / disclosure (v1.0.0)
 
 - **Audit-status disclosure.** egauth's security review to date is an AI-driven audit only; it

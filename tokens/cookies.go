@@ -23,6 +23,11 @@ const (
 // and Path=/.
 const hostPrefix = "__Host-"
 
+// securePrefix is the browser-enforced cookie name prefix that requires Secure only. It is the
+// fallback the __Host- names are demoted to when a caller opts out of host-lock semantics but
+// the cookie is still Secure and Path="/".
+const securePrefix = "__Secure-"
+
 // Cookies describes how authentication cookies are written and read. It is the single
 // source of truth for cookie behavior, shared by the tokens handlers/middleware and the
 // identity login handler.
@@ -30,6 +35,12 @@ const hostPrefix = "__Host-"
 // Per the PRD, every cookie emitted by egauth is HttpOnly, Secure and SameSite=Lax by
 // default and scoped via Path. HttpOnly is always enforced (auth cookies are never read
 // by client-side JavaScript in the server-rendered model), so it is not configurable.
+//
+// The default names carry the __Host- prefix, whose browser-enforced rules constrain Domain, Path
+// and Secure. Derive variants with WithDomain, WithPath, WithRefreshPath and WithInsecure rather
+// than assigning those fields directly: they demote the prefix so the result stays valid. A value
+// assembled field by field should be checked with Validate; every constructor that accepts one
+// does so and refuses a configuration a browser would reject.
 type Cookies struct {
 	// AccessName is the name of the short-lived access-token cookie.
 	AccessName string
@@ -69,14 +80,85 @@ func DefaultCookies() Cookies {
 	}
 }
 
-// Validate checks that the Cookies configuration is self-consistent.
-// It returns an error when a cookie name carries the __Host- prefix but the accompanying
-// attributes violate the browser-enforced requirements: the cookie must be Secure
-// (Insecure==false), must have no Domain, and must have Path="/".
+// WithDomain returns a copy of c scoped to domain.
 //
-// Validate is called automatically by withDefaults (and therefore by all Set*/Clear*/
-// Access/Refresh methods). It is exported so callers can surface configuration mistakes
-// early, e.g. in a server startup check.
+// A caller that sets a Domain has opted out of __Host- host-lock semantics, so any cookie name
+// still carrying the __Host- prefix is DEMOTED: to __Secure- while the cookie stays Secure with
+// Path="/", to the bare name otherwise. The demotion keeps the configuration valid instead of
+// making it fatal; pass explicit names via Cookies if you want to control them yourself.
+func (c Cookies) WithDomain(domain string) Cookies {
+	c.Domain = domain
+	return c.demoted()
+}
+
+// WithPath returns a copy of c whose access and refresh cookies are both scoped to path.
+//
+// A path other than "/" is incompatible with the __Host- prefix, so a name still carrying it is
+// DEMOTED (see WithDomain).
+func (c Cookies) WithPath(path string) Cookies {
+	c.Path = path
+	c.RefreshPath = path
+	return c.demoted()
+}
+
+// WithRefreshPath returns a copy of c whose refresh cookie alone is scoped to path.
+//
+// A path other than "/" is incompatible with the __Host- prefix, so a refresh cookie name still
+// carrying it is DEMOTED (see WithDomain).
+func (c Cookies) WithRefreshPath(path string) Cookies {
+	c.RefreshPath = path
+	return c.demoted()
+}
+
+// WithInsecure returns a copy of c with the Secure attribute disabled. Use it only for local
+// HTTP development.
+//
+// Browsers reject both the __Host- and __Secure- prefixes on a non-Secure cookie, so any prefixed
+// name is DEMOTED to its bare form (see WithDomain).
+func (c Cookies) WithInsecure() Cookies {
+	c.Insecure = true
+	return c.demoted()
+}
+
+// demoted returns a copy of c whose cookie names carry the strongest browser-enforced prefix the
+// current attributes still satisfy, so that mutating one attribute never leaves the value invalid.
+func (c Cookies) demoted() Cookies {
+	c.AccessName = demoteCookieName(c.AccessName, c.Insecure, c.Domain, c.Path)
+	c.RefreshName = demoteCookieName(c.RefreshName, c.Insecure, c.Domain, c.RefreshPath)
+	return c
+}
+
+// demoteCookieName drops a browser-enforced name prefix the accompanying attributes can no longer
+// satisfy: __Host- becomes __Secure- when the cookie is still Secure with Path="/", otherwise the
+// bare name, and __Secure- becomes the bare name once the cookie is no longer Secure.
+func demoteCookieName(name string, insecure bool, domain, path string) string {
+	rooted := path == "" || path == "/"
+	switch {
+	case strings.HasPrefix(name, hostPrefix):
+		base := strings.TrimPrefix(name, hostPrefix)
+		switch {
+		case !insecure && domain == "" && rooted:
+			return name
+		case !insecure && rooted:
+			return securePrefix + base
+		default:
+			return base
+		}
+	case strings.HasPrefix(name, securePrefix) && insecure:
+		return strings.TrimPrefix(name, securePrefix)
+	default:
+		return name
+	}
+}
+
+// Validate checks that the Cookies configuration is self-consistent.
+// It returns an error when a cookie name carries a browser-enforced prefix but the accompanying
+// attributes violate its requirements: a __Host- cookie must be Secure (Insecure==false), must
+// have no Domain and must have Path="/", and a __Secure- cookie must be Secure.
+//
+// Validate is called by every handler/middleware constructor that accepts a Cookies value, so a
+// broken configuration is reported at startup rather than on the first request. It is exported so
+// callers can also check a value they build themselves.
 func (c Cookies) Validate() error {
 	var errs []error
 	if strings.HasPrefix(c.AccessName, hostPrefix) {
@@ -109,13 +191,33 @@ func (c Cookies) Validate() error {
 			errs = append(errs, fmt.Errorf("cookie %q: __Host- prefix requires Secure (Insecure must be false)", c.RefreshName))
 		}
 	}
+	if c.Insecure {
+		for _, name := range []string{c.AccessName, c.RefreshName} {
+			if strings.HasPrefix(name, securePrefix) {
+				errs = append(errs, fmt.Errorf("cookie %q: __Secure- prefix requires Secure (Insecure must be false)", name))
+			}
+		}
+	}
 	return errors.Join(errs...)
+}
+
+// MustValidate panics when the configuration is not self-consistent (see Validate).
+//
+// It is what the handler and middleware constructors that cannot return an error call, so a
+// misconfiguration fails loudly once at startup instead of panicking on every request — including
+// requests that carry no cookie at all. Build the value with DefaultCookies plus WithDomain /
+// WithPath / WithRefreshPath / WithInsecure and it can never trip this.
+func (c Cookies) MustValidate() {
+	if err := c.Validate(); err != nil {
+		panic("tokens.Cookies: invalid cookie configuration: " + err.Error())
+	}
 }
 
 // withDefaults returns a copy of c with any zero-valued fields filled from DefaultCookies,
 // so that a partially-initialized Cookies (or its zero value) still behaves securely.
-// It panics if Validate detects a __Host- prefix constraint violation, because such a
-// mismatch is a programmer error that must be caught at development time.
+// It never panics and never rejects: it runs on the request path, where a panic would turn a
+// configuration mistake into an outage on every route. Configuration is checked once at
+// construction time instead, via Validate / MustValidate.
 func (c Cookies) withDefaults() Cookies {
 	d := DefaultCookies()
 	if c.AccessName == "" {
@@ -132,9 +234,6 @@ func (c Cookies) withDefaults() Cookies {
 	}
 	if c.SameSite == 0 {
 		c.SameSite = d.SameSite
-	}
-	if err := c.Validate(); err != nil {
-		panic("tokens.Cookies: invalid __Host- cookie configuration: " + err.Error())
 	}
 	return c
 }

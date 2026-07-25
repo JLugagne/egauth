@@ -224,12 +224,12 @@ Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
 ## Options (HandlerOption)
 
 - `func WithProvider(provider string) HandlerOption` — identity provider for login (default `"password"`)
-- `func WithCookies(c tokens.Cookies) HandlerOption` — replace cookie config wholesale
-- `func WithCookieDomain(domain string) HandlerOption`
+- `func WithCookies(c tokens.Cookies) HandlerOption` — replace cookie config wholesale (validated when the handler is built; an invalid value panics there, never per request)
+- `func WithCookieDomain(domain string) HandlerOption` — demotes `__Host-` cookie names to `__Secure-` (host-lock opt-out)
 - `func WithSameSite(mode http.SameSite) HandlerOption`
-- `func WithCookiePath(path string) HandlerOption` — sets both access and refresh cookie paths
-- `func WithRefreshCookiePath(path string) HandlerOption` — scope refresh cookie only
-- `func WithInsecureCookies() HandlerOption` — disable Secure flag (local HTTP dev only)
+- `func WithCookiePath(path string) HandlerOption` — sets both access and refresh cookie paths; a non-`"/"` path demotes `__Host-` names to their bare form
+- `func WithRefreshCookiePath(path string) HandlerOption` — scope refresh cookie only; demotes the refresh name the same way
+- `func WithInsecureCookies() HandlerOption` — disable Secure flag (local HTTP dev only); demotes both names to their bare form
 - `func WithSuccessRedirect(url string) HandlerOption` — 303 redirect on success instead of 204
 - `func WithFailureRedirect(url string) HandlerOption` — 303 redirect with `?error=<code>` on failure
 - `func WithFormFields(email, password, remember string) HandlerOption` — override default field names

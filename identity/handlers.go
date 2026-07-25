@@ -113,6 +113,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	if c.deliveryConcurrency > 0 {
 		c.deliverySem = make(chan struct{}, c.deliveryConcurrency)
 	}
+	c.cookies.MustValidate()
 	return c
 }
 
@@ -133,8 +134,13 @@ func WithCookies(c tokens.Cookies) HandlerOption {
 }
 
 // WithCookieDomain scopes the auth cookies to a domain.
+//
+// A Domain is incompatible with the __Host- prefix the default names carry, so a cookie name still
+// carrying it is DEMOTED (to __Secure- while the cookie stays Secure with Path="/", otherwise to
+// the bare name): setting a Domain is an explicit opt-out of host-lock semantics. Note that this
+// forfeits the subdomain cookie-tossing protection __Host- provides.
 func WithCookieDomain(domain string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Domain = domain }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithDomain(domain) }
 }
 
 // WithSameSite overrides the SameSite attribute of the auth cookies.
@@ -143,21 +149,27 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 }
 
 // WithCookiePath sets the path for both the access and refresh cookies.
+//
+// A path other than "/" is incompatible with the __Host- prefix the default names carry, so a
+// cookie name still carrying it is DEMOTED (see WithCookieDomain).
 func WithCookiePath(path string) HandlerOption {
-	return func(h *handlerConfig) {
-		h.cookies.Path = path
-		h.cookies.RefreshPath = path
-	}
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithPath(path) }
 }
 
 // WithRefreshCookiePath scopes only the refresh cookie (e.g. to a dedicated refresh route).
+//
+// A path other than "/" is incompatible with the __Host- prefix the default refresh name carries,
+// so that name is DEMOTED (see WithCookieDomain).
 func WithRefreshCookiePath(path string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.RefreshPath = path }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithRefreshPath(path) }
 }
 
 // WithInsecureCookies disables the Secure attribute. Use only for local HTTP development.
+//
+// Browsers reject a __Host- or __Secure- named cookie that is not Secure, so the cookie names are
+// DEMOTED to their bare form ("access_token" / "refresh_token").
 func WithInsecureCookies() HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Insecure = true }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithInsecure() }
 }
 
 // WithSuccessRedirect makes the handler reply with a 303 redirect to url on success

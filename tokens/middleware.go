@@ -38,6 +38,11 @@ type AuthOption[C any] func(*authConfig[C])
 
 // WithCookieAuth reads the access token from the given cookie configuration instead of
 // (or in addition to) the Authorization header.
+//
+// The configuration is validated when the middleware is built: a value a browser would reject
+// (e.g. a __Host- name kept alongside a Domain) panics there, never while serving a request.
+// Derive such variants with Cookies.WithDomain / WithPath / WithRefreshPath / WithInsecure, which
+// demote the prefix instead.
 func WithCookieAuth[C any](c Cookies) AuthOption[C] {
 	return func(a *authConfig[C]) {
 		cc := c
@@ -48,6 +53,8 @@ func WithCookieAuth[C any](c Cookies) AuthOption[C] {
 // WithAutoRefresh enables opt-in transparent rotation: when the access token is missing or
 // expired but a valid refresh cookie is present, the middleware rotates the pair, rewrites
 // both cookies and proceeds with the freshly issued claims. It implies cookie-based reads.
+//
+// The cookie configuration is validated when the middleware is built (see WithCookieAuth).
 func WithAutoRefresh[C any](rotator Rotator[C], cookies Cookies) AuthOption[C] {
 	return func(a *authConfig[C]) {
 		cc := cookies
@@ -171,6 +178,9 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 	cfg := authConfig[C]{readHeader: true}
 	for _, opt := range opts {
 		opt(&cfg)
+	}
+	if cfg.cookies != nil {
+		cfg.cookies.MustValidate()
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {

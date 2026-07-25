@@ -386,8 +386,16 @@ redaction is in any case only a backstop. Therefore the consumer must:
   containing the attacker's own token — the victim's auto-refresh then rotates the attacker's
   family and silently signs the victim into the attacker's session. `tokens.Cookies.Validate()`
   rejects any configuration that pairs a `__Host-` cookie name with `Domain != ""`, `Path != "/"`,
-  or `Insecure == true`; `withDefaults` (called by every Set*/Clear*/Access/Refresh method)
-  panics on such a mismatch, surfacing the programmer error at development time.
+  or `Insecure == true` (and a `__Secure-` name with `Insecure == true`). That check runs at
+  CONSTRUCTION: every handler and middleware constructor that takes a `Cookies` calls
+  `MustValidate` (a startup panic), and `webapp.NewWebApp` returns it as an error. Writing or
+  reading a cookie never panics at request time.
+  Opting out is explicit and self-consistent rather than fatal: `WithCookieDomain`,
+  `WithCookiePath`, `WithRefreshCookiePath` and `WithInsecureCookies` (and the underlying
+  `Cookies.WithDomain` / `WithPath` / `WithRefreshPath` / `WithInsecure`) **demote** a `__Host-`
+  name to `__Secure-` when the cookie is still `Secure` with `Path="/"`, and to the bare name
+  otherwise. Demotion forfeits the host-lock hardening above — that is the price of the Domain,
+  path scope or plain-HTTP development the option asked for, so reach for them deliberately.
   For the `sessions` package: `sessions.RequireSession` now reads the session token from
   `sessions.DefaultSessionCookieName` (`"__Host-session_token"`) **by default** — the hardened
   host-locked name is automatic and you no longer opt in. `sessions.WithCookieName` is an escape

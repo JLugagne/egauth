@@ -55,6 +55,9 @@ func ContextMiddleware[C any](verifier Verifier[C], next http.Handler, opts ...A
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.cookies != nil {
+		cfg.cookies.MustValidate()
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
