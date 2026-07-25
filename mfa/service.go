@@ -60,12 +60,20 @@ type service struct {
 	// maxAttempts is the failed-verification ceiling for the second factor. 0 disables
 	// limiting entirely (set via WithNoAttemptLimit); any positive value is the active limit.
 	maxAttempts int
+	// attemptLimitDisabled is set ONLY by WithNoAttemptLimit. Attempt limiting can no longer be
+	// disabled by arithmetic on maxAttempts (e.g. a negative WithMaxAttempts argument); this
+	// flag is the one and only opt-out.
+	attemptLimitDisabled bool
 	// lockoutDuration is the time window after which a locked-out factor auto-resets.
 	// 0 means no automatic decay — the lockout is permanent until UnlockMFA is called or the
 	// factor is disabled. Defaults to DefaultLockoutDuration.
 	lockoutDuration time.Duration
-	now             func() time.Time
-	events          event.Sink
+	// lockoutDurationSet distinguishes a deliberate WithLockoutDuration(0) (permanent lockout)
+	// from an untouched field, so NewService only applies DefaultLockoutDuration when the
+	// caller never called WithLockoutDuration at all.
+	lockoutDurationSet bool
+	now                func() time.Time
+	events             event.Sink
 }
 
 // ServiceOption configures the MFA Service.
@@ -88,14 +96,14 @@ func WithRecoveryCodeCount(n int) ServiceOption { return func(s *service) { s.re
 
 // WithMaxAttempts sets how many failed second-factor verifications (TOTP or recovery code,
 // combined) are tolerated before the factor is locked (default DefaultMaxAttempts). A
-// non-positive value is treated as "use the default" — to turn limiting OFF use
-// WithNoAttemptLimit, which makes the intent explicit and auditable.
+// non-positive value (zero OR negative) is treated as "use the default" — to turn limiting OFF
+// use WithNoAttemptLimit, which makes the intent explicit and auditable.
 func WithMaxAttempts(n int) ServiceOption { return func(s *service) { s.maxAttempts = n } }
 
 // WithNoAttemptLimit DISABLES second-factor attempt limiting. This is insecure unless an
 // external rate limiter fronts verification — the second factor becomes online-brute-forceable.
 // Limiting is ON by default; only use this if you knowingly enforce the budget elsewhere.
-func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.maxAttempts = -1 } }
+func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.attemptLimitDisabled = true } }
 
 // WithLockoutDuration sets the time window after which a locked-out second factor
 // automatically resets its attempt counter. The window is measured from the last failed
@@ -103,7 +111,10 @@ func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.maxAttempt
 // treated as a fresh budget. 0 disables time-based decay — the lockout is permanent until
 // UnlockMFA is called or the factor is disabled. Default: DefaultLockoutDuration (15 min).
 func WithLockoutDuration(d time.Duration) ServiceOption {
-	return func(s *service) { s.lockoutDuration = d }
+	return func(s *service) {
+		s.lockoutDuration = d
+		s.lockoutDurationSet = true
+	}
 }
 
 // WithClock overrides the time source (primarily for tests).
@@ -152,19 +163,25 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	case s.now == nil:
 		panic("mfa: clock must not be nil")
 	}
-	// Attempt limiting is secure-by-default: an untouched (zero) value means "use the default
-	// ceiling". WithNoAttemptLimit sets a negative sentinel to disable it; normalize that to 0
-	// (the internal "off" value) so the verify paths only have to test maxAttempts <= 0.
-	switch {
-	case s.maxAttempts == 0:
+	// Attempt limiting is secure-by-default: ANY non-positive value (zero OR negative) from
+	// WithMaxAttempts means "use the default ceiling", not "disable". Disabling is only
+	// reachable via the explicit attemptLimitDisabled flag set by WithNoAttemptLimit, never by
+	// arithmetic on maxAttempts.
+	if s.maxAttempts <= 0 {
 		s.maxAttempts = DefaultMaxAttempts
-	case s.maxAttempts < 0:
-		s.maxAttempts = 0 // explicitly disabled via WithNoAttemptLimit
 	}
-	// Lockout decay is on by default: an untouched (zero) value means "use the default window".
-	// WithLockoutDuration(0) explicitly disables decay (permanent lockout until admin action).
-	if s.lockoutDuration == 0 {
+	if s.attemptLimitDisabled {
+		s.maxAttempts = 0 // the verify paths' documented "limiting disabled" sentinel
+	}
+	// Lockout decay is on by default: an UNTOUCHED lockoutDuration (WithLockoutDuration never
+	// called) means "use the default window". A deliberate WithLockoutDuration(0) (or a
+	// negative value) explicitly disables decay (permanent lockout until admin action) and
+	// must survive normalization — lockoutDurationSet is what distinguishes the two cases.
+	switch {
+	case !s.lockoutDurationSet:
 		s.lockoutDuration = DefaultLockoutDuration
+	case s.lockoutDuration < 0:
+		s.lockoutDuration = 0
 	}
 	return s
 }

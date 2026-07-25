@@ -56,6 +56,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A negative lockout argument no longer silently disables brute-force protection**
+  (`identity`, `mfa`). `identity.WithLockout` and `mfa.WithMaxAttempts` were documented (and, for
+  `WithLockout`, doc-commented) to treat any non-positive argument as "use the safe default" —
+  only `WithNoLockout` / `WithNoAttemptLimit` are meant to disable the gate. In both services,
+  `NewService`'s normalization mapped a NEGATIVE threshold/limit to the same internal value as
+  the explicit opt-out, so e.g. `identity.WithLockout(-1, ...)` or `mfa.WithMaxAttempts(-1)`
+  silently disabled lockout/attempt-limiting instead of falling back to the default. Both options
+  now clamp any non-positive value (zero or negative) to the documented default, and the disabled
+  state is reachable ONLY through `WithNoLockout` / `WithNoAttemptLimit` (now tracked via an
+  explicit boolean field rather than overloading the threshold/limit itself).
+
+- **`mfa.WithLockoutDuration(0)` now actually produces a permanent lockout, as documented**
+  (`mfa`). The option's godoc, its field doc and SECURITY.md all state that `0` disables
+  time-based lockout decay (permanent until `UnlockMFA` or `DisableTOTP`), but `NewService`
+  could not distinguish a deliberate `WithLockoutDuration(0)` from an untouched field and always
+  overwrote it with `DefaultLockoutDuration` — making the documented permanent-lockout setting
+  unreachable. `WithLockoutDuration` now records that it was explicitly called, so `0` (or any
+  negative value) is honored as "no decay".
+
 - **Cookie configuration no longer panics at request time** (`tokens`, `identity`, `oauth`, `mfa`,
   `webapp`). `tokens.Cookies.withDefaults` panicked whenever a `__Host-` cookie name was paired with
   a `Domain`, a `Path != "/"` or `Insecure`, and it ran on the request path — including inside the

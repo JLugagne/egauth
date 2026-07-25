@@ -260,6 +260,7 @@ type service struct {
 	policy               passwords.Policy
 	lockThreshold        int
 	lockDuration         time.Duration
+	lockoutDisabled      bool
 	passwordResetTTL     time.Duration
 	emailVerificationTTL time.Duration
 	magicLinkTTL         time.Duration
@@ -277,11 +278,11 @@ type ServiceOption func(*service)
 
 // WithLockout overrides the account-lockout threshold and duration.
 //
-// A non-positive threshold or duration is treated as "use the safe default" (DefaultLockThreshold /
-// DefaultLockDuration), matching the convention of mfa.WithMaxAttempts. This means
-// WithLockout(0, 0) is a safe no-op that keeps the default lockout active — it does NOT disable
-// lockout. To explicitly opt out of lockout (e.g. because an external rate-limiter enforces the
-// budget), use WithNoLockout instead.
+// A non-positive threshold or duration (zero OR negative) is treated as "use the safe default"
+// (DefaultLockThreshold / DefaultLockDuration), matching the convention of mfa.WithMaxAttempts.
+// This means WithLockout(0, 0) and WithLockout(-1, -1) are both safe no-ops that keep the
+// default lockout active — neither disables lockout. To explicitly opt out of lockout (e.g.
+// because an external rate-limiter enforces the budget), use WithNoLockout instead.
 func WithLockout(threshold int, duration time.Duration) ServiceOption {
 	return func(s *service) {
 		s.lockThreshold = threshold
@@ -294,9 +295,10 @@ func WithLockout(threshold int, duration time.Duration) ServiceOption {
 // is online-brute-forceable. Lockout is ON by default; only use this option when you
 // knowingly enforce the attempt budget elsewhere.
 func WithNoLockout() ServiceOption {
-	// A negative sentinel is normalized to zero (the internal "disabled" value) inside
-	// NewService after all options have been applied, so the verify path only tests > 0.
-	return func(s *service) { s.lockThreshold = -1 }
+	// An explicit boolean, not a sentinel value overloaded onto lockThreshold: this is the
+	// ONLY way to disable lockout. WithLockout can no longer reach the disabled state by
+	// arithmetic, however negative its arguments are.
+	return func(s *service) { s.lockoutDisabled = true }
 }
 
 // WithPasswordResetTTL overrides how long a password-reset token stays valid.
@@ -402,20 +404,20 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 	for _, opt := range opts {
 		opt(s)
 	}
-	// Lockout is secure-by-default: a non-positive threshold (e.g. from WithLockout(0, ...))
-	// means "use the safe default ceiling", not "disable". The negative sentinel written by
-	// WithNoLockout() is normalized to zero (the internal "disabled" value) so the downstream
-	// paths only need to test lockThreshold > 0.
-	switch {
-	case s.lockThreshold == 0:
+	// Lockout is secure-by-default: ANY non-positive threshold (zero OR negative, e.g. from
+	// WithLockout(0, ...) or WithLockout(-1, ...)) means "use the safe default ceiling", not
+	// "disable". Disabling lockout is only reachable via the explicit lockoutDisabled flag set
+	// by WithNoLockout, never by arithmetic on the threshold.
+	if s.lockThreshold <= 0 {
 		s.lockThreshold = DefaultLockThreshold
-	case s.lockThreshold < 0:
-		s.lockThreshold = 0 // explicitly disabled via WithNoLockout
 	}
 	// Similarly, a non-positive duration is treated as "use the safe default".
 	// Zero duration would produce a LockedUntil at/before now, so the lock would never bite.
 	if s.lockDuration <= 0 {
 		s.lockDuration = DefaultLockDuration
+	}
+	if s.lockoutDisabled {
+		s.lockThreshold = 0 // the store's documented "lockout disabled" sentinel
 	}
 	if s.now == nil {
 		s.now = time.Now
