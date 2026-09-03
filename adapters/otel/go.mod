@@ -7,7 +7,7 @@ go 1.26.5
 // published core tag — see the two-tag dance in RELEASING.md.
 
 require (
-	github.com/JLugagne/egauth v0.3.0
+	github.com/JLugagne/egauth v0.8.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0
@@ -22,5 +22,3 @@ require (
 	go.opentelemetry.io/otel/metric v1.46.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
-
-replace github.com/JLugagne/egauth => ../..
