@@ -1,6 +1,6 @@
 module github.com/JLugagne/egauth/adapters/pgx
 
-go 1.26.5
+go 1.26.7
 
 // The `replace` directive at the bottom of this file resolves the core module
 // (github.com/JLugagne/egauth) from this repo's root, so every go command (build, test, vet, tidy,

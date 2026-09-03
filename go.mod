@@ -1,6 +1,6 @@
 module github.com/JLugagne/egauth
 
-go 1.26.5
+go 1.26.7
 
 // The v0.1.0–v0.2.1 tags predate the public-release security hardening (insecure-by-default
 // passkey, stale go directive, no tokens/basic). They are retracted so `go get` warns about and

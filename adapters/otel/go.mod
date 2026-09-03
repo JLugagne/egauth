@@ -1,6 +1,6 @@
 module github.com/JLugagne/egauth/adapters/otel
 
-go 1.26.5
+go 1.26.7
 
 // The `replace` directive resolves the core module from this repo's root for local
 // development. At release the maintainer removes it and re-tidies against the
