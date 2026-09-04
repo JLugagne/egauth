@@ -32,3 +32,10 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )
+
+// The adapters/pgx sub-module is imported by e2e-security tests. The replace directive
+// resolves it from the local disk so tools that do not use go.work (LSP, CI typecheck)
+// can resolve the package without a published tag.
+require github.com/JLugagne/egauth/adapters/pgx v0.0.0-00010101000000-000000000000
+
+replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx
