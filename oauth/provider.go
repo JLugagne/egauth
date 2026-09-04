@@ -8,6 +8,7 @@
 package oauth
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -288,7 +289,9 @@ func GetJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, ds
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("%w: userinfo status %d", ErrUserInfoFailed, resp.StatusCode)
 	}
-	if err := json.Unmarshal(body, dst); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(dst); err != nil {
 		return fmt.Errorf("%w: %v", ErrUserInfoFailed, err)
 	}
 	return nil

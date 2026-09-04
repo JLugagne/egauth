@@ -2,6 +2,7 @@ package providers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -71,6 +72,8 @@ func stringifyID(v any) string {
 	switch id := v.(type) {
 	case string:
 		return id
+	case json.Number:
+		return id.String()
 	case float64:
 		return strconv.FormatInt(int64(id), 10)
 	default:
