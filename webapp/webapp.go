@@ -122,6 +122,9 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 	if len(cfg.TrustedOrigins) == 0 && !cfg.InsecureNoOriginCheck {
 		return nil, errors.New("webapp: Config.TrustedOrigins must be set for CSRF-by-default (or set Config.InsecureNoOriginCheck to opt out)")
 	}
+	if len(cfg.TrustedOrigins) > 0 && cfg.InsecureNoOriginCheck {
+		return nil, errors.New("webapp: cannot specify both TrustedOrigins and InsecureNoOriginCheck")
+	}
 
 	accessTTL := cfg.AccessTTL
 	if accessTTL <= 0 {
