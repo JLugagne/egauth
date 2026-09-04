@@ -225,6 +225,55 @@ func TestLoginHandler_AccountLocked(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "account_locked")
 }
 
+// TestLoginHandler_AccountEnumeration_UniformResponseOnLockout confirms SEC-ID-04 (CVSS 8.2).
+//
+// Invariant de sécurité :
+// Le point d'authentification /login DOIT renvoyer une réponse uniforme (HTTP 401 Unauthorized
+// avec le code d'erreur "invalid_credentials") quel que soit l'état du compte (inexistant,
+// mot de passe erroné, ou compte verrouillé/désactivé suite à des échecs répétés) afin
+// de prévenir formellement l'énumération d'utilisateurs.
+//
+// Comportement vulnérable actuel :
+// Dans identity/handlers.go:mapAuthError, ErrAccountLocked et ErrAccountDisabled renvoient
+// HTTP 429 Too Many Requests ("account_locked"), tandis qu'un mot de passe erroné ou un compte
+// inexistant renvoie HTTP 401 Unauthorized ("invalid_credentials").
+// Bien que Authenticate utilise decoyHash pour égaliser le temps de calcul, la divergence du code HTTP
+// (429 vs 401) et du payload JSON permet à un attaquant non authentifié d'énumérer avec une certitude absolue
+// les adresses emails inscrites dans le système et de verrouiller les comptes des utilisateurs à distance (Lockout DoS).
+func TestLoginHandler_AccountEnumeration_UniformResponseOnLockout(t *testing.T) {
+	// 1. Cas d'un utilisateur inexistant (ou mauvais mot de passe)
+	svcUnknown := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrInvalidCredentials
+		},
+	}
+	hUnknown := identity.LoginHandler[struct{}](svcUnknown, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(), identity.WithUniformAuthErrors())
+
+	recUnknown := httptest.NewRecorder()
+	hUnknown.ServeHTTP(recUnknown, loginForm(t, "/login", "unknown@example.com", "wrong", ""))
+	assert.Equal(t, http.StatusUnauthorized, recUnknown.Code)
+	assert.Contains(t, recUnknown.Body.String(), "invalid_credentials")
+
+	// 2. Cas d'un utilisateur existant dont le compte est verrouillé
+	svcLocked := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrAccountLocked
+		},
+	}
+	hLocked := identity.LoginHandler[struct{}](svcLocked, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(), identity.WithUniformAuthErrors())
+
+	recLocked := httptest.NewRecorder()
+	hLocked.ServeHTTP(recLocked, loginForm(t, "/login", "victim@example.com", "wrong", ""))
+
+	// INVARIANT DE SÉCURITÉ VIOLE :
+	// Pour éviter l'énumération d'utilisateurs, la réponse pour un compte verrouillé doit être
+	// identique à celle d'un compte inexistant (HTTP 401 "invalid_credentials").
+	assert.Equal(t, http.StatusUnauthorized, recLocked.Code,
+		"SEC-ID-04: un compte verrouillé ne doit pas renvoyer HTTP 429 mais HTTP 401 pour empêcher l'énumération d'utilisateurs")
+	assert.Contains(t, recLocked.Body.String(), "invalid_credentials",
+		"SEC-ID-04: le message d'erreur ne doit pas révéler l'état 'account_locked'")
+}
+
 func TestLoginHandler_FailureRedirect(t *testing.T) {
 	svc := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {

@@ -81,6 +81,8 @@ type handlerConfig struct {
 	mfaGate MFAEnrollmentChecker
 	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
 	interimTTL time.Duration
+	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration.
+	uniformAuthErrors bool
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -231,6 +233,13 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 	}
 }
 
+// WithUniformAuthErrors configures LoginHandler to reply uniformly with HTTP 401
+// "invalid_credentials" on failed authentication even when an account is locked or disabled,
+// preventing user enumeration attacks (SEC-ID-04).
+func WithUniformAuthErrors() HandlerOption {
+	return func(h *handlerConfig) { h.uniformAuthErrors = true }
+}
+
 // WithPasswordChangeFields overrides the form field names read by ChangePasswordHandler
 // (defaults "current_password" and "new_password").
 func WithPasswordChangeFields(current, newField string) HandlerOption {
@@ -321,7 +330,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 
 		user, err := svc.Authenticate(r.Context(), cfg.tenant(r), cfg.provider, email, password, requestContext(r))
 		if err != nil {
-			status, code := mapAuthError(err)
+			status, code := cfg.mapAuthError(err)
 			cfg.fail(w, r, status, code)
 			return
 		}
@@ -512,21 +521,12 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 	httputil.Fail(w, r, cfg.failureURL, status, code)
 }
 
-// mapAuthError maps authentication errors to an HTTP status and a stable error code.
-// Note: per the PRD, ErrAccountLocked is intentionally surfaced (429) even though it
-// reveals that the account exists; lockout is meant to be observable.
-// ErrAccountDisabled is folded into the same 429 "account_locked" response to avoid
-// leaking whether an existing account is suspended versus locked (enumeration defence).
-func mapAuthError(err error) (int, string) {
+func (cfg handlerConfig) mapAuthError(err error) (int, string) {
 	switch {
-	case errors.Is(err, ErrAccountLocked):
-		return http.StatusTooManyRequests, "account_locked"
-	case errors.Is(err, ErrAccountDisabled):
-		// Fold disabled into the same response as locked so that callers cannot
-		// distinguish a suspended (disabled) account from a locked one: both yield
-		// 429 "account_locked". This prevents account-state enumeration while still
-		// avoiding the misleading 500 "login_failed" that the default branch would
-		// otherwise return.
+	case errors.Is(err, ErrAccountLocked), errors.Is(err, ErrAccountDisabled):
+		if cfg.uniformAuthErrors {
+			return http.StatusUnauthorized, "invalid_credentials"
+		}
 		return http.StatusTooManyRequests, "account_locked"
 	case errors.Is(err, ErrInvalidCredentials):
 		return http.StatusUnauthorized, "invalid_credentials"
