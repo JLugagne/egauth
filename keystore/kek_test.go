@@ -83,19 +83,19 @@ func TestKEK_OpenRejectsTamperAndWrongKey(t *testing.T) {
 
 // TestKEK_MissingAAD_CrossTenantKeyTransposition confirms SEC-TOK-01 (CVSS 8.3).
 //
-// Invariant de sécurité :
-// Dans un environnement multi-tenant chiffré par KEK, un secret scellé pour le Tenant A
-// DOIT être cryptographiquement lié à son tenant via des données associées authentifiées (AAD).
-// Une tentative d'ouverture ou de résolution de ce secret sous l'identité d'un Tenant B
-// DOIT impérativement échouer avec une erreur d'intégrité (ErrCiphertextCorrupt), interdisant
-// toute substitution de clé ou élévation de privilèges inter-tenant.
+// Security invariant:
+// In a KEK-encrypted multi-tenant environment, a secret sealed for Tenant A
+// MUST be cryptographically bound to its tenant via Authenticated Associated Data (AAD).
+// Any attempt to open or resolve that secret under the identity of Tenant B
+// MUST fail with an integrity error (ErrCiphertextCorrupt), preventing
+// any key substitution or cross-tenant privilege escalation.
 //
-// Comportement vulnérable actuel :
-// KEK.Seal et KEK.Open appellent aead.Seal et aead.Open avec un AAD nul (nil).
-// Le ciphertext n'étant lié ni au tenantID ni au keyID, un attaquant capable de substituer
-// le ciphertext du Tenant A dans le profil du Tenant B voit ce secret déchiffré avec succès
-// par le Manager du Tenant B. Le Tenant B obtient ainsi la clé de signature du Tenant A
-// et peut forger des jetons au nom du Tenant A.
+// Current vulnerable behaviour:
+// KEK.Seal and KEK.Open call aead.Seal and aead.Open with a nil AAD.
+// Because the ciphertext is bound to neither tenantID nor keyID, an attacker who can substitute
+// Tenant A's ciphertext into Tenant B's record sees that secret successfully decrypted
+// by Tenant B's Manager. Tenant B thereby obtains Tenant A's signing key
+// and can forge tokens on behalf of Tenant A.
 func TestKEK_MissingAAD_CrossTenantKeyTransposition(t *testing.T) {
 	ctx := context.Background()
 	k := validKEK(t)
@@ -103,19 +103,19 @@ func TestKEK_MissingAAD_CrossTenantKeyTransposition(t *testing.T) {
 	mgr, err := keystore.NewManager(memStore, k)
 	require.NoError(t, err)
 
-	// 1. Provisionner le Tenant A et récupérer sa clé active
+	// 1. Provision Tenant A and retrieve its active key
 	err = mgr.ProvisionTenant(ctx, "tenant-a")
 	require.NoError(t, err)
 
 	keyA, err := mgr.ActiveSigningKey(ctx, "tenant-a")
 	require.NoError(t, err)
 
-	// 2. Récupérer le ciphertext scellé stocké pour Tenant A
+	// 2. Retrieve the sealed ciphertext stored for Tenant A
 	keysA, err := memStore.VerificationKeys(ctx, "tenant-a")
 	require.NoError(t, err)
 	sealedCiphertextA := keysA[keyA.KeyID].Secret
 
-	// 3. Simuler la transposition malveillante du ciphertext du Tenant A vers le Tenant B
+	// 3. Simulate the malicious transposition of Tenant A's ciphertext into Tenant B's record
 	err = memStore.CreateTenant(ctx, "tenant-b", keystore.SigningKey{
 		KeyID:    "transposed-key-b",
 		TenantID: "tenant-b",
@@ -124,10 +124,10 @@ func TestKEK_MissingAAD_CrossTenantKeyTransposition(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// 4. INVARIANT DE SÉCURITÉ VIOLE :
-	// Résoudre la clé pour Tenant B doit échouer car le ciphertext n'appartient pas à Tenant B
+	// 4. SECURITY INVARIANT VIOLATED:
+	// Resolving the key for Tenant B must fail because the ciphertext does not belong to Tenant B
 	keyB, err := mgr.ActiveSigningKey(ctx, "tenant-b")
 	require.ErrorIs(t, err, keystore.ErrCiphertextCorrupt,
-		"SEC-TOK-01: le déchiffrement KEK d'un secret scellé sous un autre tenant doit échouer en raison de l'invalidation de l'AAD")
-	assert.Nil(t, keyB.Secret, "aucun secret ne doit être divulgué en cas de transposition inter-tenant")
+		"SEC-TOK-01: KEK decryption of a secret sealed under a different tenant must fail due to AAD mismatch")
+	assert.Nil(t, keyB.Secret, "no secret must be disclosed in case of cross-tenant transposition")
 }

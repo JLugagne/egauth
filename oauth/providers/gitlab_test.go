@@ -16,22 +16,22 @@ import (
 
 // TestGitLab_IDCollision_Float64PrecisionLoss confirms SEC-OAU-01 (CVSS 9.8).
 //
-// Invariant de sécurité :
-// Deux comptes distincts ayant des identifiants numériques différents sur le fournisseur OAuth/OIDC
-// (notamment des identifiants 64 bits ou formats Snowflake dépassant 2^53 = 9007199254740992,
-// tels que 9007199254740992 et 9007199254740993) DOIVENT impérativement produire des
-// ProviderID distincts et préserver la valeur exacte sans perte de précision.
+// Security invariant:
+// Two distinct accounts with different numeric identifiers on the OAuth/OIDC provider
+// (in particular 64-bit or Snowflake-format identifiers exceeding 2^53 = 9007199254740992,
+// such as 9007199254740992 and 9007199254740993) MUST produce distinct ProviderIDs
+// and preserve the exact value without loss of precision.
 //
-// Comportement vulnérable actuel :
-// Dans oauth.GetJSON / gitlabFetcher / stringifyID, la désérialisation JSON standard dans un
-// champ 'any' sans json.Decoder.UseNumber() convertit les nombres en float64.
-// En raison de la limite de 53 bits de mantisse de la norme IEEE 754, l'entier 9007199254740993
-// est arrondi à 9007199254740992. Les deux utilisateurs reçoivent alors exactement le même
-// ProviderID ("9007199254740992"), provoquant une collision et une usurpation de compte complète (ATO).
+// Current vulnerable behaviour:
+// In oauth.GetJSON / gitlabFetcher / stringifyID, standard JSON deserialisation into an
+// 'any' field without json.Decoder.UseNumber() converts numbers to float64.
+// Due to the 53-bit mantissa limit of the IEEE 754 standard, the integer 9007199254740993
+// is rounded to 9007199254740992. Both users then receive exactly the same
+// ProviderID ("9007199254740992"), causing a collision and a full account takeover (ATO).
 func TestGitLab_IDCollision_Float64PrecisionLoss(t *testing.T) {
 	ctx := context.Background()
 
-	// Compteur pour simuler deux utilisateurs consécutifs lors des requêtes userinfo
+	// Counter to simulate two consecutive users across userinfo requests
 	var reqCount atomic.Int32
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -45,10 +45,10 @@ func TestGitLab_IDCollision_Float64PrecisionLoss(t *testing.T) {
 		case "/oauth/userinfo":
 			count := reqCount.Add(1)
 			if count == 1 {
-				// Utilisateur 1 (Victime) : ID = 2^53 = 9007199254740992
+				// User 1 (Victim): ID = 2^53 = 9007199254740992
 				_, _ = w.Write([]byte(`{"sub": 9007199254740992, "email": "victim@gitlab.example.com", "name": "Victim"}`))
 			} else {
-				// Utilisateur 2 (Attaquant) : ID = 2^53 + 1 = 9007199254740993
+				// User 2 (Attacker): ID = 2^53 + 1 = 9007199254740993
 				_, _ = w.Write([]byte(`{"sub": 9007199254740993, "email": "attacker@gitlab.example.com", "name": "Attacker"}`))
 			}
 		default:
@@ -62,23 +62,23 @@ func TestGitLab_IDCollision_Float64PrecisionLoss(t *testing.T) {
 		oauth.WithHTTPClient(srv.Client()),
 	)
 
-	// Échange pour la victime (sub: 9007199254740992)
+	// Exchange for the victim (sub: 9007199254740992)
 	victimInfo, err := p.Exchange(ctx, "auth-code-1", "https://app.example.com/callback", "verifier-1")
-	require.NoError(t, err, "Exchange pour la victime devrait réussir")
+	require.NoError(t, err, "Exchange for the victim should succeed")
 	require.NotNil(t, victimInfo)
-	assert.Equal(t, "9007199254740992", victimInfo.ProviderID, "Le ProviderID de la victime doit être 9007199254740992")
+	assert.Equal(t, "9007199254740992", victimInfo.ProviderID, "The victim's ProviderID must be 9007199254740992")
 
-	// Échange pour l'attaquant (sub: 9007199254740993)
+	// Exchange for the attacker (sub: 9007199254740993)
 	attackerInfo, err := p.Exchange(ctx, "auth-code-2", "https://app.example.com/callback", "verifier-2")
-	require.NoError(t, err, "Exchange pour l'attaquant devrait réussir")
+	require.NoError(t, err, "Exchange for the attacker should succeed")
 	require.NotNil(t, attackerInfo)
 
-	// INVARIANT VIOLE :
-	// 1. L'identifiant de l'attaquant doit être préservé fidèlement ("9007199254740993")
+	// INVARIANT VIOLATED:
+	// 1. The attacker's identifier must be faithfully preserved ("9007199254740993")
 	assert.Equal(t, "9007199254740993", attackerInfo.ProviderID,
-		"SEC-OAU-01: le ProviderID de l'attaquant ne doit pas perdre de précision et valoir 9007199254740993")
+		"SEC-OAU-01: the attacker's ProviderID must not lose precision and must equal 9007199254740993")
 
-	// 2. Les deux ProviderID doivent impérativement être distincts pour éviter l'usurpation de compte
+	// 2. Both ProviderIDs must be distinct to prevent account takeover
 	assert.NotEqual(t, victimInfo.ProviderID, attackerInfo.ProviderID,
-		"SEC-OAU-01: deux identifiants numériques GitLab distincts ne doivent pas entrer en collision")
+		"SEC-OAU-01: two distinct numeric GitLab identifiers must not collide")
 }

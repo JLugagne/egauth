@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/JLugagne/egauth/adapters/pgx/tokens"
+	pgx "github.com/JLugagne/egauth/adapters/pgx/tokens"
 	egauthtokens "github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/storetest"
 	"github.com/google/uuid"

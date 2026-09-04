@@ -227,21 +227,21 @@ func TestLoginHandler_AccountLocked(t *testing.T) {
 
 // TestLoginHandler_AccountEnumeration_UniformResponseOnLockout confirms SEC-ID-04 (CVSS 8.2).
 //
-// Invariant de sécurité :
-// Le point d'authentification /login DOIT renvoyer une réponse uniforme (HTTP 401 Unauthorized
-// avec le code d'erreur "invalid_credentials") quel que soit l'état du compte (inexistant,
-// mot de passe erroné, ou compte verrouillé/désactivé suite à des échecs répétés) afin
-// de prévenir formellement l'énumération d'utilisateurs.
+// Security invariant:
+// The /login authentication endpoint MUST return a uniform response (HTTP 401 Unauthorized
+// with error code "invalid_credentials") regardless of account state (non-existent,
+// wrong password, or account locked/disabled after repeated failures) in order
+// to formally prevent user enumeration.
 //
-// Comportement vulnérable actuel :
-// Dans identity/handlers.go:mapAuthError, ErrAccountLocked et ErrAccountDisabled renvoient
-// HTTP 429 Too Many Requests ("account_locked"), tandis qu'un mot de passe erroné ou un compte
-// inexistant renvoie HTTP 401 Unauthorized ("invalid_credentials").
-// Bien que Authenticate utilise decoyHash pour égaliser le temps de calcul, la divergence du code HTTP
-// (429 vs 401) et du payload JSON permet à un attaquant non authentifié d'énumérer avec une certitude absolue
-// les adresses emails inscrites dans le système et de verrouiller les comptes des utilisateurs à distance (Lockout DoS).
+// Current vulnerable behaviour:
+// In identity/handlers.go:mapAuthError, ErrAccountLocked and ErrAccountDisabled return
+// HTTP 429 Too Many Requests ("account_locked"), whereas a wrong password or a non-existent account
+// returns HTTP 401 Unauthorized ("invalid_credentials").
+// Although Authenticate uses decoyHash to equalise computation time, the divergence in HTTP code
+// (429 vs 401) and JSON payload allows an unauthenticated attacker to enumerate with absolute
+// certainty the email addresses registered in the system and remotely lock out accounts (Lockout DoS).
 func TestLoginHandler_AccountEnumeration_UniformResponseOnLockout(t *testing.T) {
-	// 1. Cas d'un utilisateur inexistant (ou mauvais mot de passe)
+	// 1. Case: non-existent user (or wrong password)
 	svcUnknown := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return nil, identity.ErrInvalidCredentials
@@ -254,7 +254,7 @@ func TestLoginHandler_AccountEnumeration_UniformResponseOnLockout(t *testing.T) 
 	assert.Equal(t, http.StatusUnauthorized, recUnknown.Code)
 	assert.Contains(t, recUnknown.Body.String(), "invalid_credentials")
 
-	// 2. Cas d'un utilisateur existant dont le compte est verrouillé
+	// 2. Case: existing user whose account is locked
 	svcLocked := &servicetest.MockService{
 		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
 			return nil, identity.ErrAccountLocked
@@ -265,13 +265,13 @@ func TestLoginHandler_AccountEnumeration_UniformResponseOnLockout(t *testing.T) 
 	recLocked := httptest.NewRecorder()
 	hLocked.ServeHTTP(recLocked, loginForm(t, "/login", "victim@example.com", "wrong", ""))
 
-	// INVARIANT DE SÉCURITÉ VIOLE :
-	// Pour éviter l'énumération d'utilisateurs, la réponse pour un compte verrouillé doit être
-	// identique à celle d'un compte inexistant (HTTP 401 "invalid_credentials").
+	// SECURITY INVARIANT VIOLATED:
+	// To prevent user enumeration, the response for a locked account must be
+	// identical to that of a non-existent account (HTTP 401 "invalid_credentials").
 	assert.Equal(t, http.StatusUnauthorized, recLocked.Code,
-		"SEC-ID-04: un compte verrouillé ne doit pas renvoyer HTTP 429 mais HTTP 401 pour empêcher l'énumération d'utilisateurs")
+		"SEC-ID-04: a locked account must not return HTTP 429 but HTTP 401 to prevent user enumeration")
 	assert.Contains(t, recLocked.Body.String(), "invalid_credentials",
-		"SEC-ID-04: le message d'erreur ne doit pas révéler l'état 'account_locked'")
+		"SEC-ID-04: the error message must not reveal the 'account_locked' state")
 }
 
 func TestLoginHandler_FailureRedirect(t *testing.T) {

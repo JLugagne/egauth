@@ -10,29 +10,29 @@ import (
 
 // TestNewWebApp_ConflictingCSRFConfig_RejectsContradiction confirms SEC-SES-11 (CVSS 8.1).
 //
-// Invariant de sécurité :
-// Le constructeur webapp.NewWebApp DOIT interdire et rejeter explicitement toute configuration
-// contradictoire où TrustedOrigins est défini ET InsecureNoOriginCheck est activé à true.
-// La présence d'une liste blanche d'origines fiables (TrustedOrigins) implique la volonté formelle
-// d'activer et de restreindre la protection CSRF ; autoriser InsecureNoOriginCheck en parallèle
-// constitue un conflit majeur de configuration de sécurité qui doit échouer immédiatement à la construction (fail-closed).
+// Security invariant:
+// The webapp.NewWebApp constructor MUST explicitly reject any contradictory configuration
+// where TrustedOrigins is set AND InsecureNoOriginCheck is enabled to true.
+// The presence of a trusted-origins allowlist (TrustedOrigins) implies a formal intent
+// to enable and restrict CSRF protection; allowing InsecureNoOriginCheck in parallel
+// constitutes a major security configuration conflict that must fail immediately at construction (fail-closed).
 //
-// Comportement vulnérable actuel :
-// Dans webapp.NewWebApp (webapp/webapp.go:122-124 et 169-178), la garde ne vérifie que :
+// Current vulnerable behaviour:
+// In webapp.NewWebApp (webapp/webapp.go:122-124 and 169-178), the guard only checks:
 //
 //	len(cfg.TrustedOrigins) == 0 && !cfg.InsecureNoOriginCheck
 //
-// Si le développeur configure TrustedOrigins tout en conservant InsecureNoOriginCheck: true,
-// NewWebApp accepte silencieusement la configuration, et l'option WithInsecureNoOriginCheck()
-// écrase WithTrustedOrigins(). La protection CSRF est totalement désactivée à l'insu de l'administrateur.
+// If the developer configures TrustedOrigins while keeping InsecureNoOriginCheck: true,
+// NewWebApp silently accepts the configuration, and WithInsecureNoOriginCheck()
+// overwrites WithTrustedOrigins(). CSRF protection is completely disabled without the administrator's knowledge.
 func TestNewWebApp_ConflictingCSRFConfig_RejectsContradiction(t *testing.T) {
 	cfg := baseConfig()
 	cfg.TrustedOrigins = []string{"https://app.example.com"}
 	cfg.InsecureNoOriginCheck = true
 
-	// INVARIANT VIOLE 1 : Le constructeur doit refuser cette combinaison contradictoire
+	// SECURITY INVARIANT VIOLATED: the constructor must reject this contradictory combination
 	_, err := webapp.NewWebApp(cfg)
 	require.Error(t, err,
-		"SEC-SES-11: webapp.NewWebApp doit rejeter la combinaison contradictoire de TrustedOrigins et InsecureNoOriginCheck")
+		"SEC-SES-11: webapp.NewWebApp must reject the contradictory combination of TrustedOrigins and InsecureNoOriginCheck")
 	assert.Contains(t, err.Error(), "cannot specify both TrustedOrigins and InsecureNoOriginCheck")
 }

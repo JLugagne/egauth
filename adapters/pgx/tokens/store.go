@@ -214,7 +214,6 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 	return err
 }
 
-
 // Ping reports backend connectivity by issuing a trivial round-trip query over the store's
 // handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
 // backend is unreachable and honors ctx for cancellation/deadline.

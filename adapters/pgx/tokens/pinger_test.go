@@ -1,7 +1,7 @@
 package pgx_test
 
 import (
-	"github.com/JLugagne/egauth/adapters/pgx/tokens"
+	pgx "github.com/JLugagne/egauth/adapters/pgx/tokens"
 	"github.com/JLugagne/egauth/health"
 )
 
