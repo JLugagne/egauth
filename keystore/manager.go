@@ -268,7 +268,7 @@ func (m *Manager) newKey(tenantID, keyID, alg string, ttl time.Duration) (Signin
 	}
 	// Seal the material with the KEK before it ever reaches the Store: backends persist only the
 	// envelope-encrypted form. ActiveSigningKey/VerificationKeys open it again before use.
-	sealed, err := m.kek.Seal(raw)
+	sealed, err := m.kek.Seal(raw, []byte(tenantID))
 	if err != nil {
 		return SigningKey{}, err
 	}

@@ -71,7 +71,7 @@ func (m *Manager) Keyset(ctx context.Context, tenantID string) (Keyset, error) {
 // openKey decrypts key.Secret in place from its KEK-sealed form. Stores hold the sealed bytes in
 // SigningKey.Secret; the Manager opens them here before any signing material leaves the package.
 func (m *Manager) openKey(key *SigningKey) error {
-	pt, err := m.kek.Open(key.Secret)
+	pt, err := m.kek.Open(key.Secret, []byte(key.TenantID))
 	if err != nil {
 		return err
 	}
@@ -82,7 +82,10 @@ func (m *Manager) openKey(key *SigningKey) error {
 // SealSecret seals a plaintext secret with the Manager's KEK. Store backends call it (indirectly,
 // via the keys the Manager hands them already sealed) — it is exported so adapters and the
 // conformance suite can construct sealed key material without reaching into the KEK directly.
-func (m *Manager) SealSecret(plaintext []byte) ([]byte, error) {
+func (m *Manager) SealSecret(plaintext []byte, tenantID ...string) ([]byte, error) {
+	if len(tenantID) > 0 {
+		return m.kek.Seal(plaintext, []byte(tenantID[0]))
+	}
 	return m.kek.Seal(plaintext)
 }
 
