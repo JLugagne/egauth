@@ -143,7 +143,7 @@ func TestSecSes06_CreateSessionBypassesMaxLifetime_ZombieRetention(t *testing.T)
 	assert.Equal(t, sess.ID, storedSess.ID)
 }
 
-// SEC-SES-09 (CVSS 4.0): Boucle CPU intensive (Busy Loop) dans janitor.Start sur intervalle non positif.
+// SEC-SES-09 (CVSS 4.0): CPU-intensive busy loop (Busy Loop) in janitor.Start with non-positive interval.
 // janitor.Start clamps non-positive intervals to time.Nanosecond, starting a 1ns ticker that
 // spins a goroutine continuously at 100% CPU.
 func TestSecSes09_JanitorBusyLoopOnNonPositiveInterval(t *testing.T) {
@@ -156,13 +156,14 @@ func TestSecSes09_JanitorBusyLoopOnNonPositiveInterval(t *testing.T) {
 		executions.Add(1)
 	})
 
-	// Wait 25ms — with a 1ns ticker, the callback executes hundreds/thousands of times.
-	time.Sleep(25 * time.Millisecond)
+	// Wait 100ms — with a 1ns ticker, the callback executes many hundreds of times even on
+	// slow CI runners (Windows timer resolution is ~15ms, so we keep the threshold conservative).
+	time.Sleep(100 * time.Millisecond)
 	j.Stop()
 
 	count := executions.Load()
-	assert.Greater(t, count, int64(50),
-		"Flaw confirmed: interval <= 0 resulted in a high-frequency busy loop (>50 executions in 25ms)")
+	assert.Greater(t, count, int64(10),
+		"Flaw confirmed: interval <= 0 resulted in a high-frequency busy loop (>10 executions in 100ms)")
 }
 
 // SEC-SES-14 (CVSS 4.2): Réassignation arbitraire d'identité utilisateur dans sessions.Service.BindUser.

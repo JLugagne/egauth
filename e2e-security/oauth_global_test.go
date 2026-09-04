@@ -427,13 +427,13 @@ func TestSecOau05_JWKSCache_NoNegativeCaching_FetchesEveryUnknownKid(t *testing.
 		switch r.URL.Path {
 		case "/.well-known/openid-configuration":
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"issuer":%q,"jwks_uri":%q}`, "http://"+r.Host, "http://"+r.Host+"/jwks")
+			_, _ = fmt.Fprintf(w, `{"issuer":%q,"jwks_uri":%q}`, "http://"+r.Host, "http://"+r.Host+"/jwks")
 		case "/jwks":
 			jwksRequests.Add(1)
 			w.Header().Set("Content-Type", "application/json")
 			n := base64.RawURLEncoding.EncodeToString(rsaKey.N.Bytes())
 			e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaKey.E)).Bytes())
-			fmt.Fprintf(w, `{"keys":[{"kty":"RSA","kid":"valid-key-id","use":"sig","alg":"RS256","n":%q,"e":%q}]}`, n, e)
+			_, _ = fmt.Fprintf(w, `{"keys":[{"kty":"RSA","kid":"valid-key-id","use":"sig","alg":"RS256","n":%q,"e":%q}]}`, n, e)
 		default:
 			http.NotFound(w, r)
 		}
