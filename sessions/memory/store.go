@@ -102,7 +102,7 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 	// Enforce the bounded cap: first evict already-expired sessions, then
 	// fall back to evicting the soonest-expiring live session.
 	if s.maxSize > 0 && len(s.sessions) >= s.maxSize {
-		s.evictOne()
+		s.evictOne(tenantID)
 	}
 
 	s.sessions[sCopy.ID] = &sCopy
@@ -232,12 +232,20 @@ var _ sessions.Store = (*Store)(nil)
 
 // evictOne removes a single session to make room for a new insertion.
 // Strategy: evict all already-expired sessions first; if none are expired,
-// evict the one with the soonest ExpiresAt.
+// evict the one with the soonest ExpiresAt, prioritizing sessions from tenantID
+// so that one tenant does not evict another tenant's active session.
 // Must be called with s.mu held for writing.
-func (s *Store) evictOne() {
+func (s *Store) evictOne(tenantID string) {
 	now := time.Now()
 
-	// Pass 1: evict any expired session.
+	// Pass 1: evict any expired session (prioritizing same tenant, then any).
+	for id, sess := range s.sessions {
+		if sess.TenantID == tenantID && sess.ExpiresAt.Before(now) {
+			delete(s.sessions, id)
+			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
+			return
+		}
+	}
 	for id, sess := range s.sessions {
 		if sess.ExpiresAt.Before(now) {
 			delete(s.sessions, id)
@@ -246,17 +254,30 @@ func (s *Store) evictOne() {
 		}
 	}
 
-	// Pass 2: no expired session found — evict the soonest-expiring live one.
+	// Pass 2: no expired session found — evict the soonest-expiring live one,
+	// prioritizing sessions from the same tenant.
 	var (
 		evictID   uuid.UUID
 		evictTime time.Time
 		evictSet  bool
 	)
 	for id, sess := range s.sessions {
-		if !evictSet || sess.ExpiresAt.Before(evictTime) {
-			evictID = id
-			evictTime = sess.ExpiresAt
-			evictSet = true
+		if sess.TenantID == tenantID {
+			if !evictSet || sess.ExpiresAt.Before(evictTime) {
+				evictID = id
+				evictTime = sess.ExpiresAt
+				evictSet = true
+			}
+		}
+	}
+	if !evictSet {
+		// Fallback if the tenant has no live sessions: evict soonest-expiring session across all tenants.
+		for id, sess := range s.sessions {
+			if !evictSet || sess.ExpiresAt.Before(evictTime) {
+				evictID = id
+				evictTime = sess.ExpiresAt
+				evictSet = true
+			}
 		}
 	}
 	if evictSet {

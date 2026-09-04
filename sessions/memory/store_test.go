@@ -9,6 +9,8 @@ import (
 	"github.com/JLugagne/egauth/sessions"
 	"github.com/JLugagne/egauth/sessions/storetest"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStore(t *testing.T) {
@@ -338,4 +340,51 @@ func TestNewStore_Unbounded(t *testing.T) {
 	if store.maxSize != 0 {
 		t.Fatalf("NewStore maxSize: got %d want 0 (unbounded)", store.maxSize)
 	}
+}
+
+// TestBoundedStore_CrossTenantEvictionIsolation confirms SEC-SES-02 (CVSS 7.7).
+//
+// Invariant de sécurité :
+// Dans une architecture mutualisée multi-tenant, les limites de capacité ou les politiques d'éviction
+// (LRU/TTL) d'un magasin de sessions DOIVENT être strictement cloisonnées par tenant.
+// La création massive de sessions par le Tenant A (ou le dépassement du quota par Tenant A)
+// NE DOIT JAMAIS évincer ni détruire les sessions actives valides du Tenant B (Déni de Service croisé inter-tenant).
+//
+// Comportement vulnérable actuel :
+// sessions/memory.BoundedStore utilise un compteur global unique (s.maxSize) et sa méthode evictOne()
+// parcourt indifféremment l'ensemble des sessions de tous les tenants. Dès que la capacité globale
+// est atteinte, l'éviction détruit la session dont la date d'expiration est la plus proche, même si
+// celle-ci appartient à un tout autre tenant. Un utilisateur du Tenant A peut ainsi déconnecter
+// et bloquer arbitrairement les utilisateurs du Tenant B.
+func TestBoundedStore_CrossTenantEvictionIsolation(t *testing.T) {
+	ctx := context.Background()
+	const cap = 2
+	store := NewBoundedStore(cap)
+	now := time.Now()
+
+	// 1. Le Tenant B crée une session légitime active (expire dans 1 heure)
+	sessB := newSession("tenant-b", "hash-victim-b", now.Add(1*time.Hour))
+	err := store.CreateSession(ctx, "tenant-b", sessB)
+	require.NoError(t, err)
+
+	// 2. Le Tenant A crée une première session (expire dans 2 heures)
+	sessA1 := newSession("tenant-a", "hash-attacker-a1", now.Add(2*time.Hour))
+	err = store.CreateSession(ctx, "tenant-a", sessA1)
+	require.NoError(t, err)
+
+	// La capacité globale est atteinte (2/2)
+	assert.Equal(t, cap, store.Len())
+
+	// 3. Le Tenant A crée une seconde session (expire dans 3 heures)
+	sessA2 := newSession("tenant-a", "hash-attacker-a2", now.Add(3*time.Hour))
+	err = store.CreateSession(ctx, "tenant-a", sessA2)
+	require.NoError(t, err)
+
+	// 4. INVARIANT DE SÉCURITÉ VIOLE :
+	// L'activité ou le débordement de capacité provoqué par Tenant A ne doit en aucun cas détruire
+	// la session valide du Tenant B.
+	gotB, err := store.FindSessionByHash(ctx, "tenant-b", "hash-victim-b")
+	require.NoError(t, err, "SEC-SES-02: la session active du Tenant B ne doit pas être évincée par un débordement du Tenant A")
+	assert.NotNil(t, gotB)
+	assert.Equal(t, sessB.ID, gotB.ID)
 }
