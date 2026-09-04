@@ -38,8 +38,8 @@ type DBQuerier interface {
 
 // KEK provides envelope encryption for TOTP secrets at rest.
 type KEK interface {
-	Seal(plaintext []byte) ([]byte, error)
-	Open(sealed []byte) ([]byte, error)
+	Seal(plaintext []byte, aad ...[]byte) ([]byte, error)
+	Open(sealed []byte, aad ...[]byte) ([]byte, error)
 }
 
 // Store implements mfa.Store for PostgreSQL.
