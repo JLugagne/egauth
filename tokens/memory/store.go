@@ -9,20 +9,26 @@ import (
 	"github.com/google/uuid"
 )
 
+// tokenKey is a composite key used to partition in-memory token storage by tenant.
+type tokenKey struct {
+	tenantID string
+	hash     string
+}
+
 // Store is an in-memory implementation of tokens.Store.
 type Store[C any] struct {
 	mu sync.RWMutex
-	// refreshTokens stores full RefreshToken records keyed by hash.
+	// refreshTokens stores full RefreshToken records keyed by (tenantID, hash).
 	// SECURITY: only the hash is ever stored, never the clear-text token.
-	refreshTokens map[string]*tokens.RefreshToken
-	apiKeys       map[string]*tokens.APIKey[C]
+	refreshTokens map[tokenKey]*tokens.RefreshToken
+	apiKeys       map[tokenKey]*tokens.APIKey[C]
 }
 
 // NewStore creates a new in-memory tokens Store.
 func NewStore[C any]() *Store[C] {
 	return &Store[C]{
-		refreshTokens: make(map[string]*tokens.RefreshToken),
-		apiKeys:       make(map[string]*tokens.APIKey[C]),
+		refreshTokens: make(map[tokenKey]*tokens.RefreshToken),
+		apiKeys:       make(map[tokenKey]*tokens.APIKey[C]),
 	}
 }
 
@@ -35,21 +41,21 @@ func (s *Store[C]) DeleteExpired(ctx context.Context, tenantID string) (int64, e
 	now := time.Now()
 	var deleted int64
 
-	for hash, rt := range s.refreshTokens {
-		if rt.TenantID != tenantID {
+	for key, rt := range s.refreshTokens {
+		if key.tenantID != tenantID {
 			continue
 		}
 		if rt.ExpiresAt.Before(now) {
-			delete(s.refreshTokens, hash)
+			delete(s.refreshTokens, key)
 			deleted++
 		}
 	}
-	for hash, key := range s.apiKeys {
-		if key.TenantID != tenantID {
+	for key, apiKey := range s.apiKeys {
+		if key.tenantID != tenantID {
 			continue
 		}
-		if key.ExpiresAt != nil && key.ExpiresAt.Before(now) {
-			delete(s.apiKeys, hash)
+		if apiKey.ExpiresAt != nil && apiKey.ExpiresAt.Before(now) {
+			delete(s.apiKeys, key)
 			deleted++
 		}
 	}
@@ -70,7 +76,7 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 		consumed := *rtCopy.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
 	}
-	s.refreshTokens[rtCopy.Hash] = &rtCopy
+	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
 
 	return nil
 }
@@ -80,7 +86,7 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	entry, exists := s.refreshTokens[tokenHash]
+	entry, exists := s.refreshTokens[tokenKey{tenantID: tenantID, hash: tokenHash}]
 	if !exists || entry.TenantID != tenantID {
 		return nil, tokens.ErrRefreshTokenNotFound
 	}
@@ -98,7 +104,7 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, exists := s.refreshTokens[tokenHash]
+	entry, exists := s.refreshTokens[tokenKey{tenantID: tenantID, hash: tokenHash}]
 	if !exists || entry.TenantID != tenantID {
 		return tokens.ErrRefreshTokenNotFound
 	}
@@ -121,7 +127,7 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	entry, exists := s.refreshTokens[oldTokenHash]
+	entry, exists := s.refreshTokens[tokenKey{tenantID: tenantID, hash: oldTokenHash}]
 	if !exists || entry.TenantID != tenantID {
 		return tokens.ErrRefreshTokenNotFound
 	}
@@ -143,7 +149,7 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 		consumed := *rtCopy.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
 	}
-	s.refreshTokens[rtCopy.Hash] = &rtCopy
+	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
 
 	return nil
 }
@@ -153,12 +159,13 @@ func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tenantID string, toke
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	rt, exists := s.refreshTokens[tokenHash]
+	key := tokenKey{tenantID: tenantID, hash: tokenHash}
+	rt, exists := s.refreshTokens[key]
 	if !exists || rt.TenantID != tenantID {
 		return tokens.ErrRefreshTokenNotFound
 	}
 
-	delete(s.refreshTokens, tokenHash)
+	delete(s.refreshTokens, key)
 
 	return nil
 }
@@ -168,9 +175,9 @@ func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID u
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for hash, rt := range s.refreshTokens {
-		if rt.TenantID == tenantID && rt.FamilyID == familyID {
-			delete(s.refreshTokens, hash)
+	for key, rt := range s.refreshTokens {
+		if key.tenantID == tenantID && rt.FamilyID == familyID {
+			delete(s.refreshTokens, key)
 		}
 	}
 
@@ -183,9 +190,9 @@ func (s *Store[C]) RevokeAllRefreshTokensForUser(ctx context.Context, tenantID s
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for hash, rt := range s.refreshTokens {
-		if rt.TenantID == tenantID && rt.UserID == userID {
-			delete(s.refreshTokens, hash)
+	for key, rt := range s.refreshTokens {
+		if key.tenantID == tenantID && rt.UserID == userID {
+			delete(s.refreshTokens, key)
 		}
 	}
 
@@ -205,7 +212,7 @@ func (s *Store[C]) SaveAPIKey(ctx context.Context, tenantID string, key *tokens.
 	kCopy.Token = "" // SECURITY: do not store the clear-text token
 	kCopy.TenantID = tenantID
 
-	s.apiKeys[kCopy.Hash] = &kCopy
+	s.apiKeys[tokenKey{tenantID: tenantID, hash: kCopy.Hash}] = &kCopy
 
 	return nil
 }
@@ -215,7 +222,7 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	key, exists := s.apiKeys[tokenHash]
+	key, exists := s.apiKeys[tokenKey{tenantID: tenantID, hash: tokenHash}]
 	if !exists || key.TenantID != tenantID {
 		return nil, tokens.ErrAPIKeyNotFound
 	}
@@ -235,13 +242,13 @@ func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, key := range s.apiKeys {
-		if key.ID == keyID && key.TenantID == tenantID {
-			if key.RevokedAt != nil {
+	for key, apiKey := range s.apiKeys {
+		if key.tenantID == tenantID && apiKey.ID == keyID {
+			if apiKey.RevokedAt != nil {
 				return nil // idempotent
 			}
 			now := time.Now()
-			key.RevokedAt = &now
+			apiKey.RevokedAt = &now
 			return nil
 		}
 	}
@@ -255,10 +262,10 @@ func (s *Store[C]) RevokeAllAPIKeysForUser(ctx context.Context, tenantID string,
 	defer s.mu.Unlock()
 
 	now := time.Now()
-	for _, key := range s.apiKeys {
-		if key.TenantID == tenantID && key.CreatedBy == userID && key.RevokedAt == nil {
+	for key, apiKey := range s.apiKeys {
+		if key.tenantID == tenantID && apiKey.CreatedBy == userID && apiKey.RevokedAt == nil {
 			revoked := now
-			key.RevokedAt = &revoked
+			apiKey.RevokedAt = &revoked
 		}
 	}
 
@@ -272,9 +279,9 @@ func (s *Store[C]) ListAPIKeysByCreator(ctx context.Context, tenantID string, cr
 	defer s.mu.RUnlock()
 
 	var result []*tokens.APIKey[C]
-	for _, key := range s.apiKeys {
-		if key.TenantID == tenantID && key.CreatedBy == createdBy {
-			kCopy := *key
+	for key, apiKey := range s.apiKeys {
+		if key.tenantID == tenantID && apiKey.CreatedBy == createdBy {
+			kCopy := *apiKey
 			kCopy.Token = ""
 			result = append(result, &kCopy)
 		}

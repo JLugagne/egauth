@@ -31,11 +31,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// SEC-GLO-06 (CVSS 5.8): Collision et écrasement inter-tenant dans le store de jetons en mémoire.
+// SEC-GLO-06 (CVSS 5.8): Cross-tenant collision and overwrite prevention in memory token store.
 // The in-memory token store (tokens/memory/store.go) indexes refresh tokens and API keys by
-// token hash alone without namespacing by tenantID. When Tenant B saves a token/key with the same
-// hash as Tenant A, Tenant A's entry is overwritten. When Tenant A looks up the token, it fails
-// with ErrRefreshTokenNotFound because the record's TenantID now belongs to Tenant B.
+// a composite key (tenantID, hash). When Tenant B saves a token/key with the same hash as Tenant A,
+// both records are preserved without collision.
 func TestSecGlo06_TokenMemoryStore_CrossTenantHashCollisionOverwrite(t *testing.T) {
 	ctx := context.Background()
 	store := tokenmemory.NewStore[struct{}]()
@@ -70,12 +69,11 @@ func TestSecGlo06_TokenMemoryStore_CrossTenantHashCollisionOverwrite(t *testing.
 	}
 	require.NoError(t, store.SaveRefreshToken(ctx, "tenant-B", rtB))
 
-	// 3. Confirm flawed behavior: Tenant A's refresh token was completely clobbered!
-	// Calling FindRefreshToken under tenant-A returns ErrRefreshTokenNotFound because
-	// the stored record's TenantID was overwritten to "tenant-B".
-	_, err = store.FindRefreshToken(ctx, "tenant-A", sharedHash)
-	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound,
-		"Flaw confirmed: Tenant A's token was overwritten by Tenant B in memory store")
+	// 3. Assert remediation: Tenant A's refresh token is preserved despite Tenant B saving the same hash
+	foundAAfterB, err := store.FindRefreshToken(ctx, "tenant-A", sharedHash)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-A", foundAAfterB.TenantID)
+	assert.Equal(t, userA, foundAAfterB.UserID)
 
 	// Tenant B can retrieve it
 	foundB, err := store.FindRefreshToken(ctx, "tenant-B", sharedHash)
@@ -83,7 +81,7 @@ func TestSecGlo06_TokenMemoryStore_CrossTenantHashCollisionOverwrite(t *testing.
 	assert.Equal(t, "tenant-B", foundB.TenantID)
 	assert.Equal(t, userB, foundB.UserID)
 
-	// 4. Same flawed behavior for API keys
+	// 4. Verification for API keys
 	const sharedKeyHash = "sha256-shared-api-key-hash-002"
 	keyA := &tokens.APIKey[struct{}]{
 		ID:        uuid.New(),
@@ -103,10 +101,16 @@ func TestSecGlo06_TokenMemoryStore_CrossTenantHashCollisionOverwrite(t *testing.
 	}
 	require.NoError(t, store.SaveAPIKey(ctx, "tenant-B", keyB))
 
-	// Tenant A's API key is lost
-	_, err = store.FindAPIKeyByHash(ctx, "tenant-A", sharedKeyHash)
-	assert.ErrorIs(t, err, tokens.ErrAPIKeyNotFound,
-		"Flaw confirmed: Tenant A's API key was overwritten by Tenant B in memory store")
+	// Tenant A can still find its API key with no error
+	foundKeyA, err := store.FindAPIKeyByHash(ctx, "tenant-A", sharedKeyHash)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-A", foundKeyA.TenantID)
+	assert.Equal(t, userA, foundKeyA.CreatedBy)
+
+	foundKeyB, err := store.FindAPIKeyByHash(ctx, "tenant-B", sharedKeyHash)
+	require.NoError(t, err)
+	assert.Equal(t, "tenant-B", foundKeyB.TenantID)
+	assert.Equal(t, userB, foundKeyB.CreatedBy)
 }
 
 // SEC-GLO-08: Anonymous actor classification and role/group vanishing remediation verification.

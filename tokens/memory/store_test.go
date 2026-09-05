@@ -135,3 +135,90 @@ func TestRotateRefreshToken(t *testing.T) {
 		assert.Nil(t, oldFound.ConsumedAt)
 	})
 }
+
+func TestStore_MultiTenantHashCollision(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore[CustomClaims]()
+
+	t.Run("refresh tokens with identical hash across tenants preserve both tokens without collision", func(t *testing.T) {
+		const hashX = "shared-refresh-hash-x"
+		userA := uuid.Must(uuid.NewV7())
+		userB := uuid.Must(uuid.NewV7())
+		familyA := uuid.Must(uuid.NewV7())
+		familyB := uuid.Must(uuid.NewV7())
+
+		rtA := &tokens.RefreshToken{
+			Hash:      hashX,
+			TenantID:  "tenantA",
+			UserID:    userA,
+			FamilyID:  familyA,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, "tenantA", rtA))
+
+		rtB := &tokens.RefreshToken{
+			Hash:      hashX,
+			TenantID:  "tenantB",
+			UserID:    userB,
+			FamilyID:  familyB,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, "tenantB", rtB))
+
+		// Both tokens must be preserved under their respective tenants
+		foundA, err := store.FindRefreshToken(ctx, "tenantA", hashX)
+		require.NoError(t, err)
+		assert.Equal(t, "tenantA", foundA.TenantID)
+		assert.Equal(t, userA, foundA.UserID)
+		assert.Equal(t, familyA, foundA.FamilyID)
+
+		foundB, err := store.FindRefreshToken(ctx, "tenantB", hashX)
+		require.NoError(t, err)
+		assert.Equal(t, "tenantB", foundB.TenantID)
+		assert.Equal(t, userB, foundB.UserID)
+		assert.Equal(t, familyB, foundB.FamilyID)
+	})
+
+	t.Run("API keys with identical hash across tenants preserve both keys without collision", func(t *testing.T) {
+		const hashY = "shared-api-key-hash-y"
+		userA := uuid.Must(uuid.NewV7())
+		userB := uuid.Must(uuid.NewV7())
+		keyIDA := uuid.Must(uuid.NewV7())
+		keyIDB := uuid.Must(uuid.NewV7())
+
+		keyA := &tokens.APIKey[CustomClaims]{
+			ID:        keyIDA,
+			Hash:      hashY,
+			TenantID:  "tenantA",
+			CreatedBy: userA,
+			Type:      tokens.KeyTypePAT,
+			Claims:    tokens.Claims[CustomClaims]{Custom: CustomClaims{Foo: "tenantA-data"}},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, "tenantA", keyA))
+
+		keyB := &tokens.APIKey[CustomClaims]{
+			ID:        keyIDB,
+			Hash:      hashY,
+			TenantID:  "tenantB",
+			CreatedBy: userB,
+			Type:      tokens.KeyTypePAT,
+			Claims:    tokens.Claims[CustomClaims]{Custom: CustomClaims{Foo: "tenantB-data"}},
+		}
+		require.NoError(t, store.SaveAPIKey(ctx, "tenantB", keyB))
+
+		// Both keys must be preserved under their respective tenants
+		foundA, err := store.FindAPIKeyByHash(ctx, "tenantA", hashY)
+		require.NoError(t, err)
+		assert.Equal(t, "tenantA", foundA.TenantID)
+		assert.Equal(t, keyIDA, foundA.ID)
+		assert.Equal(t, userA, foundA.CreatedBy)
+		assert.Equal(t, "tenantA-data", foundA.Claims.Custom.Foo)
+
+		foundB, err := store.FindAPIKeyByHash(ctx, "tenantB", hashY)
+		require.NoError(t, err)
+		assert.Equal(t, "tenantB", foundB.TenantID)
+		assert.Equal(t, keyIDB, foundB.ID)
+		assert.Equal(t, userB, foundB.CreatedBy)
+		assert.Equal(t, "tenantB-data", foundB.Claims.Custom.Foo)
+	})
+}
