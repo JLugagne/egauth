@@ -52,6 +52,7 @@ type Provider struct {
 	fetchUser         FetchUserFunc
 	oidc              *oidcVerifier // non-nil when OIDC id_token validation is enabled (WithOIDC)
 	allowInsecureURLs bool          // dev-only: permit non-https auth/token URLs (WithInsecureURLs)
+	expectedIssuer    string        // explicit RFC 9207 expected issuer identifier (WithExpectedIssuer)
 	configErr         error         // deferred construction error (e.g. a non-https endpoint URL)
 }
 
@@ -77,6 +78,13 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 			p.httpClient = &clone
 		}
 	}
+}
+
+// WithExpectedIssuer sets the expected authorization server issuer identifier (RFC 9207).
+// When an OAuth authorization response contains the iss query parameter, it is validated
+// against this expected issuer.
+func WithExpectedIssuer(iss string) ProviderOption {
+	return func(p *Provider) { p.expectedIssuer = iss }
 }
 
 // WithOIDC enables OpenID Connect id_token validation for the provider (see OIDCConfig). With it
@@ -155,6 +163,33 @@ func (p *Provider) Name() string { return p.name }
 
 // oidcEnabled reports whether OIDC id_token validation is configured (WithOIDC).
 func (p *Provider) oidcEnabled() bool { return p.oidc != nil }
+
+// ExpectedIssuer returns the expected authorization server issuer identifier (RFC 9207).
+// It returns p.expectedIssuer if non-empty; else if OIDC is configured and has an issuer,
+// returns p.oidc.issuer; else derives the origin (scheme://host) from p.authURL.
+func (p *Provider) ExpectedIssuer() string {
+	if p.expectedIssuer != "" {
+		return p.expectedIssuer
+	}
+	if p.oidc != nil && p.oidc.issuer != "" {
+		return p.oidc.issuer
+	}
+	if u, err := url.Parse(p.authURL); err == nil && u.Scheme != "" && u.Host != "" {
+		return u.Scheme + "://" + u.Host
+	}
+	return ""
+}
+
+// ValidateIssuer reports whether the given issuer matches the expected issuer according to
+// RFC 9207 Section 2.2. It returns true if ExpectedIssuer() is empty (cannot be determined)
+// or if strings.TrimRight(iss, "/") == strings.TrimRight(p.ExpectedIssuer(), "/").
+func (p *Provider) ValidateIssuer(iss string) bool {
+	expected := p.ExpectedIssuer()
+	if expected == "" {
+		return true
+	}
+	return strings.TrimRight(iss, "/") == strings.TrimRight(expected, "/")
+}
 
 // AuthCodeOption customizes the authorization URL.
 type AuthCodeOption func(*authCodeParams)

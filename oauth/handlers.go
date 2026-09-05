@@ -199,6 +199,19 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusBadRequest, "untrusted_host")
 			return
 		}
+
+		q := r.URL.Query()
+		// RFC 9207 Section 2.2: Authorization Server Issuer Identification.
+		// If the authorization response contains the "iss" parameter, validate that it matches
+		// the expected issuer to prevent IdP mix-up attacks (SEC-OAU-08).
+		if iss := q.Get("iss"); iss != "" {
+			if !p.ValidateIssuer(iss) {
+				cfg.clearStateCookie(w)
+				cfg.fail(w, r, http.StatusForbidden, "issuer_mismatch")
+				return
+			}
+		}
+
 		raw, ok := cfg.readStateCookie(r)
 		cfg.clearStateCookie(w) // single-use, regardless of outcome
 		if !ok {
@@ -211,7 +224,6 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		q := r.URL.Query()
 		if q.Get("error") != "" {
 			// The user denied consent or the provider reported an error.
 			cfg.fail(w, r, http.StatusUnauthorized, "access_denied")

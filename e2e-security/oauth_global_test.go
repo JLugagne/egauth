@@ -488,10 +488,10 @@ func TestSecOau05_JWKSCache_NoNegativeCaching_FetchesEveryUnknownKid(t *testing.
 		"Second lookup of identical bogus-kid-1 must use negative cache and not trigger another JWKS request")
 }
 
-// SEC-OAU-08 (CVSS 5.3): Absence de validation du paramètre iss (RFC 9207) dans CallbackHandler.
+// SEC-OAU-08 (CVSS 5.3): RFC 9207 iss parameter validation in CallbackHandler.
 // RFC 9207 requires that if the authorization response contains an "iss" parameter, the client MUST
 // validate that its value equals the authorization server's issuer identifier.
-// CallbackHandler ignores the iss parameter completely, proceeding with state and code processing.
+// CallbackHandler validates the iss parameter and rejects mismatches with 403 Forbidden and issuer_mismatch.
 func TestSecOau08_CallbackHandler_IgnoresRFC9207IssuerParameter(t *testing.T) {
 	p := oauth.New("google", "client-id", "secret",
 		"https://accounts.google.com/o/oauth2/v2/auth",
@@ -514,11 +514,8 @@ func TestSecOau08_CallbackHandler_IgnoresRFC9207IssuerParameter(t *testing.T) {
 
 	callbackHandler.ServeHTTP(rec, req)
 
-	// The handler rejects due to missing/invalid state cookie (403 invalid_state),
-	// NOT due to issuer mismatch! It never examined "iss".
-	assert.NotEqual(t, "issuer_mismatch", rec.Body.String())
-	assert.Contains(t, rec.Body.String(), "invalid_state",
-		"Flaw confirmed: CallbackHandler inspects state and provider, but never validates the RFC 9207 'iss' parameter")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "issuer_mismatch")
 }
 
 // Helpers

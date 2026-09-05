@@ -298,6 +298,87 @@ func TestCallbackHandler_AccountExistsConflict(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, rec.Code)
 }
 
+func TestCallbackHandler_RFC9207IssuerMismatchRejected(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+	p, _ := stubProviderServer(t, &body)
+	WithExpectedIssuer("https://accounts.google.com")(p)
+
+	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+		AccessToken:           "access",
+		RefreshToken:          "refresh",
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+	}}
+
+	rec := runCallback(t, p, linker, issuer, stateCookie,
+		url.Values{
+			"state": {state},
+			"code":  {"auth-code"},
+			"iss":   {"https://evil-idp.com"},
+		}.Encode(),
+		WithRedirectURL(testRedirect),
+	)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "issuer_mismatch")
+	assert.Empty(t, linker.gotProviderID, "identity linker must not be reached on issuer mismatch")
+}
+
+func TestCallbackHandler_RFC9207IssuerMatchSucceeds(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+	p, _ := stubProviderServer(t, &body)
+	WithExpectedIssuer("https://accounts.google.com")(p)
+
+	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+		AccessToken:           "access",
+		RefreshToken:          "refresh",
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+	}}
+
+	rec := runCallback(t, p, linker, issuer, stateCookie,
+		url.Values{
+			"state": {state},
+			"code":  {"auth-code"},
+			"iss":   {"https://accounts.google.com/"},
+		}.Encode(),
+		WithRedirectURL(testRedirect),
+	)
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "prov-1", linker.gotProviderID)
+}
+
+func TestProvider_RFC9207IssuerResolutionAndValidation(t *testing.T) {
+	t.Run("explicit WithExpectedIssuer takes highest priority", func(t *testing.T) {
+		p := New("test", "cid", "sec", "https://auth.example.com/oauth/authorize", "https://auth.example.com/oauth/token",
+			nil, nil, WithExpectedIssuer("https://custom-issuer.example.com"))
+		assert.Equal(t, "https://custom-issuer.example.com", p.ExpectedIssuer())
+		assert.True(t, p.ValidateIssuer("https://custom-issuer.example.com"))
+		assert.True(t, p.ValidateIssuer("https://custom-issuer.example.com/"))
+		assert.False(t, p.ValidateIssuer("https://other-issuer.example.com"))
+	})
+
+	t.Run("derived from authURL origin when no explicit or oidc issuer", func(t *testing.T) {
+		p := New("test", "cid", "sec", "https://accounts.google.com/o/oauth2/v2/auth?prompt=consent", "https://oauth2.googleapis.com/token",
+			nil, nil)
+		assert.Equal(t, "https://accounts.google.com", p.ExpectedIssuer())
+		assert.True(t, p.ValidateIssuer("https://accounts.google.com"))
+		assert.True(t, p.ValidateIssuer("https://accounts.google.com/"))
+		assert.False(t, p.ValidateIssuer("https://evil-idp.com"))
+	})
+
+	t.Run("empty issuer allows any issuer when origin cannot be determined", func(t *testing.T) {
+		p := &Provider{}
+		assert.Equal(t, "", p.ExpectedIssuer())
+		assert.True(t, p.ValidateIssuer("https://any-issuer.com"))
+	})
+}
+
 // TestGetJSON_BoundsOversizedResponse proves the outbound read cap (io.LimitReader with
 // maxResponseBytes in GetJSON) is load-bearing: a hostile/oversized upstream userinfo body is
 // truncated at the cap, so a document larger than maxResponseBytes is cut off mid-JSON and the
