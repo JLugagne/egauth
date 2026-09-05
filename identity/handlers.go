@@ -69,6 +69,7 @@ type handlerConfig struct {
 	events                event.Sink
 	deliveryConcurrency   int
 	deliveryTimeout       time.Duration
+	deliveryQueueTimeout  time.Duration
 	// deliverySem is a buffered-channel semaphore bounding concurrent off-response-path
 	// deliveries. It is created ONCE in newHandlerConfig (so it is shared across every request
 	// served by a given handler instance — a per-request channel would make the cap meaningless)
@@ -279,9 +280,10 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 // a handler instance runs concurrently (default DefaultDeliveryConcurrency). The Request*
 // handlers dispatch delivery on a detached goroutine; this bound stops an unauthenticated flood
 // from spawning unbounded goroutines or amplifying into unbounded outbound mail/SMS. When the
-// cap is reached further deliveries are DROPPED (not queued) and surface as a DeliveryFailed
-// event rather than blocking the request. A non-positive value disables the bound (deliveries
-// fan out unbounded again) — do so only if an upstream layer already bounds the fan-out.
+// cap is reached further deliveries wait up to WithDeliveryQueueTimeout (if configured) before
+// being dropped and returning HTTP 429 service_busy, surfacing a DeliveryFailed event.
+// A non-positive value disables the bound (deliveries fan out unbounded again) — do so only
+// if an upstream layer already bounds the fan-out.
 func WithDeliveryConcurrency(n int) HandlerOption {
 	return func(h *handlerConfig) { h.deliveryConcurrency = n }
 }
@@ -454,31 +456,70 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 // flood them for valid/guessable accounts; an unbounded goroutine-per-call would spawn unbounded
 // concurrent goroutines and amplify into unbounded outbound mail/SMS (toll fraud). A buffered
 // channel semaphore (cfg.deliverySem, created ONCE per handler instance and shared across all of
-// its concurrent requests) caps the in-flight deliveries at cfg.deliveryConcurrency. A slot is
-// acquired NON-BLOCKING: when the semaphore is full the delivery is DROPPED (never queued, never
-// blocks the caller) and surfaces as a DeliveryFailed event, so an over-cap drop is observable
-// exactly like a Mailer outage. The slot is released when the delivery goroutine finishes.
+// its concurrent requests) caps the in-flight deliveries at cfg.deliveryConcurrency.
 //
-// Each delivery also runs under a per-delivery timeout (cfg.deliveryTimeout) derived from the
-// DETACHED context, so a slow or hung backend cannot pin a slot indefinitely while still keeping
-// delivery durable across the request finishing.
-func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) {
+// When the semaphore is saturated, dispatchDelivery waits up to cfg.deliveryQueueTimeout for a slot.
+// If no slot becomes available within that timeout (or immediately if deliveryQueueTimeout <= 0),
+// dispatchDelivery returns false and emits a DeliveryFailed event with ErrDeliveryDropped. The caller
+// handler is responsible for returning an HTTP 429 (service_busy) failure response so the client is
+// alerted to retry rather than falsely believing the delivery succeeded.
+//
+// If send is nil (used by enumeration-safe paths when an account does not exist), dispatchDelivery
+// reserves and immediately releases a semaphore slot to maintain uniform timing and capacity behavior
+// across existent and non-existent accounts, returning false if the semaphore was saturated.
+func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send func(ctx context.Context) error) bool {
 	base := context.WithoutCancel(r.Context())
 	tenant := cfg.tenant(r)
 
 	if cfg.deliverySem != nil {
-		select {
-		case cfg.deliverySem <- struct{}{}:
-			// Slot acquired; released by the goroutine below.
-		default:
-			// Semaphore full: drop the delivery rather than block the (often unauthenticated)
-			// caller goroutine, and surface the drop as a DeliveryFailed event so it is observable.
-			event.Emit(base, cfg.events, event.Event{
-				Type: event.DeliveryFailed, TenantID: tenant, UserID: userID,
-				Reason: "delivery_concurrency_exceeded", Err: ErrDeliveryDropped,
-			})
-			return
+		if cfg.deliveryQueueTimeout > 0 {
+			timer := time.NewTimer(cfg.deliveryQueueTimeout)
+			defer timer.Stop()
+			select {
+			case cfg.deliverySem <- struct{}{}:
+				// Slot acquired; released below or by the goroutine.
+			case <-r.Context().Done():
+				event.Emit(base, cfg.events, event.Event{
+					Type:     event.DeliveryFailed,
+					TenantID: tenant,
+					UserID:   userID,
+					Reason:   "delivery_concurrency_exceeded",
+					Err:      ErrDeliveryDropped,
+				})
+				return false
+			case <-timer.C:
+				event.Emit(base, cfg.events, event.Event{
+					Type:     event.DeliveryFailed,
+					TenantID: tenant,
+					UserID:   userID,
+					Reason:   "delivery_concurrency_exceeded",
+					Err:      ErrDeliveryDropped,
+				})
+				return false
+			}
+		} else {
+			select {
+			case cfg.deliverySem <- struct{}{}:
+				// Slot acquired; released below or by the goroutine.
+			default:
+				// Semaphore full: drop the delivery and surface as DeliveryFailed event.
+				event.Emit(base, cfg.events, event.Event{
+					Type:     event.DeliveryFailed,
+					TenantID: tenant,
+					UserID:   userID,
+					Reason:   "delivery_concurrency_exceeded",
+					Err:      ErrDeliveryDropped,
+				})
+				return false
+			}
 		}
+	}
+
+	if send == nil {
+		if cfg.deliverySem != nil {
+			<-cfg.deliverySem
+		}
+		return true
 	}
 
 	go func() {
@@ -497,6 +538,8 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send f
 			})
 		}
 	}()
+
+	return true
 }
 
 // originAllowed reports whether the request passes the CSRF same-origin check. The check is
@@ -568,10 +611,19 @@ func RequestPasswordResetHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 		// distinct status — a 500 reachable only for existing accounts would itself be an
 		// enumeration oracle. Errors are the consumer's to observe via their own Mailer/store.
 		token, user, _ := svc.RequestPasswordReset(r.Context(), cfg.tenant(r), email)
-		if token != "" && user != nil && mailer.PasswordReset != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
-			})
+		if mailer.PasswordReset != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" && user != nil {
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return mailer.PasswordReset(ctx, PasswordResetMail{User: user, Token: token})
+				}
+			}
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -639,10 +691,19 @@ func RequestEmailVerificationHandler(svc Service, mailer Mailer, opts ...Handler
 		}
 		// token is empty when the account is not a live, same-tenant user (swallowed at the
 		// service for enumeration safety); only dispatch delivery when a token was minted.
-		if token != "" && mailer.EmailVerification != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
-			})
+		if mailer.EmailVerification != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" {
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return mailer.EmailVerification(ctx, EmailVerificationMail{User: user, Token: token})
+				}
+			}
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -701,10 +762,19 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 
 		email := strings.TrimSpace(r.PostForm.Get(cfg.emailField))
 		token, user, _ := svc.RequestMagicLink(r.Context(), cfg.tenant(r), email)
-		if token != "" && user != nil && mailer.MagicLink != nil {
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
-			})
+		if mailer.MagicLink != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" && user != nil {
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return mailer.MagicLink(ctx, MagicLinkMail{User: user, Token: token})
+				}
+			}
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -927,16 +997,25 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 			}
 			return
 		}
-		if token != "" && mailer.EmailChange != nil {
-			// Deliver to the canonical form of the new address — the same normalization the
-			// service applied before binding it to the token.
-			deliverTo := newEmail
-			if n, nerr := normalizeEmail(newEmail); nerr == nil {
-				deliverTo = n
+		if mailer.EmailChange != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" {
+				// Deliver to the canonical form of the new address — the same normalization the
+				// service applied before binding it to the token.
+				deliverTo := newEmail
+				if n, nerr := normalizeEmail(newEmail); nerr == nil {
+					deliverTo = n
+				}
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
+				}
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.EmailChange(ctx, EmailChangeMail{User: user, NewEmail: deliverTo, Token: token})
-			})
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -1140,16 +1219,25 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 			}
 			return
 		}
-		if token != "" && sender.PhoneVerification != nil {
-			// Deliver to the canonical form of the number — the same normalization the service
-			// applied before binding it to the token.
-			deliverTo := phone
-			if n, nerr := normalizePhone(phone); nerr == nil {
-				deliverTo = n
+		if sender.PhoneVerification != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" {
+				// Deliver to the canonical form of the number — the same normalization the service
+				// applied before binding it to the token.
+				deliverTo := phone
+				if n, nerr := normalizePhone(phone); nerr == nil {
+					deliverTo = n
+				}
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
+				}
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return sender.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: deliverTo, Token: token})
-			})
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -1234,14 +1322,23 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 			}
 			return
 		}
-		if token != "" && mailer.RecoveryEmailVerification != nil {
-			deliverTo := recoveryEmail
-			if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
-				deliverTo = n
+		if mailer.RecoveryEmailVerification != nil {
+			var send func(context.Context) error
+			var uid string
+			if token != "" {
+				deliverTo := recoveryEmail
+				if n, nerr := normalizeEmail(recoveryEmail); nerr == nil {
+					deliverTo = n
+				}
+				uid = user.ID.String()
+				send = func(ctx context.Context) error {
+					return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
+				}
 			}
-			cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-				return mailer.RecoveryEmailVerification(ctx, RecoveryEmailMail{User: user, RecoveryEmail: deliverTo, Token: token})
-			})
+			if !cfg.dispatchDelivery(r, uid, send) {
+				cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+				return
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
@@ -1308,20 +1405,37 @@ func RequestPasswordResetViaRecoveryHandler(svc Service, mailer Mailer, sms SMSS
 		token, user, channels, _ := svc.RequestPasswordResetViaRecovery(r.Context(), cfg.tenant(r), email)
 		// Uniform response regardless of account existence or recovery-channel availability; deliver
 		// off the response path to the verified channels only (token/user are empty otherwise).
-		if token != "" && user != nil {
-			if channels.RecoveryEmail && mailer.PasswordReset != nil && user.RecoveryEmail != nil {
-				recoveryEmail := *user.RecoveryEmail
-				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-					return mailer.PasswordReset(ctx, PasswordResetMail{User: &User{
-						ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
-					}, Token: token})
-				})
+		if mailer.PasswordReset != nil || sms.PhoneVerification != nil {
+			var dispatched bool
+			if token != "" && user != nil {
+				if channels.RecoveryEmail && mailer.PasswordReset != nil && user.RecoveryEmail != nil {
+					dispatched = true
+					recoveryEmail := *user.RecoveryEmail
+					if !cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+						return mailer.PasswordReset(ctx, PasswordResetMail{User: &User{
+							ID: user.ID, TenantID: user.TenantID, Email: recoveryEmail,
+						}, Token: token})
+					}) {
+						cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+						return
+					}
+				}
+				if channels.Phone && sms.PhoneVerification != nil && user.Phone != nil {
+					dispatched = true
+					phone := *user.Phone
+					if !cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
+						return sms.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: phone, Token: token})
+					}) {
+						cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+						return
+					}
+				}
 			}
-			if channels.Phone && sms.PhoneVerification != nil && user.Phone != nil {
-				phone := *user.Phone
-				cfg.dispatchDelivery(r, user.ID.String(), func(ctx context.Context) error {
-					return sms.PhoneVerification(ctx, PhoneVerificationSMS{User: user, Phone: phone, Token: token})
-				})
+			if !dispatched {
+				if !cfg.dispatchDelivery(r, "", nil) {
+					cfg.fail(w, r, http.StatusTooManyRequests, "service_busy")
+					return
+				}
 			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)

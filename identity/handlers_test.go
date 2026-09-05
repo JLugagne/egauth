@@ -505,3 +505,190 @@ func TestLoginHandler_WithInsecureNoOriginCheck(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, called, "Authenticate must run when the origin check is disabled")
 }
+
+func TestRequestPasswordResetHandler_DeliverySaturation_BoundedWaitAndFailure(t *testing.T) {
+	resetReq := func(email string) *http.Request {
+		body := url.Values{"email": {email}}.Encode()
+		req := httptest.NewRequest(http.MethodPost, "/auth/reset", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Origin", "https://"+req.Host)
+		return req
+	}
+
+	user := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "user@example.com"}
+
+	t.Run("immediate drop without queue timeout returns 429 service_busy", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			RequestPasswordResetFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
+				return "token-123", user, nil
+			},
+		}
+		slotHeld := make(chan struct{})
+		releaseSlot := make(chan struct{})
+		defer close(releaseSlot)
+
+		mailer := identity.Mailer{
+			PasswordReset: func(_ context.Context, _ identity.PasswordResetMail) error {
+				close(slotHeld)
+				<-releaseSlot
+				return nil
+			},
+		}
+
+		h := identity.RequestPasswordResetHandler(svc, mailer, identity.WithDeliveryConcurrency(1))
+
+		// First request occupies the single delivery slot.
+		rec1 := httptest.NewRecorder()
+		go h.ServeHTTP(rec1, resetReq("user@example.com"))
+
+		select {
+		case <-slotHeld:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for first delivery to hold slot")
+		}
+
+		// Second request finds slot full; queue timeout is 0 so it must drop immediately and return 429.
+		rec2 := httptest.NewRecorder()
+		h.ServeHTTP(rec2, resetReq("user@example.com"))
+
+		assert.Equal(t, http.StatusTooManyRequests, rec2.Code)
+		assert.Contains(t, rec2.Body.String(), "service_busy")
+	})
+
+	t.Run("bounded wait succeeds when slot becomes available", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			RequestPasswordResetFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
+				return "token-123", user, nil
+			},
+		}
+		slot1Held := make(chan struct{})
+		releaseSlot1 := make(chan struct{})
+
+		slot2Delivered := make(chan struct{})
+
+		mailer := identity.Mailer{
+			PasswordReset: func(_ context.Context, mail identity.PasswordResetMail) error {
+				select {
+				case <-slot1Held:
+					// Second delivery
+					close(slot2Delivered)
+				default:
+					close(slot1Held)
+					<-releaseSlot1
+				}
+				return nil
+			},
+		}
+
+		h := identity.RequestPasswordResetHandler(svc, mailer,
+			identity.WithDeliveryConcurrency(1),
+			identity.WithDeliveryQueueTimeout(200*time.Millisecond),
+		)
+
+		// First request takes slot 1.
+		go h.ServeHTTP(httptest.NewRecorder(), resetReq("user@example.com"))
+
+		select {
+		case <-slot1Held:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for slot 1")
+		}
+
+		// Release slot 1 after 20ms while second request is waiting.
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			close(releaseSlot1)
+		}()
+
+		// Second request should wait, acquire slot when released, and succeed with 204.
+		rec2 := httptest.NewRecorder()
+		h.ServeHTTP(rec2, resetReq("user@example.com"))
+
+		assert.Equal(t, http.StatusNoContent, rec2.Code)
+		select {
+		case <-slot2Delivered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for slot 2 delivery")
+		}
+	})
+
+	t.Run("bounded wait times out and returns 429 service_busy", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			RequestPasswordResetFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
+				return "token-123", user, nil
+			},
+		}
+		slotHeld := make(chan struct{})
+		releaseSlot := make(chan struct{})
+		defer close(releaseSlot)
+
+		mailer := identity.Mailer{
+			PasswordReset: func(_ context.Context, _ identity.PasswordResetMail) error {
+				close(slotHeld)
+				<-releaseSlot
+				return nil
+			},
+		}
+
+		h := identity.RequestPasswordResetHandler(svc, mailer,
+			identity.WithDeliveryConcurrency(1),
+			identity.WithDeliveryQueueTimeout(40*time.Millisecond),
+		)
+
+		go h.ServeHTTP(httptest.NewRecorder(), resetReq("user@example.com"))
+
+		select {
+		case <-slotHeld:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for slot to be held")
+		}
+
+		start := time.Now()
+		rec2 := httptest.NewRecorder()
+		h.ServeHTTP(rec2, resetReq("user@example.com"))
+		elapsed := time.Since(start)
+
+		assert.GreaterOrEqual(t, elapsed, 30*time.Millisecond, "should wait up to delivery queue timeout")
+		assert.Equal(t, http.StatusTooManyRequests, rec2.Code)
+		assert.Contains(t, rec2.Body.String(), "service_busy")
+	})
+
+	t.Run("uniform handling for non-existent account on delivery queue saturation", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			RequestPasswordResetFunc: func(_ context.Context, _ string, email string) (string, *identity.User, error) {
+				if email == "user@example.com" {
+					return "token-123", user, nil
+				}
+				return "", nil, nil
+			},
+		}
+		slotHeld := make(chan struct{})
+		releaseSlot := make(chan struct{})
+		defer close(releaseSlot)
+
+		mailer := identity.Mailer{
+			PasswordReset: func(_ context.Context, _ identity.PasswordResetMail) error {
+				close(slotHeld)
+				<-releaseSlot
+				return nil
+			},
+		}
+
+		h := identity.RequestPasswordResetHandler(svc, mailer, identity.WithDeliveryConcurrency(1))
+
+		go h.ServeHTTP(httptest.NewRecorder(), resetReq("user@example.com"))
+
+		select {
+		case <-slotHeld:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for slot to be held")
+		}
+
+		// Request for non-existent account must also return 429 to avoid enumeration oracle.
+		recUnknown := httptest.NewRecorder()
+		h.ServeHTTP(recUnknown, resetReq("nonexistent@example.com"))
+
+		assert.Equal(t, http.StatusTooManyRequests, recUnknown.Code)
+		assert.Contains(t, recUnknown.Body.String(), "service_busy")
+	})
+}

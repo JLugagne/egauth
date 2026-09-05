@@ -127,9 +127,10 @@ func TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass(t *testing.T) {
 	assert.True(t, allowedAfterEviction, "SEC-ID-05 confirmed: exhausted key regained full burst tokens following eviction")
 }
 
-// TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation confirms that
-// when the delivery semaphore is saturated, delivery is dropped silently and the
-// HTTP handler still returns 204 No Content to the user.
+// TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation verifies that
+// when the delivery semaphore is saturated, delivery is not silently dropped with a fake 204.
+// Instead, the handler returns HTTP 429 Too Many Requests (service_busy) and emits a DeliveryFailed
+// event, alerting callers that the delivery could not be scheduled.
 func TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation(t *testing.T) {
 	ctx := context.Background()
 
@@ -190,15 +191,16 @@ func TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation(t *test
 		t.Fatal("timed out waiting for delivery worker to start")
 	}
 
-	// Request 2: Semaphore is full (1/1 in use). dispatchDelivery drops the delivery.
+	// Request 2: Semaphore is full (1/1 in use). dispatchDelivery drops the delivery and returns 429.
 	body2 := url.Values{"email": []string{"victim@example.com"}}
 	req2 := httptest.NewRequest(http.MethodPost, "/password-reset/request", strings.NewReader(body2.Encode()))
 	req2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec2 := httptest.NewRecorder()
 	handler.ServeHTTP(rec2, req2)
 
-	// FLAW: Client receives HTTP 204 No Content (believes email was sent), but delivery was silently dropped!
-	assert.Equal(t, http.StatusNoContent, rec2.Code)
+	// SEC-ID-07 fixed: Client receives HTTP 429 Too Many Requests (service_busy), not false 204 No Content.
+	assert.Equal(t, http.StatusTooManyRequests, rec2.Code, "SEC-ID-07 fixed: saturated delivery queue returns HTTP 429")
+	assert.Contains(t, rec2.Body.String(), "service_busy")
 
 	// Unblock delivery worker
 	close(deliveryBlock)
@@ -213,7 +215,7 @@ func TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation(t *test
 		}
 	}
 	eventsMu.Unlock()
-	assert.True(t, droppedFound, "SEC-ID-07 confirmed: delivery was dropped silently with ErrDeliveryDropped")
+	assert.True(t, droppedFound, "SEC-ID-07 confirmed: delivery failure was recorded with ErrDeliveryDropped")
 }
 
 // TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts proves that
