@@ -74,31 +74,27 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 	})
 }
 
-// TestSecurity_SEC_ID_06_TokenBucket_Unbounded_Memory_DoS demonstrates that TokenBucket
-// defaults to maxKeys=0 (unbounded), meaning every new key (e.g. forged IP or email)
-// permanently grows the memory map without any automatic eviction.
+// TestSecurity_SEC_ID_06_TokenBucket_Unbounded_Memory_DoS verifies that TokenBucket
+// enforces a bounded default capacity (DefaultMaxKeys) and eviction to prevent unbounded memory DoS.
 func TestSecurity_SEC_ID_06_TokenBucket_Unbounded_Memory_DoS(t *testing.T) {
 	ctx := context.Background()
 
 	// Create default TokenBucket without WithMaxKeys option
 	tb := ratelimit.NewTokenBucket(5, time.Minute)
 	assert.Equal(t, 0, tb.KeyCount())
+	assert.Equal(t, ratelimit.DefaultMaxKeys, tb.MaxKeys(), "SEC-ID-06 fixed: default TokenBucket enforces bounded DefaultMaxKeys")
 
-	// Attacker generates 500 requests with distinct spoofed keys
-	const floodCount = 500
+	// Verify that bucket capacity is strictly capped at maxKeys and evicts excess keys
+	const capLimit = 100
+	tbBounded := ratelimit.NewTokenBucket(5, time.Minute, ratelimit.WithMaxKeys(capLimit))
+	const floodCount = 250
 	for i := 0; i < floodCount; i++ {
 		key := fmt.Sprintf("spoofed-ip-10.0.%d.%d", i/256, i%256)
-		allowed, _ := tb.Allow(ctx, key)
+		allowed, _ := tbBounded.Allow(ctx, key)
 		assert.True(t, allowed)
 	}
 
-	// Memory grows unboundedly: all 500 keys are retained
-	assert.Equal(t, floodCount, tb.KeyCount(), "SEC-ID-06 confirmed: all keys are retained in memory")
-
-	// Cleanup does not evict them because they have not fully refilled (burst is 5, consumed 1 -> tokens=4 < 5)
-	cleaned := tb.Cleanup()
-	assert.Equal(t, 0, cleaned)
-	assert.Equal(t, floodCount, tb.KeyCount(), "SEC-ID-06 confirmed: keys remain indefinitely under attack")
+	assert.Equal(t, capLimit, tbBounded.KeyCount(), "SEC-ID-06 fixed: keys do not grow unboundedly and stay capped at maxKeys")
 }
 
 // TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass demonstrates that when WithMaxKeys

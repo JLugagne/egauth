@@ -13,10 +13,12 @@ import (
 //
 // # Bounding memory growth
 //
-// Without eviction, a flood of unique keys (IPs, user IDs) grows the internal map without
-// bound. Two complementary strategies are available:
+// By default, TokenBucket bounds memory growth by capping the number of tracked keys
+// to [DefaultMaxKeys] and evicting the least-pressured bucket when capacity is reached.
 //
-//   - [WithMaxKeys] sets a hard cap on the number of tracked keys. When a new key arrives
+// Two complementary strategies are available:
+//
+//   - [WithMaxKeys] overrides the default cap on the number of tracked keys. When a new key arrives
 //     and the cap is reached, the bucket that is closest to full (least under pressure) is
 //     evicted. This makes the limiter self-contained with no external scheduler required.
 //
@@ -24,13 +26,15 @@ import (
 //     Cleanup drops only fully-refilled buckets, so it does not reset any key that is still
 //     under pressure.
 //
-// You can use either strategy or both. WithMaxKeys is recommended for Internet-facing
-// deployments where key cardinality is unbounded.
+// DefaultMaxKeys is the default hard cap on the number of distinct keys
+// tracked simultaneously by a TokenBucket limiter to prevent memory exhaustion DoS.
+const DefaultMaxKeys = 100000
+
 type TokenBucket struct {
 	mu      sync.Mutex
 	burst   float64
 	refill  time.Duration // duration to accrue one token
-	maxKeys int           // 0 = unbounded
+	maxKeys int           // hard cap on number of tracked keys
 	buckets map[string]*bucketState
 	now     func() time.Time
 }
@@ -54,6 +58,7 @@ func WithClock(now func() time.Time) Option {
 
 // NewTokenBucket creates a limiter where each key may burst up to burst requests and then
 // sustains one request per refillInterval. burst is floored at 1 and refillInterval at 1ns.
+// By default, maxKeys is set to DefaultMaxKeys (100,000) to bound memory growth.
 func NewTokenBucket(burst int, refillInterval time.Duration, opts ...Option) *TokenBucket {
 	if burst < 1 {
 		burst = 1
@@ -64,6 +69,7 @@ func NewTokenBucket(burst int, refillInterval time.Duration, opts ...Option) *To
 	tb := &TokenBucket{
 		burst:   float64(burst),
 		refill:  refillInterval,
+		maxKeys: DefaultMaxKeys,
 		buckets: make(map[string]*bucketState),
 		now:     time.Now,
 	}
@@ -74,7 +80,7 @@ func NewTokenBucket(burst int, refillInterval time.Duration, opts ...Option) *To
 }
 
 // Allow consumes one token for key, refilling first based on elapsed time. When the bucket
-// was created with [WithMaxKeys] and the cap is reached, the least-pressured bucket is
+// was created with [WithMaxKeys] or default capacity and the cap is reached, the least-pressured bucket is
 // evicted before inserting the new key.
 func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Duration) {
 	tb.mu.Lock()
@@ -85,7 +91,7 @@ func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Durati
 	if !ok {
 		// Enforce the maxKeys cap: evict the bucket that has refilled the most
 		// (least under pressure) to make room for the new key.
-		if tb.maxKeys > 0 && len(tb.buckets) >= tb.maxKeys {
+		for tb.maxKeys > 0 && len(tb.buckets) >= tb.maxKeys {
 			tb.evictOne(now)
 		}
 		b = &bucketState{tokens: tb.burst, last: now}
@@ -133,13 +139,11 @@ var _ Limiter = (*TokenBucket)(nil)
 // least under pressure — closest to burst capacity) is evicted to make room.
 // Fully-refilled buckets are always preferred for eviction.
 //
-// n must be >= 1; values below 1 are silently floored to 1.
-// If WithMaxKeys is not called (or n == 0), the bucket map is unbounded and
-// callers must schedule periodic [TokenBucket.Cleanup] calls.
+// If n <= 0, DefaultMaxKeys is used.
 func WithMaxKeys(n int) Option {
 	return func(tb *TokenBucket) {
-		if n < 1 {
-			n = 1
+		if n <= 0 {
+			n = DefaultMaxKeys
 		}
 		tb.maxKeys = n
 	}
@@ -153,6 +157,13 @@ func (tb *TokenBucket) KeyCount() int {
 	return len(tb.buckets)
 }
 
+// MaxKeys returns the configured maximum number of keys tracked simultaneously.
+func (tb *TokenBucket) MaxKeys() int {
+	tb.mu.Lock()
+	defer tb.mu.Unlock()
+	return tb.maxKeys
+}
+
 // evictOne removes the single bucket that is least under pressure (closest to
 // fully-refilled). Fully-refilled buckets are preferred; among partially-refilled
 // ones the one with the most tokens (accounting for elapsed time) is chosen.
@@ -160,7 +171,8 @@ func (tb *TokenBucket) KeyCount() int {
 func (tb *TokenBucket) evictOne(now time.Time) {
 	var (
 		evictKey  string
-		evictToks float64 = -1
+		evictToks float64
+		found     bool
 		sampled   int
 	)
 	// Go maps iterate in random order. Sampling 5 elements is sufficient for finding
@@ -170,16 +182,17 @@ func (tb *TokenBucket) evictOne(now time.Time) {
 		if toks > tb.burst {
 			toks = tb.burst
 		}
-		if toks > evictToks {
+		if !found || toks > evictToks {
 			evictToks = toks
 			evictKey = k
+			found = true
 		}
 		sampled++
 		if sampled >= 5 {
 			break
 		}
 	}
-	if evictKey != "" {
+	if found {
 		delete(tb.buckets, evictKey)
 	}
 }
