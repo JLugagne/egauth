@@ -35,6 +35,8 @@ type Service interface {
 	// anonymous-to-authenticated upgrade primitive: log a user in over their existing pre-auth
 	// session without minting a new session row, while defeating session fixation. The session ID
 	// and CreatedAt are preserved. An unknown or already-expired session yields ErrSessionNotFound.
+	// A session that is already bound to an authenticated user yields ErrSessionAlreadyBound.
+	// A nil userID yields ErrInvalidUserID.
 	BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error)
 	// RevokeSession deletes the session identified by token and emits a Logout audit event. An
 	// optional event.RequestContext may be supplied to carry the client IP/UA into the audit record.
@@ -188,9 +190,17 @@ func (s *service) Rotate(ctx context.Context, tenantID string, token string, dur
 // BindUser re-binds a session to a new user identity while rotating its token, the
 // anonymous-to-authenticated upgrade primitive.
 func (s *service) BindUser(ctx context.Context, tenantID string, token string, userID uuid.UUID, duration time.Duration) (*Session, string, error) {
+	if userID == uuid.Nil {
+		return nil, "", ErrInvalidUserID
+	}
+
 	session, err := s.ValidateSession(ctx, tenantID, token)
 	if err != nil {
 		return nil, "", err
+	}
+
+	if session.UserID != uuid.Nil {
+		return nil, "", ErrSessionAlreadyBound
 	}
 
 	newToken, err := generateToken()

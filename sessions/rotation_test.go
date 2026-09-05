@@ -63,7 +63,7 @@ func TestBindUser_RebindsUserAndRotatesToken(t *testing.T) {
 	ctx := context.Background()
 	svc := newService()
 
-	anonUser := uuid.Must(uuid.NewV7())
+	anonUser := uuid.Nil
 	sess, oldToken, err := svc.CreateSession(ctx, "tenant-x", anonUser, "UA", "1.1.1.1", time.Minute)
 	require.NoError(t, err)
 
@@ -83,6 +83,35 @@ func TestBindUser_RebindsUserAndRotatesToken(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, sess.ID, got.ID)
 	assert.Equal(t, authUser, got.UserID)
+}
+
+func TestBindUser_AlreadyBoundSession_Fails(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+
+	authenticatedUser := uuid.Must(uuid.NewV7())
+	_, token, err := svc.CreateSession(ctx, "tenant-x", authenticatedUser, "UA", "1.1.1.1", time.Minute)
+	require.NoError(t, err)
+
+	newUser := uuid.Must(uuid.NewV7())
+	bound, newToken, err := svc.BindUser(ctx, "tenant-x", token, newUser, time.Hour)
+	assert.ErrorIs(t, err, sessions.ErrSessionAlreadyBound)
+	assert.Nil(t, bound)
+	assert.Empty(t, newToken)
+}
+
+func TestBindUser_NilUserID_Fails(t *testing.T) {
+	ctx := context.Background()
+	svc := newService()
+
+	sess, token, err := svc.CreateSession(ctx, "tenant-x", uuid.Nil, "UA", "1.1.1.1", time.Minute)
+	require.NoError(t, err)
+	require.Equal(t, uuid.Nil, sess.UserID)
+
+	bound, newToken, err := svc.BindUser(ctx, "tenant-x", token, uuid.Nil, time.Hour)
+	assert.ErrorIs(t, err, sessions.ErrInvalidUserID)
+	assert.Nil(t, bound)
+	assert.Empty(t, newToken)
 }
 
 func TestBindUser_UnknownToken(t *testing.T) {

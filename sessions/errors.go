@@ -18,4 +18,10 @@ var (
 	// ErrStoreCapacityExceeded is returned by CreateSession when a bounded store has reached
 	// maximum capacity and all stored sessions are active (none are expired).
 	ErrStoreCapacityExceeded = errors.New("sessions: store capacity exceeded")
+
+	// ErrSessionAlreadyBound is returned when BindUser is called on a session that is already bound to a user.
+	ErrSessionAlreadyBound = errors.New("sessions: session is already bound to a user")
+
+	// ErrInvalidUserID is returned when an operation requires a non-nil user ID.
+	ErrInvalidUserID = errors.New("sessions: invalid user ID")
 )

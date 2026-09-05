@@ -165,9 +165,9 @@ func TestSecSes09_JanitorBusyLoopOnNonPositiveInterval(t *testing.T) {
 		"Flaw confirmed: interval <= 0 resulted in a high-frequency busy loop (>10 executions in 100ms)")
 }
 
-// SEC-SES-14 (CVSS 4.2): Réassignation arbitraire d'identité utilisateur dans sessions.Service.BindUser.
-// BindUser blindly overwrites session.UserID without checking if session.UserID was already set
-// to an authenticated user (i.e. not uuid.Nil), mutating an existing user's session into another user's.
+// SEC-SES-14 (CVSS 4.2): Prevent arbitrary user identity reassignment in sessions.Service.BindUser.
+// BindUser must reject attempts to rebind an already-authenticated session (session.UserID != uuid.Nil)
+// with ErrSessionAlreadyBound, preventing arbitrary session identity reassignment.
 func TestSecSes14_BindUserOverwritesAuthenticatedUser(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore()
@@ -183,22 +183,18 @@ func TestSecSes14_BindUserOverwritesAuthenticatedUser(t *testing.T) {
 	assert.Equal(t, userA, sessA.UserID)
 
 	// 2. Call BindUser with User B on User A's session.
-	// Expected secure behavior: should reject with an error ("cannot bind already authenticated session").
-	// Current flawed behavior: successfully reassigns session to User B while keeping original session ID and CreatedAt.
+	// Fixed behavior: BindUser rejects rebinding an already-authenticated session with ErrSessionAlreadyBound.
 	sessB, tokenB, err := svc.BindUser(ctx, tenantID, tokenA, userB, time.Hour)
-	require.NoError(t, err, "Flaw confirmed: BindUser allows rebinding an already-authenticated session")
-	assert.Equal(t, userB, sessB.UserID)
-	assert.Equal(t, sessA.ID, sessB.ID, "Session ID was preserved across different user identities")
-	assert.Equal(t, sessA.CreatedAt, sessB.CreatedAt, "CreatedAt was preserved")
+	require.ErrorIs(t, err, sessions.ErrSessionAlreadyBound,
+		"SEC-SES-14 fixed: BindUser must reject rebinding an already-authenticated session")
+	assert.Nil(t, sessB)
+	assert.Empty(t, tokenB)
 
-	// Token A no longer validates (rotated)
-	_, err = svc.ValidateSession(ctx, tenantID, tokenA)
-	assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
-
-	// Token B validates as User B
-	validated, err := svc.ValidateSession(ctx, tenantID, tokenB)
+	// Token A remains valid and bound to User A (not rotated or reassigned)
+	validated, err := svc.ValidateSession(ctx, tenantID, tokenA)
 	require.NoError(t, err)
-	assert.Equal(t, userB, validated.UserID)
+	assert.Equal(t, userA, validated.UserID)
+	assert.Equal(t, sessA.ID, validated.ID)
 }
 
 // SEC-SES-07 (CVSS 7.5): Paniques silencieusement avalées dans le Janitor.
