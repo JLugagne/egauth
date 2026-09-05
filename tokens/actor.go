@@ -16,9 +16,9 @@ import "github.com/JLugagne/egauth"
 //   - any other Type (including the zero value) defaults to egauth.User so an unclassified key
 //     fails safe as a plain human principal rather than silently reading as a machine.
 //
-// KeyID is always the key's own ID and Scopes are taken verbatim from the key's claims — egauth
-// neither interprets nor enforces them; that is the application's middleware's job. No secret
-// (token or hash) is ever copied onto the Actor.
+// KeyID is always the key's own ID, and Scopes, Roles, and Groups are taken verbatim from the
+// key's claims — egauth neither interprets nor enforces them; that is the application's middleware's
+// job. No secret (token or hash) is ever copied onto the Actor.
 //
 // The function lives in the tokens package because tokens already imports the root egauth package
 // (for egauth.Actor); the root package must not import tokens in return (import cycle), so the
@@ -32,6 +32,8 @@ func ActorFromAPIKey[C any](key *APIKey[C]) egauth.Actor {
 		TenantID: key.TenantID,
 		KeyID:    key.ID,
 		Scopes:   key.Claims.Scopes,
+		Roles:    key.Claims.Roles,
+		Groups:   key.Claims.Groups,
 	}
 
 	switch key.Type {

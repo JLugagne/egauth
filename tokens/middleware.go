@@ -320,9 +320,9 @@ func extractAccessToken[C any](r *http.Request, cfg *authConfig[C]) (string, boo
 // actorFromClaims builds the egauth.Actor from verified claims. Kind is propagated verbatim
 // from Claims.Kind so that API-key-backed tokens (PAT, Service) carry the right principal
 // classification through to the WithRequiredKind gate. Interactive tokens leave Kind at the
-// zero value, which egauth.IsHuman treats as User (the safe human default).
-// Scopes are copied verbatim from the claims so that application predicates (e.g. those
-// passed to WithGate) can call actor.HasAllScopes without having to inspect the raw claims.
+// zero value, which egauth.IsHuman treats as User (the safe human default) when UserID is set.
+// Scopes, Roles, and Groups are copied verbatim from the claims so that application predicates
+// (e.g. those passed to WithGate) can call actor.HasAllScopes without having to inspect the raw claims.
 //
 // The subject mapping mirrors ActorFromAPIKey's per-Kind model: for a Service token the subject
 // is the key's own identity, so it lands on KeyID and UserID is left zero (IsMachine true); for
@@ -334,6 +334,8 @@ func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
 		TenantID: claims.TenantID,
 		Kind:     claims.Kind,
 		Scopes:   claims.Scopes,
+		Roles:    claims.Roles,
+		Groups:   claims.Groups,
 	}
 	if claims.Kind == egauth.Service {
 		actor.KeyID = claims.Subject

@@ -45,4 +45,17 @@ func TestActorFromClaims_PrincipalMapping(t *testing.T) {
 		assert.Equal(t, egauth.PrincipalKind(""), actor.Kind)
 		assert.True(t, actor.IsHuman())
 	})
+
+	t.Run("Roles and Groups are propagated from claims", func(t *testing.T) {
+		actor := actorFromClaims(&Claims[struct{}]{
+			Subject:  subject,
+			TenantID: "tenant-1",
+			Roles:    []string{"admin", "editor"},
+			Groups:   []string{"engineering", "product"},
+		})
+		assert.Equal(t, []string{"admin", "editor"}, actor.Roles)
+		assert.Equal(t, []string{"engineering", "product"}, actor.Groups)
+		assert.True(t, actor.HasRole("admin"))
+		assert.True(t, actor.HasGroup("engineering"))
+	})
 }

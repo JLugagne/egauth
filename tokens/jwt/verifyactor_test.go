@@ -113,13 +113,22 @@ func TestActorFromAPIKey(t *testing.T) {
 			ID:       keyID,
 			TenantID: "t1",
 			Type:     tokens.KeyTypePAT,
-			Claims:   tokens.Claims[struct{}]{Subject: userID, Scopes: []string{"s1"}},
+			Claims: tokens.Claims[struct{}]{
+				Subject: userID,
+				Scopes:  []string{"s1"},
+				Roles:   []string{"developer"},
+				Groups:  []string{"platform"},
+			},
 		})
 		assert.Equal(t, egauth.PAT, a.Kind)
 		assert.Equal(t, userID, a.UserID)
 		assert.Equal(t, keyID, a.KeyID)
 		assert.Equal(t, "t1", a.TenantID)
 		assert.Equal(t, []string{"s1"}, a.Scopes)
+		assert.Equal(t, []string{"developer"}, a.Roles)
+		assert.Equal(t, []string{"platform"}, a.Groups)
+		assert.True(t, a.HasRole("developer"))
+		assert.True(t, a.HasGroup("platform"))
 	})
 
 	t.Run("Service leaves UserID zero and anchors on the key ID", func(t *testing.T) {

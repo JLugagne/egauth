@@ -109,22 +109,22 @@ func TestSecGlo06_TokenMemoryStore_CrossTenantHashCollisionOverwrite(t *testing.
 		"Flaw confirmed: Tenant A's API key was overwritten by Tenant B in memory store")
 }
 
-// SEC-GLO-08 (CVSS 6.5): Évanouissement des rôles/groupes et classification humaine abusive de l'acteur anonyme.
-// Part 1: An empty/zero-value Actor (Kind == "", UserID == uuid.Nil) returns IsHuman() == true.
-// Part 2: tokens/middleware.go:actorFromClaims strips claims.Roles and claims.Groups, so domain
-// authorization logic relying on egauth.Actor cannot observe user roles.
+// SEC-GLO-08: Anonymous actor classification and role/group vanishing remediation verification.
+// Part 1: An empty/zero-value Actor (Kind == "", UserID == uuid.Nil) returns IsHuman() == false and IsAnonymous() == true.
+// Part 2: tokens/middleware.go:actorFromClaims propagates claims.Roles and claims.Groups into egauth.Actor.
 func TestSecGlo08_Actor_AnonymousClassifiedAsHuman_AndRolesVanishing(t *testing.T) {
-	// Part 1: Flawed IsHuman() classification on empty/anonymous Actor
+	// Part 1: Verification of IsHuman() and IsAnonymous() on empty/anonymous Actor
 	var unauthenticatedActor egauth.Actor
 	assert.Equal(t, egauth.PrincipalKind(""), unauthenticatedActor.Kind)
 	assert.Equal(t, uuid.Nil, unauthenticatedActor.UserID)
 
-	// Flaw confirmed: unauthenticated zero-value Actor is reported as Human!
-	assert.True(t, unauthenticatedActor.IsHuman(),
-		"Flaw confirmed: zero-value unauthenticated Actor is classified as Human (IsHuman() returns true)")
+	assert.False(t, unauthenticatedActor.IsHuman(),
+		"Zero-value unauthenticated Actor must not be classified as Human")
+	assert.True(t, unauthenticatedActor.IsAnonymous(),
+		"Zero-value unauthenticated Actor must be classified as Anonymous")
 	assert.False(t, unauthenticatedActor.IsMachine())
 
-	// Part 2: Disappearance of Roles and Groups in Actor
+	// Part 2: Propagation of Roles and Groups into Actor
 	ctx := context.Background()
 	userUUID := uuid.New()
 	secret := "01234567890123456789012345678901" // 32 bytes
@@ -153,7 +153,7 @@ func TestSecGlo08_Actor_AnonymousClassifiedAsHuman_AndRolesVanishing(t *testing.
 	pair, err := jwtSvc.IssueTokenPair(ctx, claimsWithRoles)
 	require.NoError(t, err)
 
-	// Verify that when RequireAuth invokes next handler, Roles and Groups are missing from egauth.Actor
+	// Verify that when RequireAuth invokes next handler, Roles and Groups are preserved in egauth.Actor
 	var capturedActor egauth.Actor
 
 	handler := tokens.RequireAuth[struct{}](jwtSvc, func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, custom struct{}) {
@@ -172,9 +172,10 @@ func TestSecGlo08_Actor_AnonymousClassifiedAsHuman_AndRolesVanishing(t *testing.
 	assert.Equal(t, userUUID, capturedActor.UserID)
 	assert.Equal(t, "tenant-corp", capturedActor.TenantID)
 	assert.Equal(t, []string{"read:reports"}, capturedActor.Scopes)
-
-	// Flaw confirmed: egauth.Actor does NOT carry Roles or Groups fields,
-	// so the user's role-based entitlements are lost to downstream business handlers!
+	assert.Equal(t, []string{"admin", "billing_manager"}, capturedActor.Roles)
+	assert.Equal(t, []string{"engineers", "security"}, capturedActor.Groups)
+	assert.True(t, capturedActor.HasRole("admin"))
+	assert.True(t, capturedActor.HasGroup("engineers"))
 	assert.True(t, capturedActor.HasScope("read:reports"))
 }
 
