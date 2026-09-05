@@ -14,4 +14,8 @@ var (
 	// already exists in the store. A duplicate 256-bit token hash is an integrity violation
 	// and must not silently overwrite the existing session.
 	ErrDuplicateToken = errors.New("sessions: duplicate token hash")
+
+	// ErrStoreCapacityExceeded is returned by CreateSession when a bounded store has reached
+	// maximum capacity and all stored sessions are active (none are expired).
+	ErrStoreCapacityExceeded = errors.New("sessions: store capacity exceeded")
 )

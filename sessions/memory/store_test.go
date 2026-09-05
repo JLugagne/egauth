@@ -260,8 +260,8 @@ func TestEvictExpiredOnRead(t *testing.T) {
 }
 
 // TestBoundedStore_NeverExceedsCap verifies that a bounded store never holds
-// more than maxSize sessions. When the cap is reached, the oldest session
-// (by ExpiresAt) must be evicted before the new one is inserted.
+// more than maxSize sessions. When the cap is reached with active live sessions,
+// CreateSession must return ErrStoreCapacityExceeded and refuse to evict live sessions.
 func TestBoundedStore_NeverExceedsCap(t *testing.T) {
 	ctx := context.Background()
 	const cap = 5
@@ -279,18 +279,25 @@ func TestBoundedStore_NeverExceedsCap(t *testing.T) {
 		t.Fatalf("Len() after fill: got %d want %d", got, cap)
 	}
 
-	// Adding one more must evict the oldest (hash-0, earliest ExpiresAt) and keep Len == cap.
+	// Adding one more when all sessions are live must return ErrStoreCapacityExceeded
+	// and keep Len == cap. Live sessions must NOT be evicted.
 	extra := newSession("t1", "hash-extra", future.Add(time.Hour))
-	if err := store.CreateSession(ctx, "t1", extra); err != nil {
-		t.Fatalf("CreateSession extra: %v", err)
-	}
+	err := store.CreateSession(ctx, "t1", extra)
+	require.ErrorIs(t, err, sessions.ErrStoreCapacityExceeded, "CreateSession must fail with ErrStoreCapacityExceeded when store is full of live sessions")
 	if got := store.Len(); got != cap {
 		t.Fatalf("Len() after over-cap insert: got %d want %d", got, cap)
 	}
 
-	// The extra session must be findable.
-	if _, err := store.FindSessionByHash(ctx, "t1", "hash-extra"); err != nil {
-		t.Fatalf("FindSessionByHash extra: %v", err)
+	// The extra session must not be present.
+	if _, err := store.FindSessionByHash(ctx, "t1", "hash-extra"); !assert.ErrorIs(t, err, sessions.ErrSessionNotFound) {
+		t.Fatalf("extra session should not be found: %v", err)
+	}
+
+	// All original sessions must remain intact.
+	for i := range cap {
+		if _, err := store.FindSessionByHash(ctx, "t1", "hash-"+strconv.Itoa(i)); err != nil {
+			t.Fatalf("original session %d missing: %v", i, err)
+		}
 	}
 }
 
@@ -342,20 +349,15 @@ func TestNewStore_Unbounded(t *testing.T) {
 	}
 }
 
-// TestBoundedStore_CrossTenantEvictionIsolation confirms SEC-SES-02 (CVSS 7.7).
+// TestBoundedStore_CrossTenantEvictionIsolation confirms that session capacity limits
+// preserve tenant isolation and do not evict active live sessions across or within tenants.
 //
 // Security invariant:
 // In a multi-tenant shared architecture, capacity limits or eviction policies
-// (LRU/TTL) of a session store MUST be strictly partitioned per tenant.
+// of a session store MUST protect active sessions.
 // Mass session creation by Tenant A (or Tenant A exceeding its quota)
-// MUST NEVER evict or destroy valid active sessions belonging to Tenant B (cross-tenant Denial of Service).
-//
-// Current vulnerable behaviour:
-// sessions/memory.BoundedStore uses a single global counter (s.maxSize) and its evictOne() method
-// indiscriminately iterates over all sessions from all tenants. Once the global capacity
-// is reached, eviction destroys the session with the nearest expiry, even if
-// it belongs to a completely different tenant. A Tenant A user can thereby log out
-// and arbitrarily block Tenant B users.
+// MUST NEVER evict or destroy valid active sessions belonging to Tenant B (cross-tenant Denial of Service)
+// nor active sessions belonging to any tenant. Instead, session creation fails with ErrStoreCapacityExceeded.
 func TestBoundedStore_CrossTenantEvictionIsolation(t *testing.T) {
 	ctx := context.Background()
 	const cap = 2
@@ -375,16 +377,49 @@ func TestBoundedStore_CrossTenantEvictionIsolation(t *testing.T) {
 	// Global capacity is reached (2/2)
 	assert.Equal(t, cap, store.Len())
 
-	// 3. Tenant A creates a second session (expires in 3 hours)
+	// 3. Tenant A attempts to create a second session (expires in 3 hours)
 	sessA2 := newSession("tenant-a", "hash-attacker-a2", now.Add(3*time.Hour))
 	err = store.CreateSession(ctx, "tenant-a", sessA2)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, sessions.ErrStoreCapacityExceeded, "CreateSession must fail with ErrStoreCapacityExceeded when store is full of live sessions")
 
-	// 4. SECURITY INVARIANT VIOLATED:
+	// 4. SECURITY INVARIANT PRESERVED:
 	// Tenant A's activity or capacity overflow must not under any circumstances destroy
-	// Tenant B's valid session.
+	// Tenant B's valid session, nor Tenant A's existing session.
 	gotB, err := store.FindSessionByHash(ctx, "tenant-b", "hash-victim-b")
 	require.NoError(t, err, "SEC-SES-02: Tenant B's active session must not be evicted by a Tenant A overflow")
 	assert.NotNil(t, gotB)
 	assert.Equal(t, sessB.ID, gotB.ID)
+
+	gotA1, err := store.FindSessionByHash(ctx, "tenant-a", "hash-attacker-a1")
+	require.NoError(t, err, "Tenant A's active session must not be evicted")
+	assert.NotNil(t, gotA1)
+	assert.Equal(t, sessA1.ID, gotA1.ID)
+}
+
+func TestBoundedStore_WithEvictLiveOnFull(t *testing.T) {
+	ctx := context.Background()
+	const cap = 2
+	store := NewBoundedStore(cap, WithEvictLiveOnFull(true))
+	now := time.Now()
+
+	s1 := newSession("t1", "h1", now.Add(1*time.Hour))
+	require.NoError(t, store.CreateSession(ctx, "t1", s1))
+	s2 := newSession("t1", "h2", now.Add(2*time.Hour))
+	require.NoError(t, store.CreateSession(ctx, "t1", s2))
+
+	// When WithEvictLiveOnFull is enabled, inserting beyond capacity evicts the soonest-expiring live session.
+	s3 := newSession("t1", "h3", now.Add(3*time.Hour))
+	require.NoError(t, store.CreateSession(ctx, "t1", s3))
+	assert.Equal(t, cap, store.Len())
+
+	_, err := store.FindSessionByHash(ctx, "t1", "h1")
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound)
+
+	found2, err := store.FindSessionByHash(ctx, "t1", "h2")
+	require.NoError(t, err)
+	assert.Equal(t, s2.ID, found2.ID)
+
+	found3, err := store.FindSessionByHash(ctx, "t1", "h3")
+	require.NoError(t, err)
+	assert.Equal(t, s3.ID, found3.ID)
 }

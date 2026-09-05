@@ -50,18 +50,31 @@ func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHas
 //
 // By default the store is unbounded; session growth is controlled by periodic
 // calls to DeleteExpired (e.g. via [github.com/JLugagne/egauth/janitor]).
-// Use [NewBoundedStore] for a store that enforces a hard cap and self-evicts
-// on insertion: it first removes already-expired sessions, then the session
-// with the soonest ExpiresAt, so live sessions are preserved as long as
-// possible.
+// Use [NewBoundedStore] for a store that enforces a hard cap: it removes
+// already-expired sessions on insertion, and returns
+// [sessions.ErrStoreCapacityExceeded] if no expired sessions exist, so active
+// live sessions are never evicted.
 type Store struct {
-	mu       sync.RWMutex
-	maxSize  int // 0 means unbounded
-	sessions map[uuid.UUID]*sessions.Session
+	mu              sync.RWMutex
+	maxSize         int // 0 means unbounded
+	evictLiveOnFull bool
+	sessions        map[uuid.UUID]*sessions.Session
 	// byHash is a secondary index mapping a tenant-scoped token-hash key to the owning
 	// session ID, so FindSessionByHash is O(1) instead of scanning the whole map. It is
 	// maintained in lockstep with sessions under the write lock by every mutator.
 	byHash map[string]uuid.UUID
+}
+
+// Option configures a bounded in-memory sessions Store.
+type Option func(*Store)
+
+// WithEvictLiveOnFull configures whether the bounded store should evict active live sessions
+// when capacity is reached and no expired sessions exist. Default is false (secure default:
+// return ErrStoreCapacityExceeded to prevent remote session termination DoS).
+func WithEvictLiveOnFull(evict bool) Option {
+	return func(s *Store) {
+		s.evictLiveOnFull = evict
+	}
 }
 
 // NewStore creates a new in-memory sessions Store.
@@ -81,8 +94,9 @@ func hashKey(tenantID, tokenHash string) string {
 
 // CreateSession persists a new session. If the record carries a non-empty TenantID that
 // differs from tenantID, it returns ErrTenantMismatch. When the store was created with
-// [NewBoundedStore] and the cap is already reached, one session is evicted before
-// inserting the new one.
+// [NewBoundedStore] and the cap is already reached, expired sessions are evicted to make
+// room. If no expired sessions exist and capacity remains full, ErrStoreCapacityExceeded
+// is returned unless WithEvictLiveOnFull(true) was explicitly configured.
 func (s *Store) CreateSession(ctx context.Context, tenantID string, session *sessions.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -99,10 +113,26 @@ func (s *Store) CreateSession(ctx context.Context, tenantID string, session *ses
 		return sessions.ErrDuplicateToken
 	}
 
-	// Enforce the bounded cap: first evict already-expired sessions, then
-	// fall back to evicting the soonest-expiring live session.
+	// Enforce the bounded cap: attempt to evict expired sessions first.
 	if s.maxSize > 0 && len(s.sessions) >= s.maxSize {
-		s.evictOne(tenantID)
+		now := time.Now()
+		for id, sess := range s.sessions {
+			if sess.ExpiresAt.Before(now) {
+				delete(s.sessions, id)
+				delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
+				if len(s.sessions) < s.maxSize {
+					break
+				}
+			}
+		}
+
+		if len(s.sessions) >= s.maxSize {
+			if s.evictLiveOnFull {
+				s.evictOneLive(tenantID)
+			} else {
+				return sessions.ErrStoreCapacityExceeded
+			}
+		}
 	}
 
 	s.sessions[sCopy.ID] = &sCopy
@@ -230,32 +260,11 @@ func (s *Store) DeleteSessionsByUserID(ctx context.Context, tenantID string, use
 // Verify interface compliance.
 var _ sessions.Store = (*Store)(nil)
 
-// evictOne removes a single session to make room for a new insertion.
-// Strategy: evict all already-expired sessions first; if none are expired,
-// evict the one with the soonest ExpiresAt, prioritizing sessions from tenantID
-// so that one tenant does not evict another tenant's active session.
+// evictOneLive removes a single live session with the soonest ExpiresAt,
+// prioritizing sessions from tenantID so that one tenant does not evict another
+// tenant's active session.
 // Must be called with s.mu held for writing.
-func (s *Store) evictOne(tenantID string) {
-	now := time.Now()
-
-	// Pass 1: evict any expired session (prioritizing same tenant, then any).
-	for id, sess := range s.sessions {
-		if sess.TenantID == tenantID && sess.ExpiresAt.Before(now) {
-			delete(s.sessions, id)
-			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
-			return
-		}
-	}
-	for id, sess := range s.sessions {
-		if sess.ExpiresAt.Before(now) {
-			delete(s.sessions, id)
-			delete(s.byHash, hashKey(sess.TenantID, sess.TokenHash))
-			return
-		}
-	}
-
-	// Pass 2: no expired session found — evict the soonest-expiring live one,
-	// prioritizing sessions from the same tenant.
+func (s *Store) evictOneLive(tenantID string) {
 	var (
 		evictID   uuid.UUID
 		evictTime time.Time
@@ -289,21 +298,26 @@ func (s *Store) evictOne(tenantID string) {
 
 // NewBoundedStore creates a bounded in-memory sessions Store that never holds
 // more than maxSize sessions. When a CreateSession call would exceed the cap,
-// the store first evicts already-expired sessions; if the cap is still reached
-// it evicts the session with the soonest ExpiresAt (the one most likely to
-// become irrelevant soon). maxSize must be >= 1; values below 1 are floored to 1.
+// the store evicts already-expired sessions; if the cap is still reached with
+// active live sessions, CreateSession returns [sessions.ErrStoreCapacityExceeded]
+// to prevent remote session termination DoS (SEC-SES-01). maxSize must be >= 1;
+// values below 1 are floored to 1.
 //
 // The existing [NewStore] constructor remains available for callers who prefer
 // the unbounded model and control growth via periodic [Store.DeleteExpired] calls.
-func NewBoundedStore(maxSize int) *Store {
+func NewBoundedStore(maxSize int, opts ...Option) *Store {
 	if maxSize < 1 {
 		maxSize = 1
 	}
-	return &Store{
+	s := &Store{
 		maxSize:  maxSize,
 		sessions: make(map[uuid.UUID]*sessions.Session),
 		byHash:   make(map[string]uuid.UUID),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 // Len returns the current number of sessions in the store. Useful in tests

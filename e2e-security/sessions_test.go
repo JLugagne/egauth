@@ -26,9 +26,9 @@ func hashToken(token string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// SEC-SES-01 (CVSS 7.5): Éviction de sessions actives légitimes dans sessions/memory.BoundedStore.
-// When BoundedStore reaches capacity and no expired sessions exist, it evicts active live sessions
-// with the soonest expiry, causing sudden 401 Unauthorized / forced logouts for legitimate users.
+// SEC-SES-01 (CVSS 7.5): Prevent eviction of active live sessions in sessions/memory.BoundedStore.
+// When BoundedStore reaches capacity and no expired sessions exist, it must NOT evict active live sessions.
+// Instead, session creation must fail with ErrStoreCapacityExceeded, keeping legitimate active users logged in.
 func TestSecSes01_BoundedStoreEvictsActiveLiveSessions(t *testing.T) {
 	ctx := context.Background()
 	const cap = 2
@@ -73,23 +73,24 @@ func TestSecSes01_BoundedStoreEvictsActiveLiveSessions(t *testing.T) {
 		ExpiresAt: now.Add(3 * time.Hour),
 		CreatedAt: now,
 	}
-	require.NoError(t, store.CreateSession(ctx, "tenant-1", sess3))
+	err := store.CreateSession(ctx, "tenant-1", sess3)
+	require.ErrorIs(t, err, sessions.ErrStoreCapacityExceeded,
+		"SEC-SES-01 fixed: CreateSession must return ErrStoreCapacityExceeded when store is full of live sessions")
 
-	// 3. Confirm flawed behavior: Store is still capped at 2, but live Session 1 was prematurely evicted!
+	// 3. Confirm secure behavior: Store remains capped at 2, and existing active sessions remain valid and untouched.
 	assert.Equal(t, cap, store.Len())
 
-	_, err := store.FindSessionByHash(ctx, "tenant-1", tokenHash1)
-	assert.ErrorIs(t, err, sessions.ErrSessionNotFound,
-		"Flaw confirmed: Active, non-expired Session 1 was evicted to make room for Session 3")
+	found1, err := store.FindSessionByHash(ctx, "tenant-1", tokenHash1)
+	require.NoError(t, err, "Active, non-expired Session 1 must NOT be evicted")
+	assert.Equal(t, sess1.ID, found1.ID)
 
-	// Session 2 and Session 3 remain
 	found2, err := store.FindSessionByHash(ctx, "tenant-1", tokenHash2)
-	require.NoError(t, err)
+	require.NoError(t, err, "Active, non-expired Session 2 must NOT be evicted")
 	assert.Equal(t, sess2.ID, found2.ID)
 
-	found3, err := store.FindSessionByHash(ctx, "tenant-1", tokenHash3)
-	require.NoError(t, err)
-	assert.Equal(t, sess3.ID, found3.ID)
+	// Attacker's Session 3 was not created in the store.
+	_, err = store.FindSessionByHash(ctx, "tenant-1", tokenHash3)
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "Session 3 was rejected and must not be found in the store")
 }
 
 // SEC-SES-06 (CVSS 5.4): Contournement du plafond maxLifetime par CreateSession dans le stockage et le Janitor.

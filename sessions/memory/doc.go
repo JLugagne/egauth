@@ -7,10 +7,11 @@ package memory
 //
 // Two complementary strategies prevent unbounded map growth:
 //
-//  1. [NewBoundedStore](maxSize) — hard cap, self-evicting: when a new session
-//     would exceed maxSize the store first removes already-expired sessions;
-//     if the cap is still reached it evicts the session with the soonest
-//     ExpiresAt. No external scheduler needed.
+//  1. [NewBoundedStore](maxSize) — hard cap: when a new session would exceed
+//     maxSize the store first removes already-expired sessions; if the cap is
+//     still reached with active live sessions, CreateSession returns
+//     [sessions.ErrStoreCapacityExceeded] to protect active sessions from
+//     eviction (SEC-SES-01). No external scheduler needed.
 //
 //  2. [NewStore] + periodic [Store.DeleteExpired] via
 //     [github.com/JLugagne/egauth/janitor]:
