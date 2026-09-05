@@ -114,8 +114,8 @@ const ceremonyTimeout = 5 * time.Minute
 //   - A ceremony-cookie HMAC key is required: NewService returns ErrCookieKeyMissing if
 //     Config.CookieKey is unset or shorter than MinCookieKeyLength.
 //   - A ChallengeStore is required for single-use replay protection: NewService returns
-//     ErrChallengeStoreMissing unless Config.ChallengeStore is set or the explicit opt-out
-//     Config.InsecureNoChallengeStore is true.
+//     ErrChallengeStoreMissing unless Config.ChallengeStore is set, store implements
+//     ChallengeStore, or the explicit opt-out Config.InsecureNoChallengeStore is true.
 //
 // Ceremony timeouts are enforced server-side (the challenge expiry is written into the signed
 // ceremony cookie and re-checked at Finish), so a captured/forged ceremony cannot be completed
@@ -130,8 +130,13 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		return nil, ErrCookieKeyMissing
 	}
 	if cfg.ChallengeStore == nil && !cfg.InsecureNoChallengeStore {
-		return nil, ErrChallengeStoreMissing
+		if cs, ok := store.(ChallengeStore); ok {
+			cfg.ChallengeStore = cs
+		} else {
+			return nil, ErrChallengeStoreMissing
+		}
 	}
+
 
 	// Secure-by-default: an unset UserVerification means REQUIRED (reject UV-cleared assertions).
 	// A caller wanting the weaker behavior sets VerificationPreferred/Discouraged explicitly.

@@ -137,3 +137,21 @@ func TestPasskeyNewServiceNilStoreErrors(t *testing.T) {
 	assert.ErrorIs(t, err, passkey.ErrNilStore,
 		"NewService with a nil store must return ErrNilStore at construction, not nil-panic on first request")
 }
+
+type storeWithChallengeStore struct {
+	passkey.Store
+	passkey.ChallengeStore
+}
+
+func TestNewService_AdoptsChallengeStoreFromStore(t *testing.T) {
+	cfg := secureCfg()
+	cfg.ChallengeStore = nil
+	combined := &storeWithChallengeStore{
+		Store:          memory.NewStore(),
+		ChallengeStore: memory.NewChallengeStore(),
+	}
+	svc, err := passkey.NewService(combined, cfg)
+	require.NoError(t, err)
+	assert.NotNil(t, svc)
+}
+

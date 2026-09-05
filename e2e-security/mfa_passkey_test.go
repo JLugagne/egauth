@@ -408,29 +408,30 @@ func TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession(t *testing.T) {
 }
 
 // TestSEC_PSK_01_PostgresChallengeStore_MissingImplementation confirms that adapters/pgx/passkey
-// does NOT implement passkey.ChallengeStore, leaving multi-node Postgres deployments without
-// a persistent ChallengeStore.
+// implements passkey.ChallengeStore, enabling multi-node Postgres deployments to store challenges
+// persistently without ErrChallengeStoreMissing.
 func TestSEC_PSK_01_PostgresChallengeStore_MissingImplementation(t *testing.T) {
 	pgxStore := pgxpasskey.NewStore(nil)
 
 	// Confirm that pgx.Store implements passkey.Store
 	var _ passkey.Store = pgxStore
 
-	// Confirm that pgx.Store does NOT implement passkey.ChallengeStore
+	// Confirm that pgx.Store implements passkey.ChallengeStore
 	_, implementsChallengeStore := any(pgxStore).(passkey.ChallengeStore)
-	assert.False(t, implementsChallengeStore,
-		"SEC-PSK-01 Flawed Architecture Confirmed: adapters/pgx/passkey provides no ChallengeStore implementation")
+	assert.True(t, implementsChallengeStore,
+		"SEC-PSK-01 Remediated: adapters/pgx/passkey provides ChallengeStore implementation")
 
-	// Confirm that passkey.NewService fails fast when no ChallengeStore is provided
+	// Confirm that passkey.NewService succeeds without ErrChallengeStoreMissing
 	_, err := passkey.NewService(pgxStore, passkey.Config{
 		RPID:          "example.com",
 		RPDisplayName: "Example",
 		RPOrigins:     []string{"https://example.com"},
 		CookieKey:     []byte("0123456789abcdef0123456789abcdef"),
 	})
-	assert.ErrorIs(t, err, passkey.ErrChallengeStoreMissing,
-		"SEC-PSK-01 Confirmed: Deployments using pgx must either rely on memory.ChallengeStore or InsecureNoChallengeStore")
+	assert.NoError(t, err,
+		"SEC-PSK-01 Remediated: passkey.NewService automatically adopts ChallengeStore from pgxStore")
 }
+
 
 // TestSEC_PSK_03_ClonedCredential_NotRevokedInStore confirms that when a signature counter
 // regression is detected during passkey login (CloneWarning = true), the service emits an

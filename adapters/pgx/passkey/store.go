@@ -44,6 +44,12 @@ func NewStore(db DBQuerier) *Store {
 	return &Store{db: db}
 }
 
+// NewChallengeStore creates a new PostgreSQL passkey challenge store.
+func NewChallengeStore(db DBQuerier) *Store {
+	return &Store{db: db}
+}
+
+
 // SaveCredential persists a newly registered credential. If c.TenantID is non-empty and
 // differs from tenantID, it returns ErrTenantMismatch; otherwise it sets c.TenantID = tenantID.
 func (s *Store) SaveCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
@@ -126,6 +132,37 @@ func (s *Store) DeleteCredential(ctx context.Context, tenantID string, userID uu
 }
 
 var _ passkey.Store = (*Store)(nil)
+var _ passkey.ChallengeStore = (*Store)(nil)
+
+// Put records an issued challenge with an absolute expiry.
+func (s *Store) Put(ctx context.Context, tenantID, challenge string, expiresAt time.Time) error {
+	const query = `
+		INSERT INTO passkey_challenges (tenant_id, challenge, expires_at)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (tenant_id, challenge) DO UPDATE SET expires_at = EXCLUDED.expires_at
+	`
+	_, err := s.db.Exec(ctx, query, tenantID, challenge, expiresAt)
+	return err
+}
+
+// Consume atomically removes the challenge and reports whether it was present and unexpired.
+// A second Consume of the same challenge returns (false, nil).
+func (s *Store) Consume(ctx context.Context, tenantID, challenge string) (bool, error) {
+	const query = `DELETE FROM passkey_challenges WHERE tenant_id = $1 AND challenge = $2 RETURNING expires_at`
+	var expiresAt time.Time
+	err := s.db.QueryRow(ctx, query, tenantID, challenge).Scan(&expiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if !time.Now().Before(expiresAt) {
+		return false, nil
+	}
+	return true, nil
+}
+
 
 // Ping reports backend connectivity by issuing a trivial round-trip query over the store's
 // handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the
