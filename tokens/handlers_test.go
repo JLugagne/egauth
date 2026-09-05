@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -379,6 +380,31 @@ func TestRefreshHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
 	assert.False(t, called, "rotator must not run for a cross-site request with default config")
+}
+
+// TestRefreshHandler_CSRFBlocksCrossScheme verifies that an HTTP origin targeting an HTTPS
+// endpoint is rejected, preventing cross-scheme CSRF.
+func TestRefreshHandler_CSRFBlocksCrossScheme(t *testing.T) {
+	called := false
+	rot := &issuertest.MockRotator[struct{}]{
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
+			called = true
+			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}, nil
+		},
+	}
+	h := tokens.RefreshHandler[struct{}](rot)
+
+	req := postWithRefresh("some-refresh")
+	req.URL, _ = url.Parse("https://app.example.com/refresh")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "http://app.example.com")
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "rotator must not run for a cross-scheme request")
 }
 
 // TestRefreshHandler_CSRFAllowsSameOriginByDefault proves the secure default does not

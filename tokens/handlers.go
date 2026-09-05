@@ -247,21 +247,13 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 // originAllowed reports whether the request passes the CSRF origin check. The check is ON BY
 // DEFAULT: a request is allowed only when its Origin (or Referer fallback) host is the request's
 // own Host or an allowlisted host, and a POST carrying neither header is treated as untrusted.
+// Cross-scheme protection is enforced via httputil.OriginAllowed.
 // The explicit WithInsecureNoOriginCheck opt-out restores the pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
-	// Secure-by-default CSRF check (TASK-025): allowed only when the Origin/Referer host matches
-	// the request Host or an explicitly trusted origin; a missing origin host is rejected.
-	// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. Origin-host parsing is
-	// shared via httputil (TASK-024), but the strict allow/deny policy is enforced here — NOT
-	// httputil.OriginAllowed, whose empty-allowlist default is permissive.
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
 }
 
 // tenant returns the tenant derived from the request's resolver, or "" when no resolver is

@@ -320,18 +320,15 @@ func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request
 // originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
 // by default — even with an empty trustedOrigins allowlist — to match the tokens/identity handlers
 // and make "CSRF-by-default" mean the same thing across handler families. A request is allowed only
-// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host;
+// when its Origin (or Referer fallback) host equals the request's own Host or an allowlisted host
+// (enforced by httputil.OriginAllowed, which also enforces cross-scheme protection);
 // a POST carrying neither header is treated as untrusted. WithInsecureNoOriginCheck restores the
 // pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {

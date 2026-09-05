@@ -260,29 +260,40 @@ func TestSecSes08_RevokeSessionNonIdempotentAndAuditEvasion(t *testing.T) {
 		"Flaw confirmed: No logout event emitted on subsequent revoke attempt")
 }
 
-// SEC-SES-10 (CVSS 6.8): Faiblesses de validation d'origine dans internal/httputil (Cross-Scheme & Permissive Default).
-// RequestOriginHost strips http vs https scheme allowing cross-scheme matching, and OriginAllowed fails-open when empty.
+// SEC-SES-10: Origin validation in internal/httputil (Cross-Scheme & Permissive Default).
+// RequestOriginURL preserves scheme and host, cross-scheme (HTTP origin targeting HTTPS endpoint)
+// is rejected, and OriginAllowed does not fail-open when trustedOrigins is empty.
 func TestSecSes10_OriginAllowed_CrossSchemeAndPermissiveDefault(t *testing.T) {
 	req, err := http.NewRequest("POST", "https://example.com/sensitive-action", nil)
 	require.NoError(t, err)
 
-	// Cross-Scheme: unencrypted HTTP origin targeting HTTPS endpoint.
+	// Cross-Scheme: unencrypted HTTP origin targeting HTTPS endpoint must be rejected.
 	req.Header.Set("Origin", "http://example.com")
 	req.Host = "example.com"
 
-	originHost := httputil.RequestOriginHost(req)
-	assert.Equal(t, "example.com", originHost, "Flaw confirmed: RequestOriginHost strips scheme (http://)")
+	originURL := httputil.RequestOriginURL(req)
+	require.NotNil(t, originURL)
+	assert.Equal(t, "http", originURL.Scheme)
+	assert.Equal(t, "example.com", originURL.Host)
 
-	// OriginAllowed matches host == r.Host regardless of scheme!
+	// OriginAllowed rejects cross-scheme HTTP origin even if host matches.
 	allowed := httputil.OriginAllowed(req, map[string]bool{"example.com": true})
-	assert.True(t, allowed, "Flaw confirmed: Cross-scheme origin allowed to match HTTPS host")
+	assert.False(t, allowed, "Cross-scheme HTTP origin targeting HTTPS endpoint must be rejected")
 
-	// Permissive default: empty trustedOrigins map allows all requests (fail-open)
+	// Same-scheme HTTPS origin targeting HTTPS endpoint is allowed.
+	reqHTTPS, err := http.NewRequest("POST", "https://example.com/sensitive-action", nil)
+	require.NoError(t, err)
+	reqHTTPS.Header.Set("Origin", "https://example.com")
+	reqHTTPS.Host = "example.com"
+	allowedHTTPS := httputil.OriginAllowed(reqHTTPS, nil)
+	assert.True(t, allowedHTTPS, "Matching HTTPS origin must be allowed with empty trustedOrigins")
+
+	// Secure-by-default: empty trustedOrigins map rejects foreign origins (fail-closed).
 	reqForeign, err := http.NewRequest("POST", "https://example.com/api", nil)
 	require.NoError(t, err)
 	reqForeign.Header.Set("Origin", "https://evil.attacker.com")
 	reqForeign.Host = "example.com"
 
 	allowedForeign := httputil.OriginAllowed(reqForeign, map[string]bool{})
-	assert.True(t, allowedForeign, "Flaw confirmed: OriginAllowed is fail-open when trustedOrigins is empty")
+	assert.False(t, allowedForeign, "OriginAllowed must not fail-open when trustedOrigins is empty")
 }

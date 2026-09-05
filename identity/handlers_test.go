@@ -500,6 +500,29 @@ func TestLoginHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 	assert.False(t, called, "Authenticate must not run for a cross-site request with default config")
 }
 
+// TestLoginHandler_CSRFBlocksCrossScheme verifies that an HTTP origin targeting an HTTPS
+// endpoint is rejected, preventing cross-scheme CSRF.
+func TestLoginHandler_CSRFBlocksCrossScheme(t *testing.T) {
+	called := false
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			called = true
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	req := loginForm(t, "https://app.example.com/login", "user@example.com", "secret", "")
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "http://app.example.com")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
+	assert.False(t, called, "Authenticate must not run for a cross-scheme request")
+}
+
 // TestLoginHandler_CSRFAllowsSameOriginByDefault proves the secure default is not a false
 // positive: a same-origin POST with no WithTrustedOrigins still succeeds.
 func TestLoginHandler_CSRFAllowsSameOriginByDefault(t *testing.T) {

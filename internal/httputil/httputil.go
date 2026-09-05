@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strings"
 )
 
 // WriteJSON writes a JSON-encoded body with the given HTTP status.
@@ -29,43 +30,76 @@ func WithErrorParam(rawURL, code string) string {
 	return u.String()
 }
 
-// RequestOriginHost returns the hostname (host:port) from the request's Origin header, or
-// falls back to the Referer header.  Returns "" when neither header is present or parseable,
-// and when Origin is the special value "null" (opaque origin).
-func RequestOriginHost(r *http.Request) string {
+// RequestOriginURL returns the parsed URL from the request's Origin header, or falls back to
+// the Referer header. Returns nil when neither header is present or parseable, when the parsed
+// host is empty, or when Origin is the special value "null" (opaque origin).
+func RequestOriginURL(r *http.Request) *url.URL {
 	if o := r.Header.Get("Origin"); o != "" {
 		// A present Origin is authoritative. The opaque "null" origin (sandboxed iframe, some
 		// redirect / privacy contexts) is treated as untrusted and does NOT fall back to Referer:
 		// a request that declines to assert an origin must not be validated via the weaker,
 		// more-spoofable Referer.
 		if o == "null" {
-			return ""
+			return nil
 		}
-		if u, err := url.Parse(o); err == nil {
-			return u.Host
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			return u
 		}
-		return ""
+		return nil
 	}
 	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil {
-			return u.Host
+		if u, err := url.Parse(ref); err == nil && u.Host != "" {
+			return u
 		}
+	}
+	return nil
+}
+
+// RequestOriginHost returns the hostname (host:port) from the request's Origin header, or
+// falls back to the Referer header. Returns "" when neither header is present or parseable,
+// when the parsed host is empty, and when Origin is the special value "null" (opaque origin).
+func RequestOriginHost(r *http.Request) string {
+	if u := RequestOriginURL(r); u != nil {
+		return u.Host
 	}
 	return ""
 }
 
-// OriginAllowed reports whether the incoming request comes from a trusted origin.
-// When trustedOrigins is empty all origins are allowed (opt-in protection).
-// The request's own Host is always considered trusted.
-func OriginAllowed(r *http.Request, trustedOrigins map[string]bool) bool {
-	if len(trustedOrigins) == 0 {
+// IsHTTPS reports whether the request was received over HTTPS by inspecting TLS state,
+// the request URL scheme, or the X-Forwarded-Proto header.
+func IsHTTPS(r *http.Request) bool {
+	if r.TLS != nil {
 		return true
 	}
-	host := RequestOriginHost(r)
-	if host == "" {
+	if r.URL != nil && strings.EqualFold(r.URL.Scheme, "https") {
+		return true
+	}
+	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+		if idx := strings.IndexByte(proto, ','); idx != -1 {
+			proto = proto[:idx]
+		}
+		if strings.EqualFold(strings.TrimSpace(proto), "https") {
+			return true
+		}
+	}
+	return false
+}
+
+// OriginAllowed reports whether the incoming request comes from a trusted origin.
+// A request is allowed only if its origin host matches the request's own Host or is explicitly
+// allowlisted in trustedOrigins. When trustedOrigins is empty, only same-host requests are allowed
+// (secure by default; foreign origins are rejected).
+// Additionally, cross-scheme protection is enforced: if the request is served over HTTPS,
+// an Origin or Referer with scheme "http" is rejected.
+func OriginAllowed(r *http.Request, trustedOrigins map[string]bool) bool {
+	u := RequestOriginURL(r)
+	if u == nil || u.Host == "" {
 		return false
 	}
-	return host == r.Host || trustedOrigins[host]
+	if IsHTTPS(r) && strings.EqualFold(u.Scheme, "http") {
+		return false
+	}
+	return u.Host == r.Host || trustedOrigins[u.Host]
 }
 
 // Fail writes an error response: it redirects to failureURL (with an ?error= parameter) when

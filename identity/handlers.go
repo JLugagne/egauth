@@ -546,18 +546,14 @@ func (cfg handlerConfig) dispatchDelivery(r *http.Request, userID string, send f
 // ON by default — even with an empty trustedOrigins allowlist — to match the tokens handlers
 // and make "CSRF-by-default" mean the same thing across handler families. A request is allowed
 // only when its Origin (or Referer fallback) host equals the request's own Host or an explicitly
-// allowlisted host; a browser-driven POST that carries neither header is treated as untrusted.
-// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior. The strict allow/deny
-// policy is enforced here — NOT httputil.OriginAllowed, whose empty-allowlist default is permissive.
+// allowlisted host (enforced by httputil.OriginAllowed, which also enforces cross-scheme
+// protection); a browser-driven POST that carries neither header is treated as untrusted.
+// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior.
 func (cfg handlerConfig) originAllowed(r *http.Request) bool {
 	if cfg.insecureNoOriginCheck {
 		return true
 	}
-	host := httputil.RequestOriginHost(r)
-	if host == "" {
-		return false
-	}
-	return host == r.Host || cfg.trustedOrigins[host]
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int, code string) {

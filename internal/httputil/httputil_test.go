@@ -1,6 +1,7 @@
 package httputil_test
 
 import (
+	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestOriginAllowed pins the exact-match semantics of the shared origin helper. A regression to
@@ -25,6 +27,38 @@ func TestOriginAllowed(t *testing.T) {
 		}
 		return r
 	}
+	reqHTTPS := func(origin, referer string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "https://example.com/", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
+	reqForwardedHTTPS := func(origin, referer string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://example.com/", nil)
+		r.Header.Set("X-Forwarded-Proto", "https")
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
+	reqTLS := func(origin, referer string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "http://example.com/", nil)
+		r.TLS = &tls.ConnectionState{}
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
 	trusted := map[string]bool{"app.example.com": true}
 
 	cases := []struct {
@@ -33,7 +67,8 @@ func TestOriginAllowed(t *testing.T) {
 		trusted map[string]bool
 		want    bool
 	}{
-		{"empty allowlist allows all (opt-in protection)", req("https://evil.com", ""), nil, true},
+		{"empty allowlist allows own host", req("https://example.com", ""), nil, true},
+		{"empty allowlist rejects foreign host", req("https://evil.com", ""), nil, false},
 		{"own Host is always trusted", req("https://example.com", ""), trusted, true},
 		{"exact allowlisted host allowed", req("https://app.example.com", ""), trusted, true},
 		{"foreign host rejected", req("https://evil.com", ""), trusted, false},
@@ -42,12 +77,49 @@ func TestOriginAllowed(t *testing.T) {
 		{"opaque null origin rejected", req("null", ""), trusted, false},
 		{"missing Origin and Referer rejected", req("", ""), trusted, false},
 		{"falls back to Referer host when Origin absent", req("", "https://app.example.com/page"), trusted, true},
+
+		// Cross-scheme protection
+		{"cross-scheme http origin targeting https request rejected", reqHTTPS("http://example.com", ""), trusted, false},
+		{"cross-scheme http referer targeting https request rejected", reqHTTPS("", "http://example.com/page"), trusted, false},
+		{"cross-scheme http origin targeting forwarded https rejected", reqForwardedHTTPS("http://example.com", ""), trusted, false},
+		{"cross-scheme http origin targeting tls connection rejected", reqTLS("http://example.com", ""), trusted, false},
+		{"cross-scheme http origin targeting trusted host on https rejected", reqHTTPS("http://app.example.com", ""), trusted, false},
+		{"matching https origin targeting https request allowed", reqHTTPS("https://example.com", ""), trusted, true},
+		{"trusted https origin targeting https request allowed", reqHTTPS("https://app.example.com", ""), trusted, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, httputil.OriginAllowed(tc.r, tc.trusted))
 		})
 	}
+}
+
+func TestRequestOriginURL(t *testing.T) {
+	mk := func(origin, referer string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/", nil)
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		if referer != "" {
+			r.Header.Set("Referer", referer)
+		}
+		return r
+	}
+
+	u := httputil.RequestOriginURL(mk("https://app.example.com:8443", ""))
+	require.NotNil(t, u)
+	assert.Equal(t, "https", u.Scheme)
+	assert.Equal(t, "app.example.com:8443", u.Host)
+
+	assert.Nil(t, httputil.RequestOriginURL(mk("null", "https://app.example.com")), "opaque null origin yields nil")
+
+	uRef := httputil.RequestOriginURL(mk("", "https://ref.example.com/x?q=1"))
+	require.NotNil(t, uRef)
+	assert.Equal(t, "https", uRef.Scheme)
+	assert.Equal(t, "ref.example.com", uRef.Host)
+
+	assert.Nil(t, httputil.RequestOriginURL(mk("", "")))
+	assert.Nil(t, httputil.RequestOriginURL(mk("://invalid", "")))
 }
 
 func TestRequestOriginHost(t *testing.T) {
