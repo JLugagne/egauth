@@ -93,16 +93,17 @@ func TestSecSes01_BoundedStoreEvictsActiveLiveSessions(t *testing.T) {
 	assert.ErrorIs(t, err, sessions.ErrSessionNotFound, "Session 3 was rejected and must not be found in the store")
 }
 
-// SEC-SES-06 (CVSS 5.4): Contournement du plafond maxLifetime par CreateSession dans le stockage et le Janitor.
-// CreateSession sets ExpiresAt = now.Add(duration) without calling clampExpiry, so stored sessions
-// have ExpiresAt far in the future exceeding maxLifetime. While ValidateSession rejects the session
-// after maxLifetime, the Janitor/DeleteExpired cannot purge the zombie session for the full duration.
+// SEC-SES-06 (CVSS 5.4): Session expiry clamping by maxLifetime in CreateSession to prevent zombie retention.
+// CreateSession clamps session.ExpiresAt by maxLifetime so stored sessions do not have ExpiresAt
+// exceeding maxLifetime. When maxLifetime elapses, DeleteExpired successfully purges the expired
+// session from the store, preventing uncollectable zombie sessions.
 func TestSecSes06_CreateSessionBypassesMaxLifetime_ZombieRetention(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore()
 
-	// Virtual clock frozen at T0.
-	frozen := time.Now()
+	// Virtual clock frozen at T0 in the past so real time.Now() (used by memory.Store.DeleteExpired)
+	// has already passed maxLifetime.
+	frozen := time.Now().Add(-2 * time.Hour)
 	clockNow := frozen
 	clock := func() time.Time { return clockNow }
 
@@ -118,30 +119,27 @@ func TestSecSes06_CreateSessionBypassesMaxLifetime_ZombieRetention(t *testing.T)
 	sess, token, err := svc.CreateSession(ctx, tenantID, userID, "UA", "127.0.0.1", longDuration)
 	require.NoError(t, err)
 
-	// Flawed behavior: session.ExpiresAt is NOT clamped to CreatedAt + maxLifetime.
-	assert.Equal(t, frozen.Add(longDuration), sess.ExpiresAt,
-		"Flaw confirmed: CreateSession did not clamp initial ExpiresAt to maxLifetime")
+	// Fixed behavior: session.ExpiresAt is clamped to CreatedAt + maxLifetime.
+	assert.Equal(t, sess.CreatedAt.Add(maxLifetime), sess.ExpiresAt,
+		"SEC-SES-06 fixed: CreateSession clamps initial ExpiresAt to CreatedAt+maxLifetime")
 
-	// Advance clock past maxLifetime (e.g. 2 hours later, within 10 hours).
-	clockNow = frozen.Add(2 * time.Hour)
-
-	// ValidateSession honors maxLifetime and rejects the session.
-	_, err = svc.ValidateSession(ctx, tenantID, token)
-	assert.ErrorIs(t, err, sessions.ErrSessionNotFound,
-		"ValidateSession correctly rejects session past maxLifetime")
-
-	// BUT the store still holds the zombie session because ExpiresAt is still in the future!
-	// DeleteExpired checks sess.ExpiresAt.Before(time.Now()), but ExpiresAt is 10 hours from creation.
+	// DeleteExpired purges the expired session because ExpiresAt was clamped.
 	deleted, err := store.DeleteExpired(ctx, tenantID)
 	require.NoError(t, err)
-	assert.Equal(t, int64(0), deleted,
-		"Flaw confirmed: DeleteExpired cannot purge the zombie session because stored ExpiresAt is far in the future")
+	assert.Equal(t, int64(1), deleted,
+		"SEC-SES-06 fixed: DeleteExpired successfully purges the expired session")
 
-	// The session record persists in the store despite being rejected by the service!
+	// The session record is no longer retained in the store.
 	hash := hashToken(token)
-	storedSess, err := store.FindSessionByHash(ctx, tenantID, hash)
-	require.NoError(t, err, "Zombie session remains retained in the store")
-	assert.Equal(t, sess.ID, storedSess.ID)
+	_, err = store.FindSessionByHash(ctx, tenantID, hash)
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound,
+		"Expired session is no longer retained in the store")
+
+	// ValidateSession also rejects the session.
+	clockNow = frozen.Add(2 * time.Hour)
+	_, err = svc.ValidateSession(ctx, tenantID, token)
+	assert.ErrorIs(t, err, sessions.ErrSessionNotFound,
+		"ValidateSession rejects session past maxLifetime")
 }
 
 // SEC-SES-09 (CVSS 4.0): CPU-intensive busy loop (Busy Loop) in janitor.Start with non-positive interval.

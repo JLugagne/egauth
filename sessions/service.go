@@ -111,9 +111,9 @@ func (s *service) CreateSession(ctx context.Context, tenantID string, userID uui
 		TokenHash: hash,
 		UserAgent: userAgent,
 		IP:        ip,
-		ExpiresAt: now.Add(duration),
 		CreatedAt: now,
 	}
+	session.ExpiresAt = s.clampExpiry(session, now.Add(duration))
 
 	if err := s.store.CreateSession(ctx, tenantID, session); err != nil {
 		return nil, "", err
@@ -241,8 +241,8 @@ func (s *service) hashToken(token string) string {
 // WithMaxLifetime sets an absolute cap on a session's lifetime, measured from its CreatedAt.
 // Once now is past CreatedAt+d the session stops validating and can no longer be touched or
 // rotated, regardless of how recently it was active — an idle-timeout slide can never keep a
-// stolen-but-kept-warm token alive indefinitely. Touch and Rotate additionally clamp the new
-// ExpiresAt so it never slides past the absolute deadline.
+// stolen-but-kept-warm token alive indefinitely. CreateSession, Touch, and Rotate additionally
+// clamp ExpiresAt so it never exceeds the absolute deadline.
 //
 // NewService already applies a 30-day default cap (SEC-08). Pass WithMaxLifetime to shorten or
 // lengthen that cap. A zero duration is treated as "keep the default" (same as not calling

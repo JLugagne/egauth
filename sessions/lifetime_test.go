@@ -122,6 +122,42 @@ func TestMaxLifetime_RotateClampsExpiryToDeadline(t *testing.T) {
 	assert.Equal(t, deadline, rotated.ExpiresAt, "Rotate must clamp ExpiresAt to the absolute deadline")
 }
 
+// TestMaxLifetime_CreateSessionClampsExpiryToDeadline verifies SEC-SES-06: CreateSession
+// clamps initial ExpiresAt to CreatedAt+maxLifetime when duration > maxLifetime,
+// preventing zombie sessions that persist in stores past maxLifetime without being purged.
+func TestMaxLifetime_CreateSessionClampsExpiryToDeadline(t *testing.T) {
+	ctx := context.Background()
+
+	const maxLifetime = 1 * time.Hour
+	const duration = 10 * time.Hour
+
+	// Use a creation time in the past so real time.Now() (used by memory.Store.DeleteExpired)
+	// has already passed maxLifetime.
+	frozen := time.Now().Add(-2 * time.Hour)
+	now := frozen
+	clock := func() time.Time { return now }
+
+	store := memory.NewStore()
+	svc := sessions.NewService(
+		store,
+		sessions.WithClock(clock),
+		sessions.WithMaxLifetime(maxLifetime),
+	)
+
+	tenantID := "tenant-sec06"
+	sess, _, err := svc.CreateSession(ctx, tenantID, uuid.Must(uuid.NewV7()), "UA", "127.0.0.1", duration)
+	require.NoError(t, err)
+
+	// Assert CreateSession clamps ExpiresAt to CreatedAt.Add(maxLifetime)
+	assert.Equal(t, sess.CreatedAt.Add(maxLifetime), sess.ExpiresAt,
+		"CreateSession must clamp initial ExpiresAt to CreatedAt+maxLifetime when duration exceeds maxLifetime")
+
+	// DeleteExpired purges the session after maxLifetime has elapsed
+	deleted, err := store.DeleteExpired(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), deleted, "DeleteExpired must purge the session after maxLifetime has elapsed")
+}
+
 // TestNoMaxLifetime_TouchCanExtendIndefinitely verifies that WithNoMaxLifetime disables the
 // absolute cap so Touch can keep extending the session indefinitely (idle timeout only).
 // This replaces the old TestMaxLifetime_ZeroDisablesCap now that WithMaxLifetime(0) means
