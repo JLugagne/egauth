@@ -383,10 +383,10 @@ func TestSecOau06_ResolveRedirectURL_UnsanitizedHostAndForwardedProto(t *testing
 		"Legitimate host must produce the expected redirect URI")
 }
 
-// SEC-OAU-07 (CVSS 5.3): Suivi automatique non sécurisé des redirections HTTP (307/308) avec fuite de client_secret.
-// In oauth.Provider.Exchange, http.Client has no CheckRedirect policy (it is nil by default).
-// If the token endpoint returns a 307 Temporary Redirect, Go's http.Client automatically repeats
-// the POST request including client_secret to the redirected destination.
+// SEC-OAU-07 (CVSS 5.3): Insecure automatic HTTP redirect following (307/308) with client_secret leakage.
+// In oauth.Provider.Exchange, http.Client disables automatic redirect following (via http.ErrUseLastResponse).
+// If the token endpoint returns a 307 Temporary Redirect, the redirect must not be followed,
+// client_secret must not be sent to the redirected destination, and Exchange must return an error.
 func TestSecOau07_TokenExchange_Follows307RedirectWithClientSecret(t *testing.T) {
 	var capturedClientSecret string
 	var redirectFollowed atomic.Bool
@@ -408,7 +408,7 @@ func TestSecOau07_TokenExchange_Follows307RedirectWithClientSecret(t *testing.T)
 	}))
 	defer srv.Close()
 
-	// Use default http.Client (CheckRedirect == nil) as configured in oauth.New
+	// Use default http.Client (CheckRedirect returning http.ErrUseLastResponse) as configured in oauth.New
 	p := oauth.New("redirect-test", "victim-client-id", "super-secret-client-token-999",
 		srv.URL+"/auth",
 		srv.URL+"/token",
@@ -419,12 +419,11 @@ func TestSecOau07_TokenExchange_Follows307RedirectWithClientSecret(t *testing.T)
 		oauth.WithInsecureURLs(),
 	)
 
-	_, _ = p.Exchange(context.Background(), "auth-code", srv.URL+"/callback", "")
+	_, err := p.Exchange(context.Background(), "auth-code", srv.URL+"/callback", "")
 
-	// Flaw confirmed: Default http.Client automatically followed the 307 redirect and transmitted the client_secret!
-	assert.True(t, redirectFollowed.Load(), "Flaw confirmed: HTTP 307 redirect was automatically followed")
-	assert.Equal(t, "super-secret-client-token-999", capturedClientSecret,
-		"Flaw confirmed: client_secret was leaked to the redirected URL")
+	assert.Error(t, err, "Exchange must return an error when token endpoint returns redirect")
+	assert.False(t, redirectFollowed.Load(), "HTTP 307 redirect must not be automatically followed")
+	assert.Empty(t, capturedClientSecret, "client_secret must not be leaked to the redirected URL")
 }
 
 // SEC-OAU-05 (CVSS 7.5): DoS and Amplification mitigation via JWKS negative caching and rate limiting.

@@ -64,10 +64,19 @@ func WithScopes(scopes ...string) ProviderOption {
 }
 
 // WithHTTPClient sets the HTTP client used for the token exchange and the user-info request
-// (default: a client with a 10s timeout). Useful to inject a custom transport or, in tests,
-// a client pointed at a stub server.
+// (default: a client with a 10s timeout and redirects disabled). Useful to inject a custom
+// transport or, in tests, a client pointed at a stub server. Automatic redirect following is
+// disabled to prevent client_secret leakage (SEC-OAU-07).
 func WithHTTPClient(c *http.Client) ProviderOption {
-	return func(p *Provider) { p.httpClient = c }
+	return func(p *Provider) {
+		if c != nil {
+			clone := *c
+			clone.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			}
+			p.httpClient = &clone
+		}
+	}
 }
 
 // WithOIDC enables OpenID Connect id_token validation for the provider (see OIDCConfig). With it
@@ -112,8 +121,13 @@ func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string
 		authURL:      authURL,
 		tokenURL:     tokenURL,
 		scopes:       scopes,
-		httpClient:   &http.Client{Timeout: 10 * time.Second},
-		fetchUser:    fetch,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+		fetchUser: fetch,
 	}
 	for _, o := range opts {
 		o(p)
@@ -242,6 +256,9 @@ func (p *Provider) Exchange(ctx context.Context, code, redirectURI, codeVerifier
 		return nil, fmt.Errorf("%w: %v", ErrExchangeFailed, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 300 && resp.StatusCode < 400 {
+		return nil, fmt.Errorf("%w: token endpoint returned unexpected redirect status %d: redirects are disabled for security", ErrExchangeFailed, resp.StatusCode)
+	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%w: token endpoint status %d", ErrExchangeFailed, resp.StatusCode)

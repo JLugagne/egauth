@@ -209,3 +209,15 @@ func TestSafeHTTPClientIgnoresEnvProxy(t *testing.T) {
 		}
 	})
 }
+
+// TestSafeHTTPClient_DisablesRedirects verifies that SafeHTTPClient does not follow HTTP redirects (SEC-OAU-07).
+func TestSafeHTTPClient_DisablesRedirects(t *testing.T) {
+	client := SafeHTTPClient()
+	if client.CheckRedirect == nil {
+		t.Fatal("SafeHTTPClient must have CheckRedirect set")
+	}
+	err := client.CheckRedirect(nil, nil)
+	if !errors.Is(err, http.ErrUseLastResponse) {
+		t.Fatalf("CheckRedirect returned %v, want http.ErrUseLastResponse", err)
+	}
+}

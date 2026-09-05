@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -335,3 +336,83 @@ func TestGetJSON_BoundsOversizedResponse(t *testing.T) {
 
 // Ensure identity.Service satisfies the IdentityLinker interface the callback depends on.
 var _ IdentityLinker = identity.Service(nil)
+
+// TestExchange_RefusesRedirects verifies that the OAuth client does not follow redirects (e.g. 307/308)
+// during token exchange, preventing client_secret leakage to unauthorized destinations (SEC-OAU-07).
+func TestExchange_RefusesRedirects(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var redirectFollowed atomic.Bool
+			var capturedSecret string
+
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/token":
+					http.Redirect(w, r, "/redirected-sink", status)
+				case "/redirected-sink":
+					redirectFollowed.Store(true)
+					_ = r.ParseForm()
+					capturedSecret = r.Form.Get("client_secret")
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(`{"access_token":"leaked","token_type":"Bearer"}`))
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			p := New("test", "client-id", "secret-key",
+				srv.URL+"/auth", srv.URL+"/token", []string{"email"},
+				func(ctx context.Context, c *http.Client, token string) (*UserInfo, error) {
+					return &UserInfo{ProviderID: "1"}, nil
+				},
+				WithInsecureURLs(),
+			)
+
+			info, err := p.Exchange(context.Background(), "code", srv.URL+"/callback", "")
+			require.Error(t, err, "Exchange must return an error when token endpoint returns redirect")
+			assert.Nil(t, info)
+			assert.False(t, redirectFollowed.Load(), "redirect must not be followed")
+			assert.Empty(t, capturedSecret, "client_secret must not be sent to redirect target")
+			assert.Contains(t, err.Error(), "redirects are disabled for security")
+		})
+	}
+
+	t.Run("WithHTTPClient also disables redirects", func(t *testing.T) {
+		var redirectFollowed atomic.Bool
+		var capturedSecret string
+
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/token":
+				http.Redirect(w, r, "/redirected-sink", http.StatusTemporaryRedirect)
+			case "/redirected-sink":
+				redirectFollowed.Store(true)
+				_ = r.ParseForm()
+				capturedSecret = r.Form.Get("client_secret")
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"access_token":"leaked","token_type":"Bearer"}`))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		t.Cleanup(srv.Close)
+
+		customClient := srv.Client() // default srv.Client() follows redirects
+		p := New("test", "client-id", "secret-key",
+			srv.URL+"/auth", srv.URL+"/token", []string{"email"},
+			func(ctx context.Context, c *http.Client, token string) (*UserInfo, error) {
+				return &UserInfo{ProviderID: "1"}, nil
+			},
+			WithHTTPClient(customClient),
+			WithInsecureURLs(),
+		)
+
+		info, err := p.Exchange(context.Background(), "code", srv.URL+"/callback", "")
+		require.Error(t, err, "Exchange must return an error when token endpoint returns redirect")
+		assert.Nil(t, info)
+		assert.False(t, redirectFollowed.Load(), "redirect must not be followed with custom client")
+		assert.Empty(t, capturedSecret, "client_secret must not be sent to redirect target")
+		assert.Contains(t, err.Error(), "redirects are disabled for security")
+	})
+}
