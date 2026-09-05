@@ -202,11 +202,11 @@ func TestVulnerability_SECTOK10_IndefiniteRefreshTokenExtension(t *testing.T) {
 		"rotation beyond absolute ceiling on day 100 must fail with ErrTokenExpired")
 }
 
-// SEC-TOK-11: Missing family revocation when VerifyRefreshToken is called on a replayed token.
+// SEC-TOK-11: Token family revocation when VerifyRefreshToken is called on a replayed token.
 //
-// Proves that when VerifyRefreshToken detects a replayed/consumed token (rt.ConsumedAt != nil),
-// it returns ErrRefreshTokenReused but does NOT call RevokeFamily. The rest of the token family
-// remains valid and usable by whoever possesses the latest descendant.
+// Verifies that when VerifyRefreshToken detects a replayed/consumed token (rt.ConsumedAt != nil),
+// it revokes the entire token family via RevokeFamily, ensuring active descendants cannot be
+// verified or rotated.
 func TestVulnerability_SECTOK11_VerifyRefreshToken_NoFamilyRevocationOnReplay(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore[struct{}]()
@@ -237,17 +237,16 @@ func TestVulnerability_SECTOK11_VerifyRefreshToken_NoFamilyRevocationOnReplay(t 
 	_, err = svc.VerifyRefreshToken(ctx, "", pair1.RefreshToken)
 	assert.ErrorIs(t, err, tokens.ErrRefreshTokenReused, "VerifyRefreshToken detects reuse")
 
-	// 4. Vulnerability: RT2 was NOT revoked! VerifyRefreshToken does not invoke RevokeFamily.
-	verifiedClaims, err := svc.VerifyRefreshToken(ctx, "", pair2.RefreshToken)
-	require.NoError(t, err,
-		"vulnerability confirmed: family was not revoked, so RT2 can still be verified")
-	assert.Equal(t, userID, verifiedClaims.Subject)
+	// 4. Remediation confirmed: presenting replayed RT1 revoked the family in the store.
+	// VerifyRefreshToken with pair2.RefreshToken must fail.
+	_, err = svc.VerifyRefreshToken(ctx, "", pair2.RefreshToken)
+	require.Error(t, err, "descendant RT2 verification must fail after family revocation")
+	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
 
-	// RT2 can also still be rotated into RT3.
-	pair3, err := svc.Rotate(ctx, "", pair2.RefreshToken)
-	require.NoError(t, err,
-		"vulnerability confirmed: descendant RT2 can still rotate after replayed token was presented to VerifyRefreshToken")
-	assert.NotEmpty(t, pair3.RefreshToken)
+	// Rotating pair2.RefreshToken must fail.
+	_, err = svc.Rotate(ctx, "", pair2.RefreshToken)
+	require.Error(t, err, "descendant RT2 rotation must fail after family revocation")
+	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound)
 }
 
 // SEC-TOK-04: Session hijacking without theft detection when the attacker advances within the grace window.

@@ -558,3 +558,87 @@ func TestRotate_MaxRefreshLifetime(t *testing.T) {
 			"legacy token rotation past CreatedAt + MaxRefreshLifetime must fail with ErrTokenExpired")
 	})
 }
+
+// SEC-TOK-11: Presenting a consumed refresh token to VerifyRefreshToken must revoke the entire family.
+func TestVerifyRefreshToken_ReplayRevokesFamily(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[MyCustomClaims]()
+	userID := uuid.Must(uuid.NewV7())
+	sink := &captureSink{}
+
+	claimsProvider := tokens.ClaimsProviderFunc[MyCustomClaims](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[MyCustomClaims], error) {
+		return tokens.Claims[MyCustomClaims]{Subject: uid}, nil
+	})
+
+	svc := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
+		Store:          store,
+		SecretKey:      "super-secret-key-for-testing----",
+		Issuer:         "egauth-test",
+		AccessTTL:      15 * time.Minute,
+		RefreshTTL:     24 * time.Hour,
+		ClaimsProvider: claimsProvider,
+		EventSink:      sink,
+	})
+
+	// 1. Issue initial pair (RT1).
+	pair1, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+	require.NoError(t, err)
+
+	// 2. Rotate RT1 -> yields RT2. RT1 is now consumed.
+	pair2, err := svc.Rotate(ctx, "", pair1.RefreshToken)
+	require.NoError(t, err)
+
+	// 3. Present replayed RT1 to VerifyRefreshToken.
+	_, err = svc.VerifyRefreshToken(ctx, "", pair1.RefreshToken)
+	require.ErrorIs(t, err, tokens.ErrRefreshTokenReused, "replayed token must return ErrRefreshTokenReused")
+
+	// 4. Verify that the token family was revoked in the store.
+	// Subsequent verification of active descendant RT2 must fail.
+	_, err = svc.VerifyRefreshToken(ctx, "", pair2.RefreshToken)
+	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound, "descendant RT2 verification must fail after family revocation")
+
+	// Subsequent rotation of active descendant RT2 must fail.
+	_, err = svc.Rotate(ctx, "", pair2.RefreshToken)
+	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound, "descendant RT2 rotation must fail after family revocation")
+
+	// 5. Verify audit events emitted.
+	evRevoked, okRevoked := sink.findEvent(event.TokenFamilyRevoked)
+	require.True(t, okRevoked, "TokenFamilyRevoked event must be emitted")
+	assert.Equal(t, "refresh_reuse_verify", evRevoked.Reason)
+	assert.Equal(t, userID.String(), evRevoked.UserID)
+
+	evReuse, okReuse := sink.findEvent(event.RefreshReuseDetected)
+	require.True(t, okReuse, "RefreshReuseDetected event must be emitted")
+	assert.Equal(t, "verify_replay", evReuse.Reason)
+	assert.Equal(t, userID.String(), evReuse.UserID)
+
+	t.Run("returns wrapped error when store RevokeFamily fails", func(t *testing.T) {
+		revokeErr := errors.New("db disconnect")
+		mockStore := &storetest.MockStore[MyCustomClaims]{
+			FindRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
+				consumed := time.Now()
+				return &tokens.RefreshToken{
+					Hash:       tokenHash,
+					FamilyID:   uuid.Must(uuid.NewV7()),
+					UserID:     userID,
+					TenantID:   tenantID,
+					ExpiresAt:  time.Now().Add(time.Hour),
+					ConsumedAt: &consumed,
+				}, nil
+			},
+			RevokeFamilyFunc: func(ctx context.Context, tenantID string, familyID uuid.UUID) error {
+				return revokeErr
+			},
+		}
+
+		failSvc := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
+			Store:     mockStore,
+			SecretKey: "super-secret-key-for-testing----",
+			Issuer:    "egauth-test",
+		})
+
+		_, err := failSvc.VerifyRefreshToken(ctx, "", "consumed-token")
+		require.ErrorIs(t, err, tokens.ErrRefreshTokenReused)
+		assert.Contains(t, err.Error(), "family revocation failed")
+	})
+}

@@ -750,6 +750,11 @@ func (s *Service[C]) VerifyRefreshToken(ctx context.Context, tenantID string, to
 	}
 
 	if rt.ConsumedAt != nil {
+		if rerr := s.store.RevokeFamily(ctx, tenantID, rt.FamilyID); rerr != nil {
+			return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
+		}
+		event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "refresh_reuse_verify"})
+		event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "verify_replay"})
 		return nil, tokens.ErrRefreshTokenReused
 	}
 
