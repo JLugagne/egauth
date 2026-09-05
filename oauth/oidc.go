@@ -38,6 +38,12 @@ var defaultAllowedAlgs = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "
 const (
 	defaultOIDCLeeway   = time.Minute
 	defaultJWKSCacheTTL = time.Hour
+	// defaultNegativeTTL is the duration an unknown kid is negatively cached (SEC-OAU-05).
+	defaultNegativeTTL = 30 * time.Second
+	// minRefreshInterval is the minimum cooldown duration between outbound JWKS refreshes (SEC-OAU-05).
+	minRefreshInterval = 5 * time.Second
+	// maxNegativeCacheEntries caps the negative cache size to prevent memory exhaustion (SEC-OAU-05).
+	maxNegativeCacheEntries = 1000
 	// maxJWKSBytes bounds the JWKS response read.
 	maxJWKSBytes = 1 << 20
 	// maxJWKSKeys caps how many keys a JWKS document may declare. A document over this cap is
@@ -157,12 +163,15 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 		leeway:      leeway,
 		claimsMap:   mapper,
 		jwks: &jwksCache{
-			url:           jwksOverride,
-			issuer:        cfg.Issuer,
-			allowInsecure: cfg.AllowInsecureURLs,
-			client:        client,
-			ttl:           defaultJWKSCacheTTL,
-			now:           time.Now,
+			url:                jwksOverride,
+			issuer:             cfg.Issuer,
+			allowInsecure:      cfg.AllowInsecureURLs,
+			client:             client,
+			ttl:                defaultJWKSCacheTTL,
+			negativeTTL:        defaultNegativeTTL,
+			minRefreshInterval: minRefreshInterval,
+			now:                time.Now,
+			negCache:           make(map[string]time.Time),
 		},
 	}, nil
 }
@@ -272,39 +281,167 @@ func defaultOIDCClaimsMapper(claims map[string]any) (*UserInfo, error) {
 // jwksCache fetches and caches an issuer's JSON Web Key Set, keyed by kid. It refetches on a
 // cache miss (a kid it has not seen — i.e. key rotation) or when the TTL expires.
 //
+// To prevent amplification DoS attacks (SEC-OAU-05), unknown kids are negatively cached for
+// negativeTTL, and remote JWKS refreshes are rate limited by minRefreshInterval cooldown.
+//
 // When url is empty it is resolved once, lazily, via OIDC discovery
 // (<issuer>/.well-known/openid-configuration), whose document must claim the configured issuer
 // exactly. An explicitly-provided url is treated as a pre-validated override.
 type jwksCache struct {
-	url           string // resolved (or override) jwks_uri; empty until discovery runs
-	issuer        string // configured issuer, used to derive and bind the discovery document
-	allowInsecure bool   // dev-only: permit non-https discovery/JWKS URLs
-	client        *http.Client
-	ttl           time.Duration
-	now           func() time.Time
+	url                string // resolved (or override) jwks_uri; empty until discovery runs
+	issuer             string // configured issuer, used to derive and bind the discovery document
+	allowInsecure      bool   // dev-only: permit non-https discovery/JWKS URLs
+	client             *http.Client
+	ttl                time.Duration
+	negativeTTL        time.Duration
+	minRefreshInterval time.Duration
+	now                func() time.Time
 
-	mu   sync.RWMutex
-	keys map[string]crypto.PublicKey
-	exp  time.Time
+	mu          sync.RWMutex
+	refreshMu   sync.Mutex
+	keys        map[string]crypto.PublicKey
+	exp         time.Time
+	lastRefresh time.Time
+	negCache    map[string]time.Time
+}
+
+func (c *jwksCache) timeNow() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+func (c *jwksCache) negTTL() time.Duration {
+	if c.negativeTTL > 0 {
+		return c.negativeTTL
+	}
+	return defaultNegativeTTL
+}
+
+func (c *jwksCache) minRefresh() time.Duration {
+	if c.minRefreshInterval > 0 {
+		return c.minRefreshInterval
+	}
+	return minRefreshInterval
+}
+
+func keyNotFoundError(kid string) error {
+	if kid == "" {
+		return fmt.Errorf("%w: id_token has no kid and the key set is ambiguous", ErrIDTokenInvalid)
+	}
+	return fmt.Errorf("%w: no JWKS key for kid %q", ErrIDTokenInvalid, kid)
+}
+
+func (c *jwksCache) isNegativelyCached(kid string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.negCache == nil {
+		return false
+	}
+	exp, ok := c.negCache[kid]
+	if !ok {
+		return false
+	}
+	return c.timeNow().Before(exp)
+}
+
+func (c *jwksCache) setNegative(kid string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.negCache == nil {
+		c.negCache = make(map[string]time.Time)
+	}
+	now := c.timeNow()
+
+	// Evict expired entries if we are at or above capacity.
+	if len(c.negCache) >= maxNegativeCacheEntries {
+		for k, exp := range c.negCache {
+			if !now.Before(exp) {
+				delete(c.negCache, k)
+			}
+		}
+	}
+
+	// If still at capacity, evict the oldest entry (earliest expiration time).
+	if len(c.negCache) >= maxNegativeCacheEntries {
+		var oldestKid string
+		var oldestExp time.Time
+		first := true
+		for k, exp := range c.negCache {
+			if first || exp.Before(oldestExp) {
+				oldestKid = k
+				oldestExp = exp
+				first = false
+			}
+		}
+		if !first {
+			delete(c.negCache, oldestKid)
+		}
+	}
+
+	c.negCache[kid] = now.Add(c.negTTL())
 }
 
 // publicKey returns the verification key for kid, fetching/refreshing the key set as needed.
 func (c *jwksCache) publicKey(ctx context.Context, kid string) (crypto.PublicKey, error) {
+	// 1. If kid is negatively cached and not expired, fail fast without fetching.
+	if c.isNegativelyCached(kid) {
+		return nil, keyNotFoundError(kid)
+	}
+
+	// 2. If key is already in memory cache, return it.
 	if k, ok := c.cached(kid); ok {
 		return k, nil
 	}
+
+	// 3. If refreshed too recently, rate limit and record kid in negative cache.
+	c.mu.RLock()
+	recentlyRefreshed := !c.lastRefresh.IsZero() && c.timeNow().Sub(c.lastRefresh) < c.minRefresh()
+	c.mu.RUnlock()
+	if recentlyRefreshed {
+		c.setNegative(kid)
+		return nil, keyNotFoundError(kid)
+	}
+
+	// 4. Acquire refresh lock to serialize outbound JWKS fetches.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	// Double-check after acquiring refresh lock in case a concurrent fetch completed.
+	if c.isNegativelyCached(kid) {
+		return nil, keyNotFoundError(kid)
+	}
+	if k, ok := c.cached(kid); ok {
+		return k, nil
+	}
+	c.mu.RLock()
+	recentlyRefreshed = !c.lastRefresh.IsZero() && c.timeNow().Sub(c.lastRefresh) < c.minRefresh()
+	c.mu.RUnlock()
+	if recentlyRefreshed {
+		c.setNegative(kid)
+		return nil, keyNotFoundError(kid)
+	}
+
+	// 5. Fetch JWKS from remote endpoint.
 	if err := c.refresh(ctx); err != nil {
 		return nil, err
 	}
+
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return lookupKey(c.keys, kid)
+	k, err := lookupKey(c.keys, kid)
+	c.mu.RUnlock()
+	if err != nil {
+		c.setNegative(kid)
+		return nil, keyNotFoundError(kid)
+	}
+	return k, nil
 }
 
 func (c *jwksCache) cached(kid string) (crypto.PublicKey, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	if c.keys == nil || c.now().After(c.exp) {
+	if c.keys == nil || c.timeNow().After(c.exp) {
 		return nil, false
 	}
 	k, err := lookupKey(c.keys, kid)
@@ -340,9 +477,14 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	now := c.timeNow()
 	c.mu.Lock()
 	c.keys = keys
-	c.exp = c.now().Add(c.ttl)
+	c.exp = now.Add(c.ttl)
+	c.lastRefresh = now
+	for k := range keys {
+		delete(c.negCache, k)
+	}
 	c.mu.Unlock()
 	return nil
 }

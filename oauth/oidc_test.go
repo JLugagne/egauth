@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -631,4 +632,148 @@ func TestWithOIDC_DefersErrorOnInvalidConfig(t *testing.T) {
 	_, err := p.Exchange(context.Background(), "code", "https://app/cb", "verifier")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "WithOIDC")
+}
+
+// TestJWKSCache_NegativeCachingAndRateLimiting covers SEC-OAU-05:
+// 1. Repeated lookups for an unknown kid do not trigger repeated JWKS HTTP fetches (negative caching).
+// 2. Rapid lookups for distinct unknown kids within minRefreshInterval do not trigger repeated JWKS HTTP fetches (cooldown rate limiting).
+func TestJWKSCache_NegativeCachingAndRateLimiting(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	n := base64.RawURLEncoding.EncodeToString(rsaKey.N.Bytes())
+	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaKey.E)).Bytes())
+	jwksJSON := fmt.Sprintf(`{"keys":[{"kty":"RSA","kid":"valid-key","use":"sig","alg":"RS256","n":%q,"e":%q}]}`, n, e)
+
+	var jwksRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		jwksRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jwksJSON)
+	}))
+	defer srv.Close()
+
+	mockNow := time.Now()
+	cache := &jwksCache{
+		url:           srv.URL,
+		allowInsecure: true,
+		client:        srv.Client(),
+		ttl:           time.Hour,
+		now:           func() time.Time { return mockNow },
+	}
+
+	ctx := context.Background()
+
+	// 1. First lookup for unknown kid triggers JWKS refresh.
+	_, err = cache.publicKey(ctx, "unknown-kid-1")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+	assert.Equal(t, int32(1), jwksRequests.Load(), "first lookup for unknown-kid-1 triggers JWKS refresh")
+
+	// 2. Repeated lookup for the exact same unknown kid within negative TTL must NOT trigger JWKS refresh.
+	_, err = cache.publicKey(ctx, "unknown-kid-1")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+	assert.Equal(t, int32(1), jwksRequests.Load(), "repeated lookup for unknown-kid-1 must use negative cache")
+
+	// 3. Rapid lookup for a distinct unknown kid within minRefreshInterval (e.g., 1s later) must NOT trigger JWKS refresh.
+	mockNow = mockNow.Add(1 * time.Second)
+	_, err = cache.publicKey(ctx, "unknown-kid-2")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+	assert.Equal(t, int32(1), jwksRequests.Load(), "rapid lookup for different unknown-kid-2 within minRefreshInterval must be rate limited")
+
+	// 4. Repeated lookup for unknown-kid-2 must also hit negative cache.
+	_, err = cache.publicKey(ctx, "unknown-kid-2")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+	assert.Equal(t, int32(1), jwksRequests.Load(), "repeated lookup for unknown-kid-2 must hit negative cache")
+
+	// 5. Lookup after minRefreshInterval (e.g., 6 seconds after last refresh):
+	// Cooldown has expired, so looking up a new unknown kid triggers a refresh.
+	mockNow = mockNow.Add(6 * time.Second)
+	_, err = cache.publicKey(ctx, "unknown-kid-3")
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrIDTokenInvalid)
+	assert.Equal(t, int32(2), jwksRequests.Load(), "lookup for new unknown kid after minRefreshInterval triggers JWKS refresh")
+
+	// 6. Valid kid lookup succeeds and does not trigger another refresh.
+	key, err := cache.publicKey(ctx, "valid-key")
+	require.NoError(t, err)
+	require.NotNil(t, key)
+	assert.Equal(t, int32(2), jwksRequests.Load(), "valid kid lookup returns cached key without refresh")
+}
+
+// TestJWKSCache_NegativeCache_Eviction verifies that the negative cache size is bounded
+// at maxNegativeCacheEntries to prevent memory exhaustion (SEC-OAU-05).
+func TestJWKSCache_NegativeCache_Eviction(t *testing.T) {
+	mockNow := time.Now()
+	cache := &jwksCache{
+		negativeTTL: 30 * time.Second,
+		now:         func() time.Time { return mockNow },
+	}
+
+	// Insert more than maxNegativeCacheEntries entries.
+	for i := 0; i < maxNegativeCacheEntries+50; i++ {
+		cache.setNegative(fmt.Sprintf("kid-%d", i))
+	}
+
+	cache.mu.RLock()
+	size := len(cache.negCache)
+	cache.mu.RUnlock()
+
+	assert.LessOrEqual(t, size, maxNegativeCacheEntries, "negative cache size must be capped at maxNegativeCacheEntries")
+
+	// Advance time so that existing entries expire, and insert a new one.
+	mockNow = mockNow.Add(35 * time.Second)
+	cache.setNegative("new-kid")
+
+	cache.mu.RLock()
+	sizeAfterExpiry := len(cache.negCache)
+	cache.mu.RUnlock()
+
+	assert.Equal(t, 1, sizeAfterExpiry, "expired entries should be cleaned up on eviction")
+	assert.True(t, cache.isNegativelyCached("new-kid"))
+}
+
+// TestJWKSCache_NegativeCache_Expiry verifies that expired negative cache entries allow refetch.
+func TestJWKSCache_NegativeCache_Expiry(t *testing.T) {
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	n := base64.RawURLEncoding.EncodeToString(rsaKey.N.Bytes())
+	e := base64.RawURLEncoding.EncodeToString(big.NewInt(int64(rsaKey.E)).Bytes())
+	jwksJSON := fmt.Sprintf(`{"keys":[{"kty":"RSA","kid":"valid-key","use":"sig","alg":"RS256","n":%q,"e":%q}]}`, n, e)
+
+	var jwksRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		jwksRequests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, jwksJSON)
+	}))
+	defer srv.Close()
+
+	mockNow := time.Now()
+	cache := &jwksCache{
+		url:           srv.URL,
+		allowInsecure: true,
+		client:        srv.Client(),
+		ttl:           time.Hour,
+		negativeTTL:   30 * time.Second,
+		now:           func() time.Time { return mockNow },
+	}
+
+	ctx := context.Background()
+
+	// Initial lookup for unknown kid triggers JWKS refresh.
+	_, err = cache.publicKey(ctx, "unknown-kid")
+	require.Error(t, err)
+	assert.Equal(t, int32(1), jwksRequests.Load())
+
+	// Advance time past negative TTL.
+	mockNow = mockNow.Add(35 * time.Second)
+
+	// Now that negative TTL has expired (and cooldown has expired too), looking up unknown-kid
+	// should trigger another refresh attempt.
+	_, err = cache.publicKey(ctx, "unknown-kid")
+	require.Error(t, err)
+	assert.Equal(t, int32(2), jwksRequests.Load(), "lookup after negative TTL expiry triggers a new refresh")
 }

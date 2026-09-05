@@ -412,10 +412,8 @@ func TestSecOau07_TokenExchange_Follows307RedirectWithClientSecret(t *testing.T)
 		"Flaw confirmed: client_secret was leaked to the redirected URL")
 }
 
-// SEC-OAU-05 (CVSS 7.5): DoS et Amplification par Absence de Cache Négatif sur JWKS.
-// jwksCache does not cache negative lookups. Every time a non-existent kid is requested,
-// publicKey triggers a synchronous HTTP GET refresh to the remote JWKS endpoint, even for
-// the exact same invalid kid repeatedly.
+// SEC-OAU-05 (CVSS 7.5): DoS and Amplification mitigation via JWKS negative caching and rate limiting.
+// Unknown kids are negatively cached and refresh requests are rate limited to prevent outbound amplification DoS.
 func TestSecOau05_JWKSCache_NoNegativeCaching_FetchesEveryUnknownKid(t *testing.T) {
 	var jwksRequests atomic.Int32
 
@@ -469,11 +467,11 @@ func TestSecOau05_JWKSCache_NoNegativeCaching_FetchesEveryUnknownKid(t *testing.
 	assert.Equal(t, int32(1), jwksRequests.Load(), "First lookup of bogus-kid-1 made 1 JWKS request")
 
 	// 2nd request with the EXACT SAME unknown kid!
-	// Flaw confirmed: Without negative caching, it triggers ANOTHER JWKS network fetch!
+	// With negative caching, it must NOT trigger another JWKS network fetch.
 	_, err = pTest.Exchange(context.Background(), "code2", "http://callback", "", oauth.WithExpectedNonce("nonce-1"))
 	assert.Error(t, err)
-	assert.Equal(t, int32(2), jwksRequests.Load(),
-		"Flaw confirmed: Second lookup of identical bogus-kid-1 triggered ANOTHER JWKS network request (no negative cache)")
+	assert.Equal(t, int32(1), jwksRequests.Load(),
+		"Second lookup of identical bogus-kid-1 must use negative cache and not trigger another JWKS request")
 }
 
 // SEC-OAU-08 (CVSS 5.3): Absence de validation du paramètre iss (RFC 9207) dans CallbackHandler.
