@@ -101,6 +101,25 @@ func TestRotate_CarriesMustChangePasswordForward(t *testing.T) {
 		require.NoError(t, err)
 		assert.False(t, claims.MustChangePassword, "an unflagged family must never acquire the flag on refresh")
 	})
+
+	t.Run("unflagged family acquires flag when claims provider flags user", func(t *testing.T) {
+		flaggingProvider := tokens.ClaimsProviderFunc[struct{}](func(ctx context.Context, uid uuid.UUID, tenantID string) (tokens.Claims[struct{}], error) {
+			return tokens.Claims[struct{}]{Subject: uid, TenantID: tenantID, MustChangePassword: true}, nil
+		})
+		flaggingSvc, _ := newRotatingService(t, flaggingProvider, 24*time.Hour)
+
+		pair, err := flaggingSvc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID, MustChangePassword: false})
+		require.NoError(t, err)
+		require.False(t, pair.Claims.MustChangePassword)
+
+		newPair, err := flaggingSvc.Rotate(ctx, "", pair.RefreshToken)
+		require.NoError(t, err)
+		assert.True(t, newPair.Claims.MustChangePassword, "rotated pair claims must reflect MustChangePassword=true from claims provider")
+
+		claims, err := flaggingSvc.VerifyAccessTokenForTenant(ctx, "", newPair.AccessToken)
+		require.NoError(t, err)
+		assert.True(t, claims.MustChangePassword, "verified access token claims must have MustChangePassword=true")
+	})
 }
 
 func TestRotate_ReuseDetectionRevokesFamily(t *testing.T) {

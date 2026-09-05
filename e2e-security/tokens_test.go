@@ -93,13 +93,10 @@ func TestVulnerability_SECTOK02_UnboundedMemoryLeakInKeyCache(t *testing.T) {
 	assert.Equal(t, maxTenants, cache.Len(), "cache memory remains strictly bounded to maxEntries")
 }
 
-// SEC-TOK-09: Écrasement et contournement du contrôle MustChangePassword lors du rafraîchissement.
+// SEC-TOK-09: Preserve MustChangePassword control during refresh token rotation.
 //
-// Proves that in Service.Rotate, line 825 unconditionally overwrites claims.MustChangePassword
-// with rt.MustChangePassword from the initial refresh token. If a user originally logged in with
-// MustChangePassword=false, and an administrator subsequently flags the account (returned as
-// MustChangePassword=true by ClaimsProvider), the rotation silently overwrites it back to false,
-// allowing the user to bypass the forced password change gate.
+// Verifies that in Service.Rotate, claims.MustChangePassword is preserved when ClaimsProvider
+// returns MustChangePassword=true for a user whose initial refresh token had MustChangePassword=false.
 func TestVulnerability_SECTOK09_MustChangePasswordOverwrittenOnRefresh(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore[struct{}]()
@@ -138,11 +135,11 @@ func TestVulnerability_SECTOK09_MustChangePasswordOverwrittenOnRefresh(t *testin
 	verifiedClaims, err := svc.VerifyAccessTokenForTenant(ctx, "", rotatedPair.AccessToken)
 	require.NoError(t, err)
 
-	// Vulnerability confirmed: MustChangePassword from the provider was OVERWRITTEN by rt.MustChangePassword (false).
-	assert.False(t, verifiedClaims.MustChangePassword,
-		"vulnerability confirmed: ClaimsProvider returned MustChangePassword=true, but Rotate overwrote it to false from stale rt")
-	assert.False(t, rotatedPair.Claims.MustChangePassword,
-		"returned pair claims also reflect the overwritten false value")
+	// Remediation verified: MustChangePassword from the ClaimsProvider is preserved.
+	assert.True(t, verifiedClaims.MustChangePassword,
+		"ClaimsProvider returned MustChangePassword=true, and Rotate must preserve it")
+	assert.True(t, rotatedPair.Claims.MustChangePassword,
+		"returned pair claims also reflect the preserved true value")
 }
 
 // SEC-TOK-10: Absolute maximum lifetime ceiling on refresh token families.
