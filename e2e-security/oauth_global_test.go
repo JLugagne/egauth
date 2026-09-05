@@ -183,11 +183,10 @@ func TestSecGlo08_Actor_AnonymousClassifiedAsHuman_AndRolesVanishing(t *testing.
 	assert.True(t, capturedActor.HasScope("read:reports"))
 }
 
-// SEC-OAU-09 (CVSS 4.8): Défaut de filtrage des algorithmes symétriques (none, HMAC) dans AllowedAlgs.
+// SEC-OAU-09 (CVSS 4.8): Rejection of symmetric (HMAC) and none algorithms in AllowedAlgs.
 // The OIDCConfig documentation explicitly specifies:
 // "none and HMAC algorithms are always rejected regardless of this list."
-// However, newOIDCVerifier performs no validation or stripping on cfg.AllowedAlgs, accepting
-// "none" and "HS256" into the verifier's allowed list without error.
+// newOIDCVerifier rejects "none" and symmetric HMAC algorithms in cfg.AllowedAlgs.
 func TestSecOau09_AllowedAlgs_AcceptsSymmetricAndNoneAlgorithms(t *testing.T) {
 	// Provider with AllowedAlgs set to "none" and "HS256"
 	p := oauth.New("custom-oidc", "client-id", "client-secret",
@@ -201,13 +200,9 @@ func TestSecOau09_AllowedAlgs_AcceptsSymmetricAndNoneAlgorithms(t *testing.T) {
 		}),
 	)
 
-	// Exchange fails if configErr is set; verify configErr is NOT set for none/HMAC
 	_, err := p.Exchange(context.Background(), "code", "https://app.com/cb", "")
-
-	// Flaw confirmed: Exchange does NOT return an invalid algorithm error!
-	// It proceeds to attempt network fetch to token endpoint, showing AllowedAlgs was accepted.
-	assert.NotContains(t, fmt.Sprint(err), "algorithm",
-		"Flaw confirmed: WithOIDC accepted 'none' and HMAC algorithms without raising an algorithm error")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "algorithm")
 }
 
 // SEC-GLO-07 (CVSS 6.3): Désynchronisation de tenant entre tokens.ContextMiddleware et otp.SubjectResolver.

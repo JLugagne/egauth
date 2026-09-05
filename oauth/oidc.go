@@ -35,6 +35,21 @@ var (
 // verifying against a JWKS public key is the classic RS256→HS256 algorithm-confusion attack.
 var defaultAllowedAlgs = []string{"RS256", "RS384", "RS512", "ES256", "ES384", "ES512"}
 
+// supportedOIDCAlgs contains the asymmetric signing algorithms supported for OIDC id_token validation.
+// "none" and symmetric HMAC algorithms are strictly forbidden to prevent algorithm confusion (SEC-OAU-09).
+var supportedOIDCAlgs = map[string]struct{}{
+	"RS256": {},
+	"RS384": {},
+	"RS512": {},
+	"ES256": {},
+	"ES384": {},
+	"ES512": {},
+	"PS256": {},
+	"PS384": {},
+	"PS512": {},
+	"EdDSA": {},
+}
+
 const (
 	defaultOIDCLeeway   = time.Minute
 	defaultJWKSCacheTTL = time.Hour
@@ -140,6 +155,15 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 	algs := cfg.AllowedAlgs
 	if len(algs) == 0 {
 		algs = defaultAllowedAlgs
+	} else {
+		for _, alg := range algs {
+			if strings.EqualFold(alg, "none") || strings.HasPrefix(strings.ToUpper(alg), "HS") {
+				return nil, fmt.Errorf("oauth: algorithm %q is not allowed: none and symmetric HMAC algorithms are forbidden for OIDC id_token validation", alg)
+			}
+			if _, ok := supportedOIDCAlgs[alg]; !ok {
+				return nil, fmt.Errorf("oauth: algorithm %q is not supported: only asymmetric algorithms are supported for OIDC id_token validation", alg)
+			}
+		}
 	}
 	leeway := cfg.Leeway
 	if leeway <= 0 {

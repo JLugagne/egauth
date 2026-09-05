@@ -777,3 +777,53 @@ func TestJWKSCache_NegativeCache_Expiry(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, int32(2), jwksRequests.Load(), "lookup after negative TTL expiry triggers a new refresh")
 }
+
+// TestWithOIDC_AllowedAlgsValidation covers SEC-OAU-09:
+// "none" and symmetric HMAC algorithms are forbidden in AllowedAlgs to prevent algorithm-confusion attacks.
+// Supported asymmetric algorithms (RS*, ES*, PS*, EdDSA) are accepted.
+func TestWithOIDC_AllowedAlgsValidation(t *testing.T) {
+	t.Run("rejects none algorithm", func(t *testing.T) {
+		p := New("oidc", "client-id", "client-secret",
+			"https://auth.example.com/authorize",
+			"https://auth.example.com/token",
+			[]string{"openid"},
+			nil,
+			WithOIDC(OIDCConfig{
+				Issuer:      "https://idp.example.com",
+				AllowedAlgs: []string{"none"},
+			}),
+		)
+		require.Error(t, p.configErr)
+		assert.Contains(t, p.configErr.Error(), "algorithm \"none\" is not allowed")
+	})
+
+	t.Run("rejects HS256 algorithm", func(t *testing.T) {
+		p := New("oidc", "client-id", "client-secret",
+			"https://auth.example.com/authorize",
+			"https://auth.example.com/token",
+			[]string{"openid"},
+			nil,
+			WithOIDC(OIDCConfig{
+				Issuer:      "https://idp.example.com",
+				AllowedAlgs: []string{"HS256"},
+			}),
+		)
+		require.Error(t, p.configErr)
+		assert.Contains(t, p.configErr.Error(), "algorithm \"HS256\" is not allowed")
+	})
+
+	t.Run("allows valid asymmetric algorithms", func(t *testing.T) {
+		p := New("oidc", "client-id", "client-secret",
+			"https://auth.example.com/authorize",
+			"https://auth.example.com/token",
+			[]string{"openid"},
+			nil,
+			WithOIDC(OIDCConfig{
+				Issuer:      "https://idp.example.com",
+				AllowedAlgs: []string{"RS256", "ES256"},
+			}),
+		)
+		assert.NoError(t, p.configErr)
+		assert.True(t, p.oidcEnabled())
+	})
+}
