@@ -3,7 +3,10 @@ package oauth
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/identity"
@@ -30,6 +33,7 @@ type handlerConfig struct {
 	stateCookieName string
 	stateTTL        time.Duration
 	redirectURL     string
+	allowedHosts    []string
 	usePKCE         bool
 	tenantResolver  func(*http.Request) string
 	successURL      string
@@ -80,6 +84,13 @@ func WithInsecureCookies() HandlerOption {
 // configure it explicitly in production.
 func WithRedirectURL(rawURL string) HandlerOption {
 	return func(h *handlerConfig) { h.redirectURL = rawURL }
+}
+
+// WithAllowedHosts configures the hostnames permitted when dynamically deriving the
+// redirect_uri from the incoming request. If the request's Host does not match any
+// allowed host, the redirect URI derivation fails and the handler rejects the request.
+func WithAllowedHosts(hosts ...string) HandlerOption {
+	return func(h *handlerConfig) { h.allowedHosts = append(h.allowedHosts, hosts...) }
 }
 
 // WithStateCookieName overrides the CSRF state cookie name (default "oauth_state").
@@ -143,6 +154,11 @@ func WithAllowUnverifiedEmail() HandlerOption {
 func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		redirectURI := cfg.resolveRedirectURL(r)
+		if redirectURI == "" {
+			http.Error(w, "invalid or untrusted host", http.StatusBadRequest)
+			return
+		}
 		state, err := newState()
 		if err != nil {
 			http.Error(w, "internal error", http.StatusInternalServerError)
@@ -167,7 +183,7 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
 		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r)))
-		http.Redirect(w, r, p.AuthCodeURL(state, cfg.resolveRedirectURL(r), challenge, authOpts...), http.StatusFound)
+		http.Redirect(w, r, p.AuthCodeURL(state, redirectURI, challenge, authOpts...), http.StatusFound)
 	}
 }
 
@@ -178,6 +194,11 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		redirectURI := cfg.resolveRedirectURL(r)
+		if redirectURI == "" {
+			cfg.fail(w, r, http.StatusBadRequest, "untrusted_host")
+			return
+		}
 		raw, ok := cfg.readStateCookie(r)
 		cfg.clearStateCookie(w) // single-use, regardless of outcome
 		if !ok {
@@ -221,7 +242,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		if p.oidcEnabled() {
 			exchOpts = append(exchOpts, WithExpectedNonce(nonce))
 		}
-		info, err := p.Exchange(r.Context(), code, cfg.resolveRedirectURL(r), verifier, exchOpts...)
+		info, err := p.Exchange(r.Context(), code, redirectURI, verifier, exchOpts...)
 		if err != nil {
 			cfg.fail(w, r, http.StatusBadGateway, "exchange_failed")
 			return
@@ -301,20 +322,100 @@ func (cfg handlerConfig) clearStateCookie(w http.ResponseWriter) {
 }
 
 // resolveRedirectURL returns the configured redirect_uri or, as a fallback, derives one from
-// the request. The fallback is correct for the callback handler (the request URL is the
-// callback URL) but not for BeginHandler — configure WithRedirectURL in production.
+// the request. The fallback validates that r.Host is syntactically valid and, if allowedHosts
+// are configured, that r.Host matches one of them.
 func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 	if cfg.redirectURL != "" {
 		return cfg.redirectURL
 	}
+	if !isValidHost(r.Host) {
+		return ""
+	}
+	if len(cfg.allowedHosts) > 0 {
+		reqHost := r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			reqHost = h
+		}
+		reqHost = strings.Trim(reqHost, "[]")
+		allowed := false
+		for _, ah := range cfg.allowedHosts {
+			target := ah
+			if h, _, err := net.SplitHostPort(ah); err == nil {
+				target = h
+			}
+			target = strings.Trim(target, "[]")
+			if strings.EqualFold(reqHost, target) || strings.EqualFold(r.Host, ah) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return ""
+		}
+	}
 	return requestScheme(r) + "://" + r.Host + r.URL.Path
+}
+
+func isValidHost(rawHost string) bool {
+	if rawHost == "" {
+		return false
+	}
+	for i := 0; i < len(rawHost); i++ {
+		b := rawHost[i]
+		if b <= ' ' || b == 0x7f || b == '/' || b == '\\' || b == '@' || b == '?' || b == '#' || b == '%' {
+			return false
+		}
+	}
+	host := rawHost
+	if h, port, err := net.SplitHostPort(rawHost); err == nil {
+		host = h
+		if port == "" {
+			return false
+		}
+		p, err := strconv.Atoi(port)
+		if err != nil || p < 1 || p > 65535 {
+			return false
+		}
+	} else {
+		if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+			host = host[1 : len(host)-1]
+		}
+	}
+	if host == "" {
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return true
+	}
+	if strings.ContainsAny(host, ":[]") {
+		return false
+	}
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || len(host) > 253 {
+		return false
+	}
+	labels := strings.Split(host, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+		for j := 0; j < len(label); j++ {
+			ch := label[j]
+			isAlphaNum := (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9')
+			if !isAlphaNum && ch != '-' && ch != '_' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func requestScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
 	}
-	if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" {
+	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
+	if proto == "https" || proto == "http" {
 		return proto
 	}
 	return "http"

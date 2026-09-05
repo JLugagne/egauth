@@ -333,10 +333,10 @@ func TestSecGlo10_JanitorStop_BlocksIndefinitelyOnLongRunningCleanup(t *testing.
 	}
 }
 
-// SEC-OAU-06 (CVSS 6.9): Dérivation non sécurisée de redirect_uri via Host / X-Forwarded-Proto.
-// When WithRedirectURL is not provided, resolveRedirectURL blindly trusts r.Host and
-// X-Forwarded-Proto. An attacker injecting Host: evil.attacker.com causes BeginHandler to construct
-// redirect_uri=https://evil.attacker.com/oauth/begin.
+// SEC-OAU-06 (CVSS 6.9): Sanitize Host and X-Forwarded-Proto in redirect_uri derivation.
+// When WithRedirectURL is not provided, resolveRedirectURL validates r.Host against WithAllowedHosts.
+// Requests with an untrusted host are rejected with HTTP 400 Bad Request, while legitimate
+// hosts produce the expected redirect URI.
 func TestSecOau06_ResolveRedirectURL_UnsanitizedHostAndForwardedProto(t *testing.T) {
 	p := oauth.New("mock-provider", "client-id", "client-secret",
 		"https://provider.example.com/oauth/authorize",
@@ -345,27 +345,37 @@ func TestSecOau06_ResolveRedirectURL_UnsanitizedHostAndForwardedProto(t *testing
 		nil,
 	)
 
-	// BeginHandler without WithRedirectURL
-	beginHandler := oauth.BeginHandler(p)
+	// BeginHandler configured with WithAllowedHosts
+	beginHandler := oauth.BeginHandler(p, oauth.WithAllowedHosts("app.example.com"))
 
-	req := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
-	req.Host = "evil.attacker.com"
-	req.Header.Set("X-Forwarded-Proto", "https")
-	rec := httptest.NewRecorder()
+	// 1. Host header poisoning attempt is rejected with 400 Bad Request
+	reqAttack := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
+	reqAttack.Host = "evil.attacker.com"
+	reqAttack.Header.Set("X-Forwarded-Proto", "https")
+	recAttack := httptest.NewRecorder()
 
-	beginHandler.ServeHTTP(rec, req)
-	require.Equal(t, http.StatusFound, rec.Code)
+	beginHandler.ServeHTTP(recAttack, reqAttack)
+	assert.Equal(t, http.StatusBadRequest, recAttack.Code,
+		"Untrusted host header must be rejected with 400 Bad Request")
 
-	location := rec.Header().Get("Location")
+	// 2. Legitimate host produces the expected redirect URI
+	reqLegit := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
+	reqLegit.Host = "app.example.com"
+	reqLegit.Header.Set("X-Forwarded-Proto", "https")
+	recLegit := httptest.NewRecorder()
+
+	beginHandler.ServeHTTP(recLegit, reqLegit)
+	require.Equal(t, http.StatusFound, recLegit.Code)
+
+	location := recLegit.Header().Get("Location")
 	require.NotEmpty(t, location)
 
 	parsedURL, err := url.Parse(location)
 	require.NoError(t, err)
 
 	redirectURI := parsedURL.Query().Get("redirect_uri")
-	// Flaw confirmed: The derived redirect_uri contains the attacker-injected Host!
-	assert.Equal(t, "https://evil.attacker.com/oauth/begin", redirectURI,
-		"Flaw confirmed: redirect_uri was derived from untrusted Host header")
+	assert.Equal(t, "https://app.example.com/oauth/begin", redirectURI,
+		"Legitimate host must produce the expected redirect URI")
 }
 
 // SEC-OAU-07 (CVSS 5.3): Suivi automatique non sécurisé des redirections HTTP (307/308) avec fuite de client_secret.
