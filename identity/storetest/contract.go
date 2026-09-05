@@ -437,6 +437,49 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.True(t, found.LockedUntil.After(time.Now()), "the fresh lock must be in the future")
 	})
 
+	t.Run("Contract: Failed attempts decay after lockout duration when account was not locked", func(t *testing.T) {
+		email := "test_lockout_decay@example.com"
+		user, err := store.CreateUser(ctx, tenantA, email)
+		require.NoError(t, err)
+
+		hash := "hashed_pass"
+		ident := &identity.Identity{
+			UserID:       user.ID,
+			Provider:     "password",
+			ProviderID:   email,
+			PasswordHash: &hash,
+		}
+		require.NoError(t, store.AddIdentity(ctx, tenantA, ident))
+
+		const shortThreshold = 5
+		const shortWindow = 20 * time.Millisecond
+
+		// Record 2 failed attempts within the window.
+		for i := 1; i <= 2; i++ {
+			justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, shortThreshold, shortWindow)
+			require.NoError(t, err)
+			assert.False(t, justLocked)
+		}
+
+		found, err := store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		assert.Equal(t, 2, found.FailedAttempts)
+		assert.Nil(t, found.LockedUntil)
+
+		// Wait for the sliding window to elapse.
+		time.Sleep(30 * time.Millisecond)
+
+		// A subsequent failed attempt must decay stale attempts and reset to 1 instead of incrementing to 3.
+		justLocked, err := store.IncrementFailedAttempts(ctx, tenantA, ident.ID, shortThreshold, shortWindow)
+		require.NoError(t, err)
+		assert.False(t, justLocked, "must not lock the account on decayed attempt")
+
+		found, err = store.FindIdentityByProvider(ctx, tenantA, "password", email)
+		require.NoError(t, err)
+		assert.Equal(t, 1, found.FailedAttempts, "stale failed attempts must decay and reset to 1 after sliding window has elapsed")
+		assert.Nil(t, found.LockedUntil, "account must remain unlocked")
+	})
+
 	t.Run("Contract: Password Update", func(t *testing.T) {
 		email := "test_pwupdate@example.com"
 		user, err := store.CreateUser(ctx, tenantA, email)

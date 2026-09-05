@@ -209,7 +209,7 @@ func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 		purpose := "login"
 
 		blockDelivery := make(chan struct{})
-		deliveryStarted := make(chan struct{})
+		deliveryStarted := make(chan struct{}, 1)
 
 		deliver := func(ctx context.Context, ch *otp.Challenge) error {
 			select {

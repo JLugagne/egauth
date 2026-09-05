@@ -132,6 +132,10 @@ type LockoutStore interface {
 	// IncrementFailedAttempts increments the failed-attempt counter for an identity.
 	// When the counter reaches/exceeds lockThreshold, LockedUntil is set to now + lockDuration.
 	//
+	// When the account was not locked (LockedUntil is nil) and lockDuration > 0 and the time
+	// elapsed since UpdatedAt is at least lockDuration, stale failed attempts outside the
+	// sliding window decay and the counter resets before the increment.
+	//
 	// justLocked reports whether THIS call's atomic increment is the one that crossed the
 	// threshold (the counter went from below lockThreshold to at/above it). It is derived from
 	// the post-increment counter inside the same atomic operation, so under concurrent failed

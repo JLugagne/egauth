@@ -287,13 +287,14 @@ func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *
 	})
 }
 
-// TestSecurity_SEC_ID_10_Persistent_Failed_Attempts_No_TTL verifies that failed login
-// attempts persist indefinitely without any TTL or sliding window, allowing an attacker
-// to prime an account so a single user typo triggers a lockout.
+// TestSecurity_SEC_ID_10_Persistent_Failed_Attempts_No_TTL verifies that stale failed login
+// attempts decay after the sliding window (lockDuration) elapses, preventing an attacker
+// from priming an account so that a subsequent single user typo triggers a lockout.
 func TestSecurity_SEC_ID_10_Persistent_Failed_Attempts_No_TTL(t *testing.T) {
 	ctx := context.Background()
 
-	store := identitymemory.NewStore()
+	now := time.Now()
+	store := identitymemory.NewStore(identitymemory.WithClock(func() time.Time { return now }))
 	hasher := &hashertest.MockHasher{
 		HashFunc: func(ctx context.Context, p string) (string, error) { return "hash_" + p, nil },
 	}
@@ -318,23 +319,26 @@ func TestSecurity_SEC_ID_10_Persistent_Failed_Attempts_No_TTL(t *testing.T) {
 		assert.False(t, justLocked)
 	}
 
-	// Counter stays permanently at 4
+	// Counter is at 4 attempts within the window
 	identsAfter, err := store.FindIdentitiesByUserID(ctx, "", user.ID)
 	require.NoError(t, err)
 	assert.Equal(t, 4, identsAfter[0].FailedAttempts)
 	assert.Nil(t, identsAfter[0].LockedUntil)
 
-	// Long time passes in real life (no TTL exists on failed_attempts).
+	// Long time passes (sliding window elapses)
+	now = now.Add(lockDuration + time.Second)
+
 	// Legitimate user makes a single typo:
 	justLocked, err := store.IncrementFailedAttempts(ctx, "", pwIdent.ID, lockThreshold, lockDuration)
 	require.NoError(t, err)
 
-	// FLAW: The account is now immediately locked because stale attempts never decayed!
-	assert.True(t, justLocked, "SEC-ID-10 confirmed: account was locked on user's single attempt due to lack of failed attempts TTL")
+	// Stale failed attempts decayed: the single typo resets the counter to 1 and does NOT lock the account.
+	assert.False(t, justLocked, "account must not be locked after sliding window has elapsed")
 
 	identsLocked, err := store.FindIdentitiesByUserID(ctx, "", user.ID)
 	require.NoError(t, err)
-	assert.NotNil(t, identsLocked[0].LockedUntil, "Account is locked")
+	assert.Equal(t, 1, identsLocked[0].FailedAttempts, "failed attempts counter must reset to 1 after sliding window")
+	assert.Nil(t, identsLocked[0].LockedUntil, "account must remain unlocked")
 }
 
 // TestSecurity_SEC_ID_11_Timing_Oracle_Discrepancy shows that RequestPasswordReset

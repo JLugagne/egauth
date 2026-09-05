@@ -9,21 +9,59 @@ import (
 	"github.com/google/uuid"
 )
 
+// Option configures a Store.
+type Option func(*Store)
+
+// WithClock configures the time source used by the store (useful in tests).
+func WithClock(clock func() time.Time) Option {
+	return func(s *Store) {
+		s.now = clock
+	}
+}
+
 // Store is an in-memory implementation of identity.Store.
 type Store struct {
 	mu                 sync.RWMutex
 	users              map[uuid.UUID]*identity.User
 	identities         map[uuid.UUID]*identity.Identity
 	verificationTokens map[string]*identity.VerificationToken // keyed by selector
+	now                func() time.Time
 }
 
 // NewStore creates a new in-memory Store.
-func NewStore() *Store {
-	return &Store{
+func NewStore(opts ...Option) *Store {
+	s := &Store{
 		users:              make(map[uuid.UUID]*identity.User),
 		identities:         make(map[uuid.UUID]*identity.Identity),
 		verificationTokens: make(map[string]*identity.VerificationToken),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// SetClock configures the time source used by the store (useful in tests).
+func (s *Store) SetClock(clock func() time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.now = clock
+}
+
+// SetIdentityUpdatedAt modifies the UpdatedAt timestamp of an identity (useful in tests).
+func (s *Store) SetIdentityUpdatedAt(identityID uuid.UUID, t time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ident, ok := s.identities[identityID]; ok {
+		ident.UpdatedAt = t
+	}
+}
+
+func (s *Store) timeNow() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
 }
 
 // CreateUser creates a new user.
@@ -37,7 +75,7 @@ func (s *Store) CreateUser(ctx context.Context, tenantID string, email string) (
 		}
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	user := &identity.User{
 		ID:        uuid.Must(uuid.NewV7()),
 		TenantID:  tenantID,
@@ -116,7 +154,7 @@ func (s *Store) UpdateUser(ctx context.Context, tenantID string, user *identity.
 
 	uCopy := *user
 	uCopy.TenantID = tenantID
-	uCopy.UpdatedAt = time.Now()
+	uCopy.UpdatedAt = s.timeNow()
 	s.users[user.ID] = &uCopy
 
 	return nil
@@ -143,7 +181,7 @@ func (s *Store) UpdateUserEmail(ctx context.Context, tenantID string, userID uui
 		}
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	user.Email = newEmail
 	v := verifiedAt
 	user.EmailVerifiedAt = &v
@@ -172,7 +210,7 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 		return identity.ErrUserNotFound
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	existing.DeletedAt = &now
 	existing.Email = uuid.Must(uuid.NewV7()).String()
 	existing.UpdatedAt = now
@@ -222,7 +260,7 @@ func (s *Store) AddIdentity(ctx context.Context, tenantID string, ident *identit
 		}
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	ident.ID = uuid.Must(uuid.NewV7())
 	ident.TenantID = tenantID
 	ident.CreatedAt = now
@@ -279,7 +317,7 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, use
 			ident.LockedUntil = nil
 			ident.PasswordChangedAt = changedAt
 			ident.MustChangePassword = mustChange
-			ident.UpdatedAt = time.Now()
+			ident.UpdatedAt = s.timeNow()
 			return nil
 		}
 	}
@@ -303,7 +341,7 @@ func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, us
 		return "", err
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	vt := &identity.VerificationToken{
 		Selector:     selector,
 		VerifierHash: verifierHash,
@@ -336,7 +374,7 @@ func (s *Store) ConsumeVerificationToken(ctx context.Context, tenantID string, t
 		return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
 	}
 
-	if time.Now().After(vt.ExpiresAt) {
+	if s.timeNow().After(vt.ExpiresAt) {
 		// Expired but genuine: drop it and report expiry to the legitimate holder.
 		delete(s.verificationTokens, selector)
 		return uuid.Nil, nil, identity.ErrVerificationTokenExpired
@@ -352,7 +390,7 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := time.Now()
+	now := s.timeNow()
 	var deleted int64
 	for selector, vt := range s.verificationTokens {
 		if vt.TenantID != tenantID {
@@ -373,6 +411,10 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 // When the identity's prior lock has already expired at entry (LockedUntil is set but not
 // after now), the counter is reset to zero and LockedUntil cleared before the increment, so a
 // new lockout cycle begins and re-crossing the threshold reports justLocked again.
+//
+// When the identity was not locked (LockedUntil is nil) and lockDuration > 0 and the time
+// elapsed since UpdatedAt is at least lockDuration, stale failed attempts outside the
+// sliding window decay and the counter is reset to zero before the increment.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -382,10 +424,12 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, id
 		return false, identity.ErrIdentityNotFound
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	if ident.LockedUntil != nil && !ident.LockedUntil.After(now) {
 		ident.FailedAttempts = 0
 		ident.LockedUntil = nil
+	} else if ident.LockedUntil == nil && lockDuration > 0 && !ident.UpdatedAt.IsZero() && now.Sub(ident.UpdatedAt) >= lockDuration {
+		ident.FailedAttempts = 0
 	}
 
 	before := ident.FailedAttempts
@@ -412,7 +456,7 @@ func (s *Store) ResetFailedAttempts(ctx context.Context, tenantID string, identi
 
 	ident.FailedAttempts = 0
 	ident.LockedUntil = nil
-	ident.UpdatedAt = time.Now()
+	ident.UpdatedAt = s.timeNow()
 
 	return nil
 }
@@ -449,7 +493,7 @@ func (s *Store) UpdateUserPhone(ctx context.Context, tenantID string, userID uui
 		}
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	p := newPhone
 	user.Phone = &p
 	v := verifiedAt
@@ -470,7 +514,7 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, us
 		return identity.ErrUserNotFound
 	}
 
-	now := time.Now()
+	now := s.timeNow()
 	r := recoveryEmail
 	user.RecoveryEmail = &r
 	v := verifiedAt
@@ -493,7 +537,7 @@ func (s *Store) DisableUser(ctx context.Context, tenantID string, id uuid.UUID, 
 
 	d := disabledAt
 	user.DisabledAt = &d
-	user.UpdatedAt = time.Now()
+	user.UpdatedAt = s.timeNow()
 
 	return nil
 }
@@ -510,7 +554,7 @@ func (s *Store) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) e
 	}
 
 	user.DisabledAt = nil
-	user.UpdatedAt = time.Now()
+	user.UpdatedAt = s.timeNow()
 
 	return nil
 }

@@ -469,16 +469,22 @@ func (s *Store) DeleteExpiredVerificationTokens(ctx context.Context, tenantID st
 // now()), the counter is restarted from zero (this attempt makes it 1) and the stale lock
 // cleared in the same statement, so a new lockout cycle begins and re-crossing the threshold
 // reports justLocked again.
+//
+// When the account was not locked (locked_until is NULL) and lockDuration > 0 and the time
+// elapsed since updated_at is at least lockDuration, stale failed attempts outside the
+// sliding window decay and failed_attempts resets to 1 in the same statement.
 func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, identityID uuid.UUID, lockThreshold int, lockDuration time.Duration) (justLocked bool, err error) {
 	query := `
 		UPDATE identities
 		SET failed_attempts = CASE
 				WHEN locked_until IS NOT NULL AND locked_until <= now() THEN 1
+				WHEN locked_until IS NULL AND $4 > 0 AND updated_at + ($4::bigint * interval '1 millisecond') <= now() THEN 1
 				ELSE failed_attempts + 1
 			END,
 			locked_until = CASE
 				WHEN $3 > 0 AND (CASE
 						WHEN locked_until IS NOT NULL AND locked_until <= now() THEN 1
+						WHEN locked_until IS NULL AND $4 > 0 AND updated_at + ($4::bigint * interval '1 millisecond') <= now() THEN 1
 						ELSE failed_attempts + 1
 					END) >= $3 THEN now() + ($4::bigint * interval '1 millisecond')
 				WHEN locked_until IS NOT NULL AND locked_until <= now() THEN NULL
@@ -488,9 +494,10 @@ func (s *Store) IncrementFailedAttempts(ctx context.Context, tenantID string, id
 		WHERE id = $1 AND tenant_id = $2
 		RETURNING $3 > 0 AND failed_attempts >= $3 AND failed_attempts - 1 < $3
 	`
-	// failed_attempts in RETURNING is the post-update value: after an expired lock it is 1
-	// (the restarted count), otherwise pre-increment + 1. The predicate therefore reduces to
-	// "effective pre-increment < threshold <= post-increment": the crossing transition only.
+	// failed_attempts in RETURNING is the post-update value: after an expired lock or decayed
+	// counter it is 1 (the restarted count), otherwise pre-increment + 1. The predicate
+	// therefore reduces to "effective pre-increment < threshold <= post-increment": the
+	// crossing transition only.
 	row := s.db.QueryRow(ctx, query, identityID, tenantID, lockThreshold, lockDuration.Milliseconds())
 	if err := row.Scan(&justLocked); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
