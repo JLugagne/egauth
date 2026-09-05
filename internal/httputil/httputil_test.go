@@ -167,3 +167,17 @@ func TestParseLimitedForm(t *testing.T) {
 		assert.Equal(t, "request_too_large", *errCode)
 	})
 }
+
+func TestClientIP(t *testing.T) {
+	r1 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r1.RemoteAddr = "192.0.2.1:12345"
+	assert.Equal(t, "192.0.2.1", httputil.ClientIP(r1))
+
+	r2 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r2.RemoteAddr = "192.0.2.1"
+	assert.Equal(t, "192.0.2.1", httputil.ClientIP(r2))
+
+	r3 := httptest.NewRequest(http.MethodGet, "/", nil)
+	r3.RemoteAddr = "[2001:db8::1]:8080"
+	assert.Equal(t, "2001:db8::1", httputil.ClientIP(r3))
+}

@@ -171,3 +171,24 @@ func TestUserResolverFromContext(t *testing.T) {
 		assert.False(t, sok)
 	})
 }
+
+func TestClientContext(t *testing.T) {
+	ctx := context.Background()
+
+	// Initially absent
+	cc, ok := tokens.ClientContextFromContext(ctx)
+	assert.False(t, ok)
+	assert.True(t, cc.IsEmpty())
+
+	// Injected
+	expected := tokens.ClientContext{
+		IP:        "198.51.100.1",
+		UserAgent: "TestAgent/1.0",
+	}
+	ctxWithCC := tokens.WithClientContext(ctx, expected)
+
+	got, ok := tokens.ClientContextFromContext(ctxWithCC)
+	assert.True(t, ok)
+	assert.Equal(t, expected, got)
+	assert.False(t, got.IsEmpty())
+}

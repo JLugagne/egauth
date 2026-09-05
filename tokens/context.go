@@ -147,3 +147,28 @@ func MustChangeResolverFromContext[C any](r *http.Request) bool {
 	}
 	return claims.MustChangePassword
 }
+
+// ClientContext carries network/client metadata (such as IP address and User-Agent)
+// associated with an authentication or token rotation request.
+type ClientContext struct {
+	IP        string
+	UserAgent string
+}
+
+// IsEmpty reports whether both IP and UserAgent are empty.
+func (c ClientContext) IsEmpty() bool {
+	return c.IP == "" && c.UserAgent == ""
+}
+
+type clientCtxKey struct{}
+
+// WithClientContext attaches a ClientContext to ctx.
+func WithClientContext(ctx context.Context, cc ClientContext) context.Context {
+	return context.WithValue(ctx, clientCtxKey{}, cc)
+}
+
+// ClientContextFromContext extracts the ClientContext from ctx, if present.
+func ClientContextFromContext(ctx context.Context) (ClientContext, bool) {
+	cc, ok := ctx.Value(clientCtxKey{}).(ClientContext)
+	return cc, ok
+}

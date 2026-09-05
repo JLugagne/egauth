@@ -2,12 +2,15 @@ package jwt_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/issuertest"
 	"github.com/JLugagne/egauth/tokens/jwt"
+	"github.com/JLugagne/egauth/tokens/memory"
 	"github.com/JLugagne/egauth/tokens/storetest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -372,4 +375,71 @@ func TestRotate_NonAtomicStore_RollbackOnFailure(t *testing.T) {
 	oldRT := tokensMap[tokens.HashToken(initialPair.RefreshToken)]
 	require.NotNil(t, oldRT)
 	assert.Nil(t, oldRT.ConsumedAt, "old token ConsumedAt must be rolled back to nil on save failure")
+}
+
+func TestRotate_DetectSessionTheftWithinGrace(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[MyCustomClaims]()
+	userID := uuid.Must(uuid.NewV7())
+	sink := &captureSink{}
+
+	claimsProvider := tokens.ClaimsProviderFunc[MyCustomClaims](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[MyCustomClaims], error) {
+		return tokens.Claims[MyCustomClaims]{Subject: uid}, nil
+	})
+
+	svc := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
+		Store:            store,
+		SecretKey:        "super-secret-key-for-testing----",
+		Issuer:           "egauth-test",
+		AccessTTL:        15 * time.Minute,
+		RefreshTTL:       24 * time.Hour,
+		ReuseGracePeriod: 10 * time.Second,
+		ClaimsProvider:   claimsProvider,
+		EventSink:        sink,
+	})
+
+	// Issue token
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+	require.NoError(t, err)
+
+	// Client A (IP "1.2.3.4") rotates the token
+	ctxA := tokens.WithClientContext(ctx, tokens.ClientContext{IP: "1.2.3.4", UserAgent: "ClientA"})
+	newPairA, err := svc.Rotate(ctxA, "", pair.RefreshToken)
+	require.NoError(t, err)
+
+	// Client B (IP "5.6.7.8") presents the SAME token within the grace period
+	ctxB := tokens.WithClientContext(ctx, tokens.ClientContext{IP: "5.6.7.8", UserAgent: "ClientB"})
+	_, theftErr := svc.Rotate(ctxB, "", pair.RefreshToken)
+
+	// Theft MUST return ErrRefreshTokenReused and NOT ErrRefreshConcurrent
+	require.ErrorIs(t, theftErr, tokens.ErrRefreshTokenReused, "theft must return ErrRefreshTokenReused")
+	assert.False(t, errors.Is(theftErr, tokens.ErrRefreshConcurrent), "theft must NOT be classified as benign concurrency ErrRefreshConcurrent")
+
+	// Verify events emitted with reason "grace_theft"
+	evRevoked, okRevoked := sink.findEvent(event.TokenFamilyRevoked)
+	require.True(t, okRevoked, "TokenFamilyRevoked must be emitted on grace theft")
+	assert.Equal(t, "grace_theft", evRevoked.Reason)
+
+	evReuse, okReuse := sink.findEvent(event.RefreshReuseDetected)
+	require.True(t, okReuse, "RefreshReuseDetected must be emitted on grace theft")
+	assert.Equal(t, "grace_theft", evReuse.Reason)
+
+	// The family must be revoked in the store; subsequent rotation of newPairA must fail
+	_, err = svc.Rotate(ctxA, "", newPairA.RefreshToken)
+	assert.ErrorIs(t, err, tokens.ErrRefreshTokenNotFound, "family must be revoked following theft in grace window")
+
+	// Test benign concurrency with matching client context
+	pair2, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+	require.NoError(t, err)
+
+	newPair2, err := svc.Rotate(ctxA, "", pair2.RefreshToken)
+	require.NoError(t, err)
+
+	// Same client presents token again within grace -> benign concurrency
+	_, benignErr := svc.Rotate(ctxA, "", pair2.RefreshToken)
+	require.ErrorIs(t, benignErr, tokens.ErrRefreshConcurrent, "same client replay within grace must be treated as benign concurrency")
+
+	// Family remains valid for same client
+	_, err = svc.Rotate(ctxA, "", newPair2.RefreshToken)
+	assert.NoError(t, err, "family must remain valid after benign concurrency")
 }

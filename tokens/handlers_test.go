@@ -457,3 +457,25 @@ func TestLogoutHandler_CSRFBlocksCrossOriginByDefault(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Contains(t, rec.Body.String(), "cross_site_blocked")
 }
+
+func TestRefreshHandler_PassesClientContext(t *testing.T) {
+	var capturedCC tokens.ClientContext
+	var capturedOK bool
+	rot := &issuertest.MockRotator[struct{}]{
+		RotateFunc: func(ctx context.Context, tenantID string, refreshToken string) (*tokens.TokenPair[struct{}], error) {
+			capturedCC, capturedOK = tokens.ClientContextFromContext(ctx)
+			return &tokens.TokenPair[struct{}]{}, nil
+		},
+	}
+	h := tokens.RefreshHandler[struct{}](rot)
+	req := postWithRefresh("some-token")
+	req.RemoteAddr = "192.0.2.10:4567"
+	req.Header.Set("User-Agent", "TestBrowser/2.0")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	require.True(t, capturedOK)
+	assert.Equal(t, "192.0.2.10", capturedCC.IP)
+	assert.Equal(t, "TestBrowser/2.0", capturedCC.UserAgent)
+}
+

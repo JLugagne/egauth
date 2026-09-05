@@ -158,7 +158,11 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 			return
 		}
 
-		pair, err := rotator.Rotate(r.Context(), cfg.tenant(r), refreshToken)
+		clientCtx := WithClientContext(r.Context(), ClientContext{
+			IP:        httputil.ClientIP(r),
+			UserAgent: r.UserAgent(),
+		})
+		pair, err := rotator.Rotate(clientCtx, cfg.tenant(r), refreshToken)
 		if err != nil {
 			// ErrRefreshConcurrent is benign concurrency: a parallel request won the rotation
 			// race and already minted a fresh, valid refresh cookie for this client (the family
@@ -295,11 +299,7 @@ func (cfg handlerConfig) emitLogout(r *http.Request, tenantID, userID string) {
 // a trusted reverse proxy terminates them, and egauth cannot know the deployment's proxy topology.
 // This mirrors identity.requestContext and the untrusted-RemoteAddr stance of ratelimit.ClientIP.
 func requestContext(r *http.Request) event.RequestContext {
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		ip = host
-	}
-	return event.RequestContext{IP: ip, UserAgent: r.UserAgent()}
+	return event.RequestContext{IP: httputil.ClientIP(r), UserAgent: r.UserAgent()}
 }
 
 func refreshErrorCode(err error) string {

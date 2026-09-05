@@ -5,12 +5,23 @@ package httputil
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
 )
 
+// ClientIP extracts the client IP (host portion) from r.RemoteAddr. It does NOT trust
+// X-Forwarded-For or Forwarded headers because egauth cannot know the deployment proxy topology.
+func ClientIP(r *http.Request) string {
+	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
 // WriteJSON writes a JSON-encoded body with the given HTTP status.
+
 func WriteJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

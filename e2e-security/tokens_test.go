@@ -247,11 +247,13 @@ func TestVulnerability_SECTOK11_VerifyRefreshToken_NoFamilyRevocationOnReplay(t 
 }
 
 // SEC-TOK-04: Session hijacking without theft detection when the attacker advances within the grace window.
+// SEC-TOK-04: detect session theft when refresh token is advanced in grace window
 //
-// Proves that if an attacker intercepts an unconsumed refresh token (RT1) and rotates it,
-// and the victim presents RT1 within the 10s grace window, the server classifies the victim's
-// request as benign concurrency (ErrRefreshConcurrent) and DOES NOT revoke the family.
-// The attacker retains the valid active session (RT2) while the victim is locked out.
+// Verifies that if an attacker intercepts an unconsumed refresh token (RT1) and rotates it,
+// and the victim presents RT1 within the 10s grace window from a distinct client context:
+// - The victim's request is detected as session theft (ErrRefreshTokenReused, not ErrRefreshConcurrent).
+// - The token family is revoked immediately.
+// - The attacker's active session (attackerRT2) is invalidated and subsequent rotation fails.
 func TestVulnerability_SECTOK04_SessionHijackWithinReuseGraceWindow(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore[struct{}]()
@@ -275,30 +277,35 @@ func TestVulnerability_SECTOK04_SessionHijackWithinReuseGraceWindow(t *testing.T
 		Clock:            clock,
 	})
 
+	victimCtx := tokens.WithClientContext(ctx, tokens.ClientContext{IP: "203.0.113.1", UserAgent: "VictimBrowser/1.0"})
+	attackerCtx := tokens.WithClientContext(ctx, tokens.ClientContext{IP: "198.51.100.2", UserAgent: "AttackerBot/2.0"})
+
 	// 1. Victim gets RT1.
-	victimPair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+	victimPair, err := svc.IssueTokenPair(victimCtx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 	stolenRT1 := victimPair.RefreshToken
 
 	// 2. Attacker rotates stolen RT1 at t0 -> gets attackerRT2.
-	attackerPair, err := svc.Rotate(ctx, "", stolenRT1)
+	attackerPair, err := svc.Rotate(attackerCtx, "", stolenRT1)
 	require.NoError(t, err)
 
 	// 3. 2 seconds later (within the 10s grace period), victim attempts to rotate RT1.
 	currTime = currTime.Add(2 * time.Second)
-	_, victimErr := svc.Rotate(ctx, "", stolenRT1)
+	_, victimErr := svc.Rotate(victimCtx, "", stolenRT1)
 
-	// Victim gets ErrRefreshConcurrent instead of family revocation.
-	assert.ErrorIs(t, victimErr, tokens.ErrRefreshConcurrent,
-		"vulnerability confirmed: victim request treated as benign race instead of theft")
+	// Victim request is detected as session theft (ErrRefreshTokenReused), not benign race.
+	assert.ErrorIs(t, victimErr, tokens.ErrRefreshTokenReused,
+		"victim request must be detected as theft across distinct client contexts")
+	assert.False(t, errors.Is(victimErr, tokens.ErrRefreshConcurrent),
+		"theft must not be classified as benign concurrency ErrRefreshConcurrent")
 
-	// 4. Attacker rotates attackerRT2 at t0 + 3s -> gets attackerRT3.
+	// 4. Attacker attempts to rotate attackerRT2 at t0 + 3s -> fails because family was revoked!
 	currTime = currTime.Add(1 * time.Second)
-	attackerPair3, err := svc.Rotate(ctx, "", attackerPair.RefreshToken)
-	require.NoError(t, err,
-		"vulnerability confirmed: attacker session remains valid and continues advancing rotation chain")
-	assert.NotEmpty(t, attackerPair3.RefreshToken)
+	_, attackerErr := svc.Rotate(attackerCtx, "", attackerPair.RefreshToken)
+	assert.ErrorIs(t, attackerErr, tokens.ErrRefreshTokenNotFound,
+		"attacker session must be revoked when theft is detected in grace window")
 }
+
 
 // SEC-TOK-13: Incohérence et désynchronisation du type de principal pour les clés API sans type explicite.
 //

@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/JLugagne/egauth"
@@ -39,6 +40,13 @@ type claimsWrapper[C any] struct {
 // to avoid logging users out on ordinary request concurrency.
 const DefaultReuseGracePeriod = 10 * time.Second
 
+type rotationClientEntry struct {
+	client    tokens.ClientContext
+	rotatedAt time.Time
+}
+
+const maxRotationClients = 10000
+
 // Service provides JWT-based implementations of tokens.Issuer, tokens.Verifier and
 // tokens.Rotator.
 type Service[C any] struct {
@@ -61,6 +69,9 @@ type Service[C any] struct {
 	reuseGrace        time.Duration
 	events            event.Sink
 	now               func() time.Time
+
+	rotationMu      sync.Mutex
+	rotationClients map[string]rotationClientEntry
 }
 
 // SigningKey is one HMAC signing key in a rotation keyset. KeyID is a stable identifier emitted
@@ -387,6 +398,7 @@ func New[C any](cfg Config[C]) *Service[C] {
 		reuseGrace:        cfg.ReuseGracePeriod,
 		events:            cfg.EventSink,
 		now:               cfg.Clock,
+		rotationClients:   make(map[string]rotationClientEntry),
 	}
 }
 
@@ -750,6 +762,7 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	}
 
 	hash := tokens.HashToken(refreshToken)
+	cc, _ := tokens.ClientContextFromContext(ctx)
 
 	rt, err := s.store.FindRefreshToken(ctx, tenantID, hash)
 	if err != nil {
@@ -757,13 +770,17 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	}
 
 	// A consumed token was presented again. Within the reuse grace window this is treated
-	// as benign concurrency (the legitimate client raced itself): the request is rejected
-	// but the family is kept alive. Outside the window it is treated as theft — a stale
-	// token resurfacing long after it was rotated away — and the whole family is revoked so
-	// every descendant is invalidated. If the revocation itself fails we must NOT report a
-	// clean reuse rejection (which the caller treats as "theft handled"); surface the
-	// failure so the family is never silently assumed revoked. Wrapping keeps
-	// errors.Is(…Reused) true for callers and cookie-clearing handlers.
+	// as benign concurrency (the legitimate client raced itself) ONLY IF the presenting client
+	// matches the one that performed the rotation, or if client context is unknown/empty.
+	// If a different client context presents the token within the grace window, this indicates
+	// session theft (an attacker intercepted and rotated the token first, or is replaying a stolen
+	// token during the legitimate user's grace window): the family is immediately revoked,
+	// grace_theft security events are emitted, and ErrRefreshTokenReused is returned.
+	// Outside the window it is treated as theft — a stale token resurfacing long after it was
+	// rotated away — and the whole family is revoked so every descendant is invalidated.
+	// If the revocation itself fails we must NOT report a clean reuse rejection (which the caller
+	// treats as "theft handled"); surface the failure so the family is never silently assumed
+	// revoked. Wrapping keeps errors.Is(…Reused) true for callers and cookie-clearing handlers.
 	if rt.ConsumedAt != nil {
 		if time.Since(*rt.ConsumedAt) > s.reuseGrace {
 			if rerr := s.store.RevokeFamily(ctx, tenantID, rt.FamilyID); rerr != nil {
@@ -771,15 +788,25 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 			}
 			event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "refresh_reuse"})
 			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "after_grace"})
-		} else {
-			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
-			// Benign concurrency: the legitimate client raced itself and the winning request
-			// already minted a fresh pair. Surface the distinct ErrRefreshConcurrent sentinel
-			// (which still wraps ErrRefreshTokenReused) so cookie-clearing callers preserve the
-			// winner's freshly issued refresh cookie instead of logging the user out.
-			return nil, tokens.ErrRefreshConcurrent
+			return nil, tokens.ErrRefreshTokenReused
 		}
-		return nil, tokens.ErrRefreshTokenReused
+
+		prevCC, hasPrev := s.getRotationClient(hash)
+		if hasPrev && isClientTheft(cc, prevCC) {
+			if rerr := s.store.RevokeFamily(ctx, tenantID, rt.FamilyID); rerr != nil {
+				return nil, fmt.Errorf("%w: family revocation failed: %v", tokens.ErrRefreshTokenReused, rerr)
+			}
+			event.Emit(ctx, s.events, event.Event{Type: event.TokenFamilyRevoked, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "grace_theft"})
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "grace_theft"})
+			return nil, tokens.ErrRefreshTokenReused
+		}
+
+		event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "within_grace"})
+		// Benign concurrency: the legitimate client raced itself and the winning request
+		// already minted a fresh pair. Surface the distinct ErrRefreshConcurrent sentinel
+		// (which still wraps ErrRefreshTokenReused) so cookie-clearing callers preserve the
+		// winner's freshly issued refresh cookie instead of logging the user out.
+		return nil, tokens.ErrRefreshConcurrent
 	}
 
 	if s.now().After(rt.ExpiresAt) {
@@ -838,6 +865,7 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 			}
 			return nil, err
 		}
+		s.recordRotationClient(hash, cc)
 		return pair, nil
 	}
 
@@ -869,7 +897,81 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 		return nil, err
 	}
 
+	s.recordRotationClient(hash, cc)
 	return pair, nil
+}
+
+func (s *Service[C]) recordRotationClient(hash string, cc tokens.ClientContext) {
+	if s.reuseGrace <= 0 {
+		return
+	}
+	s.rotationMu.Lock()
+	defer s.rotationMu.Unlock()
+
+	now := s.now()
+	cutoff := now.Add(-s.reuseGrace)
+
+	// Clean up stale entries older than reuseGrace to prevent memory growth.
+	for k, v := range s.rotationClients {
+		if v.rotatedAt.Before(cutoff) {
+			delete(s.rotationClients, k)
+		}
+	}
+
+	if len(s.rotationClients) >= maxRotationClients {
+		var oldestKey string
+		var oldestTime time.Time
+		for k, v := range s.rotationClients {
+			if oldestKey == "" || v.rotatedAt.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = v.rotatedAt
+			}
+		}
+		if oldestKey != "" {
+			delete(s.rotationClients, oldestKey)
+		}
+	}
+
+	if s.rotationClients == nil {
+		s.rotationClients = make(map[string]rotationClientEntry)
+	}
+	s.rotationClients[hash] = rotationClientEntry{
+		client:    cc,
+		rotatedAt: now,
+	}
+}
+
+func (s *Service[C]) getRotationClient(hash string) (tokens.ClientContext, bool) {
+	s.rotationMu.Lock()
+	defer s.rotationMu.Unlock()
+
+	entry, ok := s.rotationClients[hash]
+	if !ok {
+		return tokens.ClientContext{}, false
+	}
+	if s.now().Sub(entry.rotatedAt) > s.reuseGrace {
+		delete(s.rotationClients, hash)
+		return tokens.ClientContext{}, false
+	}
+	return entry.client, true
+}
+
+func isClientTheft(curr, prev tokens.ClientContext) bool {
+	if curr.IsEmpty() || prev.IsEmpty() {
+		return false
+	}
+	if curr.IP != "" && prev.IP != "" && curr.IP != prev.IP {
+		return true
+	}
+	if curr.UserAgent != "" && prev.UserAgent != "" && curr.UserAgent != prev.UserAgent {
+		return true
+	}
+	if (curr.IP == "" || prev.IP == "") && (curr.UserAgent == "" || prev.UserAgent == "") {
+		if curr != prev {
+			return true
+		}
+	}
+	return false
 }
 
 // VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring
