@@ -145,10 +145,10 @@ func TestVulnerability_SECTOK09_MustChangePasswordOverwrittenOnRefresh(t *testin
 		"returned pair claims also reflect the overwritten false value")
 }
 
-// SEC-TOK-10: Absence d'expiration absolue des familles de Refresh Tokens (Prolongation indéfinie).
+// SEC-TOK-10: Absolute maximum lifetime ceiling on refresh token families.
 //
-// Proves that each rotation sets ExpiresAt = now.Add(RefreshTTL) with no absolute ceiling.
-// A session chain can be refreshed indefinitely past any reasonable lifetime limit.
+// Verifies that when MaxRefreshLifetime is configured, token rotation respects the
+// absolute ceiling (clamping expiry) and rejects rotation attempts beyond the ceiling.
 func TestVulnerability_SECTOK10_IndefiniteRefreshTokenExtension(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore[struct{}]()
@@ -157,19 +157,21 @@ func TestVulnerability_SECTOK10_IndefiniteRefreshTokenExtension(t *testing.T) {
 	currTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return currTime }
 
-	refreshTTL := 30 * 24 * time.Hour // 30 days
+	refreshTTL := 30 * 24 * time.Hour  // 30 days
+	maxLifetime := 90 * 24 * time.Hour // 90 days absolute ceiling
 	claimsProvider := tokens.ClaimsProviderFunc[struct{}](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[struct{}], error) {
 		return tokens.Claims[struct{}]{Subject: uid}, nil
 	})
 
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:          store,
-		SecretKey:      "secret-key-at-least-32-bytes-long-test!",
-		Issuer:         "test-issuer",
-		AccessTTL:      15 * time.Minute,
-		RefreshTTL:     refreshTTL,
-		ClaimsProvider: claimsProvider,
-		Clock:          clock,
+		Store:              store,
+		SecretKey:          "secret-key-at-least-32-bytes-long-test!",
+		Issuer:             "test-issuer",
+		AccessTTL:          15 * time.Minute,
+		RefreshTTL:         refreshTTL,
+		MaxRefreshLifetime: maxLifetime,
+		ClaimsProvider:     claimsProvider,
+		Clock:              clock,
 	})
 
 	// Initial login on Day 0.
@@ -178,24 +180,26 @@ func TestVulnerability_SECTOK10_IndefiniteRefreshTokenExtension(t *testing.T) {
 	initialAuthTime := initialPair.Claims.AuthTime
 	currentToken := initialPair.RefreshToken
 
-	// Rotate every 20 days for 15 cycles (300 days total, almost 1 year).
-	for day := 20; day <= 300; day += 20 {
+	// Rotate every 20 days up to Day 80.
+	for day := 20; day <= 80; day += 20 {
 		currTime = currTime.Add(20 * 24 * time.Hour)
 		newPair, err := svc.Rotate(ctx, "", currentToken)
-		require.NoError(t, err, "rotation on day %d should succeed due to lack of absolute max lifetime", day)
+		require.NoError(t, err, "rotation on day %d should succeed within max lifetime", day)
 
-		// Each rotation pushes the expiry 30 days into the future relative to current time.
-		assert.Equal(t, currTime.Add(refreshTTL), newPair.RefreshTokenExpiresAt)
+		expectedExpiry := currTime.Add(refreshTTL)
+		ceiling := initialAuthTime.Add(maxLifetime)
+		if expectedExpiry.After(ceiling) {
+			expectedExpiry = ceiling
+		}
+		assert.Equal(t, expectedExpiry, newPair.RefreshTokenExpiresAt, "expiry on day %d must not exceed max lifetime ceiling", day)
 		currentToken = newPair.RefreshToken
 	}
 
-	// Verify the final token after 300 days:
-	// The original authentication happened 300 days ago, but the family is still alive and kicking.
-	finalClaims, err := svc.VerifyRefreshToken(ctx, "", currentToken)
-	require.NoError(t, err)
-	assert.Equal(t, userID, finalClaims.Subject)
-	assert.True(t, currTime.Sub(initialAuthTime) >= 300*24*time.Hour,
-		"vulnerability confirmed: session family alive 300 days past initial auth without absolute cap")
+	// At Day 100 (past the 90-day absolute ceiling), rotation must be rejected.
+	currTime = currTime.Add(20 * 24 * time.Hour)
+	_, err = svc.Rotate(ctx, "", currentToken)
+	require.ErrorIs(t, err, tokens.ErrTokenExpired,
+		"rotation beyond absolute ceiling on day 100 must fail with ErrTokenExpired")
 }
 
 // SEC-TOK-11: Missing family revocation when VerifyRefreshToken is called on a replayed token.
@@ -305,7 +309,6 @@ func TestVulnerability_SECTOK04_SessionHijackWithinReuseGraceWindow(t *testing.T
 	assert.ErrorIs(t, attackerErr, tokens.ErrRefreshTokenNotFound,
 		"attacker session must be revoked when theft is detected in grace window")
 }
-
 
 // SEC-TOK-13: Incohérence et désynchronisation du type de principal pour les clés API sans type explicite.
 //

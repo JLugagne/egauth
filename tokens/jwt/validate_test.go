@@ -86,6 +86,9 @@ func TestConfig_Validate(t *testing.T) {
 	// TASK-095: nil Store and nil ClaimsProvider must be flagged by Validate.
 	assert.Error(t, mut(func(c *jwt.Config[struct{}]) { c.Store = nil }).Validate(), "nil Store must be rejected by Validate")
 	assert.Error(t, mut(func(c *jwt.Config[struct{}]) { c.ClaimsProvider = nil }).Validate(), "nil ClaimsProvider must be rejected by Validate")
+
+	// SEC-TOK-10: MaxRefreshLifetime must be non-negative.
+	assert.Error(t, mut(func(c *jwt.Config[struct{}]) { c.MaxRefreshLifetime = -1 }).Validate(), "negative MaxRefreshLifetime must be rejected by Validate")
 }
 
 // TestNew_PanicsOnNilStore is the regression test for TASK-095.

@@ -443,3 +443,118 @@ func TestRotate_DetectSessionTheftWithinGrace(t *testing.T) {
 	_, err = svc.Rotate(ctxA, "", newPair2.RefreshToken)
 	assert.NoError(t, err, "family must remain valid after benign concurrency")
 }
+
+// SEC-TOK-10: Absolute maximum lifetime ceiling on refresh token families.
+func TestRotate_MaxRefreshLifetime(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[MyCustomClaims]()
+	userID := uuid.Must(uuid.NewV7())
+
+	now := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	currTime := now
+	clock := func() time.Time { return currTime }
+
+	claimsProvider := tokens.ClaimsProviderFunc[MyCustomClaims](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[MyCustomClaims], error) {
+		return tokens.Claims[MyCustomClaims]{Subject: uid}, nil
+	})
+
+	maxLifetime := 2 * time.Hour
+	refreshTTL := 1 * time.Hour // individual tokens valid for 1 hour
+
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:              store,
+		SecretKey:          "super-secret-key-for-testing----",
+		Issuer:             "egauth-test",
+		AccessTTL:          15 * time.Minute,
+		RefreshTTL:         refreshTTL,
+		MaxRefreshLifetime: maxLifetime,
+		ClaimsProvider:     claimsProvider,
+		Clock:              clock,
+	}
+	svc := jwt.New[MyCustomClaims](cfg)
+
+	t.Run("rotated token ExpiresAt is clamped so it does not exceed AuthTime + MaxRefreshLifetime", func(t *testing.T) {
+		currTime = now
+		// Issue initial token pair at t=0 (valid until t=1h)
+		initialPair, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+		require.NoError(t, err)
+		initialAuthTime := initialPair.Claims.AuthTime
+
+		// Rotate at t=40m -> yields token valid until t=1h40m (< 2h ceiling)
+		currTime = now.Add(40 * time.Minute)
+		pair1, err := svc.Rotate(ctx, "", initialPair.RefreshToken)
+		require.NoError(t, err)
+		assert.Equal(t, currTime.Add(refreshTTL), pair1.RefreshTokenExpiresAt)
+
+		// Rotate at t=1h20m -> currTime + refreshTTL would be t=2h20m (> 2h ceiling).
+		// Expiry must be clamped to initialAuthTime + 2h.
+		currTime = now.Add(80 * time.Minute)
+		pair2, err := svc.Rotate(ctx, "", pair1.RefreshToken)
+		require.NoError(t, err)
+
+		expectedMaxExpiry := initialAuthTime.Add(maxLifetime)
+		assert.Equal(t, expectedMaxExpiry, pair2.RefreshTokenExpiresAt,
+			"rotated token expiry must be clamped to AuthTime + MaxRefreshLifetime")
+
+		storedRT, err := store.FindRefreshToken(ctx, "", pair2.RefreshTokenHash)
+		require.NoError(t, err)
+		assert.Equal(t, expectedMaxExpiry, storedRT.ExpiresAt,
+			"stored refresh token expiry must be clamped to ceiling")
+
+		// Advance clock past the 2h ceiling (e.g. 2h 1m)
+		currTime = now.Add(2*time.Hour + time.Minute)
+
+		_, err = svc.Rotate(ctx, "", pair2.RefreshToken)
+		assert.ErrorIs(t, err, tokens.ErrTokenExpired,
+			"rotating after MaxRefreshLifetime has elapsed must fail with ErrTokenExpired")
+	})
+
+	t.Run("rotation fails with ErrTokenExpired when rotating after 2 hours directly", func(t *testing.T) {
+		// Fresh service with RefreshTTL=3h > MaxRefreshLifetime=2h
+		currTime = now
+		longTTLService := jwt.New[MyCustomClaims](jwt.Config[MyCustomClaims]{
+			Store:              store,
+			SecretKey:          "super-secret-key-for-testing----",
+			Issuer:             "egauth-test",
+			AccessTTL:          15 * time.Minute,
+			RefreshTTL:         3 * time.Hour,
+			MaxRefreshLifetime: maxLifetime,
+			ClaimsProvider:     claimsProvider,
+			Clock:              clock,
+		})
+
+		pair, err := longTTLService.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+		require.NoError(t, err)
+
+		// Initial token should also be clamped to 2h max lifetime
+		assert.Equal(t, now.Add(maxLifetime), pair.RefreshTokenExpiresAt,
+			"initial token expiry must be clamped if RefreshTTL > MaxRefreshLifetime")
+
+		// Advance clock directly past 2 hours
+		currTime = now.Add(2*time.Hour + time.Minute)
+
+		_, err = longTTLService.Rotate(ctx, "", pair.RefreshToken)
+		assert.ErrorIs(t, err, tokens.ErrTokenExpired,
+			"rotating after 2 hours must fail with ErrTokenExpired")
+	})
+
+	t.Run("legacy token with zero AuthTime falls back to CreatedAt for max lifetime", func(t *testing.T) {
+		currTime = now
+		plaintext := "legacy-token-zero-auth-time"
+		createdAt := now
+		require.NoError(t, store.SaveRefreshToken(ctx, "", &tokens.RefreshToken{
+			Hash:      tokens.HashToken(plaintext),
+			FamilyID:  uuid.Must(uuid.NewV7()),
+			UserID:    userID,
+			ExpiresAt: now.Add(3 * time.Hour),
+			CreatedAt: createdAt,
+			// AuthTime intentionally zero
+		}))
+
+		// Advance clock past max lifetime from CreatedAt (2 hours + 1 min from t=0)
+		currTime = now.Add(2*time.Hour + time.Minute)
+		_, err := svc.Rotate(ctx, "", plaintext)
+		assert.ErrorIs(t, err, tokens.ErrTokenExpired,
+			"legacy token rotation past CreatedAt + MaxRefreshLifetime must fail with ErrTokenExpired")
+	})
+}

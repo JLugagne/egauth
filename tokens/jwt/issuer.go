@@ -61,14 +61,15 @@ type Service[C any] struct {
 	keyStore KeyStore
 	issuer   string
 	// expected audiences for the verify path; empty disables the aud check
-	expectedAudiences []string
-	accessTTL         time.Duration
-	refreshTTL        time.Duration
-	refreshLength     int
-	apiKeyLength      int
-	reuseGrace        time.Duration
-	events            event.Sink
-	now               func() time.Time
+	expectedAudiences  []string
+	accessTTL          time.Duration
+	refreshTTL         time.Duration
+	maxRefreshLifetime time.Duration
+	refreshLength      int
+	apiKeyLength       int
+	reuseGrace         time.Duration
+	events             event.Sink
+	now                func() time.Time
 
 	rotationMu      sync.Mutex
 	rotationClients map[string]rotationClientEntry
@@ -122,8 +123,14 @@ type Config[C any] struct {
 	ClaimsProvider tokens.ClaimsProvider[C]
 	AccessTTL      time.Duration
 	RefreshTTL     time.Duration
-	RefreshLength  int
-	APIKeyLength   int
+	// MaxRefreshLifetime caps the absolute lifetime of a refresh token family from its initial
+	// authentication / creation time. When non-zero, token rotation will clamp RefreshExpiresAt
+	// to not exceed auth_time + MaxRefreshLifetime, and will reject rotation attempts once that
+	// ceiling has been reached (returning tokens.ErrTokenExpired). This prevents indefinitely
+	// extended sessions (NIST SP 800-63B). Zero disables the ceiling (backward-compatible).
+	MaxRefreshLifetime time.Duration
+	RefreshLength      int
+	APIKeyLength       int
 	// ReuseGracePeriod tunes refresh-token reuse detection. A replay of a consumed token
 	// within this window is treated as benign concurrency (rejected without revoking the
 	// family); a replay after it is treated as theft and revokes the whole family. The zero
@@ -238,6 +245,9 @@ func (cfg Config[C]) Validate() error {
 	}
 	if cfg.RefreshTTL <= 0 {
 		errs = append(errs, errors.New("jwt: RefreshTTL must be positive"))
+	}
+	if cfg.MaxRefreshLifetime < 0 {
+		errs = append(errs, errors.New("jwt: MaxRefreshLifetime must be non-negative"))
 	}
 	// A non-zero RefreshLength or APIKeyLength below MinTokenLength yields guessable tokens.
 	// Zero means "use the default (32)" and is accepted here; New substitutes the safe default.
@@ -382,23 +392,24 @@ func New[C any](cfg Config[C]) *Service[C] {
 	}
 
 	return &Service[C]{
-		store:             cfg.Store,
-		claimsProvider:    cfg.ClaimsProvider,
-		active:            active,
-		signingKeyID:      signKeyID,
-		verifySigners:     verifySigners,
-		legacy:            legacy,
-		keyStore:          cfg.KeyStore,
-		issuer:            cfg.Issuer,
-		expectedAudiences: cfg.ExpectedAudience,
-		accessTTL:         cfg.AccessTTL,
-		refreshTTL:        cfg.RefreshTTL,
-		refreshLength:     cfg.RefreshLength,
-		apiKeyLength:      cfg.APIKeyLength,
-		reuseGrace:        cfg.ReuseGracePeriod,
-		events:            cfg.EventSink,
-		now:               cfg.Clock,
-		rotationClients:   make(map[string]rotationClientEntry),
+		store:              cfg.Store,
+		claimsProvider:     cfg.ClaimsProvider,
+		active:             active,
+		signingKeyID:       signKeyID,
+		verifySigners:      verifySigners,
+		legacy:             legacy,
+		keyStore:           cfg.KeyStore,
+		issuer:             cfg.Issuer,
+		expectedAudiences:  cfg.ExpectedAudience,
+		accessTTL:          cfg.AccessTTL,
+		refreshTTL:         cfg.RefreshTTL,
+		maxRefreshLifetime: cfg.MaxRefreshLifetime,
+		refreshLength:      cfg.RefreshLength,
+		apiKeyLength:       cfg.APIKeyLength,
+		reuseGrace:         cfg.ReuseGracePeriod,
+		events:             cfg.EventSink,
+		now:                cfg.Clock,
+		rotationClients:    make(map[string]rotationClientEntry),
 	}
 }
 
@@ -480,6 +491,12 @@ func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], fami
 	refreshTokenStr := base64.RawURLEncoding.EncodeToString(refreshBytes)
 	refreshHash := tokens.HashToken(refreshTokenStr)
 	refreshExpiresAt := now.Add(s.refreshTTL)
+	if s.maxRefreshLifetime > 0 && !authTime.IsZero() {
+		maxExpiry := authTime.Add(s.maxRefreshLifetime)
+		if refreshExpiresAt.After(maxExpiry) {
+			refreshExpiresAt = maxExpiry
+		}
+	}
 
 	rt := &tokens.RefreshToken{
 		Hash:               refreshHash,
@@ -811,6 +828,19 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 
 	if s.now().After(rt.ExpiresAt) {
 		return nil, tokens.ErrTokenExpired
+	}
+
+	if s.maxRefreshLifetime > 0 {
+		authTime := rt.AuthTime
+		if authTime.IsZero() {
+			authTime = rt.CreatedAt
+		}
+		if !authTime.IsZero() {
+			maxExpiry := authTime.Add(s.maxRefreshLifetime)
+			if !s.now().Before(maxExpiry) {
+				return nil, tokens.ErrTokenExpired
+			}
+		}
 	}
 
 	// Resolve fresh claims (status, scopes, roles, ...) at rotation time rather than
