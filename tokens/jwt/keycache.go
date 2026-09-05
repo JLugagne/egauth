@@ -30,6 +30,10 @@ import (
 // sink wired, yet long enough to absorb a burst of requests for the same tenant.
 const DefaultKeyCacheTTL = 30 * time.Second
 
+// DefaultKeyCacheMaxEntries is the upper bound on cached tenant keysets when NewCachingKeyStore is
+// constructed without an explicit capacity option.
+const DefaultKeyCacheMaxEntries = 10000
+
 // Event types that must drop a tenant's cached keyset the moment they fire. They mirror the
 // keystore.Manager lifecycle events by value, so wiring a CachingKeyStore as a Manager event sink
 // needs no import of (and no dependency on) the keystore package — preserving tokens/jwt's tiny
@@ -50,9 +54,10 @@ type cachedKeyset struct {
 // CachingKeyStore is a KeyStore decorator adding a bounded-TTL per-tenant cache with explicit and
 // event-driven invalidation. It is safe for concurrent use.
 type CachingKeyStore struct {
-	delegate KeyStore
-	ttl      time.Duration
-	now      func() time.Time
+	delegate   KeyStore
+	ttl        time.Duration
+	maxEntries int
+	now        func() time.Time
 
 	mu      sync.Mutex
 	entries map[string]cachedKeyset
@@ -75,6 +80,18 @@ func WithCacheClock(now func() time.Time) CachingKeyStoreOption {
 	}
 }
 
+// WithCacheMaxEntries bounds the maximum number of tenant entries retained in the cache. A
+// non-positive limit selects DefaultKeyCacheMaxEntries.
+func WithCacheMaxEntries(maxEntries int) CachingKeyStoreOption {
+	return func(c *CachingKeyStore) {
+		if maxEntries <= 0 {
+			c.maxEntries = DefaultKeyCacheMaxEntries
+			return
+		}
+		c.maxEntries = maxEntries
+	}
+}
+
 // NewCachingKeyStore wraps delegate with a cache whose entries live for at most ttl. A non-positive
 // ttl selects DefaultKeyCacheTTL. It panics on a nil delegate (a programming error caught at
 // startup rather than as a nil dereference on the first request), matching jwt.New's fail-fast
@@ -87,10 +104,11 @@ func NewCachingKeyStore(delegate KeyStore, ttl time.Duration, opts ...CachingKey
 		ttl = DefaultKeyCacheTTL
 	}
 	c := &CachingKeyStore{
-		delegate: delegate,
-		ttl:      ttl,
-		now:      time.Now,
-		entries:  make(map[string]cachedKeyset),
+		delegate:   delegate,
+		ttl:        ttl,
+		maxEntries: DefaultKeyCacheMaxEntries,
+		now:        time.Now,
+		entries:    make(map[string]cachedKeyset),
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -130,6 +148,31 @@ func (c *CachingKeyStore) store(tenantID string, active Signer, verify map[strin
 	defer c.mu.Unlock()
 	if c.gen != seenGen {
 		return
+	}
+	if len(c.entries) >= c.maxEntries {
+		now := c.now()
+		for id, e := range c.entries {
+			if now.Sub(e.cachedAt) >= c.ttl {
+				delete(c.entries, id)
+			}
+		}
+		if len(c.entries) >= c.maxEntries {
+			if _, exists := c.entries[tenantID]; !exists {
+				var oldestID string
+				var oldestTime time.Time
+				first := true
+				for id, e := range c.entries {
+					if first || e.cachedAt.Before(oldestTime) {
+						oldestID = id
+						oldestTime = e.cachedAt
+						first = false
+					}
+				}
+				if !first {
+					delete(c.entries, oldestID)
+				}
+			}
+		}
 	}
 	c.entries[tenantID] = cachedKeyset{active: active, verify: verify, cachedAt: c.now()}
 }
@@ -189,6 +232,13 @@ func (c *CachingKeyStore) InvalidateAll() {
 	c.entries = make(map[string]cachedKeyset)
 	c.gen++
 	c.mu.Unlock()
+}
+
+// Len returns the current number of cached tenant entries.
+func (c *CachingKeyStore) Len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.entries)
 }
 
 // EmitEvent implements event.Sink so the cache can be wired as one of the keystore.Manager's sinks

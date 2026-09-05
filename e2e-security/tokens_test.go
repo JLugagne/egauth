@@ -45,12 +45,10 @@ func (m *mockKeyStore) VerificationKeys(_ context.Context, tenantID string) (map
 	return map[string]jwt.Signer{"kid-" + tenantID: signer}, nil
 }
 
-// SEC-TOK-02: Épuisement Mémoire Non Borné dans CachingKeyStore.
+// SEC-TOK-02: Bounded memory capacity and eviction of expired entries in CachingKeyStore.
 //
-// Proves that CachingKeyStore stores every queried tenant in an internal map with
-// no maximum capacity and no background cleaner. Expired entries are only deleted
-// if the exact same tenant is queried again. When an attacker queries many distinct
-// tenants, all entries remain in memory indefinitely even after their TTL has expired.
+// Verifies that CachingKeyStore bounds its internal memory capacity and evicts expired
+// entries when capacity is reached, preventing memory exhaustion attacks from arbitrary tenant lookups.
 func TestVulnerability_SECTOK02_UnboundedMemoryLeakInKeyCache(t *testing.T) {
 	ctx := context.Background()
 	mockKS := newMockKeyStore()
@@ -59,34 +57,40 @@ func TestVulnerability_SECTOK02_UnboundedMemoryLeakInKeyCache(t *testing.T) {
 	clock := func() time.Time { return currTime }
 
 	ttl := 10 * time.Millisecond
-	cache := jwt.NewCachingKeyStore(mockKS, ttl, jwt.WithCacheClock(clock))
+	maxTenants := 50
+	cache := jwt.NewCachingKeyStore(mockKS, ttl, jwt.WithCacheClock(clock), jwt.WithCacheMaxEntries(maxTenants))
 
 	// Simulate attacker probing 50 distinct tenant IDs.
-	numTenants := 50
-	for i := 0; i < numTenants; i++ {
+	for i := 0; i < maxTenants; i++ {
 		tenantID := uuid.New().String()
 		_, err := cache.ActiveSigningKey(ctx, tenantID)
 		require.NoError(t, err)
 	}
 
-	// Inspect the internal entries map via reflection.
+	// Inspect the internal entries map via reflection and Len() method.
 	entriesVal := reflect.ValueOf(cache).Elem().FieldByName("entries")
 	require.True(t, entriesVal.IsValid(), "entries field must exist on CachingKeyStore")
-	assert.Equal(t, numTenants, entriesVal.Len(), "cache should hold all queried tenants")
+	assert.Equal(t, maxTenants, entriesVal.Len(), "cache should hold all queried tenants up to capacity")
+	assert.Equal(t, maxTenants, cache.Len(), "cache.Len() should match max capacity")
 
 	// Advance time past the TTL by 1 hour.
 	currTime = currTime.Add(1 * time.Hour)
 
-	// Since none of the 50 tenants are looked up again, no cleanup occurs.
-	// The expired entries remain allocated in heap memory indefinitely.
-	assert.Equal(t, numTenants, entriesVal.Len(),
-		"vulnerability confirmed: expired tenant entries are not evicted and stay in memory indefinitely")
-
-	// Adding a new tenant increases the map size without cleaning expired entries.
+	// Adding a new tenant when capacity is reached triggers a sweep of expired entries.
 	_, err := cache.ActiveSigningKey(ctx, "new-tenant-id")
 	require.NoError(t, err)
-	assert.Equal(t, numTenants+1, entriesVal.Len(),
-		"cache memory grows monotonically with each new tenant without bounded capacity")
+	assert.Equal(t, 1, cache.Len(),
+		"remediation verified: expired tenant entries were evicted when capacity was reached")
+	assert.Equal(t, 1, entriesVal.Len(),
+		"internal map entries were cleaned up")
+
+	// Verify that capacity remains bounded when filled with unexpired entries.
+	for i := 0; i < maxTenants+10; i++ {
+		tenantID := uuid.New().String()
+		_, err := cache.ActiveSigningKey(ctx, tenantID)
+		require.NoError(t, err)
+	}
+	assert.Equal(t, maxTenants, cache.Len(), "cache memory remains strictly bounded to maxEntries")
 }
 
 // SEC-TOK-09: Écrasement et contournement du contrôle MustChangePassword lors du rafraîchissement.

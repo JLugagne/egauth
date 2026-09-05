@@ -290,3 +290,129 @@ var (
 	_ KeyStore   = (*CachingKeyStore)(nil)
 	_ event.Sink = (*CachingKeyStore)(nil)
 )
+
+func TestCachingKeyStore_BoundedCapacity(t *testing.T) {
+	backing := newCountingKeyStore()
+	cache := NewCachingKeyStore(backing, time.Hour, WithCacheMaxEntries(3))
+
+	ctx := context.Background()
+	tenants := []string{"t1", "t2", "t3", "t4", "t5"}
+	for _, tenant := range tenants {
+		if _, err := cache.ActiveSigningKey(ctx, tenant); err != nil {
+			t.Fatalf("ActiveSigningKey(%s): %v", tenant, err)
+		}
+	}
+
+	if n := cache.Len(); n != 3 {
+		t.Fatalf("expected cache size bounded to 3, got %d", n)
+	}
+}
+
+func TestCachingKeyStore_DefaultMaxEntries(t *testing.T) {
+	backing := newCountingKeyStore()
+	cache := NewCachingKeyStore(backing, time.Hour, WithCacheMaxEntries(0))
+	if cache.maxEntries != DefaultKeyCacheMaxEntries {
+		t.Fatalf("expected maxEntries to default to %d, got %d", DefaultKeyCacheMaxEntries, cache.maxEntries)
+	}
+	negCache := NewCachingKeyStore(backing, time.Hour, WithCacheMaxEntries(-10))
+	if negCache.maxEntries != DefaultKeyCacheMaxEntries {
+		t.Fatalf("expected maxEntries to default to %d, got %d", DefaultKeyCacheMaxEntries, negCache.maxEntries)
+	}
+}
+
+func TestCachingKeyStore_EvictsExpiredEntriesWhenCapacityReached(t *testing.T) {
+	backing := newCountingKeyStore()
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	ttl := 10 * time.Second
+	cache := NewCachingKeyStore(backing, ttl, WithCacheMaxEntries(3), WithCacheClock(clock))
+
+	ctx := context.Background()
+	// Fill cache to capacity (3 entries: t1, t2, t3)
+	for _, tenant := range []string{"t1", "t2", "t3"} {
+		if _, err := cache.ActiveSigningKey(ctx, tenant); err != nil {
+			t.Fatalf("ActiveSigningKey(%s): %v", tenant, err)
+		}
+	}
+	if cache.Len() != 3 {
+		t.Fatalf("expected 3 entries in cache, got %d", cache.Len())
+	}
+
+	// Advance time past TTL
+	now = now.Add(ttl + time.Second)
+
+	// Querying a new tenant t4 reaches capacity check and sweeps all expired entries
+	if _, err := cache.ActiveSigningKey(ctx, "t4"); err != nil {
+		t.Fatalf("ActiveSigningKey(t4): %v", err)
+	}
+
+	// The 3 expired entries should have been evicted; only t4 remains
+	if cache.Len() != 1 {
+		t.Fatalf("expected 1 entry in cache after sweep of expired entries, got %d", cache.Len())
+	}
+
+	// t1 was evicted, so querying t1 should hit the backing store again
+	if _, err := cache.ActiveSigningKey(ctx, "t1"); err != nil {
+		t.Fatalf("ActiveSigningKey(t1): %v", err)
+	}
+	if active, _ := backing.calls("t1"); active != 2 {
+		t.Fatalf("expected t1 to be re-resolved from backing store (2 calls), got %d", active)
+	}
+}
+
+func TestCachingKeyStore_EvictsOldestEntryWhenCapacityExceededByUnexpired(t *testing.T) {
+	backing := newCountingKeyStore()
+	now := time.Unix(1_700_000_000, 0)
+	clock := func() time.Time { return now }
+	cache := NewCachingKeyStore(backing, time.Hour, WithCacheMaxEntries(3), WithCacheClock(clock))
+
+	ctx := context.Background()
+	// Store t1 at now
+	if _, err := cache.ActiveSigningKey(ctx, "t1"); err != nil {
+		t.Fatalf("ActiveSigningKey(t1): %v", err)
+	}
+
+	// Store t2 at now+1s
+	now = now.Add(time.Second)
+	if _, err := cache.ActiveSigningKey(ctx, "t2"); err != nil {
+		t.Fatalf("ActiveSigningKey(t2): %v", err)
+	}
+
+	// Store t3 at now+2s
+	now = now.Add(time.Second)
+	if _, err := cache.ActiveSigningKey(ctx, "t3"); err != nil {
+		t.Fatalf("ActiveSigningKey(t3): %v", err)
+	}
+
+	if cache.Len() != 3 {
+		t.Fatalf("expected 3 entries in cache, got %d", cache.Len())
+	}
+
+	// Store t4 at now+3s; capacity exceeded by unexpired entries, so oldest entry (t1) must be evicted
+	now = now.Add(time.Second)
+	if _, err := cache.ActiveSigningKey(ctx, "t4"); err != nil {
+		t.Fatalf("ActiveSigningKey(t4): %v", err)
+	}
+
+	if cache.Len() != 3 {
+		t.Fatalf("expected cache size bounded at 3, got %d", cache.Len())
+	}
+
+	// t2, t3, t4 should still be cached (1 backing call each)
+	for _, tenant := range []string{"t2", "t3", "t4"} {
+		if _, err := cache.ActiveSigningKey(ctx, tenant); err != nil {
+			t.Fatalf("ActiveSigningKey(%s): %v", tenant, err)
+		}
+		if active, _ := backing.calls(tenant); active != 1 {
+			t.Fatalf("expected %s to be served from cache (1 call), got %d", tenant, active)
+		}
+	}
+
+	// t1 was evicted as oldest, so querying t1 must re-read backing store (2 calls)
+	if _, err := cache.ActiveSigningKey(ctx, "t1"); err != nil {
+		t.Fatalf("ActiveSigningKey(t1): %v", err)
+	}
+	if active, _ := backing.calls("t1"); active != 2 {
+		t.Fatalf("expected t1 to be re-resolved from backing store after eviction (2 calls), got %d", active)
+	}
+}
