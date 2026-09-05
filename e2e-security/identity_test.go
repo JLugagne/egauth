@@ -218,8 +218,9 @@ func TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation(t *test
 	assert.True(t, droppedFound, "SEC-ID-07 confirmed: delivery failure was recorded with ErrDeliveryDropped")
 }
 
-// TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts proves that
-// ChangePassword succeeds even when the target account is administratively disabled or soft-deleted.
+// TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts verifies that
+// ChangePassword and ChangePasswordHandler reject password changes when the target account
+// is administratively disabled or soft-deleted.
 func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *testing.T) {
 	ctx := context.Background()
 
@@ -238,7 +239,7 @@ func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *
 	store := identitymemory.NewStore()
 	svc := identity.NewService(store, hasher, pwPolicy)
 
-	t.Run("ChangePassword succeeds on administratively disabled user", func(t *testing.T) {
+	t.Run("ChangePassword fails on administratively disabled user", func(t *testing.T) {
 		user, err := svc.Register(ctx, "", "suspended@example.com", "OldPassword123!")
 		require.NoError(t, err)
 
@@ -250,13 +251,13 @@ func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *
 		_, err = svc.Authenticate(ctx, "", "password", "suspended@example.com", "OldPassword123!")
 		assert.ErrorIs(t, err, identity.ErrAccountDisabled)
 
-		// FLAW: ChangePassword ignores DisabledAt and succeeds!
+		// ChangePassword rejects disabled user with ErrAccountDisabled
 		err = svc.ChangePassword(ctx, "", user.ID, "OldPassword123!", "NewPassword123!")
-		assert.NoError(t, err, "SEC-ID-09 confirmed: ChangePassword succeeded on disabled user")
+		assert.ErrorIs(t, err, identity.ErrAccountDisabled, "SEC-ID-09: ChangePassword must reject disabled user")
 
-		// In HTTP handler: ChangePasswordHandler also succeeds
+		// In HTTP handler: ChangePasswordHandler also fails with 403 Forbidden
 		req := httptest.NewRequest(http.MethodPost, "/password/change", strings.NewReader(url.Values{
-			"current_password": []string{"NewPassword123!"},
+			"current_password": []string{"OldPassword123!"},
 			"new_password":     []string{"BrandNewPassword123!"},
 		}.Encode()))
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -269,10 +270,10 @@ func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *
 			identity.WithInsecureNoOriginCheck(),
 		)
 		handler.ServeHTTP(rec, req)
-		assert.Equal(t, http.StatusNoContent, rec.Code, "SEC-ID-09 confirmed: HTTP handler allowed password change for disabled user")
+		assert.Equal(t, http.StatusForbidden, rec.Code, "SEC-ID-09: HTTP handler must reject password change for disabled user")
 	})
 
-	t.Run("ChangePassword succeeds on soft-deleted user", func(t *testing.T) {
+	t.Run("ChangePassword fails on soft-deleted user", func(t *testing.T) {
 		user, err := svc.Register(ctx, "", "deleted@example.com", "OldPassword123!")
 		require.NoError(t, err)
 
@@ -280,9 +281,9 @@ func TestSecurity_SEC_ID_09_ChangePassword_On_Suspended_And_Deleted_Accounts(t *
 		err = store.DeleteUser(ctx, "", user.ID)
 		require.NoError(t, err)
 
-		// FLAW: ChangePassword does not check DeletedAt and succeeds!
+		// ChangePassword rejects soft-deleted user with ErrAccountDisabled
 		err = svc.ChangePassword(ctx, "", user.ID, "OldPassword123!", "NewPassword123!")
-		assert.NoError(t, err, "SEC-ID-09 confirmed: ChangePassword succeeded on soft-deleted user")
+		assert.ErrorIs(t, err, identity.ErrAccountDisabled, "SEC-ID-09: ChangePassword must reject soft-deleted user")
 	})
 }
 

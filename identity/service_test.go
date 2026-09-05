@@ -82,6 +82,9 @@ func TestService_ChangePassword(t *testing.T) {
 	t.Run("wrong current password is rejected and nothing is written", func(t *testing.T) {
 		updated := false
 		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id}, nil
+			},
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				return passwordIdent(), nil
 			},
@@ -108,6 +111,9 @@ func TestService_ChangePassword(t *testing.T) {
 	t.Run("correct current and valid new updates the hash", func(t *testing.T) {
 		var gotHash string
 		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id}, nil
+			},
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				assert.Equal(t, userID, id)
 				return passwordIdent(), nil
@@ -156,6 +162,9 @@ func TestService_ChangePassword(t *testing.T) {
 
 	t.Run("account without a password identity is rejected with a decoy hash", func(t *testing.T) {
 		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id}, nil
+			},
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				return []*identity.Identity{{Provider: "google", ProviderID: "x"}}, nil
 			},
@@ -174,6 +183,9 @@ func TestService_ChangePassword(t *testing.T) {
 
 	t.Run("successful change runs account erasers", func(t *testing.T) {
 		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id}, nil
+			},
 			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
 				return passwordIdent(), nil
 			},
@@ -206,6 +218,78 @@ func TestService_ChangePassword(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, eraser1Run, "first eraser must run")
 		assert.True(t, eraser2Run, "second eraser must run")
+	})
+
+	t.Run("suspended user is rejected with ErrAccountDisabled", func(t *testing.T) {
+		now := time.Now()
+		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id, DisabledAt: &now}, nil
+			},
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
+				t.Fatalf("UpdateIdentityPassword must not be reached for a suspended account")
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error { return nil },
+			HashFunc:    func(ctx context.Context, p string) (string, error) { return "new-hash", nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, "", userID, "current-pass", "NewValidPass123!")
+		assert.ErrorIs(t, err, identity.ErrAccountDisabled)
+	})
+
+	t.Run("soft-deleted user is rejected with ErrAccountDisabled", func(t *testing.T) {
+		now := time.Now()
+		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return &identity.User{ID: id, DeletedAt: &now}, nil
+			},
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
+				t.Fatalf("UpdateIdentityPassword must not be reached for a soft-deleted account")
+				return nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error { return nil },
+			HashFunc:    func(ctx context.Context, p string) (string, error) { return "new-hash", nil },
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, "", userID, "current-pass", "NewValidPass123!")
+		assert.ErrorIs(t, err, identity.ErrAccountDisabled)
+	})
+
+	t.Run("non-existent user returns ErrUserNotFound", func(t *testing.T) {
+		store := &storetest.MockStore{
+			FindUserByIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
+			FindIdentitiesByUserIDFunc: func(ctx context.Context, tenantID string, id uuid.UUID) ([]*identity.Identity, error) {
+				return passwordIdent(), nil
+			},
+		}
+		hasher := &hashertest.MockHasher{
+			CompareFunc: func(ctx context.Context, hash, password string) error {
+				t.Fatalf("Compare must not be reached for non-existent user")
+				return nil
+			},
+		}
+		policy := &mockPolicy{VerifyFunc: func(ctx context.Context, p string) error { return nil }}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ChangePassword(ctx, "", userID, "current-pass", "NewValidPass123!")
+		assert.ErrorIs(t, err, identity.ErrUserNotFound)
 	})
 }
 

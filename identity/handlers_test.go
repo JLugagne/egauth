@@ -155,6 +155,19 @@ func TestChangePasswordHandler(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "password_rejected")
 	})
 
+	t.Run("disabled account returns 403", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPassword string) error {
+				assert.Equal(t, uid, userID)
+				return identity.ErrAccountDisabled
+			},
+		}
+		rec := httptest.NewRecorder()
+		identity.ChangePasswordHandler(svc, withUser).ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "account_disabled")
+	})
+
 	t.Run("success returns 204 and passes the fields through", func(t *testing.T) {
 		called := false
 		svc := &servicetest.MockService{
@@ -170,6 +183,29 @@ func TestChangePasswordHandler(t *testing.T) {
 		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.True(t, called)
 	})
+}
+
+func TestChangePasswordWithReissueHandler_DisabledAccount_Returns403(t *testing.T) {
+	svc := &servicetest.MockService{
+		ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPw string) error {
+			return identity.ErrAccountDisabled
+		},
+	}
+
+	withUser := identity.WithUserResolver(func(r *http.Request) (*identity.User, bool) {
+		return &identity.User{ID: uuid.Must(uuid.NewV7())}, true
+	})
+
+	h := identity.ChangePasswordWithReissueHandler[struct{}](svc, okIssuer(), testClaimsBuilder(), withUser)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "account_disabled")
+	assert.Nil(t, cookieByName(rec, tokens.DefaultAccessCookieName),
+		"no cookies must be written when account is disabled")
+	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName))
 }
 
 func TestLoginHandler_RejectsOversizedBody(t *testing.T) {

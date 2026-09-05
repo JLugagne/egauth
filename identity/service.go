@@ -763,6 +763,14 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 		return err
 	}
 
+	user, err := s.store.FindUserByID(ctx, tenantID, userID)
+	if err != nil {
+		return err
+	}
+	if user.DisabledAt != nil || user.DeletedAt != nil {
+		return ErrAccountDisabled
+	}
+
 	idents, err := s.store.FindIdentitiesByUserID(ctx, tenantID, userID)
 	if err != nil {
 		return err

@@ -868,6 +868,8 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 
 		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
 			switch {
+			case errors.Is(err, ErrAccountDisabled):
+				cfg.fail(w, r, http.StatusForbidden, "account_disabled")
 			case errors.Is(err, ErrInvalidCredentials):
 				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
 			case isPasswordPolicyError(err):
@@ -926,6 +928,8 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 
 		if err := svc.ChangePassword(r.Context(), cfg.tenant(r), user.ID, current, newPassword); err != nil {
 			switch {
+			case errors.Is(err, ErrAccountDisabled):
+				cfg.fail(w, r, http.StatusForbidden, "account_disabled")
 			case errors.Is(err, ErrInvalidCredentials):
 				cfg.fail(w, r, http.StatusUnauthorized, "invalid_credentials")
 			case isPasswordPolicyError(err):
