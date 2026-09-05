@@ -277,6 +277,9 @@ func TestRegister_CompensatesOrphanWhenAddIdentityFails(t *testing.T) {
 	created := &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "orphan@example.com"}
 	deleted := false
 	store := &storetest.MockStore{
+		FindUserByEmailFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {
+			return nil, identity.ErrUserNotFound
+		},
 		CreateUserFunc: func(_ context.Context, _ string, _ string) (*identity.User, error) {
 			return created, nil
 		},

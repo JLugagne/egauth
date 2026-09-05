@@ -437,6 +437,14 @@ func (s *service) Register(ctx context.Context, tenantID string, email, password
 		return nil, err
 	}
 
+	// Check whether the email already exists before running the expensive password hasher,
+	// preventing unauthenticated pre-auth CPU/memory exhaustion DoS (SEC-ID-01).
+	if _, ferr := s.store.FindUserByEmail(ctx, tenantID, email); ferr == nil {
+		return nil, ErrEmailAlreadyExists
+	} else if !errors.Is(ferr, ErrUserNotFound) {
+		return nil, ferr
+	}
+
 	hash, err := s.hasher.Hash(ctx, password)
 	if err != nil {
 		return nil, err
@@ -696,17 +704,20 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	if err := s.requirePasswordDeps(); err != nil {
 		return err
 	}
-	// Validate and hash BEFORE consuming, so a weak password or a hashing failure does not
-	// burn a single-use token.
+	// Validate password against policy BEFORE consuming the token, so a weak password
+	// does not burn a single-use token.
 	if err := s.policy.Verify(ctx, newPassword); err != nil {
 		return err
 	}
-	hash, err := s.hasher.Hash(ctx, newPassword)
+
+	// Consume and validate the token for a live user BEFORE hashing, preventing unauthenticated
+	// pre-auth Argon2id CPU/memory exhaustion DoS (SEC-ID-01).
+	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindPasswordReset)
 	if err != nil {
 		return err
 	}
 
-	user, _, err := s.consumeForLiveUser(ctx, tenantID, token, KindPasswordReset)
+	hash, err := s.hasher.Hash(ctx, newPassword)
 	if err != nil {
 		return err
 	}

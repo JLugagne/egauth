@@ -23,8 +23,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS proves that ResetPassword and Register
-// execute the computationally heavy password hashing BEFORE verifying the existence
+// TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS verifies that ResetPassword and Register
+// do NOT execute the computationally heavy password hashing before verifying the existence
 // or validity of the token or the uniqueness of the email address.
 func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 	ctx := context.Background()
@@ -43,7 +43,7 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 	store := identitymemory.NewStore()
 	svc := identity.NewService(store, hasher, pwPolicy)
 
-	t.Run("ResetPassword hashes before checking token existence/validity", func(t *testing.T) {
+	t.Run("ResetPassword does not hash when token is invalid or does not exist", func(t *testing.T) {
 		hashCount = 0
 		invalidToken := "completely-bogus-token-123456"
 
@@ -53,11 +53,11 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 		// The operation fails because the token does not exist
 		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
 
-		// FLAW: Hasher was invoked before token check, burning CPU/memory on invalid requests
-		assert.Equal(t, 1, hashCount, "SEC-ID-01 confirmed: expensive Hash was performed prior to validating token")
+		// SEC-ID-01 fixed: Hasher is not invoked on invalid tokens, preventing pre-auth DoS
+		assert.Equal(t, 0, hashCount, "SEC-ID-01 fixed: expensive Hash must not be performed on invalid token")
 	})
 
-	t.Run("Register hashes before checking if email already exists", func(t *testing.T) {
+	t.Run("Register does not hash when email already exists", func(t *testing.T) {
 		// First registration succeeds
 		_, err := svc.Register(ctx, "", "existing@example.com", "ValidP@ssw0rd2026!")
 		require.NoError(t, err)
@@ -69,8 +69,8 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 		// Registration fails with email collision
 		assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
 
-		// FLAW: Hasher was still invoked before checking if email exists in store
-		assert.Equal(t, 1, hashCount, "SEC-ID-01 confirmed: expensive Hash was performed before checking email uniqueness")
+		// SEC-ID-01 fixed: Hasher is not invoked on duplicate email, preventing pre-auth DoS
+		assert.Equal(t, 0, hashCount, "SEC-ID-01 fixed: expensive Hash must not be performed before checking email uniqueness")
 	})
 }
 

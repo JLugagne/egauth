@@ -222,6 +222,9 @@ func TestService_Register(t *testing.T) {
 		}
 
 		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
 			CreateUserFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 				assert.Equal(t, email, e)
 				return expectedUser, nil
@@ -273,7 +276,11 @@ func TestService_Register(t *testing.T) {
 	})
 
 	t.Run("hash failure", func(t *testing.T) {
-		store := &storetest.MockStore{}
+		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
+		}
 		hasher := &hashertest.MockHasher{
 			HashFunc: func(ctx context.Context, p string) (string, error) {
 				return "", passwords.ErrHashFailed
@@ -420,6 +427,9 @@ func TestService_Authenticate(t *testing.T) {
 
 	t.Run("create user fails", func(t *testing.T) {
 		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
 			CreateUserFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 				return nil, errors.New("db error")
 			},
@@ -444,6 +454,9 @@ func TestService_Authenticate(t *testing.T) {
 	t.Run("add identity fails", func(t *testing.T) {
 		compensated := false
 		store := &storetest.MockStore{
+			FindUserByEmailFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+				return nil, identity.ErrUserNotFound
+			},
 			CreateUserFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 				return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
 			},
@@ -797,4 +810,92 @@ func TestService_Lockout(t *testing.T) {
 		_, err := svc.Authenticate(ctx, "", "password", email, "correct")
 		require.NoError(t, err)
 	})
+}
+
+func TestResetPassword_PreAuthArgon2id(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("invalid token does not invoke hasher", func(t *testing.T) {
+		hashCalled := false
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, password string) (string, error) {
+				hashCalled = true
+				return "hash", nil
+			},
+		}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, password string) error {
+				return nil
+			},
+		}
+		store := &storetest.MockStore{
+			ConsumeVerificationTokenFunc: func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error) {
+				return uuid.Nil, nil, identity.ErrVerificationTokenNotFound
+			},
+		}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ResetPassword(ctx, "", "invalid-token", "ValidPassword123!")
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound)
+		assert.False(t, hashCalled, "hasher.Hash must not be called when reset token is invalid")
+	})
+
+	t.Run("expired token does not invoke hasher", func(t *testing.T) {
+		hashCalled := false
+		hasher := &hashertest.MockHasher{
+			HashFunc: func(ctx context.Context, password string) (string, error) {
+				hashCalled = true
+				return "hash", nil
+			},
+		}
+		policy := &mockPolicy{
+			VerifyFunc: func(ctx context.Context, password string) error {
+				return nil
+			},
+		}
+		store := &storetest.MockStore{
+			ConsumeVerificationTokenFunc: func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error) {
+				return uuid.Nil, nil, identity.ErrVerificationTokenExpired
+			},
+		}
+		svc := identity.NewService(store, hasher, policy)
+
+		err := svc.ResetPassword(ctx, "", "expired-token", "ValidPassword123!")
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenExpired)
+		assert.False(t, hashCalled, "hasher.Hash must not be called when reset token is expired")
+	})
+}
+
+func TestRegister_DuplicateEmail_NoHashing(t *testing.T) {
+	ctx := context.Background()
+	const email = "existing@example.com"
+
+	hashCalled := false
+	hasher := &hashertest.MockHasher{
+		HashFunc: func(ctx context.Context, password string) (string, error) {
+			hashCalled = true
+			return "hash", nil
+		},
+	}
+	policy := &mockPolicy{
+		VerifyFunc: func(ctx context.Context, password string) error {
+			return nil
+		},
+	}
+	store := &storetest.MockStore{
+		FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
+			if e == email {
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), Email: email}, nil
+			}
+			return nil, identity.ErrUserNotFound
+		},
+		CreateUserFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+			return nil, identity.ErrEmailAlreadyExists
+		},
+	}
+	svc := identity.NewService(store, hasher, policy)
+
+	_, err := svc.Register(ctx, "", email, "ValidPassword123!")
+	assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
+	assert.False(t, hashCalled, "hasher.Hash must not be called when registering an existing email")
 }
