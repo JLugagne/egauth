@@ -97,9 +97,9 @@ func TestSecurity_SEC_ID_06_TokenBucket_Unbounded_Memory_DoS(t *testing.T) {
 	assert.Equal(t, capLimit, tbBounded.KeyCount(), "SEC-ID-06 fixed: keys do not grow unboundedly and stay capped at maxKeys")
 }
 
-// TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass demonstrates that when WithMaxKeys
-// is enabled, evictOne can evict completely exhausted (rate-limited) buckets, allowing
-// the rate-limited client to immediately regain full burst capacity.
+// TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass verifies that when WithMaxKeys
+// is enabled, evictOne does NOT evict completely exhausted (rate-limited) buckets, preventing
+// an attacker from regaining burst capacity via eviction flooding.
 func TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass(t *testing.T) {
 	ctx := context.Background()
 
@@ -121,10 +121,10 @@ func TestSecurity_SEC_ID_05_TokenBucket_Eviction_Bypass(t *testing.T) {
 		tb.Allow(ctx, fmt.Sprintf("flood-%d", i))
 	}
 
-	// Step 4: Because evictOne selects candidate with toks > -1, an exhausted key (tokens=0)
-	// can be evicted. Once evicted, requesting targetKey again instantiates a fresh bucket!
+	// Step 4: SEC-ID-05 fixed: evictOne does not evict actively throttled keys;
+	// targetKey remains in the bucket map and remains rate-limited.
 	allowedAfterEviction, _ := tb.Allow(ctx, targetKey)
-	assert.True(t, allowedAfterEviction, "SEC-ID-05 confirmed: exhausted key regained full burst tokens following eviction")
+	assert.False(t, allowedAfterEviction, "SEC-ID-05 fixed: exhausted key must remain rate-limited after eviction flooding")
 }
 
 // TestSecurity_SEC_ID_07_Silent_Delivery_Drop_On_Semaphore_Saturation verifies that

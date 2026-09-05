@@ -92,7 +92,11 @@ func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Durati
 		// Enforce the maxKeys cap: evict the bucket that has refilled the most
 		// (least under pressure) to make room for the new key.
 		for tb.maxKeys > 0 && len(tb.buckets) >= tb.maxKeys {
-			tb.evictOne(now)
+			if !tb.evictOne(now) {
+				// All tracked buckets are actively throttled (toks < 1.0).
+				// Do not evict throttled keys to hand out free tokens to a new requester.
+				return false, tb.refill
+			}
 		}
 		b = &bucketState{tokens: tb.burst, last: now}
 		tb.buckets[key] = b
@@ -164,35 +168,56 @@ func (tb *TokenBucket) MaxKeys() int {
 	return tb.maxKeys
 }
 
-// evictOne removes the single bucket that is least under pressure (closest to
-// fully-refilled). Fully-refilled buckets are preferred; among partially-refilled
-// ones the one with the most tokens (accounting for elapsed time) is chosen.
+// evictOne removes a single bucket that is safe to evict (not actively throttled).
+// Fully-refilled buckets (toks >= tb.burst) are preferred first; among unthrottled
+// buckets (toks >= 1.0), the one with the most tokens is chosen.
+// Actively throttled buckets (toks < 1.0 and waiting for refill) must NEVER be
+// evicted if any unthrottled bucket is available, and are not evicted if all
+// buckets in the map are throttled.
+// Returns true if a bucket was evicted, or false if no bucket could be safely evicted.
 // Must be called with tb.mu held.
-func (tb *TokenBucket) evictOne(now time.Time) {
+func (tb *TokenBucket) evictOne(now time.Time) bool {
 	var (
-		evictKey  string
-		evictToks float64
-		found     bool
+		bestKey   string
+		bestToks  float64 = -1
 		sampled   int
+		maxSample = 5
 	)
-	// Go maps iterate in random order. Sampling 5 elements is sufficient for finding
-	// a reasonably good candidate for eviction in O(1) time.
+	// Go maps iterate in random order. Sampling 5 elements is preferred for finding
+	// a reasonably good candidate for eviction in O(1) time. If sampling 5 keys only
+	// finds throttled keys, sample more keys (up to a reasonable bound of 100) to find
+	// an unthrottled / refilled key.
 	for k, b := range tb.buckets {
+		sampled++
 		toks := b.tokens + float64(now.Sub(b.last))/float64(tb.refill)
 		if toks > tb.burst {
 			toks = tb.burst
 		}
-		if !found || toks > evictToks {
-			evictToks = toks
-			evictKey = k
-			found = true
+		if toks >= tb.burst {
+			delete(tb.buckets, k)
+			return true
 		}
-		sampled++
-		if sampled >= 5 {
-			break
+		if toks >= 1.0 {
+			if toks > bestToks {
+				bestToks = toks
+				bestKey = k
+			}
+		}
+		if sampled >= maxSample {
+			if bestKey != "" {
+				break
+			}
+			if maxSample < 100 {
+				maxSample = 100
+			}
+			if sampled >= maxSample {
+				break
+			}
 		}
 	}
-	if found {
-		delete(tb.buckets, evictKey)
+	if bestKey != "" {
+		delete(tb.buckets, bestKey)
+		return true
 	}
+	return false
 }
