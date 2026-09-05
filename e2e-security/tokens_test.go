@@ -344,6 +344,7 @@ func TestVulnerability_SECTOK13_APIKeyTypeDesynchronization(t *testing.T) {
 type mockStoreForFailure struct {
 	tokens.Store[struct{}]
 	failSaveAfterConsume bool
+	failRotate           bool
 	consumedTokens       map[string]*tokens.RefreshToken
 	revokedFamilies      map[uuid.UUID]bool
 	underlying           *memory.Store[struct{}]
@@ -397,11 +398,37 @@ func (m *mockStoreForFailure) DeleteExpired(ctx context.Context, tenantID string
 	return m.underlying.DeleteExpired(ctx, tenantID)
 }
 
-// SEC-TOK-03: Non-atomicité de la rotation menant au DoS et à l'invalidation de session.
+func (m *mockStoreForFailure) RotateRefreshToken(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+	if m.failRotate {
+		return errors.New("simulated database connection failure during RotateRefreshToken")
+	}
+	return m.underlying.RotateRefreshToken(ctx, tenantID, oldTokenHash, newRT)
+}
+
+type mockNonAtomicStore struct {
+	tokens.Store[struct{}]
+	failSaveNew     bool
+	initialHash     string
+	revokedFamilies map[uuid.UUID]bool
+}
+
+func (m *mockNonAtomicStore) SaveRefreshToken(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
+	if m.failSaveNew && rt.Hash != m.initialHash {
+		return errors.New("simulated failure saving new refresh token")
+	}
+	return m.Store.SaveRefreshToken(ctx, tenantID, rt)
+}
+
+func (m *mockNonAtomicStore) RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error {
+	m.revokedFamilies[familyID] = true
+	return m.Store.RevokeFamily(ctx, tenantID, familyID)
+}
+
+// SEC-TOK-03: Non-atomic refresh token rotation leading to denial of service and session revocation.
 //
-// Proves that if SaveRefreshToken fails after ConsumeRefreshToken succeeds,
-// the original token is marked consumed, no new pair is issued, and a subsequent
-// retry after the reuse grace period causes RevokeFamily to be called, locking out the user.
+// Verifies that atomic refresh token rotation prevents leaving an old token consumed when
+// rotation fails, and that fallback non-atomic stores roll back consumption on save failure,
+// ensuring subsequent client retries do not trigger replay detection or revoke the session family.
 func TestVulnerability_SECTOK03_NonAtomicRotationLeadingToSessionRevocation(t *testing.T) {
 	ctx := context.Background()
 	mockStore := newMockStoreForFailure()
@@ -429,23 +456,60 @@ func TestVulnerability_SECTOK03_NonAtomicRotationLeadingToSessionRevocation(t *t
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
 	require.NoError(t, err)
 
-	// Simulate transient DB failure on SaveRefreshToken during Rotate.
-	mockStore.failSaveAfterConsume = true
+	// Simulate transient DB failure on RotateRefreshToken during Rotate.
+	mockStore.failRotate = true
 	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
-	require.Error(t, err, "rotation fails during SaveRefreshToken")
+	require.Error(t, err, "rotation fails during simulated transient DB error")
 
-	// Token was already marked consumed in store!
+	// Old token was NOT marked consumed in store due to atomic rotation!
 	rt, findErr := mockStore.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
 	require.NoError(t, findErr)
-	require.NotNil(t, rt.ConsumedAt, "token was consumed despite failure to issue successor")
+	require.Nil(t, rt.ConsumedAt, "token must NOT be consumed when atomic rotation fails")
 
 	// Client retries after 25 milliseconds (outside 10ms grace period).
 	time.Sleep(25 * time.Millisecond)
-	mockStore.failSaveAfterConsume = false
-	_, retryErr := svc.Rotate(ctx, "", pair.RefreshToken)
-	assert.ErrorIs(t, retryErr, tokens.ErrRefreshTokenReused)
+	mockStore.failRotate = false
+	newPair, retryErr := svc.Rotate(ctx, "", pair.RefreshToken)
+	require.NoError(t, retryErr, "retry must succeed because the old token was never left consumed")
+	require.NotEmpty(t, newPair.RefreshToken)
 
-	// Family was revoked because the non-atomic failure left the consumed token in DB!
-	assert.True(t, mockStore.revokedFamilies[rt.FamilyID],
-		"vulnerability confirmed: non-atomic rotation failure resulted in permanent session family revocation upon client retry")
+	// Family was NOT revoked!
+	assert.False(t, mockStore.revokedFamilies[rt.FamilyID],
+		"vulnerability remediated: atomic rotation prevents session revocation DoS upon retry")
+
+	// Also verify that a non-atomic store rolls back consumption if saving new token fails.
+	nonAtomicStore := &mockNonAtomicStore{
+		Store:           memory.NewStore[struct{}](),
+		revokedFamilies: make(map[uuid.UUID]bool),
+	}
+	nonAtomicSvc := jwt.New[struct{}](jwt.Config[struct{}]{
+		Store:            nonAtomicStore,
+		SecretKey:        "secret-key-at-least-32-bytes-long-test!",
+		Issuer:           "test-issuer",
+		AccessTTL:        15 * time.Minute,
+		RefreshTTL:       24 * time.Hour,
+		ReuseGracePeriod: 10 * time.Millisecond,
+		ClaimsProvider:   claimsProvider,
+		Clock:            clock,
+	})
+	pair2, err := nonAtomicSvc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+	require.NoError(t, err)
+
+	nonAtomicStore.failSaveNew = true
+	nonAtomicStore.initialHash = tokens.HashToken(pair2.RefreshToken)
+	_, err = nonAtomicSvc.Rotate(ctx, "", pair2.RefreshToken)
+	require.Error(t, err, "rotation fails during SaveRefreshToken on non-atomic store")
+
+	// Verify rollback unmarks consumed token
+	rt2, err := nonAtomicStore.FindRefreshToken(ctx, "", tokens.HashToken(pair2.RefreshToken))
+	require.NoError(t, err)
+	assert.Nil(t, rt2.ConsumedAt, "non-atomic store must roll back ConsumedAt to nil on save failure")
+
+	// Client retries after grace period
+	time.Sleep(25 * time.Millisecond)
+	nonAtomicStore.failSaveNew = false
+	newPair2, retryErr2 := nonAtomicSvc.Rotate(ctx, "", pair2.RefreshToken)
+	require.NoError(t, retryErr2, "retry must succeed after non-atomic store rollback")
+	assert.NotEmpty(t, newPair2.RefreshToken)
+	assert.False(t, nonAtomicStore.revokedFamilies[rt2.FamilyID], "family must not be revoked on client retry")
 }

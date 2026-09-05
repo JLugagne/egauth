@@ -174,3 +174,118 @@ func TestStoreAPIKeyColumns(t *testing.T) {
 		assert.ErrorIs(t, err, egauthtokens.ErrAPIKeyNotFound, "expired key must be hard-deleted")
 	})
 }
+
+func TestRotateRefreshToken(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	store := pgx.NewStore[customClaims](pool)
+
+	tenantID := "tenant-rotate-test"
+	userID := uuid.Must(uuid.NewV7())
+	familyID := uuid.Must(uuid.NewV7())
+
+	t.Run("successful atomic rotation", func(t *testing.T) {
+		oldRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-old-hash-1",
+			TenantID:  tenantID,
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, oldRT))
+
+		newRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-new-hash-1",
+			TenantID:  tenantID,
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+
+		err := store.RotateRefreshToken(ctx, tenantID, "pgx-old-hash-1", newRT)
+		require.NoError(t, err)
+
+		oldFound, err := store.FindRefreshToken(ctx, tenantID, "pgx-old-hash-1")
+		require.NoError(t, err)
+		assert.NotNil(t, oldFound.ConsumedAt)
+
+		newFound, err := store.FindRefreshToken(ctx, tenantID, "pgx-new-hash-1")
+		require.NoError(t, err)
+		assert.Nil(t, newFound.ConsumedAt)
+	})
+
+	t.Run("returns ErrRefreshTokenNotFound if old token does not exist", func(t *testing.T) {
+		newRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-new-hash-notfound",
+			TenantID:  tenantID,
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+
+		err := store.RotateRefreshToken(ctx, tenantID, "nonexistent-hash", newRT)
+		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenNotFound)
+
+		_, err = store.FindRefreshToken(ctx, tenantID, "pgx-new-hash-notfound")
+		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenNotFound)
+	})
+
+	t.Run("returns ErrRefreshTokenReused if old token already consumed", func(t *testing.T) {
+		now := time.Now().UTC()
+		oldRT := &egauthtokens.RefreshToken{
+			Hash:       "pgx-old-hash-consumed",
+			TenantID:   tenantID,
+			UserID:     userID,
+			FamilyID:   familyID,
+			ExpiresAt:  time.Now().Add(time.Hour),
+			ConsumedAt: &now,
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, oldRT))
+
+		newRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-new-hash-consumed-attempt",
+			TenantID:  tenantID,
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+
+		err := store.RotateRefreshToken(ctx, tenantID, "pgx-old-hash-consumed", newRT)
+		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenReused)
+
+		_, err = store.FindRefreshToken(ctx, tenantID, "pgx-new-hash-consumed-attempt")
+		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenNotFound)
+	})
+
+	t.Run("rolls back on error and does not leave old token consumed", func(t *testing.T) {
+		oldRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-old-hash-rollback",
+			TenantID:  tenantID,
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, oldRT))
+
+		// Tenant mismatch causes an error
+		newRT := &egauthtokens.RefreshToken{
+			Hash:      "pgx-new-hash-rollback",
+			TenantID:  "different-tenant",
+			UserID:    userID,
+			FamilyID:  familyID,
+			ExpiresAt: time.Now().Add(time.Hour),
+		}
+
+		err := store.RotateRefreshToken(ctx, tenantID, "pgx-old-hash-rollback", newRT)
+		assert.ErrorIs(t, err, egauthtokens.ErrTenantMismatch)
+
+		// Old token must still NOT be consumed
+		oldFound, err := store.FindRefreshToken(ctx, tenantID, "pgx-old-hash-rollback")
+		require.NoError(t, err)
+		assert.Nil(t, oldFound.ConsumedAt, "old token must remain unconsumed after rollback")
+
+		// New token must NOT be saved
+		_, err = store.FindRefreshToken(ctx, tenantID, "pgx-new-hash-rollback")
+		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenNotFound)
+	})
+}

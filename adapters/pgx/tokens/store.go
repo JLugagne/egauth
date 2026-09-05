@@ -45,6 +45,11 @@ func NewStore[C any](db DBQuerier) *Store[C] {
 	return &Store[C]{db: db}
 }
 
+var (
+	_ tokens.Store[any]                = (*Store[any])(nil)
+	_ tokens.AtomicRefreshTokenRotator = (*Store[any])(nil)
+)
+
 // SaveRefreshToken persists a refresh token record (storing only its hash).
 func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
 	if rt.TenantID != "" && rt.TenantID != tenantID {
@@ -129,6 +134,73 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 
 	// The token exists but already had consumed_at set -> replay.
 	return tokens.ErrRefreshTokenReused
+}
+
+// RotateRefreshToken atomically marks oldTokenHash as consumed and persists newRT within the tenant
+// in a single SQL transaction.
+func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+	if newRT.TenantID != "" && newRT.TenantID != tenantID {
+		return tokens.ErrTenantMismatch
+	}
+
+	beginner, ok := s.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return errors.New("pgx tokens store: underlying DBQuerier does not support transactions")
+	}
+
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	consumeQuery := `
+		UPDATE tokens SET consumed_at = now()
+		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL
+	`
+	tag, err := tx.Exec(ctx, consumeQuery, tenantID, oldTokenHash)
+	if err != nil {
+		return err
+	}
+
+	if tag.RowsAffected() == 0 {
+		existsQuery := `SELECT 1 FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
+		var dummy int
+		err = tx.QueryRow(ctx, existsQuery, tenantID, oldTokenHash).Scan(&dummy)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return tokens.ErrRefreshTokenNotFound
+			}
+			return err
+		}
+		return tokens.ErrRefreshTokenReused
+	}
+
+	createdAt := newRT.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+
+	var authTime *time.Time
+	if !newRT.AuthTime.IsZero() {
+		authTime = &newRT.AuthTime
+	}
+
+	insertQuery := `
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT (tenant_id, token_hash) DO UPDATE
+		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
+			must_change_password = EXCLUDED.must_change_password,
+			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
+	`
+	if _, err := tx.Exec(ctx, insertQuery, tenantID, newRT.Hash, newRT.UserID, newRT.FamilyID, authTime, newRT.MustChangePassword, newRT.ExpiresAt, createdAt, newRT.ConsumedAt); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
 }
 
 // RevokeRefreshToken deletes/revokes a single refresh token by its hash.

@@ -113,6 +113,41 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 	return nil
 }
 
+// RotateRefreshToken atomically marks oldTokenHash as consumed and persists newRT within the tenant.
+// If the old token does not exist, it returns ErrRefreshTokenNotFound.
+// If the old token was already consumed, it returns ErrRefreshTokenReused.
+// If saving the new token fails (e.g. tenant mismatch), the old token is not marked consumed.
+func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	entry, exists := s.refreshTokens[oldTokenHash]
+	if !exists || entry.TenantID != tenantID {
+		return tokens.ErrRefreshTokenNotFound
+	}
+
+	if entry.ConsumedAt != nil {
+		return tokens.ErrRefreshTokenReused
+	}
+
+	if newRT.TenantID != "" && newRT.TenantID != tenantID {
+		return tokens.ErrTenantMismatch
+	}
+
+	now := time.Now().UTC()
+	entry.ConsumedAt = &now
+
+	rtCopy := *newRT
+	rtCopy.TenantID = tenantID
+	if rtCopy.ConsumedAt != nil {
+		consumed := *rtCopy.ConsumedAt
+		rtCopy.ConsumedAt = &consumed
+	}
+	s.refreshTokens[rtCopy.Hash] = &rtCopy
+
+	return nil
+}
+
 // RevokeRefreshToken deletes/revokes a single refresh token by its hash.
 func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error {
 	s.mu.Lock()
@@ -190,7 +225,10 @@ func (s *Store[C]) FindAPIKeyByHash(ctx context.Context, tenantID string, tokenH
 }
 
 // Verify interface compliance
-var _ tokens.Store[any] = (*Store[any])(nil)
+var (
+	_ tokens.Store[any]                = (*Store[any])(nil)
+	_ tokens.AtomicRefreshTokenRotator = (*Store[any])(nil)
+)
 
 // RevokeAPIKey soft-revokes the API key identified by keyID within tenantID.
 func (s *Store[C]) RevokeAPIKey(ctx context.Context, tenantID string, keyID uuid.UUID) error {

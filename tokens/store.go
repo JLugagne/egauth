@@ -56,6 +56,12 @@ type RefreshTokenStore interface {
 	RevokeAllRefreshTokensForUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
+// AtomicRefreshTokenRotator is an optional capability interface for stores that support
+// atomically consuming an old refresh token and persisting its successor in a single transaction.
+type AtomicRefreshTokenRotator interface {
+	RotateRefreshToken(ctx context.Context, tenantID string, oldTokenHash string, newRT *RefreshToken) error
+}
+
 // APIKeyStore is the API-key capability of a tokens backend, generic over the custom-claims type C
 // carried by each key.
 type APIKeyStore[C any] interface {

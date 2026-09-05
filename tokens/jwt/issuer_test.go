@@ -228,3 +228,148 @@ func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
 		assert.ErrorIs(t, err, tokens.ErrInvalidToken)
 	})
 }
+
+type mockAtomicStore struct {
+	*storetest.MockStore[MyCustomClaims]
+	rotateCalled bool
+	rotateFunc   func(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error
+}
+
+func (m *mockAtomicStore) RotateRefreshToken(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+	m.rotateCalled = true
+	if m.rotateFunc != nil {
+		return m.rotateFunc(ctx, tenantID, oldTokenHash, newRT)
+	}
+	return nil
+}
+
+func TestRotate_AtomicStore(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.Must(uuid.NewV7())
+	tokensMap := make(map[string]*tokens.RefreshToken)
+
+	baseStore := &storetest.MockStore[MyCustomClaims]{
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
+			tokensMap[rt.Hash] = rt
+			return nil
+		},
+		FindRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
+			rt, ok := tokensMap[tokenHash]
+			if !ok {
+				return nil, tokens.ErrRefreshTokenNotFound
+			}
+			return rt, nil
+		},
+		ConsumeRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) error {
+			t.Fatal("ConsumeRefreshToken should NOT be called directly when store implements AtomicRefreshTokenRotator")
+			return nil
+		},
+	}
+
+	atomicStore := &mockAtomicStore{
+		MockStore: baseStore,
+	}
+
+	claimsProvider := tokens.ClaimsProviderFunc[MyCustomClaims](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[MyCustomClaims], error) {
+		return tokens.Claims[MyCustomClaims]{Subject: uid}, nil
+	})
+
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:          atomicStore,
+		SecretKey:      "super-secret-key-for-testing----",
+		Issuer:         "egauth-test",
+		AccessTTL:      15 * time.Minute,
+		RefreshTTL:     24 * time.Hour,
+		ClaimsProvider: claimsProvider,
+	}
+	svc := jwt.New[MyCustomClaims](cfg)
+
+	initialPair, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+	require.NoError(t, err)
+
+	atomicStore.rotateFunc = func(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+		oldRT, ok := tokensMap[oldTokenHash]
+		require.True(t, ok)
+		now := time.Now().UTC()
+		oldRT.ConsumedAt = &now
+		tokensMap[newRT.Hash] = newRT
+		return nil
+	}
+
+	pair, err := svc.Rotate(ctx, "", initialPair.RefreshToken)
+	require.NoError(t, err)
+	assert.NotEmpty(t, pair.RefreshToken)
+	assert.True(t, atomicStore.rotateCalled, "atomic store RotateRefreshToken must be called")
+
+	// Test race condition returning ErrRefreshTokenReused maps to ErrRefreshConcurrent
+	atomicStore.rotateFunc = func(ctx context.Context, tenantID string, oldTokenHash string, newRT *tokens.RefreshToken) error {
+		return tokens.ErrRefreshTokenReused
+	}
+	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
+	assert.ErrorIs(t, err, tokens.ErrRefreshConcurrent, "losing consume race during atomic rotation must return ErrRefreshConcurrent")
+}
+
+func TestRotate_NonAtomicStore_RollbackOnFailure(t *testing.T) {
+	ctx := context.Background()
+	userID := uuid.Must(uuid.NewV7())
+	tokensMap := make(map[string]*tokens.RefreshToken)
+
+	var initialToken string
+	failSave := false
+	store := &storetest.MockStore[MyCustomClaims]{
+		SaveRefreshTokenFunc: func(ctx context.Context, tenantID string, rt *tokens.RefreshToken) error {
+			if failSave && (initialToken == "" || rt.Hash != tokens.HashToken(initialToken)) {
+				return assert.AnError
+			}
+			tokensMap[rt.Hash] = rt
+			return nil
+		},
+		FindRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
+			rt, ok := tokensMap[tokenHash]
+			if !ok {
+				return nil, tokens.ErrRefreshTokenNotFound
+			}
+			return rt, nil
+		},
+		ConsumeRefreshTokenFunc: func(ctx context.Context, tenantID string, tokenHash string) error {
+			rt, ok := tokensMap[tokenHash]
+			if !ok {
+				return tokens.ErrRefreshTokenNotFound
+			}
+			if rt.ConsumedAt != nil {
+				return tokens.ErrRefreshTokenReused
+			}
+			now := time.Now().UTC()
+			rt.ConsumedAt = &now
+			return nil
+		},
+	}
+
+	claimsProvider := tokens.ClaimsProviderFunc[MyCustomClaims](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[MyCustomClaims], error) {
+		return tokens.Claims[MyCustomClaims]{Subject: uid}, nil
+	})
+
+	cfg := jwt.Config[MyCustomClaims]{
+		Store:          store,
+		SecretKey:      "super-secret-key-for-testing----",
+		Issuer:         "egauth-test",
+		AccessTTL:      15 * time.Minute,
+		RefreshTTL:     24 * time.Hour,
+		ClaimsProvider: claimsProvider,
+	}
+	svc := jwt.New[MyCustomClaims](cfg)
+
+	initialPair, err := svc.IssueTokenPair(ctx, tokens.Claims[MyCustomClaims]{Subject: userID})
+	require.NoError(t, err)
+	initialToken = initialPair.RefreshToken
+
+	// Now fail saving the new token during rotation
+	failSave = true
+	_, err = svc.Rotate(ctx, "", initialPair.RefreshToken)
+	require.Error(t, err)
+
+	// Verify rollback: old token must NOT remain marked as consumed
+	oldRT := tokensMap[tokens.HashToken(initialPair.RefreshToken)]
+	require.NotNil(t, oldRT)
+	assert.Nil(t, oldRT.ConsumedAt, "old token ConsumedAt must be rolled back to nil on save failure")
+}

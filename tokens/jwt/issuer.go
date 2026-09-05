@@ -400,7 +400,9 @@ func (s *Service[C]) IssueTokenPair(ctx context.Context, claims tokens.Claims[C]
 // token (hash only) within the given family. It is shared by initial issuance (new family)
 // and rotation (existing family); initial reports which, so auth_time defaults to the issue
 // time ONLY for a genuine fresh authentication and is never manufactured by a rotation.
-func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
+// mintPair signs an access JWT and mints an opaque refresh token, returning the token pair
+// and the unpersisted RefreshToken record.
+func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], *tokens.RefreshToken, error) {
 	now := s.now()
 	accessExpiresAt := now.Add(s.accessTTL)
 	if !claims.ExpiresAt.IsZero() {
@@ -445,7 +447,7 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	// active key (per-tenant cryptographic isolation); otherwise it is the static keyset.
 	signer, err := s.resolveSigningKey(ctx, claims.TenantID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	token := jwt.NewWithClaims(signer.Method(), wrapper)
 	// Tag the token with the active key id so verifiers can select the right key during a
@@ -455,13 +457,13 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	}
 	accessTokenStr, err := token.SignedString(signer.SignKey())
 	if err != nil {
-		return nil, fmt.Errorf("failed to sign token: %w", err)
+		return nil, nil, fmt.Errorf("failed to sign token: %w", err)
 	}
 
 	// Generate opaque refresh token.
 	refreshBytes := make([]byte, s.refreshLength)
 	if _, err := rand.Read(refreshBytes); err != nil {
-		return nil, fmt.Errorf("failed to generate refresh token: %w", err)
+		return nil, nil, fmt.Errorf("failed to generate refresh token: %w", err)
 	}
 	refreshTokenStr := base64.RawURLEncoding.EncodeToString(refreshBytes)
 	refreshHash := tokens.HashToken(refreshTokenStr)
@@ -478,23 +480,34 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 		CreatedAt:          now,
 	}
 
-	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
-		return nil, err
-	}
-
 	// Reflect the issuer-controlled access expiry and the resolved auth_time back into the
 	// returned claims.
 	claims.ExpiresAt = accessExpiresAt
 	claims.AuthTime = authTime
 
-	return &tokens.TokenPair[C]{
+	pair := &tokens.TokenPair[C]{
 		AccessToken:           accessTokenStr,
 		RefreshToken:          refreshTokenStr,
 		RefreshTokenHash:      refreshHash,
 		AccessTokenExpiresAt:  accessExpiresAt,
 		RefreshTokenExpiresAt: refreshExpiresAt,
 		Claims:                claims,
-	}, nil
+	}
+
+	return pair, rt, nil
+}
+
+func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], familyID uuid.UUID, initial bool) (*tokens.TokenPair[C], error) {
+	pair, rt, err := s.mintPair(ctx, claims, familyID, initial)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, rt); err != nil {
+		return nil, err
+	}
+
+	return pair, nil
 }
 
 // ErrPATSubjectMismatch is returned by IssueAPIKey when a KeyTypePAT is issued with a
@@ -786,23 +799,6 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 		return nil, err
 	}
 
-	// Atomically consume (single-use). Losing this race means another in-flight request
-	// rotated the SAME not-yet-consumed token first. That is benign concurrency (parallel
-	// tabs, link prefetch, concurrent sub-resource loads), NOT theft — so we reject this
-	// request WITHOUT revoking the family. A genuine replay is still caught above on the
-	// next presentation, once ConsumedAt has been set by the completed rotation.
-	if err := s.store.ConsumeRefreshToken(ctx, tenantID, hash); err != nil {
-		// Losing the consume race returns ErrRefreshTokenReused from the store: a parallel
-		// request consumed the SAME not-yet-consumed token first. That is benign concurrency,
-		// not theft — report it as ErrRefreshConcurrent so the winner's freshly minted cookies
-		// are preserved rather than cleared. Any other store error propagates unchanged.
-		if errors.Is(err, tokens.ErrRefreshTokenReused) {
-			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
-			return nil, tokens.ErrRefreshConcurrent
-		}
-		return nil, err
-	}
-
 	// The tenant is immutable within a rotation family: keep the descendant in the SAME
 	// partition used to find/consume/revoke, regardless of what the provider returns —
 	// otherwise a divergent tenant would orphan the token out of reach of family
@@ -824,10 +820,56 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// erasers).
 	claims.MustChangePassword = rt.MustChangePassword
 
-	// Issue a new pair within the SAME family to preserve the rotation chain. initial=false:
+	// Mint the new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
 	// family's preserved value, which may be zero for a legacy token) is taken verbatim.
-	return s.issuePair(ctx, claims, rt.FamilyID, false)
+	pair, newRT, err := s.mintPair(ctx, claims, rt.FamilyID, false)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if the store supports atomic refresh token rotation. If so, execute consumption
+	// and insertion in a single atomic transaction.
+	if rotator, ok := s.store.(tokens.AtomicRefreshTokenRotator); ok {
+		if err := rotator.RotateRefreshToken(ctx, tenantID, hash, newRT); err != nil {
+			if errors.Is(err, tokens.ErrRefreshTokenReused) {
+				event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
+				return nil, tokens.ErrRefreshConcurrent
+			}
+			return nil, err
+		}
+		return pair, nil
+	}
+
+	// Fallback for stores that do not implement AtomicRefreshTokenRotator:
+	// Atomically consume (single-use). Losing this race means another in-flight request
+	// rotated the SAME not-yet-consumed token first. That is benign concurrency (parallel
+	// tabs, link prefetch, concurrent sub-resource loads), NOT theft — so we reject this
+	// request WITHOUT revoking the family. A genuine replay is still caught above on the
+	// next presentation, once ConsumedAt has been set by the completed rotation.
+	if err := s.store.ConsumeRefreshToken(ctx, tenantID, hash); err != nil {
+		// Losing the consume race returns ErrRefreshTokenReused from the store: a parallel
+		// request consumed the SAME not-yet-consumed token first. That is benign concurrency,
+		// not theft — report it as ErrRefreshConcurrent so the winner's freshly minted cookies
+		// are preserved rather than cleared. Any other store error propagates unchanged.
+		if errors.Is(err, tokens.ErrRefreshTokenReused) {
+			event.Emit(ctx, s.events, event.Event{Type: event.RefreshReuseDetected, UserID: rt.UserID.String(), TenantID: rt.TenantID, Reason: "consume_race"})
+			return nil, tokens.ErrRefreshConcurrent
+		}
+		return nil, err
+	}
+
+	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, newRT); err != nil {
+		// Rollback: unmark the old token's ConsumedAt so the session isn't permanently orphaned.
+		rollbackRT := *rt
+		rollbackRT.ConsumedAt = nil
+		if rerr := s.store.SaveRefreshToken(ctx, tenantID, &rollbackRT); rerr != nil {
+			return nil, fmt.Errorf("failed to save refresh token (%w); rollback also failed: %v", err, rerr)
+		}
+		return nil, err
+	}
+
+	return pair, nil
 }
 
 // VerifyAccessTokenForTenant validates an access token and binds it to tenantID, mirroring
