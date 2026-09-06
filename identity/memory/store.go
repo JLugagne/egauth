@@ -213,6 +213,10 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 	now := s.timeNow()
 	existing.DeletedAt = &now
 	existing.Email = uuid.Must(uuid.NewV7()).String()
+	existing.Phone = nil
+	existing.PhoneVerifiedAt = nil
+	existing.RecoveryEmail = nil
+	existing.RecoveryEmailVerifiedAt = nil
 	existing.UpdatedAt = now
 
 	for _, ident := range s.identities {

@@ -73,7 +73,9 @@ type VerificationToken struct {
 // token to hand to the user (selector.verifier), the selector to index on, and the SHA-256
 // hash of the verifier to persist. The plaintext verifier itself is never returned for
 // storage. Store implementations call this so the secure-generation logic lives in one place.
-func GenerateVerificationToken() (token, selector, verifierHash string, err error) {
+var GenerateVerificationToken = generateVerificationToken
+
+func generateVerificationToken() (token, selector, verifierHash string, err error) {
 	sel := make([]byte, selectorBytes)
 	if _, err = rand.Read(sel); err != nil {
 		return "", "", "", err

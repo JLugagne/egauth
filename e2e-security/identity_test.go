@@ -341,10 +341,22 @@ func TestSecurity_SEC_ID_10_Persistent_Failed_Attempts_No_TTL(t *testing.T) {
 	assert.Nil(t, identsLocked[0].LockedUntil, "account must remain unlocked")
 }
 
-// TestSecurity_SEC_ID_11_Timing_Oracle_Discrepancy shows that RequestPasswordReset
-// performs token generation and persistence for existing accounts, while returning early for non-existing accounts.
+// TestSecurity_SEC_ID_11_Timing_Oracle_Discrepancy verifies that RequestPasswordReset
+// and related unauthenticated request endpoints perform decoy token generation when an account does not exist,
+// equalizing the workload with existing accounts to mitigate timing enumeration oracles.
 func TestSecurity_SEC_ID_11_Timing_Oracle_Discrepancy(t *testing.T) {
 	ctx := context.Background()
+
+	var tokenGenCount int
+	var mu sync.Mutex
+	origGen := identity.GenerateVerificationToken
+	identity.GenerateVerificationToken = func() (string, string, string, error) {
+		mu.Lock()
+		tokenGenCount++
+		mu.Unlock()
+		return origGen()
+	}
+	defer func() { identity.GenerateVerificationToken = origGen }()
 
 	hasher := &hashertest.MockHasher{
 		HashFunc: func(ctx context.Context, p string) (string, error) { return "hash", nil },
@@ -354,24 +366,66 @@ func TestSecurity_SEC_ID_11_Timing_Oracle_Discrepancy(t *testing.T) {
 	svc := identity.NewService(store, hasher, pwPolicy)
 
 	// Register existing user
-	_, err := svc.Register(ctx, "", "existing@example.com", "Password123!")
+	_, err := svc.Register(ctx, "", "existing@example.com", "ValidP@ssw0rd2026!")
 	require.NoError(t, err)
 
-	// Request for non-existent user returns immediately without minting a token
+	// Reset count before testing non-existent user
+	mu.Lock()
+	tokenGenCount = 0
+	mu.Unlock()
+
+	// Request for non-existent user performs decoy token generation to equalize timing
 	tokNonExistent, uNonExistent, err := svc.RequestPasswordReset(ctx, "", "does-not-exist@example.com")
 	require.NoError(t, err)
 	assert.Empty(t, tokNonExistent)
 	assert.Nil(t, uNonExistent)
+	mu.Lock()
+	nonExistentCount := tokenGenCount
+	mu.Unlock()
+	assert.Equal(t, 1, nonExistentCount, "SEC-ID-11 fixed: decoy token generation must be performed when user is not found to equalize timing")
 
-	// Request for existing user executes token generation and database writes
+	// Request for existing user executes token generation
+	mu.Lock()
+	tokenGenCount = 0
+	mu.Unlock()
 	tokExisting, uExisting, err := svc.RequestPasswordReset(ctx, "", "existing@example.com")
 	require.NoError(t, err)
 	assert.NotEmpty(t, tokExisting)
 	assert.NotNil(t, uExisting)
+	mu.Lock()
+	existingCount := tokenGenCount
+	mu.Unlock()
+	assert.Equal(t, 1, existingCount, "SEC-ID-11 fixed: token generation is performed for existing user")
+
+	// Verify RequestMagicLink performs decoy token generation for non-existent user
+	mu.Lock()
+	tokenGenCount = 0
+	mu.Unlock()
+	tokML, uML, err := svc.RequestMagicLink(ctx, "", "does-not-exist@example.com")
+	require.NoError(t, err)
+	assert.Empty(t, tokML)
+	assert.Nil(t, uML)
+	mu.Lock()
+	mlCount := tokenGenCount
+	mu.Unlock()
+	assert.Equal(t, 1, mlCount, "SEC-ID-11 fixed: RequestMagicLink must perform decoy token generation for non-existent user")
+
+	// Verify RequestPasswordResetViaRecovery performs decoy token generation for non-existent user
+	mu.Lock()
+	tokenGenCount = 0
+	mu.Unlock()
+	tokRec, uRec, _, err := svc.RequestPasswordResetViaRecovery(ctx, "", "does-not-exist@example.com")
+	require.NoError(t, err)
+	assert.Empty(t, tokRec)
+	assert.Nil(t, uRec)
+	mu.Lock()
+	recCount := tokenGenCount
+	mu.Unlock()
+	assert.Equal(t, 1, recCount, "SEC-ID-11 fixed: RequestPasswordResetViaRecovery must perform decoy token generation for non-existent user")
 }
 
 // TestSecurity_SEC_ID_13_Incomplete_PII_Anonymization_On_DeleteUser demonstrates that
-// DeleteUser leaves Phone and RecoveryEmail unredacted in the database record.
+// DeleteUser redacts Phone and RecoveryEmail (and their verification timestamps) upon deletion.
 func TestSecurity_SEC_ID_13_Incomplete_PII_Anonymization_On_DeleteUser(t *testing.T) {
 	ctx := context.Background()
 
@@ -382,7 +436,7 @@ func TestSecurity_SEC_ID_13_Incomplete_PII_Anonymization_On_DeleteUser(t *testin
 	store := identitymemory.NewStore()
 	svc := identity.NewService(store, hasher, pwPolicy)
 
-	user, err := svc.Register(ctx, "", "user.to.delete@example.com", "Password123!")
+	user, err := svc.Register(ctx, "", "user.to.delete@example.com", "ValidP@ssw0rd2026!")
 	require.NoError(t, err)
 
 	phone := "+33612345678"
@@ -404,15 +458,15 @@ func TestSecurity_SEC_ID_13_Incomplete_PII_Anonymization_On_DeleteUser(t *testin
 	// Primary email was anonymized
 	assert.NotEqual(t, "user.to.delete@example.com", storedUser.Email)
 
-	// FLAW: Sensitive PII (Phone and RecoveryEmail) were NOT anonymized or cleared!
-	assert.NotNil(t, storedUser.Phone, "SEC-ID-13 confirmed: Phone is retained after deletion")
-	assert.Equal(t, phone, *storedUser.Phone)
-	assert.NotNil(t, storedUser.RecoveryEmail, "SEC-ID-13 confirmed: RecoveryEmail is retained after deletion")
-	assert.Equal(t, recEmail, *storedUser.RecoveryEmail)
+	// SEC-ID-13 fixed: Sensitive PII (Phone and RecoveryEmail) must be cleared / anonymized!
+	assert.Nil(t, storedUser.Phone, "SEC-ID-13 fixed: Phone must be redacted/cleared after deletion")
+	assert.Nil(t, storedUser.PhoneVerifiedAt, "SEC-ID-13 fixed: PhoneVerifiedAt must be cleared after deletion")
+	assert.Nil(t, storedUser.RecoveryEmail, "SEC-ID-13 fixed: RecoveryEmail must be redacted/cleared after deletion")
+	assert.Nil(t, storedUser.RecoveryEmailVerifiedAt, "SEC-ID-13 fixed: RecoveryEmailVerifiedAt must be cleared after deletion")
 }
 
 // TestSecurity_SEC_ID_14_Default_Password_Policy_Allows_Breached_Passwords verifies that
-// DefaultPolicy enforces legacy character complexity while accepting notorious dictionary passwords.
+// DefaultPolicy rejects notorious breached passwords.
 func TestSecurity_SEC_ID_14_Default_Password_Policy_Allows_Breached_Passwords(t *testing.T) {
 	ctx := context.Background()
 	defaultPolicy := policy.NewDefaultPolicy()
@@ -428,7 +482,6 @@ func TestSecurity_SEC_ID_14_Default_Password_Policy_Allows_Breached_Passwords(t 
 
 	for _, pass := range notoriousPasswords {
 		err := defaultPolicy.Verify(ctx, pass)
-		// FLAW: DefaultPolicy accepts these notorious passwords because it has no breach checker
-		assert.NoError(t, err, "SEC-ID-14 confirmed: DefaultPolicy accepted known weak password %q", pass)
+		assert.ErrorIs(t, err, policy.ErrBreachedPassword, "SEC-ID-14 fixed: DefaultPolicy rejected known weak password %q", pass)
 	}
 }

@@ -200,7 +200,9 @@ func (s *Store) DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) e
 	const query = `
 		WITH del AS (
 			UPDATE users
-			SET deleted_at = $1, email = $2, updated_at = $1
+			SET deleted_at = $1, email = $2, updated_at = $1,
+			    phone = NULL, phone_verified_at = NULL,
+			    recovery_email = NULL, recovery_email_verified_at = NULL
 			WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
 			RETURNING id
 		),

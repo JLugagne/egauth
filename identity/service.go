@@ -500,6 +500,13 @@ func (s *service) decoyHash(ctx context.Context, password string) {
 	_, _ = s.hasher.Hash(ctx, password)
 }
 
+// decoyToken performs throwaway verification token generation to equalize timing
+// on unauthenticated request paths where no real token is minted (unknown user,
+// malformed email, or missing required factor). This prevents user enumeration via response-time analysis.
+func (s *service) decoyToken() {
+	_, _, _, _ = GenerateVerificationToken()
+}
+
 func (s *service) Authenticate(ctx context.Context, tenantID string, provider, providerID, password string, rc ...event.RequestContext) (*User, error) {
 	// reqCtx is the (optional) caller-supplied client IP / User-Agent. It is copied into the
 	// Attrs of every login.* event below so the audit trail carries the request's origin; when
@@ -626,12 +633,14 @@ func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, ema
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
 		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		s.decoyToken()
 		return "", nil, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
-			// Do not reveal whether the account exists.
+			// Do not reveal whether the account exists. Equalize timing via decoy token generation.
+			s.decoyToken()
 			return "", nil, nil
 		}
 		return "", nil, err
@@ -646,6 +655,7 @@ func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, ema
 		return "", nil, err
 	}
 	if !hasPasswordIdentity(idents) {
+		s.decoyToken()
 		return "", nil, nil
 	}
 
@@ -1050,11 +1060,13 @@ func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email s
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
 		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		s.decoyToken()
 		return "", nil, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			s.decoyToken()
 			return "", nil, nil // do not reveal whether the account exists
 		}
 		return "", nil, err
@@ -1278,11 +1290,13 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
 		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			s.decoyToken()
 			return "", nil, RecoveryChannels{}, nil
 		}
 		return "", nil, RecoveryChannels{}, err
@@ -1295,6 +1309,7 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 		return "", nil, RecoveryChannels{}, err
 	}
 	if !hasPasswordIdentity(idents) {
+		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
 
@@ -1303,6 +1318,7 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 	// the caller cannot distinguish "no such account" from "no recovery channel".
 	channels := recoveryChannelsOf(user)
 	if !channels.Any() {
+		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
 

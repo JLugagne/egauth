@@ -114,3 +114,22 @@ func TestDefaultPolicy_LengthCountsRunesNotBytes(t *testing.T) {
 	assert.NoError(t, p.Verify(ctx, long),
 		"a 50-character password must be within the 72-character limit regardless of byte length")
 }
+
+func TestDefaultPolicy_RejectsBreachedPasswords(t *testing.T) {
+	ctx := context.Background()
+	p := policy.NewDefaultPolicy()
+
+	breached := []string{
+		"Password123!",
+		"Admin2024!",
+		"Welcome1!",
+		"Summer2026!",
+		"P@ssword1",
+	}
+
+	for _, pass := range breached {
+		err := p.Verify(ctx, pass)
+		assert.ErrorIs(t, err, policy.ErrBreachedPassword, "must reject notorious password %q", pass)
+		assert.ErrorIs(t, err, passwords.ErrPasswordBreached)
+	}
+}

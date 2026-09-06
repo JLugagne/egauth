@@ -274,6 +274,11 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NotNil(t, foundByID.EmailVerifiedAt)
 		assert.Equal(t, now.Unix(), foundByID.EmailVerifiedAt.Unix())
 
+		phone := "+33612345678"
+		recEmail := "recovery@example.com"
+		require.NoError(t, store.UpdateUserPhone(ctx, tenantA, user.ID, phone, now))
+		require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenantA, user.ID, recEmail, now))
+
 		// Delete (Soft delete & anonymize)
 		err = store.DeleteUser(ctx, tenantA, user.ID)
 		require.NoError(t, err)
@@ -287,6 +292,10 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		require.NoError(t, err)
 		require.NotNil(t, deletedUser.DeletedAt)
 		assert.NotEqual(t, email, deletedUser.Email)
+		assert.Nil(t, deletedUser.Phone, "phone must be cleared on deletion")
+		assert.Nil(t, deletedUser.PhoneVerifiedAt, "phone_verified_at must be cleared on deletion")
+		assert.Nil(t, deletedUser.RecoveryEmail, "recovery_email must be cleared on deletion")
+		assert.Nil(t, deletedUser.RecoveryEmailVerifiedAt, "recovery_email_verified_at must be cleared on deletion")
 
 		// Deleting an already-deleted (or unknown / cross-tenant) user reports ErrUserNotFound,
 		// not a silent no-op success — both backends must agree.
