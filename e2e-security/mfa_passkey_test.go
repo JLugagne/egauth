@@ -146,11 +146,11 @@ func TestSEC_MFA_06_ConfirmTOTP_NonAtomic_RecoveryCodesLost(t *testing.T) {
 	require.NoError(t, err, "User can authenticate with minted recovery code")
 }
 
-// TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop confirms:
-//  1. The desynchronization and race condition where IssueHandler returns HTTP 204 No Content
-//     before svc.Issue has written to the store, causing immediate verifications to fail with 401 invalid_code.
-//  2. The silent drop vulnerability where saturating the delivery semaphore causes IssueHandler to return
-//     HTTP 204 No Content while completely dropping the call to svc.Issue (no OTP ever generated or saved).
+// TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop verifies:
+//  1. Synchronous OTP issuance ensures immediate verification succeeds even while out-of-band
+//     delivery is still in-flight/blocked.
+//  2. When delivery concurrency semaphore is saturated, delivery is dropped but the OTP challenge
+//     remains persisted in the database, so verification does not fail with ErrCodeNotFound.
 func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 	t.Run("RaceCondition_VerificationBeforeIssuePersists", func(t *testing.T) {
 		store := otpmemory.NewStore()
@@ -158,13 +158,15 @@ func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 		subject := uuid.Must(uuid.NewV7())
 		purpose := "login"
 
-		issueStarted := make(chan struct{})
-		issueRelease := make(chan struct{})
+		deliveryStarted := make(chan struct{})
+		deliveryRelease := make(chan struct{})
+		var deliveredCode string
 
-		// Custom deliver that holds execution to demonstrate that HTTP 204 is returned before completion
+		// Custom deliver that holds execution to demonstrate delivery is decoupled from persistence
 		deliver := func(ctx context.Context, ch *otp.Challenge) error {
-			close(issueStarted)
-			<-issueRelease
+			deliveredCode = ch.Code
+			close(deliveryStarted)
+			<-deliveryRelease
 			return nil
 		}
 
@@ -190,22 +192,30 @@ func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 		// IssueHandler has returned HTTP 204 No Content to the client!
 		assert.Equal(t, http.StatusNoContent, issueRec.Code)
 
-		// Meanwhile, delivery is still pending (or database was slow).
-		// An automated client immediately attempts verification.
+		// Synchronous persistence: the challenge MUST be in the store immediately upon 204,
+		// before delivery is even dispatched/run.
+		storedOTP, err := store.GetOTP(context.Background(), "", subject, purpose)
+		require.NoError(t, err, "OTP challenge must be synchronously saved in the store before HTTP 204 is returned")
+		require.NotNil(t, storedOTP)
+
+		// Wait until delivery goroutine has started and received the challenge
+		<-deliveryStarted
+
+		// Delivery is still pending / in-flight!
+		// Verify immediately with the issued code.
 		verifyRec := httptest.NewRecorder()
-		verifyForm := url.Values{"code": {"123456"}}
+		verifyForm := url.Values{"code": {deliveredCode}}
 		verifyReq := httptest.NewRequest(http.MethodPost, "/otp/verify", strings.NewReader(verifyForm.Encode()))
 		verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		verifyReq.Header.Set("Origin", "https://"+verifyReq.Host)
 
 		verifyH.ServeHTTP(verifyRec, verifyReq)
 
-		// In current code: verify fails with 401 invalid_code because the async pipeline has not committed!
-		assert.Equal(t, http.StatusUnauthorized, verifyRec.Code,
-			"SEC-OTP-02 Flawed Behavior Confirmed: Immediate verify fails because IssueHandler returned 204 before completion")
+		assert.Equal(t, http.StatusNoContent, verifyRec.Code,
+			"Immediate verify succeeds because OTP persistence completed synchronously before HTTP response")
 
 		// Release delivery goroutine
-		close(issueRelease)
+		close(deliveryRelease)
 	})
 
 	t.Run("SilentDrop_UnderSemaphoreSaturation", func(t *testing.T) {
@@ -263,10 +273,11 @@ func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 		// Release blocked delivery 1
 		close(blockDelivery)
 
-		// Verify subject 2: NO OTP was ever created or saved for subject 2 because dispatchDelivery silently dropped it!
-		err := svc.Verify(context.Background(), "", subject2, purpose, "123456")
-		assert.ErrorIs(t, err, otp.ErrCodeNotFound,
-			"SEC-OTP-02 Flawed Behavior Confirmed: Request 2 received HTTP 204 but was silently dropped with no OTP issued")
+		// Verify subject 2: OTP was generated and saved in the database even though delivery was dropped.
+		// Verifying with any code must NOT return otp.ErrCodeNotFound.
+		err := svc.Verify(context.Background(), "", subject2, purpose, "000000")
+		assert.NotErrorIs(t, err, otp.ErrCodeNotFound,
+			"OTP was successfully created and persisted for subject 2 despite delivery semaphore saturation")
 	})
 }
 

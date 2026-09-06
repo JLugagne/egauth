@@ -161,16 +161,18 @@ func WithDeliveryTimeout(d time.Duration) HandlerOption {
 // IssueHandler builds an HTTP handler that mints an OTP for the resolved subject and hands the
 // Challenge (including the plaintext code) to deliver for out-of-band delivery (email/SMS).
 // It ALWAYS responds uniformly (204 / success redirect) — whether or not a subject was
-// resolved or delivery succeeded — so it leaks no account-existence signal. Both the mint
-// (svc.Issue) and delivery run off the response path: the request goroutine does no
-// subject-dependent store work, so an existing subject cannot be distinguished from an unknown
-// one by response latency (no timing oracle).
+// resolved or delivery succeeded — so it leaks no account-existence signal.
 //
-// Issuing and delivery are BOUNDED together: the handler instance holds a shared semaphore (see
-// WithMaxConcurrentDeliveries) that caps concurrent in-flight goroutines and a per-delivery
-// timeout (see WithDeliveryTimeout) that prevents a hung backend from pinning a slot
-// indefinitely. Under a semaphore-full flood a mint may be dropped rather than queued — intended
-// backpressure for an often-unauthenticated endpoint.
+// The OTP challenge is minted and persisted synchronously (svc.Issue) before returning the HTTP
+// response to prevent race conditions where immediate verification attempts could fail against
+// an uncommitted store write. Out-of-band delivery (email/SMS) is dispatched off the response
+// path with bounded concurrency.
+//
+// Delivery is BOUNDED: the handler instance holds a shared semaphore (see WithMaxConcurrentDeliveries)
+// that caps concurrent in-flight delivery goroutines and a per-delivery timeout (see WithDeliveryTimeout)
+// that prevents a hung backend from pinning a slot indefinitely. Under a semaphore-full flood,
+// out-of-band delivery may be dropped rather than queued (intended backpressure), while the
+// generated OTP challenge remains persisted and verifiable in the store.
 func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) error, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -194,16 +196,11 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 		if subjectID, ok := cfg.subjectResolver(r); ok {
 			tenant := cfg.tenant(r)
 			purpose := cfg.purposeOf(r)
-			cfg.dispatchDelivery(r, func(ctx context.Context) error {
-				ch, err := svc.Issue(ctx, tenant, subjectID, purpose)
-				if err != nil {
-					return err
-				}
-				if deliver != nil {
+			if ch, err := svc.Issue(r.Context(), tenant, subjectID, purpose); err == nil && deliver != nil {
+				cfg.dispatchDelivery(r, func(ctx context.Context) error {
 					return deliver(ctx, ch)
-				}
-				return nil
-			})
+				})
+			}
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
