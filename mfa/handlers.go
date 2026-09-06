@@ -255,6 +255,44 @@ func (cfg handlerConfig) isSteppedUp(r *http.Request) bool {
 	return false
 }
 
+// steppedUpAMR computes the authoritative AMR for the full pair re-issued by StepUpHandler: the
+// interim session's primary factor(s) (resolved via WithAMRResolver, then the context AMR, then
+// the context claims — the same precedence isSteppedUp uses), the verified second factor (otp,
+// the family both TOTP and recovery codes belong to) and the MFA marker. Duplicates collapse (a
+// magic-link interim already carries otp, so the result is [otp, mfa], never a fabricated pwd).
+// When no interim AMR is resolvable the historical password-primary default applies, keeping the
+// pre-existing [pwd, otp, mfa] contract for the password-gated wiring.
+func steppedUpAMR[C any](cfg handlerConfig, r *http.Request) []string {
+	var interim []string
+	if cfg.amrResolve != nil {
+		interim = cfg.amrResolve(r)
+	} else if ctxAMRs, ok := tokens.AMRFromContext(r.Context()); ok {
+		interim = ctxAMRs
+	} else if claims, ok := tokens.ClaimsFromContext[C](r.Context()); ok {
+		interim = claims.AMR
+	}
+	amr := make([]string, 0, len(interim)+2)
+	seen := make(map[string]bool, len(interim)+2)
+	appendUnique := func(values ...string) {
+		for _, v := range values {
+			if !seen[v] {
+				seen[v] = true
+				amr = append(amr, v)
+			}
+		}
+	}
+	for _, a := range interim {
+		if a != tokens.AMRMFA {
+			appendUnique(a)
+		}
+	}
+	if len(amr) == 0 {
+		appendUnique(tokens.AMRPassword)
+	}
+	appendUnique(tokens.AMROTP, tokens.AMRMFA)
+	return amr
+}
+
 // guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
 // user resolution and tenant derivation, body-size cap (DefaultMaxBodyBytes, overridable via
 // WithMaxBodyBytes), then invokes fn with the resolved user ID and tenant string.
@@ -353,19 +391,22 @@ func mapMFAError(err error) (int, string) {
 
 // StepUpClaimsBuilder maps the stepped-up user (resolved from the interim session) to the claims
 // embedded in the full token pair StepUpHandler re-issues. The handler overwrites the returned
-// AMR with [pwd, otp, mfa]; the builder supplies the rest (subject, tenant, scopes, custom).
+// AMR with the authoritative step-up factor set (the interim session's primary factor + otp +
+// mfa); the builder supplies the rest (subject, tenant, scopes, custom).
 // Implementations should leave Claims.ExpiresAt zero so the issuer's configured access TTL
 // applies to the full session.
 type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[C]
 
 // StepUpHandler is the completion half of the AMR/step-up model whose pre-step-up half is
 // identity.WithMFAGate. It is mounted behind the interim session (the access cookie set by an
-// MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code or backup recovery
-// code it verifies the second factor, then re-issues the FULL access+refresh pair with
-// AMR=[tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the
-// interim access cookie. A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new
-// token but never the interim one. On an incorrect/expired code it fails (like VerifyHandler) and
-// mints nothing, so the interim session is never upgraded.
+// MFA-gated LoginHandler or MagicLinkLoginHandler) supplied via WithUserResolver. On a correct
+// TOTP code or backup recovery code it verifies the second factor, then re-issues the FULL
+// access+refresh pair whose AMR preserves the interim session's primary factor and adds
+// tokens.AMROTP + tokens.AMRMFA (password interim: [pwd, otp, mfa]; magic-link interim:
+// [otp, mfa] — never a factor the ceremony did not verify), and writes both cookies, overwriting
+// the interim access cookie. A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the
+// new token but never the interim one. On an incorrect/expired code it fails (like VerifyHandler)
+// and mints nothing, so the interim session is never upgraded.
 //
 // Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
 func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
@@ -392,9 +433,14 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 			return
 		}
 		claims := claimsOf(r.Context(), uid, tenant)
-		// The factor set is now password + a verified TOTP or recovery code, so the token reaches the
-		// MFA assurance level. AMR is set here (not by the builder) so it is authoritative.
-		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
+		// The factor set is now the interim session's verified primary factor + a verified TOTP or
+		// recovery code, so the token reaches the MFA assurance level. AMR is set here (not by the
+		// builder) so it is authoritative. The primary factor is PRESERVED from the interim session
+		// instead of being hardcoded to pwd: a password-gated login presents [pwd], a magic-link
+		// gated login presents [otp] — the stepped-up token must never claim a factor the ceremony
+		// did not verify (SEC-MFA-01). With no interim AMR resolvable, the historical password
+		// default applies.
+		claims.AMR = steppedUpAMR[C](cfg, r)
 		// Carry the forced-change gate forward: if the verified interim token was flagged
 		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
 		// refresh family persists the flag and Rotate replays it onto every silent refresh — so an

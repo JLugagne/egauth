@@ -388,3 +388,97 @@ func TestStepUpHandler_InvalidRecoveryCodeMintsNothing(t *testing.T) {
 	assert.Nil(t, stepUpCookie(rec, tokens.DefaultAccessCookieName))
 	assert.Nil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName))
 }
+
+// TestStepUpHandler_PreservesInterimPrimaryAMR proves the SEC-MFA-01 fix: StepUpHandler must NOT
+// hardcode AMR=[pwd, otp, mfa]. A magic-link interim session carries AMR=[otp] (no password was
+// ever verified); after a TOTP step-up the full pair must preserve that otp primary factor and
+// add the MFA marker — asserting a pwd factor that never happened would overstate the assurance
+// level to any downstream tokens.WithRequiredAMR(tokens.AMRPassword) gate.
+func TestStepUpHandler_PreservesInterimPrimaryAMR(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var enroll struct {
+		Secret string `json:"secret"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
+	rec = httptest.NewRecorder()
+	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var captured tokens.Claims[struct{}]
+	issuer := &issuertest.MockIssuer[struct{}]{
+		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			captured = claims
+			return &tokens.TokenPair[struct{}]{
+				AccessToken:           "full-access-jwt",
+				RefreshToken:          "full-refresh-opaque",
+				RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				Claims:                claims,
+			}, nil
+		},
+	}
+	builder := func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[struct{}] {
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
+	}
+
+	// The interim session came from a magic link: its only factor is otp, no password.
+	amrResolver := mfa.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMROTP} })
+
+	clk.t = clk.t.Add(mfa.DefaultPeriod)
+	rec = httptest.NewRecorder()
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, amrResolver)
+	h(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Contains(t, captured.AMR, tokens.AMRMFA, "step-up token must carry the MFA marker")
+	assert.Contains(t, captured.AMR, tokens.AMROTP, "the verified second factor must be present")
+	assert.NotContains(t, captured.AMR, tokens.AMRPassword,
+		"SEC-MFA-01: step-up must not assert a password factor the magic-link ceremony never verified")
+}
+
+// TestStepUpHandler_NoInterimAMR_FallsBackToPassword proves backward compatibility: when no
+// interim AMR is resolvable (the historical wiring, where the resolver/context carries nothing),
+// StepUpHandler keeps stamping the password-primary [pwd, otp, mfa] set.
+func TestStepUpHandler_NoInterimAMR_FallsBackToPassword(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	var enroll struct {
+		Secret string `json:"secret"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
+	rec = httptest.NewRecorder()
+	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+
+	var captured tokens.Claims[struct{}]
+	issuer := &issuertest.MockIssuer[struct{}]{
+		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			captured = claims
+			return &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour), Claims: claims}, nil
+		},
+	}
+	builder := func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[struct{}] {
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
+	}
+
+	// A resolver that reports no factors at all (empty), simulating a request with no interim AMR.
+	emptyAMR := mfa.WithAMRResolver(func(*http.Request) []string { return nil })
+
+	clk.t = clk.t.Add(mfa.DefaultPeriod)
+	rec = httptest.NewRecorder()
+	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, emptyAMR)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR,
+		"with no interim AMR the historical password-primary set is preserved")
+}

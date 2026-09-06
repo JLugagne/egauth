@@ -82,6 +82,8 @@ type handlerConfig struct {
 	mfaGate MFAEnrollmentChecker
 	// interimTTL is the lifetime of that interim access token. Zero means DefaultInterimTokenTTL.
 	interimTTL time.Duration
+	// authFlow, when non-nil, delegates the post-credential pipeline of MagicLinkLoginHandler to a unified flow engine (see AuthFlow / WithAuthFlow): account state, MFA policy, must-change gating and issuance all move into the engine, and the handler-side issuer is bypassed.
+	authFlow AuthFlow
 	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration.
 	uniformAuthErrors bool
 	amrResolver       func(*http.Request) []string
@@ -361,7 +363,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 				return
 			}
 			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, mustChange); err != nil {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMRPassword, mustChange); err != nil {
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
@@ -782,6 +784,13 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 // token pair and writes the auth cookies — exactly like LoginHandler, but authenticated by the
 // emailed token instead of a password. The optional remember_me field makes the refresh cookie
 // persistent.
+//
+// MFA gating (SEC-ID-03): under WithMFAGate, an enrolled user does NOT receive the full pair —
+// the emailed link alone is a single factor. They get a short-lived interim access token
+// (AMR=[otp], no refresh cookie) and must complete mfa.StepUpHandler, mirroring LoginHandler.
+// Under WithAuthFlow the whole post-credential pipeline (account state, MFA policy, must-change
+// flag, issuance) is delegated to the unified flow engine, which either issues the final
+// credentials or parks the ceremony in the MFA-challenged state with a flow-token cookie.
 func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -808,6 +817,25 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			return
 		}
 
+		// Unified flow engine (issue #71): when configured, the engine owns the entire
+		// post-credential pipeline — account lifecycle, MFA policy, must-change flag and
+		// issuance — and writes the outcome directly to w: either the final credentials
+		// (flow completed via the engine's SessionMinter) or the flow-token cookie (MFA
+		// challenged; the client completes authflow.StepUpHandler). The handler-side issuer
+		// is bypassed. Fail closed: a rejected flow NEVER falls through to direct issuance.
+		if cfg.authFlow != nil {
+			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "magic_link", []string{tokens.AMROTP}, remember); err != nil {
+				status, code := http.StatusInternalServerError, "internal_error"
+				if errors.Is(err, ErrAccountDisabled) {
+					status, code = http.StatusForbidden, "account_disabled"
+				}
+				cfg.fail(w, r, status, code)
+				return
+			}
+			httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+			return
+		}
+
 		// Forced-change gate: a magic-link login is still subject to the must-change flag. When the
 		// credential is flagged the renewable pair carries Claims.MustChangePassword (persisted across
 		// refresh), so the middleware soft-redirects to the reset page. Fail closed on a policy error.
@@ -815,6 +843,28 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
+		}
+
+		// MFA gate (SEC-ID-03): a magic link is a single-factor ceremony (mailbox control) and
+		// must not bypass the second factor of an enrolled user. Exactly like LoginHandler, an
+		// enrolled user receives a short-lived INTERIM access token — stamped with the
+		// magic-link factor (AMR=[otp], never AMRMFA) and NO refresh cookie — and must complete
+		// mfa.StepUpHandler to obtain the full pair. The must-change flag rides on the interim
+		// token so step-up preserves it. Fail closed on a gate error.
+		if cfg.mfaGate != nil {
+			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
+			if err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMROTP, mustChange); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				return
+			}
 		}
 
 		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
@@ -947,7 +997,7 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 				return
 			}
 			if enrolled && !isMFAVerified[C](r, cfg) {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, false); err != nil {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMRPassword, false); err != nil {
 					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 					return
 				}
@@ -1513,16 +1563,21 @@ type MFAEnrollmentChecker interface {
 	IsEnrolled(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
-// WithMFAGate turns LoginHandler into an MFA-gated handler. After a correct password it asks
-// the checker whether the user has a confirmed second factor enrolled. An enrolled user is NOT
-// granted the full access+refresh pair; instead they receive a short-lived INTERIM access token
-// stamped AMR=[tokens.AMRPassword] (never the MFA marker) and NO refresh cookie, so the pre-MFA
-// state is not an indefinitely renewable session. The application then drives the second factor
-// (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR including tokens.AMRMFA. Users
-// without an enrolled factor are unaffected and still receive the full pair.
+// WithMFAGate turns LoginHandler and MagicLinkLoginHandler into MFA-gated handlers. After the
+// primary factor is verified (password, or consumed magic-link token) it asks the checker
+// whether the user has a confirmed second factor enrolled. An enrolled user is NOT granted the
+// full access+refresh pair; instead they receive a short-lived INTERIM access token stamped with
+// the verified factor only — AMR=[tokens.AMRPassword] for a password login,
+// AMR=[tokens.AMROTP] for a magic link (SEC-ID-03), never the MFA marker — and NO refresh
+// cookie, so the pre-MFA state is not an indefinitely renewable session. The application then
+// drives the second factor (e.g. mfa.StepUpHandler) which re-issues the full pair with AMR
+// including tokens.AMRMFA. Users without an enrolled factor are unaffected and still receive
+// the full pair.
 //
 // This is the producing half of the AMR/step-up model whose enforcing half is
-// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly.
+// tokens.WithRequiredAMR. mfa.Service satisfies MFAEnrollmentChecker directly. WithAuthFlow
+// supersedes this option on MagicLinkLoginHandler: when a flow engine is wired, the engine's
+// own MFA gate decides, and this option is not consulted.
 func WithMFAGate(checker MFAEnrollmentChecker) HandlerOption {
 	return func(h *handlerConfig) { h.mfaGate = checker }
 }
@@ -1544,16 +1599,18 @@ func WithAMRResolver(fn func(*http.Request) []string) HandlerOption {
 }
 
 // issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
-// who has passed the password step but not yet the second factor, and writes ONLY the access
-// cookie. The interim token carries AMR=[tokens.AMRPassword] (so tokens.WithRequiredAMR with the
-// MFA marker rejects it) and an explicit short expiry; no refresh cookie is written, so the
-// pre-step-up state is not a renewable session. The application completes the flow with
-// mfa.StepUpHandler, which re-issues the full pair with the MFA factor in AMR.
-func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, mustChange bool) error {
+// who has passed the primary factor but not yet the second factor, and writes ONLY the access
+// cookie. The interim token carries AMR=[primaryAMR] — the factor actually verified (pwd for a
+// password login, otp for a magic link) — so tokens.WithRequiredAMR with the MFA marker rejects
+// it and the token never overstates the assurance level (SEC-MFA-01: no hardcoded factor). An
+// explicit short expiry is forced; no refresh cookie is written, so the pre-step-up state is not
+// a renewable session. The application completes the flow with mfa.StepUpHandler, which
+// re-issues the full pair with the MFA factor in AMR.
+func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, primaryAMR string, mustChange bool) error {
 	claims := claimsOf(user)
-	// Stamp the password factor only and force a short explicit access-token expiry, overriding
-	// whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
-	claims.AMR = []string{tokens.AMRPassword}
+	// Stamp the verified primary factor only and force a short explicit access-token expiry,
+	// overriding whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
+	claims.AMR = []string{primaryAMR}
 	// When the credential is ALSO flagged for rotation, carry the advisory flag on the interim
 	// token so the step-up re-issuance (mfa.StepUpHandler, TASK-065) can preserve it: an
 	// MFA-enrolled must-change user must not escape the gate by completing the second factor.

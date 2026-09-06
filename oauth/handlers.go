@@ -40,6 +40,9 @@ type handlerConfig struct {
 	successURL      string
 	failureURL      string
 	persistRefresh  bool
+	// authFlow, when non-nil, delegates the post-callback pipeline (account state, MFA policy,
+	// issuance) of CallbackHandler to a unified flow engine (see AuthFlow / WithAuthFlow).
+	authFlow AuthFlow
 
 	allowUnverifiedEmail bool
 }
@@ -202,6 +205,10 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 // cookie (CSRF), exchanges the code (with PKCE), fetches the user info, links or
 // JIT-provisions the local account, then issues an access+refresh token pair and writes the
 // auth cookies. The state cookie is always cleared, and on any failure no auth cookie is set.
+//
+// When WithAuthFlow is configured, issuance is delegated to the unified flow engine instead
+// (SEC-GLO-02): an MFA-enrolled user receives only the engine's flow-token cookie and must
+// complete the second factor before any access/refresh cookie is written.
 func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -293,6 +300,22 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		if err != nil {
 			status, code := mapLinkError(err)
 			cfg.fail(w, r, status, code)
+			return
+		}
+
+		// Unified flow engine (issue #71 / SEC-GLO-02): when configured, the engine owns the
+		// post-callback pipeline — account lifecycle re-validation, MFA policy enforcement,
+		// must-change gating and issuance. An MFA-enrolled user does NOT get a full pair here:
+		// the engine writes only its flow-token cookie and the ceremony completes through the
+		// engine's step-up endpoint. Fail closed: a rejected flow NEVER falls through to the
+		// direct issuance below.
+		if cfg.authFlow != nil {
+			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "oauth:"+p.Name(), []string{"oauth"}, cfg.persistRefresh); err != nil {
+				status, code := mapLinkError(err)
+				cfg.fail(w, r, status, code)
+				return
+			}
+			httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 			return
 		}
 

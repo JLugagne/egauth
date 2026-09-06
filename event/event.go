@@ -42,6 +42,7 @@ const (
 	AccountEnabled          Type = "account.enabled"  // administrative re-activation
 	RefreshReuseDetected    Type = "refresh.reuse_detected"
 	TokenFamilyRevoked      Type = "token.family_revoked"
+	MFAChallengeRequired    Type = "mfa.challenge_required" // a login flow paused mid-pipeline: a second factor must be satisfied before final credential issuance (authflow engine)
 	MFAEnrolled             Type = "mfa.enrolled"
 	MFAConfirmed            Type = "mfa.confirmed"
 	MFAVerified             Type = "mfa.verified" // a second factor (TOTP or recovery code) was successfully verified
