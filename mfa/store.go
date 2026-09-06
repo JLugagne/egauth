@@ -9,8 +9,9 @@ import (
 
 // Store persists TOTP enrollments and recovery codes, and tracks their independent attempt limits.
 //
-// It is the composition of three capability interfaces — TOTPStore (the authenticator-app factor),
-// RecoveryCodeStore (the single-use backup codes), and RecoveryAttemptStore (isolated lockout tracking).
+// It is the composition of four capability interfaces — TOTPStore (the authenticator-app factor),
+// RecoveryCodeStore (the single-use backup codes), RecoveryAttemptStore (isolated lockout tracking),
+// and EnrollmentConfirmer (atomic TOTP activation with recovery codes).
 // Both the in-memory and pgx stores implement the whole Store.
 //
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
@@ -20,6 +21,17 @@ type Store interface {
 	TOTPStore
 	RecoveryCodeStore
 	RecoveryAttemptStore
+	EnrollmentConfirmer
+}
+
+// EnrollmentConfirmer is the atomic confirmation capability of an mfa backend:
+// atomically marking a TOTP enrollment confirmed and persisting its initial recovery codes.
+type EnrollmentConfirmer interface {
+	// ConfirmEnrollment atomically marks the TOTP enrollment as confirmed (updating ConfirmedAt,
+	// LastUsedStep, and resetting FailedAttempts and LastAttemptAt) and persists the generated
+	// recovery code hashes. Both operations MUST succeed together in a single atomic transaction
+	// or fail together without committing either change (SEC-MFA-06).
+	ConfirmEnrollment(ctx context.Context, tenantID string, enrollment *TOTPEnrollment, codeHashes []string) error
 }
 
 // TOTPStore is the TOTP-enrollment capability of an mfa backend: persisting, reading,

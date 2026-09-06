@@ -49,6 +49,32 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 	return nil
 }
 
+func (s *Store) ConfirmEnrollment(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment, codeHashes []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if e.TenantID != "" && e.TenantID != tenantID {
+		return mfa.ErrTenantMismatch
+	}
+	stored := *e
+	stored.TenantID = tenantID
+	s.totp[key(tenantID, e.UserID)] = &stored
+
+	now := time.Now()
+	codes := make([]*mfa.RecoveryCode, 0, len(codeHashes))
+	for _, h := range codeHashes {
+		codes = append(codes, &mfa.RecoveryCode{
+			UserID:    e.UserID,
+			TenantID:  tenantID,
+			CodeHash:  h,
+			CreatedAt: now,
+		})
+	}
+	s.recovery[key(tenantID, e.UserID)] = codes
+	delete(s.recoveryAttempts, key(tenantID, e.UserID))
+	return nil
+}
+
 func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*mfa.TOTPEnrollment, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()

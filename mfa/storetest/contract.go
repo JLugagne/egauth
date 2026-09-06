@@ -267,6 +267,48 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 			"SaveTOTP must reject a record whose TenantID conflicts with the tenantID arg")
 	})
 
+	t.Run("ConfirmEnrollment confirms TOTP and persists recovery codes atomically", func(t *testing.T) {
+		uid := uuid.Must(uuid.NewV7())
+		now := time.Now()
+		enr := &mfa.TOTPEnrollment{
+			UserID:    uid,
+			Secret:    "SHARED-SECRET",
+			CreatedAt: now,
+		}
+		require.NoError(t, store.SaveTOTP(ctx, tenantA, enr))
+
+		confTime := now.Add(time.Minute)
+		enr.ConfirmedAt = &confTime
+		enr.LastUsedStep = 55
+		enr.FailedAttempts = 0
+		enr.LastAttemptAt = time.Time{}
+
+		hashes := []string{"hash-alpha", "hash-beta"}
+		require.NoError(t, store.ConfirmEnrollment(ctx, tenantA, enr, hashes))
+
+		got, err := store.GetTOTP(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.True(t, got.Confirmed())
+		assert.Equal(t, int64(55), got.LastUsedStep)
+		assert.Equal(t, 0, got.FailedAttempts)
+		assert.True(t, got.LastAttemptAt.IsZero())
+
+		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "hash-alpha"))
+		assert.ErrorIs(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "hash-alpha"), mfa.ErrRecoveryCodeNotFound)
+		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "hash-beta"))
+
+		require.NoError(t, store.DeleteTOTP(ctx, tenantA, uid))
+		require.NoError(t, store.DeleteRecoveryCodes(ctx, tenantA, uid))
+	})
+
+	t.Run("ConfirmEnrollment ErrTenantMismatch", func(t *testing.T) {
+		uid := uuid.Must(uuid.NewV7())
+		e := &mfa.TOTPEnrollment{UserID: uid, TenantID: "other-tenant", Secret: "S", CreatedAt: time.Now()}
+		err := store.ConfirmEnrollment(ctx, tenantA, e, []string{"h1"})
+		assert.ErrorIs(t, err, mfa.ErrTenantMismatch,
+			"ConfirmEnrollment must reject a record whose TenantID conflicts with the tenantID arg")
+	})
+
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
 			uid := uuid.Must(uuid.NewV7())

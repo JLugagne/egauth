@@ -2,6 +2,7 @@ package mfa_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -310,4 +311,62 @@ func TestVerifyTOTP_ConcurrentAttemptLimit(t *testing.T) {
 	assert.LessOrEqual(t, invalid, int64(maxAttempts), "concurrent wrong guesses must not exceed the attempt ceiling")
 	// And the factor is locked afterwards.
 	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts)
+}
+
+// failingConfirmStore wraps mfa.Store but injects a failure during ConfirmEnrollment.
+type failingConfirmStore struct {
+	mfa.Store
+	failConfirm bool
+}
+
+func (s *failingConfirmStore) ConfirmEnrollment(ctx context.Context, tenantID string, enrollment *mfa.TOTPEnrollment, codeHashes []string) error {
+	if s.failConfirm {
+		return errors.New("simulated error during confirm enrollment")
+	}
+	return s.Store.ConfirmEnrollment(ctx, tenantID, enrollment, codeHashes)
+}
+
+func TestConfirmTOTP_AtomicOnRecoveryFailure(t *testing.T) {
+	ctx := context.Background()
+	baseStore := memory.NewStore()
+	store := &failingConfirmStore{Store: baseStore}
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(store, mfa.WithClock(clk.now))
+	uid := uuid.Must(uuid.NewV7())
+
+	enrollment, err := svc.EnrollTOTP(ctx, "", uid, "user@example.com")
+	require.NoError(t, err)
+
+	code, err := mfa.GenerateCode(enrollment.Secret, clk.now(), mfa.DefaultDigits, mfa.DefaultPeriod)
+	require.NoError(t, err)
+
+	// Simulate failure in ConfirmEnrollment
+	store.failConfirm = true
+
+	codes, err := svc.ConfirmTOTP(ctx, "", uid, code)
+	assert.Error(t, err)
+	assert.Nil(t, codes)
+
+	// User must not be confirmed if ConfirmEnrollment fails
+	enrolled, err := svc.IsEnrolled(ctx, "", uid)
+	require.NoError(t, err)
+	assert.False(t, enrolled, "user must not be confirmed if ConfirmEnrollment fails")
+
+	got, err := store.GetTOTP(ctx, "", uid)
+	require.NoError(t, err)
+	assert.False(t, got.Confirmed())
+	assert.Nil(t, got.ConfirmedAt)
+
+	// Restore and retry
+	store.failConfirm = false
+	codes, err = svc.ConfirmTOTP(ctx, "", uid, code)
+	require.NoError(t, err)
+	require.NotEmpty(t, codes)
+
+	enrolled, err = svc.IsEnrolled(ctx, "", uid)
+	require.NoError(t, err)
+	assert.True(t, enrolled)
+
+	// Recovery codes work
+	require.NoError(t, svc.VerifyRecoveryCode(ctx, "", uid, codes[0]))
 }

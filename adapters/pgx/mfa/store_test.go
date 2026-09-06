@@ -115,3 +115,46 @@ func TestPgxStore_TOTPSecretEncryptedAtRest(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, plaintextSecret, string(rawSecret), "TOTP secret must be encrypted at rest, not stored in plaintext")
 }
+
+// TestPgxStore_ConfirmEnrollmentAtomic verifies that ConfirmEnrollment executes within a single
+// database transaction: if inserting recovery codes fails (e.g. duplicate hash trips PK),
+// the entire transaction rolls back and the TOTP enrollment is NOT left confirmed (SEC-MFA-06).
+func TestPgxStore_ConfirmEnrollmentAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	uid := uuid.Must(uuid.NewV7())
+
+	enr := &mfa.TOTPEnrollment{
+		UserID:   uid,
+		TenantID: "t1",
+		Secret:   "secret-key",
+	}
+	require.NoError(t, store.SaveTOTP(ctx, "t1", enr))
+
+	// Attempt confirmation with duplicate recovery code hashes to cause PK violation during insert
+	now := time.Now()
+	enr.ConfirmedAt = &now
+	enr.LastUsedStep = 42
+	err := store.ConfirmEnrollment(ctx, "t1", enr, []string{"dup", "dup"})
+	require.Error(t, err)
+
+	// Because of transaction rollback, the TOTP enrollment must remain unconfirmed
+	got, err := store.GetTOTP(ctx, "t1", uid)
+	require.NoError(t, err)
+	assert.False(t, got.Confirmed(), "TOTP factor must remain unconfirmed when recovery code persistence fails")
+	assert.Nil(t, got.ConfirmedAt)
+	assert.Equal(t, int64(0), got.LastUsedStep)
+
+	// Zero recovery codes should exist for this user
+	assert.ErrorIs(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "dup"), mfa.ErrRecoveryCodeNotFound)
+
+	// When called with unique codes, ConfirmEnrollment succeeds
+	err = store.ConfirmEnrollment(ctx, "t1", enr, []string{"code1", "code2"})
+	require.NoError(t, err)
+
+	got, err = store.GetTOTP(ctx, "t1", uid)
+	require.NoError(t, err)
+	assert.True(t, got.Confirmed())
+	assert.Equal(t, int64(42), got.LastUsedStep)
+	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "code1"))
+}

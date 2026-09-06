@@ -91,6 +91,78 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 	return err
 }
 
+func (s *Store) ConfirmEnrollment(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment, codeHashes []string) error {
+	if e.TenantID != "" && e.TenantID != tenantID {
+		return mfa.ErrTenantMismatch
+	}
+	e.TenantID = tenantID
+	if e.CreatedAt.IsZero() {
+		e.CreatedAt = time.Now().UTC()
+	}
+
+	sealed, err := s.kek.Seal([]byte(e.Secret))
+	if err != nil {
+		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
+	}
+	secretStr := base64.StdEncoding.EncodeToString(sealed)
+
+	var lastAttemptAt *time.Time
+	if !e.LastAttemptAt.IsZero() {
+		t := e.LastAttemptAt.UTC()
+		lastAttemptAt = &t
+	}
+
+	const totpQuery = `
+		INSERT INTO mfa_totp (tenant_id, user_id, secret, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (tenant_id, user_id) DO UPDATE
+		SET secret = EXCLUDED.secret,
+		    confirmed_at = EXCLUDED.confirmed_at,
+		    last_used_step = EXCLUDED.last_used_step,
+		    failed_attempts = EXCLUDED.failed_attempts,
+		    last_attempt_at = EXCLUDED.last_attempt_at
+	`
+	const insertCode = `
+		INSERT INTO mfa_recovery_codes (tenant_id, user_id, code_hash, used_at, created_at)
+		VALUES ($1, $2, $3, NULL, $4)
+	`
+	now := time.Now().UTC()
+
+	confirm := func(q DBQuerier) error {
+		if _, err := q.Exec(ctx, totpQuery, tenantID, e.UserID, secretStr, e.ConfirmedAt, e.LastUsedStep, e.FailedAttempts, lastAttemptAt, e.CreatedAt); err != nil {
+			return err
+		}
+		if _, err := q.Exec(ctx, `DELETE FROM mfa_recovery_codes WHERE tenant_id = $1 AND user_id = $2`, tenantID, e.UserID); err != nil {
+			return err
+		}
+		if _, err := q.Exec(ctx, `DELETE FROM mfa_recovery_attempts WHERE tenant_id = $1 AND user_id = $2`, tenantID, e.UserID); err != nil {
+			return err
+		}
+		for _, h := range codeHashes {
+			if _, err := q.Exec(ctx, insertCode, tenantID, e.UserID, h, now); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	beginner, ok := s.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return confirm(s.db)
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	if err := confirm(tx); err != nil {
+		_ = tx.Rollback(ctx)
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*mfa.TOTPEnrollment, error) {
 	const query = `
 		SELECT secret, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at

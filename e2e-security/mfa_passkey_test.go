@@ -74,7 +74,7 @@ func TestSEC_MFA_05_SharedLockout_TOTP_Exhaustion_Blocks_RecoveryCodes(t *testin
 	require.NoError(t, err, "valid recovery code must succeed even after TOTP attempts are exhausted")
 }
 
-// failingRecoveryStore proxies mfa.Store but injects a failure during ReplaceRecoveryCodes.
+// failingRecoveryStore proxies mfa.Store but injects a failure during ReplaceRecoveryCodes or ConfirmEnrollment.
 type failingRecoveryStore struct {
 	mfa.Store
 	failReplace bool
@@ -87,14 +87,16 @@ func (s *failingRecoveryStore) ReplaceRecoveryCodes(ctx context.Context, tenantI
 	return s.Store.ReplaceRecoveryCodes(ctx, tenantID, userID, codeHashes)
 }
 
-// TestSEC_MFA_06_ConfirmTOTP_NonAtomic_RecoveryCodesLost confirms the non-atomicity of ConfirmTOTP.
-//
-// Root cause: ConfirmTOTP first commits ConfirmedAt in SaveTOTP, and only then calls mintRecoveryCodes.
-// If minting/saving recovery codes fails:
-// 1. The TOTP factor is permanently marked as confirmed in the database.
-// 2. Zero recovery codes are saved in the database.
-// 3. Any retry by the user is rejected with ErrAlreadyEnrolled.
-// The user is permanently stuck with an active MFA factor but zero recovery codes.
+func (s *failingRecoveryStore) ConfirmEnrollment(ctx context.Context, tenantID string, enrollment *mfa.TOTPEnrollment, codeHashes []string) error {
+	if s.failReplace {
+		return errors.New("simulated database disconnect during recovery codes persistence")
+	}
+	return s.Store.ConfirmEnrollment(ctx, tenantID, enrollment, codeHashes)
+}
+
+// TestSEC_MFA_06_ConfirmTOTP_NonAtomic_RecoveryCodesLost verifies that ConfirmTOTP is atomic:
+// if recovery codes persistence fails, TOTP must not be left confirmed, and retrying ConfirmTOTP
+// succeeds once persistence is restored (SEC-MFA-06).
 func TestSEC_MFA_06_ConfirmTOTP_NonAtomic_RecoveryCodesLost(t *testing.T) {
 	ctx := context.Background()
 	baseStore := mfamemory.NewStore()
@@ -121,21 +123,27 @@ func TestSEC_MFA_06_ConfirmTOTP_NonAtomic_RecoveryCodesLost(t *testing.T) {
 	assert.Nil(t, codes)
 	assert.Contains(t, err.Error(), "simulated database disconnect")
 
-	// 4. Verify the database state: TOTP is already CONFIRMED!
+	// 4. Verify the database state: TOTP must NOT be confirmed!
 	storedEnrollment, err := store.GetTOTP(ctx, tenant, uid)
 	require.NoError(t, err)
-	assert.True(t, storedEnrollment.Confirmed(), "SEC-MFA-06: TOTP was committed as confirmed despite recovery failure")
+	assert.False(t, storedEnrollment.Confirmed(), "SEC-MFA-06 Fixed: TOTP must not be left confirmed if recovery codes failed to persist")
+	assert.Nil(t, storedEnrollment.ConfirmedAt)
+
+	// 5. Restore database connectivity and retry ConfirmTOTP:
+	store.failReplace = false
+
+	retryCodes, err := svc.ConfirmTOTP(ctx, tenant, uid, confirmCode)
+	require.NoError(t, err, "SEC-MFA-06 Fixed: Retry must succeed once persistence is restored")
+	require.NotEmpty(t, retryCodes)
+
+	// 6. Verify enrollment is now confirmed and recovery codes exist:
+	storedEnrollment, err = store.GetTOTP(ctx, tenant, uid)
+	require.NoError(t, err)
+	assert.True(t, storedEnrollment.Confirmed(), "TOTP is confirmed after successful retry")
 	assert.NotNil(t, storedEnrollment.ConfirmedAt)
 
-	// 5. User tries to retry ConfirmTOTP to obtain their recovery codes:
-	// It is rejected with ErrAlreadyEnrolled!
-	_, retryErr := svc.ConfirmTOTP(ctx, tenant, uid, confirmCode)
-	assert.ErrorIs(t, retryErr, mfa.ErrAlreadyEnrolled, "SEC-MFA-06: Retry is blocked with ErrAlreadyEnrolled")
-
-	// 6. Verify that NO recovery codes exist in the database for the user:
-	verifyErr := svc.VerifyRecoveryCode(ctx, tenant, uid, "any-valid-looking-code")
-	assert.ErrorIs(t, verifyErr, mfa.ErrRecoveryCodeNotFound,
-		"SEC-MFA-06 Flawed Behavior Confirmed: User has active MFA but zero recovery codes in store")
+	err = svc.VerifyRecoveryCode(ctx, tenant, uid, retryCodes[0])
+	require.NoError(t, err, "User can authenticate with minted recovery code")
 }
 
 // TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop confirms:

@@ -233,6 +233,11 @@ func (s *service) ConfirmTOTP(ctx context.Context, tenantID string, userID uuid.
 		return nil, ErrInvalidCode
 	}
 
+	plaintext, hashes, err := generateRecoveryCodes(s.recoveryCodeCount)
+	if err != nil {
+		return nil, err
+	}
+
 	now := s.now()
 	enrollment.ConfirmedAt = &now
 	enrollment.LastUsedStep = step // the confirming code cannot be replayed for login
@@ -242,12 +247,36 @@ func (s *service) ConfirmTOTP(ctx context.Context, tenantID string, userID uuid.
 	// first-login budget — leaving a freshly enrolled user one wrong code away from a lockout.
 	enrollment.FailedAttempts = 0
 	enrollment.LastAttemptAt = time.Time{}
-	if err := s.store.SaveTOTP(ctx, tenantID, enrollment); err != nil {
-		return nil, err
+
+	// Atomically persist TOTP confirmation and recovery codes (SEC-MFA-06).
+	// If the store implements EnrollmentConfirmer, execute both in a single atomic transaction.
+	// Otherwise, fallback to SaveTOTP + ReplaceRecoveryCodes with compensating rollback.
+	if confirmer, ok := s.store.(EnrollmentConfirmer); ok {
+		if err := confirmer.ConfirmEnrollment(ctx, tenantID, enrollment, hashes); err != nil {
+			return nil, err
+		}
+	} else {
+		prevConfirmedAt := enrollment.ConfirmedAt
+		prevStep := enrollment.LastUsedStep
+		prevAttempts := enrollment.FailedAttempts
+		prevLastAttempt := enrollment.LastAttemptAt
+
+		if err := s.store.SaveTOTP(ctx, tenantID, enrollment); err != nil {
+			return nil, err
+		}
+		if err := s.store.ReplaceRecoveryCodes(ctx, tenantID, userID, hashes); err != nil {
+			// Compensating rollback so partial failures do not leave TOTP confirmed without recovery codes.
+			enrollment.ConfirmedAt = prevConfirmedAt
+			enrollment.LastUsedStep = prevStep
+			enrollment.FailedAttempts = prevAttempts
+			enrollment.LastAttemptAt = prevLastAttempt
+			_ = s.store.SaveTOTP(ctx, tenantID, enrollment)
+			return nil, err
+		}
 	}
 
 	s.emit(ctx, event.Event{Type: event.MFAConfirmed, UserID: userID.String(), TenantID: tenantID})
-	return s.mintRecoveryCodes(ctx, tenantID, userID)
+	return plaintext, nil
 }
 
 func (s *service) VerifyTOTP(ctx context.Context, tenantID string, userID uuid.UUID, code string) error {
