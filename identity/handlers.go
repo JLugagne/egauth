@@ -84,6 +84,7 @@ type handlerConfig struct {
 	interimTTL time.Duration
 	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration.
 	uniformAuthErrors bool
+	amrResolver       func(*http.Request) []string
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -936,16 +937,78 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 			return
 		}
 
+		// MFA gate: when configured, an enrolled user who has not already satisfied MFA
+		// must not receive a full refreshable pair. Issue an interim token so that the client
+		// must complete the second factor before getting full access.
+		if cfg.mfaGate != nil {
+			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), cfg.tenant(r), user.ID)
+			if err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
+				return
+			}
+			if enrolled && !isMFAVerified[C](r, cfg) {
+				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, false); err != nil {
+					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+					return
+				}
+				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+				return
+			}
+		}
+
 		// ChangePassword succeeded: the must-change flag is cleared in the store and prior
 		// refresh-token families have been revoked by the AccountErasers. Issue a fresh full pair
 		// now (mustChange=false) so the user is immediately re-authenticated, with a clean refresh
 		// family that no longer replays the gate, without an extra login round-trip.
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, false, false); err != nil {
+		effectiveClaimsOf := claimsOf
+		if isMFAVerified[C](r, cfg) {
+			effectiveClaimsOf = func(u *User) tokens.Claims[C] {
+				c := claimsOf(u)
+				hasMFA := false
+				for _, a := range c.AMR {
+					if a == tokens.AMRMFA {
+						hasMFA = true
+						break
+					}
+				}
+				if !hasMFA {
+					c.AMR = append(c.AMR, tokens.AMRMFA)
+				}
+				return c
+			}
+		}
+		if err := issuePairAndSetCookies(w, r, cfg, issuer, effectiveClaimsOf, user, false, false); err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
+}
+
+func isMFAVerified[C any](r *http.Request, cfg handlerConfig) bool {
+	if cfg.amrResolver != nil {
+		amrs := cfg.amrResolver(r)
+		for _, a := range amrs {
+			if a == tokens.AMRMFA {
+				return true
+			}
+		}
+	}
+	if amrs, ok := tokens.AMRFromContext(r.Context()); ok {
+		for _, a := range amrs {
+			if a == tokens.AMRMFA {
+				return true
+			}
+		}
+	}
+	if claims, ok := tokens.ClaimsFromContext[C](r.Context()); ok {
+		for _, a := range claims.AMR {
+			if a == tokens.AMRMFA {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RequestEmailChangeHandler builds an authenticated HTTP handler that starts the change-email
@@ -1473,6 +1536,11 @@ func WithInterimTokenTTL(d time.Duration) HandlerOption {
 			h.interimTTL = d
 		}
 	}
+}
+
+// WithAMRResolver configures a custom function to extract AMR factors from the request.
+func WithAMRResolver(fn func(*http.Request) []string) HandlerOption {
+	return func(h *handlerConfig) { h.amrResolver = fn }
 }
 
 // issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user

@@ -27,6 +27,7 @@ func newContextVerifier(subject uuid.UUID, tenantID string) *issuertest.MockVeri
 				return &tokens.Claims[customClaims]{
 					Subject:  subject,
 					TenantID: tenantID,
+					AMR:      []string{tokens.AMRPassword, tokens.AMRMFA},
 					Custom:   customClaims{Role: "admin"},
 				}, nil
 			}
@@ -49,12 +50,15 @@ func TestContextMiddleware(t *testing.T) {
 		var gotActorOK bool
 		var gotClaims *tokens.Claims[customClaims]
 		var gotClaimsOK bool
+		var gotAMR []string
+		var gotAMROK bool
 		var nextCalled bool
 
 		next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			nextCalled = true
 			gotActor, gotActorOK = tokens.ActorFromContext(r.Context())
 			gotClaims, gotClaimsOK = tokens.ClaimsFromContext[customClaims](r.Context())
+			gotAMR, gotAMROK = tokens.AMRFromContext(r.Context())
 			w.WriteHeader(http.StatusOK)
 		})
 
@@ -71,6 +75,9 @@ func TestContextMiddleware(t *testing.T) {
 		require.NotNil(t, gotClaims)
 		assert.Equal(t, subject, gotClaims.Subject)
 		assert.Equal(t, "admin", gotClaims.Custom.Role)
+
+		require.True(t, gotAMROK)
+		assert.Equal(t, []string{tokens.AMRPassword, tokens.AMRMFA}, gotAMR)
 	})
 
 	t.Run("fails closed without calling next when token is missing", func(t *testing.T) {
@@ -113,6 +120,9 @@ func TestActorFromContext_Empty(t *testing.T) {
 
 	_, claimsOK := tokens.ClaimsFromContext[customClaims](context.Background())
 	assert.False(t, claimsOK)
+
+	_, amrOK := tokens.AMRFromContext(context.Background())
+	assert.False(t, amrOK)
 }
 
 // TestClaimsFromContext_WrongType proves a ClaimsFromContext call with the wrong C fails

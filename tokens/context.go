@@ -39,7 +39,20 @@ type actorCarrier interface {
 	actor() egauth.Actor
 }
 
+// amrCarrier exposes the AMR slice without naming C, so AMRFromContext can stay
+// non-generic.
+type amrCarrier interface {
+	amr() []string
+}
+
 func (a authContext[C]) actor() egauth.Actor { return a.actorValue }
+
+func (a authContext[C]) amr() []string {
+	if a.claims == nil {
+		return nil
+	}
+	return a.claims.AMR
+}
 
 // ContextMiddleware verifies the access token using the SAME fail-closed path as
 // RequireAuth (header/cookie source, tenant resolver, auto-refresh, AMR and max-auth-age
@@ -97,6 +110,17 @@ func ClaimsFromContext[C any](ctx context.Context) (*Claims[C], bool) {
 		return nil, false
 	}
 	return ac.claims, true
+}
+
+// AMRFromContext returns the authentication method references (RFC 8176) from the
+// verified token injected by ContextMiddleware into ctx. ok is false when no authenticated
+// token is present in ctx.
+func AMRFromContext(ctx context.Context) ([]string, bool) {
+	carrier, ok := ctx.Value(ctxKey{}).(amrCarrier)
+	if !ok {
+		return nil, false
+	}
+	return carrier.amr(), true
 }
 
 // UserResolverFromContext adapts the context Actor to the (userID, tenant, ok) resolver

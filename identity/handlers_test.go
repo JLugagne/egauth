@@ -208,6 +208,141 @@ func TestChangePasswordWithReissueHandler_DisabledAccount_Returns403(t *testing.
 	assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName))
 }
 
+func TestChangePasswordWithReissueHandler_MFAGate(t *testing.T) {
+	uid := uuid.Must(uuid.NewV7())
+	user := &identity.User{ID: uid}
+	withUser := identity.WithUserResolver(func(r *http.Request) (*identity.User, bool) {
+		return user, true
+	})
+
+	t.Run("enrolled user with interim session receives interim token and no refresh cookie", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPw string) error {
+				return nil
+			},
+		}
+		var captured tokens.Claims[struct{}]
+		h := identity.ChangePasswordWithReissueHandler[struct{}](
+			svc,
+			capturingIssuer(&captured),
+			testClaimsBuilder(),
+			withUser,
+			identity.WithMFAGate(stubMFAGate{enrolled: true}),
+			identity.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMRPassword} }),
+		)
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "interim access cookie expected")
+		assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName), "must not issue refresh cookie to MFA-enrolled user from interim session")
+		assert.Equal(t, []string{tokens.AMRPassword}, captured.AMR)
+		assert.NotContains(t, captured.AMR, tokens.AMRMFA)
+	})
+
+	t.Run("enrolled user with already elevated MFA session receives full pair", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPw string) error {
+				return nil
+			},
+		}
+		var captured tokens.Claims[struct{}]
+		h := identity.ChangePasswordWithReissueHandler[struct{}](
+			svc,
+			capturingIssuer(&captured),
+			testClaimsBuilder(),
+			withUser,
+			identity.WithMFAGate(stubMFAGate{enrolled: true}),
+			identity.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMRPassword, tokens.AMRMFA} }),
+		)
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName))
+		require.NotNil(t, cookieByName(rec, tokens.DefaultRefreshCookieName), "already elevated user receives full pair")
+	})
+
+	t.Run("non-enrolled user receives full pair", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPw string) error {
+				return nil
+			},
+		}
+		var captured tokens.Claims[struct{}]
+		h := identity.ChangePasswordWithReissueHandler[struct{}](
+			svc,
+			capturingIssuer(&captured),
+			testClaimsBuilder(),
+			withUser,
+			identity.WithMFAGate(stubMFAGate{enrolled: false}),
+		)
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, changePwForm(t, "old", "NewValidPass123!"))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName))
+		require.NotNil(t, cookieByName(rec, tokens.DefaultRefreshCookieName), "non-enrolled user receives full pair")
+	})
+
+	t.Run("ContextMiddleware with interim token receives interim and with AMRMFA receives full pair", func(t *testing.T) {
+		svc := &servicetest.MockService{
+			ChangePasswordFunc: func(ctx context.Context, tenantID string, userID uuid.UUID, current, newPw string) error {
+				return nil
+			},
+		}
+
+		mockVerifier := func(amr []string) tokens.Verifier[struct{}] {
+			return &issuertest.MockVerifier[struct{}]{
+				VerifyAccessTokenForTenantFunc: func(_ context.Context, _, _ string) (*tokens.Claims[struct{}], error) {
+					return &tokens.Claims[struct{}]{
+						Subject: uid,
+						AMR:     amr,
+					}, nil
+				},
+			}
+		}
+
+		var captured tokens.Claims[struct{}]
+		handler := identity.ChangePasswordWithReissueHandler[struct{}](
+			svc,
+			capturingIssuer(&captured),
+			testClaimsBuilder(),
+			identity.WithUserResolver(func(r *http.Request) (*identity.User, bool) {
+				actor, ok := tokens.ActorFromContext(r.Context())
+				if !ok {
+					return nil, false
+				}
+				return &identity.User{ID: actor.UserID}, true
+			}),
+			identity.WithMFAGate(stubMFAGate{enrolled: true}),
+		)
+
+		// Interim session [pwd] -> interim token only, no refresh cookie
+		rec := httptest.NewRecorder()
+		req := changePwForm(t, "old", "NewValidPass123!")
+		req.Header.Set("Authorization", "Bearer token-pwd")
+		tokens.ContextMiddleware[struct{}](mockVerifier([]string{tokens.AMRPassword}), handler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName))
+		assert.Nil(t, cookieByName(rec, tokens.DefaultRefreshCookieName))
+		assert.Equal(t, []string{tokens.AMRPassword}, captured.AMR)
+
+		// Elevated session [pwd, otp, mfa] -> full pair
+		rec = httptest.NewRecorder()
+		req = changePwForm(t, "old", "NewValidPass123!")
+		req.Header.Set("Authorization", "Bearer token-mfa")
+		tokens.ContextMiddleware[struct{}](mockVerifier([]string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}), handler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName))
+		require.NotNil(t, cookieByName(rec, tokens.DefaultRefreshCookieName))
+		assert.Contains(t, captured.AMR, tokens.AMRMFA)
+	})
+}
+
 func TestLoginHandler_RejectsOversizedBody(t *testing.T) {
 	called := false
 	svc := &servicetest.MockService{

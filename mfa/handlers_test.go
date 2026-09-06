@@ -1,6 +1,7 @@
 package mfa_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 
 	"github.com/JLugagne/egauth/mfa"
 	"github.com/JLugagne/egauth/mfa/memory"
+	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/issuertest"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,7 +79,7 @@ func TestHandlers_FullFlow(t *testing.T) {
 
 	// Disable → 204.
 	rec = httptest.NewRecorder()
-	mfa.DisableHandler(svc, resolver)(rec, mfaPost(url.Values{}))
+	mfa.DisableHandler(svc, resolver, mfa.WithoutStepUp())(rec, mfaPost(url.Values{}))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
@@ -138,7 +141,7 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		{"VerifyHandler", mfa.VerifyHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver, trusted), url.Values{"code": {"abc"}}},
 		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted), url.Values{}},
-		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted), url.Values{}},
+		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted, mfa.WithoutStepUp()), url.Values{}},
 	}
 
 	for _, h := range handlers {
@@ -172,5 +175,106 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		rec := httptest.NewRecorder()
 		handlerInsecure(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)
+	})
+}
+
+func TestDisableHandler_StepUp(t *testing.T) {
+	setupEnrolledUser := func(t *testing.T) (mfa.Service, uuid.UUID, *clock) {
+		clk := &clock{t: time.Unix(1_700_000_000, 0)}
+		svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+		uid := uuid.Must(uuid.NewV7())
+		enroll, err := svc.EnrollTOTP(context.Background(), "t1", uid, "user@example.com")
+		require.NoError(t, err)
+		code := clk.code(t, enroll.Secret)
+		_, err = svc.ConfirmTOTP(context.Background(), "t1", uid, code)
+		require.NoError(t, err)
+		return svc, uid, clk
+	}
+
+	t.Run("default requires step-up and rejects unelevated caller with 403", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+		resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+		rec := httptest.NewRecorder()
+		mfa.DisableHandler(svc, resolver)(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "step_up_required")
+	})
+
+	t.Run("interim session AMR [pwd] is rejected with 403", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+		resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+		amrOpt := mfa.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMRPassword} })
+
+		rec := httptest.NewRecorder()
+		mfa.DisableHandler(svc, resolver, amrOpt)(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "step_up_required")
+	})
+
+	t.Run("elevated session with AMRMFA succeeds with 204", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+		resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+		amrOpt := mfa.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMRPassword, tokens.AMRMFA} })
+
+		rec := httptest.NewRecorder()
+		mfa.DisableHandler(svc, resolver, amrOpt)(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+
+	t.Run("WithoutStepUp allows unelevated caller with 204", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+		resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+		rec := httptest.NewRecorder()
+		mfa.DisableHandler(svc, resolver, mfa.WithoutStepUp())(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+
+	t.Run("WithStepUpRequired false allows unelevated caller with 204", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+		resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+		rec := httptest.NewRecorder()
+		mfa.DisableHandler(svc, resolver, mfa.WithStepUpRequired(false))(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+
+	t.Run("ContextMiddleware with AMRMFA succeeds and without AMRMFA is rejected", func(t *testing.T) {
+		svc, uid, _ := setupEnrolledUser(t)
+
+		mockVerifier := func(amr []string) tokens.Verifier[struct{}] {
+			return &issuertest.MockVerifier[struct{}]{
+				VerifyAccessTokenForTenantFunc: func(_ context.Context, _, _ string) (*tokens.Claims[struct{}], error) {
+					return &tokens.Claims[struct{}]{
+						Subject:  uid,
+						TenantID: "t1",
+						AMR:      amr,
+					}, nil
+				},
+			}
+		}
+
+		handler := mfa.DisableHandler(svc, mfa.WithUserResolver(tokens.UserResolverFromContext))
+
+		// Without AMRMFA in token -> 403
+		rec := httptest.NewRecorder()
+		req := mfaPost(url.Values{})
+		req.Header.Set("Authorization", "Bearer token-pwd")
+		tokens.ContextMiddleware[struct{}](mockVerifier([]string{tokens.AMRPassword}), handler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "step_up_required")
+
+		// With AMRMFA in token -> 204
+		rec = httptest.NewRecorder()
+		req = mfaPost(url.Values{})
+		req.Header.Set("Authorization", "Bearer token-mfa")
+		tokens.ContextMiddleware[struct{}](mockVerifier([]string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}), handler).ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
 	})
 }

@@ -39,6 +39,8 @@ type handlerConfig struct {
 	maxBodyBytes int64
 	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true on the re-issued full pair. The pair is renewable, but the refresh family persists the flag (Rotate replays it on every refresh), so a verified interim token carrying the flag cannot escape the forced-change gate after a second factor. Nil (default) leaves the flag unset.
 	mustChangeResolve func(r *http.Request) bool
+	stepUpRequired    bool
+	amrResolve        func(r *http.Request) []string
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -46,10 +48,11 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		accountField: "account",
-		codeField:    "code",
-		cookies:      tokens.DefaultCookies(),
-		maxBodyBytes: DefaultMaxBodyBytes,
+		accountField:   "account",
+		codeField:      "code",
+		cookies:        tokens.DefaultCookies(),
+		maxBodyBytes:   DefaultMaxBodyBytes,
+		stepUpRequired: true,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -125,6 +128,21 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 // tokens.ContextMiddleware. Nil (the default) leaves the flag unset.
 func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
+}
+
+// WithoutStepUp disables step-up / AMR verification on DisableHandler.
+func WithoutStepUp() HandlerOption {
+	return func(h *handlerConfig) { h.stepUpRequired = false }
+}
+
+// WithStepUpRequired explicitly configures whether DisableHandler requires step-up elevation.
+func WithStepUpRequired(required bool) HandlerOption {
+	return func(h *handlerConfig) { h.stepUpRequired = required }
+}
+
+// WithAMRResolver configures a custom function to extract AMR factors from the request.
+func WithAMRResolver(fn func(r *http.Request) []string) HandlerOption {
+	return func(h *handlerConfig) { h.amrResolve = fn }
 }
 
 // EnrollHandler starts TOTP enrollment and returns the shared secret and otpauth URI as JSON
@@ -204,15 +222,37 @@ func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.Han
 }
 
 // DisableHandler removes the user's TOTP factor and recovery codes, replying 204 (or 303).
+// By default it enforces step-up elevation (requiring tokens.AMRMFA in the session's AMR).
 func DisableHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if cfg.stepUpRequired && !cfg.isSteppedUp(r) {
+			cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+			return
+		}
 		if err := svc.DisableTOTP(r.Context(), tenant, uid); err != nil {
 			cfg.failErr(w, r, err)
 			return
 		}
 		cfg.ok(w, r)
 	})
+}
+
+func (cfg handlerConfig) isSteppedUp(r *http.Request) bool {
+	var amrs []string
+	if cfg.amrResolve != nil {
+		amrs = cfg.amrResolve(r)
+	} else if ctxAMRs, ok := tokens.AMRFromContext(r.Context()); ok {
+		amrs = ctxAMRs
+	} else {
+		return false
+	}
+	for _, a := range amrs {
+		if a == tokens.AMRMFA {
+			return true
+		}
+	}
+	return false
 }
 
 // guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
