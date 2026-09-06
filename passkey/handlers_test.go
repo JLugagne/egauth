@@ -6,10 +6,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/JLugagne/egauth/passkey"
 	passkeymemory "github.com/JLugagne/egauth/passkey/memory"
+	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -204,4 +207,129 @@ func TestBeginLoginHandler_NoCredentials(t *testing.T) {
 	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/login/begin", nil))
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code) // no_credentials
+}
+
+func TestCeremonyCookie_CrossTenantRejection(t *testing.T) {
+	store := passkeymemory.NewStore()
+	svc, err := passkey.NewService(store, passkey.Config{
+		RPID:                     "example.com",
+		RPDisplayName:            "Example",
+		RPOrigins:                []string{"https://example.com"},
+		CookieKey:                testCookieKey,
+		InsecureNoChallengeStore: true,
+	})
+	require.NoError(t, err)
+
+	t.Run("registration", func(t *testing.T) {
+		uidA := uuid.Must(uuid.NewV7())
+		uidB := uuid.Must(uuid.NewV7())
+
+		resA := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
+			return uidA, "alice", "Alice", "tenant-a", true
+		})
+		resB := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
+			return uidB, "bob", "Bob", "tenant-b", true
+		})
+
+		beginA := passkey.BeginRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		recA := httptest.NewRecorder()
+		beginA(recA, httptest.NewRequest(http.MethodPost, "/register/begin", nil))
+		require.Equal(t, http.StatusOK, recA.Code)
+		cookie := findCookie(recA.Result().Cookies(), passkey.DefaultSessionCookieName)
+		require.NotNil(t, cookie)
+
+		// Submitting cookie to Tenant B must fail with session_invalid (HTTP 400).
+		finishB := passkey.FinishRegistrationHandler(svc, resB, passkey.WithCookieKey(testCookieKey))
+		reqB := httptest.NewRequest(http.MethodPost, "/register/finish", strings.NewReader("{}"))
+		reqB.AddCookie(cookie)
+		recB := httptest.NewRecorder()
+		finishB(recB, reqB)
+		assert.Equal(t, http.StatusBadRequest, recB.Code)
+		assert.Contains(t, recB.Body.String(), "session_invalid")
+
+		// Submitting cookie to Tenant A (same tenant) must pass session check (not session_invalid).
+		finishA := passkey.FinishRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		reqA := httptest.NewRequest(http.MethodPost, "/register/finish", strings.NewReader("{}"))
+		reqA.AddCookie(cookie)
+		recA2 := httptest.NewRecorder()
+		finishA(recA2, reqA)
+		assert.NotContains(t, recA2.Body.String(), "session_invalid")
+	})
+
+	t.Run("login", func(t *testing.T) {
+		uidA := uuid.Must(uuid.NewV7())
+		uidB := uuid.Must(uuid.NewV7())
+		credID := []byte("cred-alice")
+		credData, err := json.Marshal(webauthn.Credential{ID: credID})
+		require.NoError(t, err)
+		require.NoError(t, store.SaveCredential(context.Background(), "tenant-a", &passkey.Credential{
+			UserID: uidA, ID: credID, Data: credData, CreatedAt: time.Now(),
+		}))
+
+		resA := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
+			return uidA, "alice", "Alice", "tenant-a", true
+		})
+		resB := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
+			return uidB, "bob", "Bob", "tenant-b", true
+		})
+
+		beginA := passkey.BeginLoginHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		recA := httptest.NewRecorder()
+		beginA(recA, httptest.NewRequest(http.MethodPost, "/login/begin", nil))
+		require.Equal(t, http.StatusOK, recA.Code)
+		cookie := findCookie(recA.Result().Cookies(), passkey.DefaultSessionCookieName)
+		require.NotNil(t, cookie)
+
+		// Submitting cookie to Tenant B must fail with session_invalid (HTTP 400).
+		finishB := passkey.FinishLoginHandler(svc, resB, passkey.WithCookieKey(testCookieKey))
+		reqB := httptest.NewRequest(http.MethodPost, "/login/finish", strings.NewReader("{}"))
+		reqB.AddCookie(cookie)
+		recB := httptest.NewRecorder()
+		finishB(recB, reqB)
+		assert.Equal(t, http.StatusBadRequest, recB.Code)
+		assert.Contains(t, recB.Body.String(), "session_invalid")
+
+		// Submitting cookie to Tenant A (same tenant) must pass session check (not session_invalid).
+		finishA := passkey.FinishLoginHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		reqA := httptest.NewRequest(http.MethodPost, "/login/finish", strings.NewReader("{}"))
+		reqA.AddCookie(cookie)
+		recA2 := httptest.NewRecorder()
+		finishA(recA2, reqA)
+		assert.NotContains(t, recA2.Body.String(), "session_invalid")
+	})
+
+	t.Run("discoverable login", func(t *testing.T) {
+		beginA := passkey.BeginDiscoverableLoginHandler(svc,
+			passkey.WithDiscoverableTenant(func(*http.Request) string { return "tenant-a" }),
+			passkey.WithCookieKey(testCookieKey),
+		)
+		recA := httptest.NewRecorder()
+		beginA(recA, httptest.NewRequest(http.MethodPost, "/discoverable/begin", nil))
+		require.Equal(t, http.StatusOK, recA.Code)
+		cookie := findCookie(recA.Result().Cookies(), passkey.DefaultSessionCookieName)
+		require.NotNil(t, cookie)
+
+		// Submitting cookie to Tenant B must fail with session_invalid (HTTP 400).
+		finishB := passkey.FinishDiscoverableLoginHandler(svc,
+			passkey.WithDiscoverableTenant(func(*http.Request) string { return "tenant-b" }),
+			passkey.WithCookieKey(testCookieKey),
+		)
+		reqB := httptest.NewRequest(http.MethodPost, "/discoverable/finish", strings.NewReader("{}"))
+		reqB.AddCookie(cookie)
+		recB := httptest.NewRecorder()
+		finishB(recB, reqB)
+		assert.Equal(t, http.StatusBadRequest, recB.Code)
+		assert.Contains(t, recB.Body.String(), "session_invalid")
+
+		// Submitting cookie to Tenant A (same tenant) must pass session check (not session_invalid).
+		finishA := passkey.FinishDiscoverableLoginHandler(svc,
+			passkey.WithDiscoverableTenant(func(*http.Request) string { return "tenant-a" }),
+			passkey.WithCookieKey(testCookieKey),
+		)
+		reqA := httptest.NewRequest(http.MethodPost, "/discoverable/finish", strings.NewReader("{}"))
+		reqA.AddCookie(cookie)
+		recA2 := httptest.NewRecorder()
+		finishA(recA2, reqA)
+		assert.NotContains(t, recA2.Body.String(), "session_invalid")
+	})
 }

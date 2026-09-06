@@ -259,6 +259,13 @@ func (cfg handlerConfig) subject(w http.ResponseWriter, r *http.Request) (uuid.U
 	return uid, name, displayName, tenant, true
 }
 
+// ceremonyState binds the ceremony session data to the initiating tenant ID, preventing
+// cross-tenant ceremony replay and submission (SEC-PSK-04).
+type ceremonyState struct {
+	TenantID    string               `json:"tenantId"`
+	SessionData webauthn.SessionData `json:"sessionData"`
+}
+
 func (cfg handlerConfig) storeSession(w http.ResponseWriter, r *http.Request, tenant string, session *webauthn.SessionData) bool {
 	key, ok := cfg.cookieKeyFor(w, r.Context(), tenant)
 	if !ok {
@@ -266,7 +273,15 @@ func (cfg handlerConfig) storeSession(w http.ResponseWriter, r *http.Request, te
 		// downgrade). cookieKeyFor has already written the 500.
 		return false
 	}
-	raw, err := json.Marshal(session)
+	var sessionData webauthn.SessionData
+	if session != nil {
+		sessionData = *session
+	}
+	state := ceremonyState{
+		TenantID:    tenant,
+		SessionData: sessionData,
+	}
+	raw, err := json.Marshal(state)
 	if err != nil {
 		http.Error(w, "session_error", http.StatusInternalServerError)
 		return false
@@ -297,11 +312,20 @@ func (cfg handlerConfig) loadSession(w http.ResponseWriter, r *http.Request, ten
 		return session, false
 	}
 	raw, ok := cfg.open(key, c.Value)
-	if !ok || json.Unmarshal(raw, &session) != nil {
+	if !ok {
 		cfg.fail(w, ErrSessionInvalid)
 		return session, false
 	}
-	return session, true
+	var state ceremonyState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		cfg.fail(w, ErrSessionInvalid)
+		return session, false
+	}
+	if state.TenantID != tenant {
+		cfg.fail(w, ErrSessionInvalid)
+		return session, false
+	}
+	return state.SessionData, true
 }
 
 // seal prepends an HMAC-SHA256 tag to the payload and base64url-encodes the result, so the

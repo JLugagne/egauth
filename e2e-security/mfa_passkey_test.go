@@ -270,14 +270,8 @@ func TestSEC_OTP_02_AsyncIssue_RaceCondition_And_SilentDrop(t *testing.T) {
 	})
 }
 
-// TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault confirms the lack of tenant
-// isolation in Passkey ceremony cookies under default configuration (or when InsecureNoChallengeStore is used,
-// as forced by SEC-PSK-01 on multi-node Postgres deployments).
-//
-// Root cause: By default (without WithTenantCookieKeys), passkey handlers share a single static
-// cookieKey across all tenants. Furthermore, webauthn.SessionData serialized in storeSession does NOT
-// contain the tenantID. Therefore, a ceremony cookie sealed for Tenant A is valid and accepted
-// by Tenant B's handlers without returning session_invalid.
+// TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault verifies that ceremony cookies
+// bind the tenantID and that cross-tenant submission is rejected with session_invalid (HTTP 400).
 func TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault(t *testing.T) {
 	testCookieKey := []byte("0123456789abcdef0123456789abcdef")
 	store := passkeymemory.NewStore()
@@ -339,9 +333,8 @@ func TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault(t *testing.T) {
 	crossRec := httptest.NewRecorder()
 	finishB(crossRec, crossReq)
 
-	// loadSession succeeded! The response body is NOT session_invalid:
-	assert.NotContains(t, crossRec.Body.String(), "session_invalid",
-		"SEC-PSK-04 Flawed Behavior Confirmed: Tenant A's ceremony cookie is accepted by Tenant B without session_invalid error")
+	assert.Equal(t, http.StatusBadRequest, crossRec.Code)
+	assert.Contains(t, crossRec.Body.String(), "session_invalid")
 }
 
 // TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession confirms that:
