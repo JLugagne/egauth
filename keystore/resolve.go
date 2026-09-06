@@ -49,6 +49,28 @@ func (m *Manager) VerificationKeys(ctx context.Context, tenantID string) (map[st
 	return out, nil
 }
 
+// HistoricalKeys returns every retained key for the tenant (including expired and retired keys),
+// keyed by KeyID, each with its secret decrypted. This enables retrospective verification of
+// historical signatures.
+func (m *Manager) HistoricalKeys(ctx context.Context, tenantID string) (map[string]SigningKey, error) {
+	hstore, ok := m.store.(HistoricalKeyStore)
+	if !ok {
+		return m.VerificationKeys(ctx, tenantID)
+	}
+	keys, err := hstore.HistoricalKeys(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]SigningKey, len(keys))
+	for id, k := range keys {
+		if err := m.openKey(&k); err != nil {
+			return nil, err
+		}
+		out[id] = k
+	}
+	return out, nil
+}
+
 // Keyset resolves the full signing material for a tenant in one call: the active signer plus the
 // verification set, all decrypted. It is the convenience entry point for tokens/jwt's per-request
 // keyset resolution.

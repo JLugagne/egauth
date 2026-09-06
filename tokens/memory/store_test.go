@@ -222,3 +222,37 @@ func TestStore_MultiTenantHashCollision(t *testing.T) {
 		assert.Equal(t, "tenantB-data", foundB.Claims.Custom.Foo)
 	})
 }
+
+func TestStore_RevokeFamily_PreservesAuditTrail(t *testing.T) {
+	ctx := context.Background()
+	store := NewStore[CustomClaims]()
+	tenantID := "tenant-audit"
+	familyID := uuid.Must(uuid.NewV7())
+	userID := uuid.Must(uuid.NewV7())
+
+	rt := &tokens.RefreshToken{
+		Hash:      "token-hash-1",
+		TenantID:  tenantID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+
+	// Revoke the family
+	require.NoError(t, store.RevokeFamily(ctx, tenantID, familyID))
+
+	// FindRefreshToken must return ErrTokenFamilyRevoked (not ErrRefreshTokenNotFound)
+	_, err := store.FindRefreshToken(ctx, tenantID, "token-hash-1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tokens.ErrTokenFamilyRevoked)
+	assert.ErrorIs(t, err, tokens.ErrTokenRevoked)
+
+	// In memory store, verify the entry was retained with RevokedAt set
+	store.mu.RLock()
+	entry, exists := store.refreshTokens[tokenKey{tenantID: tenantID, hash: "token-hash-1"}]
+	store.mu.RUnlock()
+
+	require.True(t, exists, "revoked token family must remain in memory storage for auditability")
+	assert.NotNil(t, entry.RevokedAt, "RevokedAt timestamp must be stamped on revocation")
+}

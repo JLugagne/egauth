@@ -51,4 +51,11 @@ var (
 
 	// ErrInvalidPrincipalType is returned when an API key is issued with an empty or unsupported principal type.
 	ErrInvalidPrincipalType = errors.New("tokens: invalid principal type")
+
+	// ErrTokenRevoked is returned when a revoked token is presented.
+	ErrTokenRevoked = errors.New("tokens: token revoked")
+
+	// ErrTokenFamilyRevoked is returned when a token belonging to a revoked family is presented.
+	// It wraps ErrTokenRevoked and ErrRefreshTokenNotFound for backward compatibility.
+	ErrTokenFamilyRevoked = fmt.Errorf("%w: token family revoked (%w)", ErrTokenRevoked, ErrRefreshTokenNotFound)
 )

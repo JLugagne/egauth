@@ -76,6 +76,10 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 		consumed := *rtCopy.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
 	}
+	if rtCopy.RevokedAt != nil {
+		revoked := *rtCopy.RevokedAt
+		rtCopy.RevokedAt = &revoked
+	}
 	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
 
 	return nil
@@ -91,10 +95,18 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 		return nil, tokens.ErrRefreshTokenNotFound
 	}
 
+	if entry.RevokedAt != nil {
+		return nil, tokens.ErrTokenFamilyRevoked
+	}
+
 	rtCopy := *entry
 	if entry.ConsumedAt != nil {
 		consumed := *entry.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
+	}
+	if entry.RevokedAt != nil {
+		revoked := *entry.RevokedAt
+		rtCopy.RevokedAt = &revoked
 	}
 	return &rtCopy, nil
 }
@@ -107,6 +119,10 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 	entry, exists := s.refreshTokens[tokenKey{tenantID: tenantID, hash: tokenHash}]
 	if !exists || entry.TenantID != tenantID {
 		return tokens.ErrRefreshTokenNotFound
+	}
+
+	if entry.RevokedAt != nil {
+		return tokens.ErrTokenFamilyRevoked
 	}
 
 	if entry.ConsumedAt != nil {
@@ -132,6 +148,10 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 		return tokens.ErrRefreshTokenNotFound
 	}
 
+	if entry.RevokedAt != nil {
+		return tokens.ErrTokenFamilyRevoked
+	}
+
 	if entry.ConsumedAt != nil {
 		return tokens.ErrRefreshTokenReused
 	}
@@ -148,6 +168,10 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 	if rtCopy.ConsumedAt != nil {
 		consumed := *rtCopy.ConsumedAt
 		rtCopy.ConsumedAt = &consumed
+	}
+	if rtCopy.RevokedAt != nil {
+		revoked := *rtCopy.RevokedAt
+		rtCopy.RevokedAt = &revoked
 	}
 	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
 
@@ -170,14 +194,18 @@ func (s *Store[C]) RevokeRefreshToken(ctx context.Context, tenantID string, toke
 	return nil
 }
 
-// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
+// RevokeFamily revokes ALL refresh tokens sharing the given family ID by stamping RevokedAt.
 func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for key, rt := range s.refreshTokens {
-		if key.tenantID == tenantID && rt.FamilyID == familyID {
-			delete(s.refreshTokens, key)
+	now := time.Now().UTC()
+	for _, rt := range s.refreshTokens {
+		if rt.TenantID == tenantID && rt.FamilyID == familyID {
+			if rt.RevokedAt == nil {
+				revoked := now
+				rt.RevokedAt = &revoked
+			}
 		}
 	}
 

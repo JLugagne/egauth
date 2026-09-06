@@ -39,15 +39,44 @@ type DBQuerier interface {
 
 // Store implements keystore.Store for PostgreSQL using pgx.
 type Store struct {
-	db DBQuerier
+	db         DBQuerier
+	retention  time.Duration
+	softRetire bool
+}
+
+// Option configures a Store.
+type Option func(*Store)
+
+// WithRetention sets a retention window for expired keys. When configured, RetireExpiredKeys
+// will soft-retire keys (marking retired_at) if they expired within the retention window,
+// and only permanently delete keys whose not_after is older than (now - retention).
+func WithRetention(window time.Duration) Option {
+	return func(s *Store) {
+		s.retention = window
+		s.softRetire = true
+	}
+}
+
+// WithSoftRetire enables soft-retiring expired keys without hard-deleting them.
+func WithSoftRetire(enabled bool) Option {
+	return func(s *Store) {
+		s.softRetire = enabled
+	}
 }
 
 // NewStore creates a new PostgreSQL keystore Store.
-func NewStore(db DBQuerier) *Store {
-	return &Store{db: db}
+func NewStore(db DBQuerier, opts ...Option) *Store {
+	s := &Store{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
-var _ keystore.Store = (*Store)(nil)
+var (
+	_ keystore.Store              = (*Store)(nil)
+	_ keystore.HistoricalKeyStore = (*Store)(nil)
+)
 
 // CreateTenant records a new tenant with its initial signing key. It returns
 // keystore.ErrTenantExists if the tenant already has key material.
@@ -164,6 +193,38 @@ func (s *Store) VerificationKeys(ctx context.Context, tenantID string) (map[stri
 	return out, rows.Err()
 }
 
+// HistoricalKeys returns every retained key for the tenant (including retired and expired keys),
+// keyed by key id.
+func (s *Store) HistoricalKeys(ctx context.Context, tenantID string) (map[string]keystore.SigningKey, error) {
+	exists, err := s.TenantExists(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, keystore.ErrTenantNotFound
+	}
+	query := `
+		SELECT key_id, secret, created_at, not_after, retired_at, alg
+		FROM keystore_keys
+		WHERE tenant_id = $1
+	`
+	rows, err := s.db.Query(ctx, query, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := map[string]keystore.SigningKey{}
+	for rows.Next() {
+		key, err := scanKey(rows, tenantID)
+		if err != nil {
+			return nil, err
+		}
+		out[key.KeyID] = key
+	}
+	return out, rows.Err()
+}
+
 // RotateSigningKey installs next and retires every currently-active key (verify-only), capping
 // their not_after at retiredAt so RetireExpiredKeys reaps them after the overlap. It runs in a
 // single transaction for atomicity.
@@ -192,9 +253,46 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 	return err
 }
 
-// RetireExpiredKeys deletes keys whose not_after is at or before now, returning the count
-// removed. It never removes a key still active.
+// RetireExpiredKeys deletes or soft-retires keys whose not_after is at or before now, returning
+// the count affected. When softRetire is enabled, it stamps retired_at on expired keys rather
+// than deleting them, unless retention is configured and expired beyond the window.
 func (s *Store) RetireExpiredKeys(ctx context.Context, tenantID string, now time.Time) (int64, error) {
+	exists, err := s.TenantExists(ctx, tenantID)
+	if err != nil {
+		return 0, err
+	}
+	if !exists {
+		return 0, keystore.ErrTenantNotFound
+	}
+
+	if s.softRetire {
+		var total int64
+		if s.retention > 0 {
+			cutoff := now.Add(-s.retention)
+			deleteQuery := `
+				DELETE FROM keystore_keys
+				WHERE tenant_id = $1 AND not_after IS NOT NULL AND not_after <= $2
+			`
+			tag, err := s.db.Exec(ctx, deleteQuery, tenantID, cutoff)
+			if err != nil {
+				return 0, err
+			}
+			total += tag.RowsAffected()
+		}
+
+		updateQuery := `
+			UPDATE keystore_keys
+			SET retired_at = $2
+			WHERE tenant_id = $1 AND not_after IS NOT NULL AND not_after <= $2 AND retired_at IS NULL
+		`
+		tag, err := s.db.Exec(ctx, updateQuery, tenantID, now)
+		if err != nil {
+			return 0, err
+		}
+		total += tag.RowsAffected()
+		return total, nil
+	}
+
 	query := `
 		DELETE FROM keystore_keys
 		WHERE tenant_id = $1 AND not_after IS NOT NULL AND not_after <= $2

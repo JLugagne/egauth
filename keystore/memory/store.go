@@ -21,11 +21,30 @@ type Store struct {
 	// tenant exists; absence means it was never provisioned.
 	tenants map[string]map[string]keystore.SigningKey
 	// now is the time source; overridable via WithClock for deterministic tests. Defaults to time.Now.
-	now func() time.Time
+	now        func() time.Time
+	retention  time.Duration
+	softRetire bool
 }
 
 // Option configures a Store.
 type Option func(*Store)
+
+// WithRetention sets a retention window for expired keys. When configured, RetireExpiredKeys
+// will soft-retire keys (marking retired_at) if they expired within the retention window,
+// and only permanently delete keys whose not_after is older than (now - retention).
+func WithRetention(window time.Duration) Option {
+	return func(s *Store) {
+		s.retention = window
+		s.softRetire = true
+	}
+}
+
+// WithSoftRetire enables soft-retiring expired keys without hard-deleting them.
+func WithSoftRetire(enabled bool) Option {
+	return func(s *Store) {
+		s.softRetire = enabled
+	}
+}
 
 // WithClock overrides the store's time source (for deterministic tests). It must be the same
 // clock the keystore.Manager is configured with, so active/expired evaluation agrees across the
@@ -170,8 +189,9 @@ func (s *Store) RotateSigningKey(ctx context.Context, tenantID string, next keys
 	return nil
 }
 
-// RetireExpiredKeys deletes keys whose NotAfter is at or before now, returning the count removed.
-// It never removes a key that is still active.
+// RetireExpiredKeys deletes or soft-retires keys whose NotAfter is at or before now, returning the
+// count affected. If softRetire is enabled, it marks keys as retired instead of deleting them,
+// unless a retention window is configured and exceeded. It never removes or retires an active key.
 func (s *Store) RetireExpiredKeys(ctx context.Context, tenantID string, now time.Time) (int64, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -185,8 +205,20 @@ func (s *Store) RetireExpiredKeys(ctx context.Context, tenantID string, now time
 			continue
 		}
 		if k.IsExpired(now) {
-			delete(keys, id)
-			n++
+			if s.softRetire {
+				if s.retention > 0 && !k.NotAfter.IsZero() && now.Sub(k.NotAfter) >= s.retention {
+					delete(keys, id)
+					n++
+				} else if k.RetiredAt == nil {
+					ra := now
+					k.RetiredAt = &ra
+					keys[id] = k
+					n++
+				}
+			} else {
+				delete(keys, id)
+				n++
+			}
 		}
 	}
 	return n, nil
@@ -218,4 +250,19 @@ func guardTenant(tenantID string, key keystore.SigningKey) error {
 		return keystore.ErrTenantMismatch
 	}
 	return nil
+}
+
+// HistoricalKeys returns every retained key for the tenant (including retired and expired keys).
+func (s *Store) HistoricalKeys(ctx context.Context, tenantID string) (map[string]keystore.SigningKey, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	keys, ok := s.tenants[tenantID]
+	if !ok {
+		return nil, keystore.ErrTenantNotFound
+	}
+	out := make(map[string]keystore.SigningKey, len(keys))
+	for id, k := range keys {
+		out[id] = k
+	}
+	return out, nil
 }

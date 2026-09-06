@@ -158,4 +158,7 @@ type RefreshToken struct {
 	ExpiresAt          time.Time
 	CreatedAt          time.Time
 	ConsumedAt         *time.Time
+	// RevokedAt records when this token's family was revoked. When non-nil, the token
+	// has been invalidated by family revocation but is preserved for audit trail.
+	RevokedAt *time.Time
 }

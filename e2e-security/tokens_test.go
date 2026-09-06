@@ -1,6 +1,7 @@
 package e2esecurity_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"reflect"
@@ -8,6 +9,8 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/keystore"
+	keystorememory "github.com/JLugagne/egauth/keystore/memory"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/jwt"
 	"github.com/JLugagne/egauth/tokens/memory"
@@ -529,4 +532,148 @@ func TestVulnerability_SECTOK03_NonAtomicRotationLeadingToSessionRevocation(t *t
 	require.NoError(t, retryErr2, "retry must succeed after non-atomic store rollback")
 	assert.NotEmpty(t, newPair2.RefreshToken)
 	assert.False(t, nonAtomicStore.revokedFamilies[rt2.FamilyID], "family must not be revoked on client retry")
+}
+
+// SEC-TOK-12: Audit trail loss - permanent deletion of token family on revocation (RevokeFamily).
+//
+// Verifies that RevokeFamily preserves the token family records with RevokedAt stamped rather
+// than hard-deleting them from storage, maintaining audit trail while rejecting future use with
+// ErrTokenFamilyRevoked.
+func TestVulnerability_SECTOK12_AuditTrailLossOnRevokeFamily(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[struct{}]()
+	userID := uuid.Must(uuid.NewV7())
+
+	claimsProvider := tokens.ClaimsProviderFunc[struct{}](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[struct{}], error) {
+		return tokens.Claims[struct{}]{Subject: uid}, nil
+	})
+
+	svc := jwt.New[struct{}](jwt.Config[struct{}]{
+		Store:          store,
+		SecretKey:      "secret-key-at-least-32-bytes-long-test!",
+		Issuer:         "test-issuer",
+		AccessTTL:      15 * time.Minute,
+		RefreshTTL:     24 * time.Hour,
+		ClaimsProvider: claimsProvider,
+	})
+
+	pair1, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+	require.NoError(t, err)
+
+	pair2, err := svc.Rotate(ctx, "", pair1.RefreshToken)
+	require.NoError(t, err)
+
+	hash1 := tokens.HashToken(pair1.RefreshToken)
+	hash2 := tokens.HashToken(pair2.RefreshToken)
+
+	rt1, err := store.FindRefreshToken(ctx, "", hash1)
+	require.NoError(t, err)
+	familyID := rt1.FamilyID
+
+	// Revoke the family
+	err = store.RevokeFamily(ctx, "", familyID)
+	require.NoError(t, err)
+
+	// Tokens in the family must be rejected with ErrTokenFamilyRevoked (and ErrTokenRevoked)
+	_, err = store.FindRefreshToken(ctx, "", hash1)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tokens.ErrTokenFamilyRevoked, "FindRefreshToken must return ErrTokenFamilyRevoked")
+	assert.ErrorIs(t, err, tokens.ErrTokenRevoked, "FindRefreshToken must wrap ErrTokenRevoked")
+
+	_, err = store.FindRefreshToken(ctx, "", hash2)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tokens.ErrTokenFamilyRevoked, "FindRefreshToken on descendant must return ErrTokenFamilyRevoked")
+
+	_, err = svc.VerifyRefreshToken(ctx, "", pair2.RefreshToken)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tokens.ErrTokenFamilyRevoked, "VerifyRefreshToken must return ErrTokenFamilyRevoked")
+
+	_, err = svc.Rotate(ctx, "", pair2.RefreshToken)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tokens.ErrTokenFamilyRevoked, "Rotate must return ErrTokenFamilyRevoked")
+}
+
+// SEC-TOK-14: State persistence inconsistency on ClaimsProvider failure during refresh rotation.
+//
+// Verifies that if ClaimsProvider fails during rotation, the refresh token is not burned or
+// marked consumed, ensuring atomic consistency and allowing subsequent retries to succeed.
+func TestVulnerability_SECTOK14_StatePersistenceInconsistencyOnClaimsProviderFailure(t *testing.T) {
+	ctx := context.Background()
+	store := memory.NewStore[struct{}]()
+	userID := uuid.Must(uuid.NewV7())
+
+	shouldFail := true
+	claimsProvider := tokens.ClaimsProviderFunc[struct{}](func(_ context.Context, uid uuid.UUID, _ string) (tokens.Claims[struct{}], error) {
+		if shouldFail {
+			return tokens.Claims[struct{}]{}, errors.New("simulated transient database outage in claims provider")
+		}
+		return tokens.Claims[struct{}]{Subject: uid}, nil
+	})
+
+	svc := jwt.New[struct{}](jwt.Config[struct{}]{
+		Store:          store,
+		SecretKey:      "secret-key-at-least-32-bytes-long-test!",
+		Issuer:         "test-issuer",
+		AccessTTL:      15 * time.Minute,
+		RefreshTTL:     24 * time.Hour,
+		ClaimsProvider: claimsProvider,
+	})
+
+	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: userID})
+	require.NoError(t, err)
+
+	// Rotation attempt 1: ClaimsProvider fails.
+	_, err = svc.Rotate(ctx, "", pair.RefreshToken)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated transient database outage")
+
+	// Verify token is NOT marked consumed in the store
+	rt, err := store.FindRefreshToken(ctx, "", tokens.HashToken(pair.RefreshToken))
+	require.NoError(t, err)
+	assert.Nil(t, rt.ConsumedAt, "refresh token must not be consumed when ClaimsProvider fails")
+
+	// Rotation attempt 2: ClaimsProvider recovers -> succeeds cleanly.
+	shouldFail = false
+	newPair, err := svc.Rotate(ctx, "", pair.RefreshToken)
+	require.NoError(t, err, "retry after claims provider recovery must succeed")
+	assert.NotEmpty(t, newPair.RefreshToken)
+	assert.NotEmpty(t, newPair.AccessToken)
+}
+
+// SEC-TOK-05: Destructive key deletion by RetireExpiredKeys on keystore.
+//
+// Verifies that keystore supports retaining expired keys or soft-retiring them (marking retired_at)
+// rather than immediately destroying them, enabling retrospective verification of historical signatures.
+func TestVulnerability_SECTOK05_DestructiveKeyDeletionOnRetireExpiredKeys(t *testing.T) {
+	ctx := context.Background()
+	currTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return currTime }
+
+	kek, err := keystore.NewKEK(bytes.Repeat([]byte("k"), keystore.KEKKeyLength))
+	require.NoError(t, err)
+
+	// Memory store with soft-retire enabled
+	store := keystorememory.New(keystorememory.WithClock(clock), keystorememory.WithSoftRetire(true))
+	mgr, err := keystore.NewManager(store, kek, keystore.WithClock(clock))
+	require.NoError(t, err)
+
+	tenantID := "tenant-retire-test"
+	require.NoError(t, mgr.ProvisionTenant(ctx, tenantID))
+
+	activeKey, err := mgr.ActiveSigningKey(ctx, tenantID)
+	require.NoError(t, err)
+
+	// Advance time past key expiry (default TTL is 90 days = 2160 hours)
+	currTime = currTime.Add(100 * 24 * time.Hour)
+
+	// Run RetireExpiredKeys
+	n, err := mgr.RetireExpiredKeys(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), n)
+
+	// Retrospective verification: HistoricalKeys must still contain the expired key!
+	hist, err := mgr.HistoricalKeys(ctx, tenantID)
+	require.NoError(t, err)
+	assert.Contains(t, hist, activeKey.KeyID, "historical key must be retained for retrospective verification")
+	assert.NotNil(t, hist[activeKey.KeyID].RetiredAt, "historical key must have retired_at stamped")
 }

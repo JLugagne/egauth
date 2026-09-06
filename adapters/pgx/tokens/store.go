@@ -69,21 +69,22 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 	}
 
 	query := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
 		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
 			must_change_password = EXCLUDED.must_change_password,
-			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
+			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at,
+			revoked_at = EXCLUDED.revoked_at
 	`
-	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.MustChangePassword, rt.ExpiresAt, createdAt, rt.ConsumedAt)
+	_, err := s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.MustChangePassword, rt.ExpiresAt, createdAt, rt.ConsumedAt, rt.RevokedAt)
 	return err
 }
 
 // FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
 func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
 	query := `
-		SELECT token_hash, family_id, user_id, tenant_id, auth_time, must_change_password, expires_at, created_at, consumed_at
+		SELECT token_hash, family_id, user_id, tenant_id, auth_time, must_change_password, expires_at, created_at, consumed_at, revoked_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL
 	`
@@ -91,12 +92,16 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 
 	var rt tokens.RefreshToken
 	var authTime *time.Time
-	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.MustChangePassword, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt)
+	var revokedAt *time.Time
+	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.MustChangePassword, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt, &revokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrRefreshTokenNotFound
 		}
 		return nil, err
+	}
+	if revokedAt != nil {
+		return nil, tokens.ErrTokenFamilyRevoked
 	}
 	if authTime != nil {
 		rt.AuthTime = *authTime
@@ -109,7 +114,7 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tokenHash string) error {
 	query := `
 		UPDATE tokens SET consumed_at = now()
-		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL
+		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL AND revoked_at IS NULL
 	`
 	tag, err := s.db.Exec(ctx, query, tenantID, tokenHash)
 	if err != nil {
@@ -120,11 +125,11 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 		return nil
 	}
 
-	// 0 rows: either the token does not exist (in this tenant) or it was already consumed.
+	// 0 rows: either the token does not exist (in this tenant), was revoked, or was already consumed.
 	// Disambiguate with an existence check to return the correct sentinel.
-	existsQuery := `SELECT 1 FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
-	var dummy int
-	err = s.db.QueryRow(ctx, existsQuery, tenantID, tokenHash).Scan(&dummy)
+	existsQuery := `SELECT consumed_at, revoked_at FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
+	var consumedAt, revokedAt *time.Time
+	err = s.db.QueryRow(ctx, existsQuery, tenantID, tokenHash).Scan(&consumedAt, &revokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return tokens.ErrRefreshTokenNotFound
@@ -132,8 +137,14 @@ func (s *Store[C]) ConsumeRefreshToken(ctx context.Context, tenantID string, tok
 		return err
 	}
 
-	// The token exists but already had consumed_at set -> replay.
-	return tokens.ErrRefreshTokenReused
+	if revokedAt != nil {
+		return tokens.ErrTokenFamilyRevoked
+	}
+	if consumedAt != nil {
+		return tokens.ErrRefreshTokenReused
+	}
+
+	return nil
 }
 
 // RotateRefreshToken atomically marks oldTokenHash as consumed and persists newRT within the tenant
@@ -158,7 +169,7 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 
 	consumeQuery := `
 		UPDATE tokens SET consumed_at = now()
-		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL
+		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL AND consumed_at IS NULL AND revoked_at IS NULL
 	`
 	tag, err := tx.Exec(ctx, consumeQuery, tenantID, oldTokenHash)
 	if err != nil {
@@ -166,14 +177,17 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 	}
 
 	if tag.RowsAffected() == 0 {
-		existsQuery := `SELECT 1 FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
-		var dummy int
-		err = tx.QueryRow(ctx, existsQuery, tenantID, oldTokenHash).Scan(&dummy)
+		existsQuery := `SELECT consumed_at, revoked_at FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
+		var consumedAt, revokedAt *time.Time
+		err = tx.QueryRow(ctx, existsQuery, tenantID, oldTokenHash).Scan(&consumedAt, &revokedAt)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return tokens.ErrRefreshTokenNotFound
 			}
 			return err
+		}
+		if revokedAt != nil {
+			return tokens.ErrTokenFamilyRevoked
 		}
 		return tokens.ErrRefreshTokenReused
 	}
@@ -189,14 +203,15 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 	}
 
 	insertQuery := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, expires_at, created_at, consumed_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
 		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
 			must_change_password = EXCLUDED.must_change_password,
-			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at
+			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at,
+			revoked_at = EXCLUDED.revoked_at
 	`
-	if _, err := tx.Exec(ctx, insertQuery, tenantID, newRT.Hash, newRT.UserID, newRT.FamilyID, authTime, newRT.MustChangePassword, newRT.ExpiresAt, createdAt, newRT.ConsumedAt); err != nil {
+	if _, err := tx.Exec(ctx, insertQuery, tenantID, newRT.Hash, newRT.UserID, newRT.FamilyID, authTime, newRT.MustChangePassword, newRT.ExpiresAt, createdAt, newRT.ConsumedAt, newRT.RevokedAt); err != nil {
 		return err
 	}
 
@@ -230,9 +245,9 @@ func (s *Store[C]) DeleteExpired(ctx context.Context, tenantID string) (int64, e
 	return tag.RowsAffected(), nil
 }
 
-// RevokeFamily revokes ALL refresh tokens sharing the given family ID.
+// RevokeFamily revokes ALL refresh tokens sharing the given family ID by stamping revoked_at.
 func (s *Store[C]) RevokeFamily(ctx context.Context, tenantID string, familyID uuid.UUID) error {
-	query := `DELETE FROM tokens WHERE tenant_id = $1 AND family_id = $2 AND claims IS NULL`
+	query := `UPDATE tokens SET revoked_at = now() WHERE tenant_id = $1 AND family_id = $2 AND claims IS NULL AND revoked_at IS NULL`
 	_, err := s.db.Exec(ctx, query, tenantID, familyID)
 	return err
 }

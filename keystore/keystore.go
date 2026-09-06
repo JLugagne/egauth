@@ -151,6 +151,12 @@ type Store interface {
 	DeleteTenant(ctx context.Context, tenantID string) error
 }
 
+// HistoricalKeyStore is an optional capability interface for stores that retain expired or
+// soft-retired keys for retrospective verification of signatures.
+type HistoricalKeyStore interface {
+	HistoricalKeys(ctx context.Context, tenantID string) (map[string]SigningKey, error)
+}
+
 // TenantEraser erases a tenant's records from one downstream store (sessions, tokens, identity,
 // …). DeleteTenant fans out across the registered erasers so a single auditable call purges all
 // tenant-scoped state, not just crypto material. Implementations must be idempotent and safe to

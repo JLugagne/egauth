@@ -236,3 +236,39 @@ func TestPgxKeystore_CreateTenant_ConcurrentRace(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, key1.KeyID, key2.KeyID, "ActiveSigningKey must be deterministic")
 }
+
+// TestPgxKeystore_RetireExpiredKeys_SoftRetire tests that WithSoftRetire retains expired keys
+// with retired_at stamped rather than hard-deleting them.
+func TestPgxKeystore_RetireExpiredKeys_SoftRetire(t *testing.T) {
+	pool := startPostgres(t)
+	ctx := context.Background()
+	store := pgxkeystore.NewStore(pool, pgxkeystore.WithSoftRetire(true))
+
+	tenantID := "tenant-soft-retire"
+	expiredTime := time.Now().Add(-2 * time.Hour)
+	key := keystore.SigningKey{
+		KeyID:     "key-expired-1",
+		TenantID:  tenantID,
+		Secret:    []byte("sealed-secret-1"),
+		CreatedAt: time.Now().Add(-10 * time.Hour),
+		NotAfter:  expiredTime,
+	}
+	require.NoError(t, store.PutSigningKey(ctx, tenantID, key))
+
+	// Run RetireExpiredKeys
+	n, err := store.RetireExpiredKeys(ctx, tenantID, time.Now())
+	require.NoError(t, err)
+	require.Equal(t, int64(1), n)
+
+	// Direct database check: row must NOT be deleted, retired_at must be populated
+	var retiredAt *time.Time
+	query := `SELECT retired_at FROM keystore_keys WHERE tenant_id = $1 AND key_id = $2`
+	err = pool.QueryRow(ctx, query, tenantID, "key-expired-1").Scan(&retiredAt)
+	require.NoError(t, err, "key must not be deleted from keystore_keys")
+	require.NotNil(t, retiredAt, "retired_at must be stamped")
+
+	// HistoricalKeys must still return it
+	hist, err := store.HistoricalKeys(ctx, tenantID)
+	require.NoError(t, err)
+	require.Contains(t, hist, "key-expired-1")
+}

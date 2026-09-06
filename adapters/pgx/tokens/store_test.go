@@ -289,3 +289,38 @@ func TestRotateRefreshToken(t *testing.T) {
 		assert.ErrorIs(t, err, egauthtokens.ErrRefreshTokenNotFound)
 	})
 }
+
+func TestStore_RevokeFamily_PreservesAuditTrail(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	store := pgx.NewStore[customClaims](pool)
+
+	tenantID := "tenant-audit-pgx"
+	userID := uuid.Must(uuid.NewV7())
+	familyID := uuid.Must(uuid.NewV7())
+
+	rt := &egauthtokens.RefreshToken{
+		Hash:      "pgx-audit-hash-1",
+		TenantID:  tenantID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+
+	// Revoke the family
+	require.NoError(t, store.RevokeFamily(ctx, tenantID, familyID))
+
+	// FindRefreshToken must return ErrTokenFamilyRevoked
+	_, err := store.FindRefreshToken(ctx, tenantID, "pgx-audit-hash-1")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, egauthtokens.ErrTokenFamilyRevoked)
+	assert.ErrorIs(t, err, egauthtokens.ErrTokenRevoked)
+
+	// Direct database query: row must NOT be deleted, revoked_at must be populated
+	var revokedAt *time.Time
+	query := `SELECT revoked_at FROM tokens WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL`
+	err = pool.QueryRow(ctx, query, tenantID, "pgx-audit-hash-1").Scan(&revokedAt)
+	require.NoError(t, err, "row must remain in tokens table for audit trail")
+	assert.NotNil(t, revokedAt, "revoked_at must be stamped in database")
+}
