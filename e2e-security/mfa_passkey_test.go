@@ -338,10 +338,9 @@ func TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault(t *testing.T) {
 }
 
 // TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession confirms that:
-// 1. StepUpHandler strictly calls svc.VerifyTOTP and rejects recovery codes with 401 invalid_code.
-// 2. VerifyRecoveryHandler only verifies/consumes the code but issues NO tokens and sets NO cookies.
-// Consequence: A user who lost their TOTP device is completely unable to step up or log into their session
-// using valid recovery codes.
+// 1. StepUpHandler accepts valid recovery codes and elevates the session.
+// 2. Full token pair and cookies are issued just like with TOTP.
+// 3. Single-use recovery codes are consumed and cannot be reused.
 func TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession(t *testing.T) {
 	ctx := context.Background()
 	store := mfamemory.NewStore()
@@ -363,8 +362,10 @@ func TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession(t *testing.T) {
 	validRecoveryCode := recoveryCodes[0]
 
 	// Setup StepUpHandler with mock issuer
+	var captured tokens.Claims[struct{}]
 	issuer := &issuertest.MockIssuer[struct{}]{
 		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			captured = claims
 			return &tokens.TokenPair[struct{}]{
 				AccessToken:  "full-access-token",
 				RefreshToken: "full-refresh-token",
@@ -387,24 +388,35 @@ func TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession(t *testing.T) {
 
 	stepUpH(stepUpRec, stepUpReq)
 
-	assert.Equal(t, http.StatusUnauthorized, stepUpRec.Code,
-		"SEC-MFA-04 Flawed Behavior Confirmed: StepUpHandler rejects recovery codes with 401 invalid_code")
-	assert.Contains(t, stepUpRec.Body.String(), "invalid_code")
-	assert.Empty(t, stepUpRec.Result().Cookies(), "StepUpHandler issued no cookies on recovery code submission")
+	assert.Equal(t, http.StatusNoContent, stepUpRec.Code,
+		"SEC-MFA-04 Fixed: StepUpHandler accepts valid recovery codes and returns HTTP 204")
+	cookies := stepUpRec.Result().Cookies()
+	require.NotEmpty(t, cookies, "StepUpHandler must issue cookies on valid recovery code")
+	var accessCookie, refreshCookie *http.Cookie
+	for _, c := range cookies {
+		if c.Name == tokens.DefaultAccessCookieName {
+			accessCookie = c
+		}
+		if c.Name == tokens.DefaultRefreshCookieName {
+			refreshCookie = c
+		}
+	}
+	require.NotNil(t, accessCookie, "access cookie must be set")
+	require.NotNil(t, refreshCookie, "refresh cookie must be set")
+	assert.Equal(t, "full-access-token", accessCookie.Value)
+	assert.Equal(t, "full-refresh-token", refreshCookie.Value)
+	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
 
-	// 2. User submits recovery code to VerifyRecoveryHandler:
-	verifyRecovH := mfa.VerifyRecoveryHandler(svc, resolver)
-	verifyRec := httptest.NewRecorder()
-	verifyReq := httptest.NewRequest(http.MethodPost, "/mfa/recovery/verify", strings.NewReader(stepUpForm.Encode()))
-	verifyReq.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	verifyReq.Header.Set("Origin", "https://"+verifyReq.Host)
+	// 2. Single-use: submitting the same recovery code again fails:
+	stepUpRec2 := httptest.NewRecorder()
+	stepUpReq2 := httptest.NewRequest(http.MethodPost, "/mfa/step-up", strings.NewReader(stepUpForm.Encode()))
+	stepUpReq2.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	stepUpReq2.Header.Set("Origin", "https://"+stepUpReq2.Host)
+	stepUpH(stepUpRec2, stepUpReq2)
 
-	verifyRecovH(verifyRec, verifyReq)
-
-	assert.Equal(t, http.StatusNoContent, verifyRec.Code)
-	// Notice: VerifyRecoveryHandler returns 204, but does NOT issue tokens or set access/refresh cookies!
-	assert.Empty(t, verifyRec.Result().Cookies(),
-		"SEC-MFA-04 Flawed Behavior Confirmed: VerifyRecoveryHandler sets no cookies and cannot elevate session to AMR MFA")
+	assert.Equal(t, http.StatusUnauthorized, stepUpRec2.Code,
+		"consumed recovery code cannot be reused")
+	assert.Contains(t, stepUpRec2.Body.String(), "invalid_code")
 }
 
 // TestSEC_PSK_01_PostgresChallengeStore_MissingImplementation confirms that adapters/pgx/passkey
@@ -431,7 +443,6 @@ func TestSEC_PSK_01_PostgresChallengeStore_MissingImplementation(t *testing.T) {
 	assert.NoError(t, err,
 		"SEC-PSK-01 Remediated: passkey.NewService automatically adopts ChallengeStore from pgxStore")
 }
-
 
 // TestSEC_PSK_03_ClonedCredential_NotRevokedInStore confirms that when a signature counter
 // regression is detected during passkey login (CloneWarning = true), the service emits an

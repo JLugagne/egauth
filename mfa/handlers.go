@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/JLugagne/egauth/internal/httputil"
 
@@ -319,24 +320,40 @@ type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tena
 
 // StepUpHandler is the completion half of the AMR/step-up model whose pre-step-up half is
 // identity.WithMFAGate. It is mounted behind the interim session (the access cookie set by an
-// MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code it verifies the
-// second factor, then re-issues the FULL access+refresh pair with AMR=[tokens.AMRPassword,
-// tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the interim access cookie.
-// A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new token but never the
-// interim one. On an incorrect/expired code it fails (like VerifyHandler) and mints nothing, so
-// the interim session is never upgraded.
+// MFA-gated LoginHandler) supplied via WithUserResolver. On a correct TOTP code or backup recovery
+// code it verifies the second factor, then re-issues the FULL access+refresh pair with
+// AMR=[tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA] and writes both cookies, overwriting the
+// interim access cookie. A route gated with tokens.WithRequiredAMR(tokens.AMRMFA) accepts the new
+// token but never the interim one. On an incorrect/expired code it fails (like VerifyHandler) and
+// mints nothing, so the interim session is never upgraded.
 //
 // Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
 func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
-		if err := svc.VerifyTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField)); err != nil {
+		recCode := r.PostForm.Get("recovery_code")
+		code := r.PostForm.Get(cfg.codeField)
+
+		var err error
+		if recCode != "" {
+			err = svc.VerifyRecoveryCode(r.Context(), tenant, uid, recCode)
+		} else if isRecoveryCodeFormat(code) {
+			err = svc.VerifyRecoveryCode(r.Context(), tenant, uid, code)
+		} else {
+			err = svc.VerifyTOTP(r.Context(), tenant, uid, code)
+			if errors.Is(err, ErrInvalidCode) && (strings.Contains(code, "-") || len(code) > 8) {
+				if rerr := svc.VerifyRecoveryCode(r.Context(), tenant, uid, code); rerr == nil {
+					err = nil
+				}
+			}
+		}
+		if err != nil {
 			cfg.failErr(w, r, err)
 			return
 		}
 		claims := claimsOf(r.Context(), uid, tenant)
-		// The factor set is now password + a verified TOTP, so the token reaches the MFA
-		// assurance level. AMR is set here (not by the builder) so it is authoritative.
+		// The factor set is now password + a verified TOTP or recovery code, so the token reaches the
+		// MFA assurance level. AMR is set here (not by the builder) so it is authoritative.
 		claims.AMR = []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}
 		// Carry the forced-change gate forward: if the verified interim token was flagged
 		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the

@@ -62,3 +62,27 @@ func groupCode(s string, size int) string {
 	}
 	return b.String()
 }
+
+// isRecoveryCodeFormat reports whether code matches the expected format of a recovery code
+// (e.g. 16 base32 characters, with or without dashes or spaces, or containing dashes/letters).
+func isRecoveryCodeFormat(code string) bool {
+	if strings.Contains(code, "-") {
+		return true
+	}
+	norm := normalizeRecoveryCode(code)
+	if len(norm) == 16 {
+		for _, r := range norm {
+			if (r >= 'A' && r <= 'Z') || (r >= '2' && r <= '7') {
+				continue
+			}
+			return false
+		}
+		return true
+	}
+	for _, r := range code {
+		if unicode.IsLetter(r) {
+			return true
+		}
+	}
+	return false
+}

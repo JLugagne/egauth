@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -231,5 +232,159 @@ func TestStepUpHandler_BadCodeMintsNothing(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, issued, "no token may be issued on a failed step-up")
 	assert.Nil(t, stepUpCookie(rec, tokens.DefaultAccessCookieName), "no cookie on failed step-up")
+	assert.Nil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName))
+}
+
+// TestStepUpHandler_RecoveryCode_ReissuesFullPairWithAMRMFA verifies that submitting a valid
+// backup recovery code in the "code" parameter succeeds, issues the full token pair with AMRMFA,
+// sets cookies, and single-use consumes the recovery code so reuse fails.
+func TestStepUpHandler_RecoveryCode_ReissuesFullPairWithAMRMFA(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var enroll struct {
+		Secret string `json:"secret"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
+
+	rec = httptest.NewRecorder()
+	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var confirm struct {
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &confirm))
+	require.NotEmpty(t, confirm.RecoveryCodes)
+	validRecoveryCode := confirm.RecoveryCodes[0]
+
+	var captured tokens.Claims[struct{}]
+	issuer := &issuertest.MockIssuer[struct{}]{
+		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			captured = claims
+			return &tokens.TokenPair[struct{}]{
+				AccessToken:           "full-access-jwt",
+				RefreshToken:          "full-refresh-opaque",
+				RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				Claims:                claims,
+			}, nil
+		},
+	}
+	builder := func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[struct{}] {
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
+	}
+
+	// 1. Submit valid recovery code to StepUpHandler:
+	rec = httptest.NewRecorder()
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	h(rec, mfaPost(url.Values{"code": {validRecoveryCode}}))
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR)
+	assert.Contains(t, captured.AMR, tokens.AMRMFA)
+
+	access := stepUpCookie(rec, tokens.DefaultAccessCookieName)
+	refresh := stepUpCookie(rec, tokens.DefaultRefreshCookieName)
+	require.NotNil(t, access, "step-up with recovery code must set access cookie")
+	require.NotNil(t, refresh, "step-up with recovery code must set refresh cookie")
+	assert.Equal(t, "full-access-jwt", access.Value)
+	assert.Equal(t, "full-refresh-opaque", refresh.Value)
+
+	// 2. Re-submitting the same consumed code fails:
+	rec = httptest.NewRecorder()
+	h(rec, mfaPost(url.Values{"code": {validRecoveryCode}}))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	// 3. Second recovery code unformatted (no dashes) also works:
+	validRecoveryCode2 := strings.ReplaceAll(confirm.RecoveryCodes[1], "-", "")
+	rec = httptest.NewRecorder()
+	h(rec, mfaPost(url.Values{"code": {validRecoveryCode2}}))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// TestStepUpHandler_RecoveryCodeParam_ReissuesFullPair verifies that submitting via "recovery_code"
+// parameter works identically to "code".
+func TestStepUpHandler_RecoveryCodeParam_ReissuesFullPair(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	var enroll struct {
+		Secret string `json:"secret"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
+
+	rec = httptest.NewRecorder()
+	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	var confirm struct {
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &confirm))
+
+	issuer := &issuertest.MockIssuer[struct{}]{
+		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			return &tokens.TokenPair[struct{}]{
+				AccessToken:           "full-access-jwt",
+				RefreshToken:          "full-refresh-opaque",
+				RefreshTokenExpiresAt: time.Now().Add(24 * time.Hour),
+				Claims:                claims,
+			}, nil
+		},
+	}
+	builder := func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[struct{}] {
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
+	}
+
+	rec = httptest.NewRecorder()
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	h(rec, mfaPost(url.Values{"recovery_code": {confirm.RecoveryCodes[0]}}))
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, stepUpCookie(rec, tokens.DefaultAccessCookieName))
+	require.NotNil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName))
+}
+
+// TestStepUpHandler_InvalidRecoveryCodeMintsNothing confirms an invalid recovery code fails with 401
+// and mints no tokens.
+func TestStepUpHandler_InvalidRecoveryCodeMintsNothing(t *testing.T) {
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	var enroll struct {
+		Secret string `json:"secret"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
+
+	rec = httptest.NewRecorder()
+	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+
+	issued := false
+	issuer := &issuertest.MockIssuer[struct{}]{
+		IssueTokenPairFunc: func(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+			issued = true
+			return &tokens.TokenPair[struct{}]{}, nil
+		},
+	}
+	builder := func(ctx context.Context, userID uuid.UUID, tenant string) tokens.Claims[struct{}] {
+		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
+	}
+
+	rec = httptest.NewRecorder()
+	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)(rec, mfaPost(url.Values{"code": {"ABCD-EFGH-IJKL-9999"}}))
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, issued, "no token may be issued on a failed step-up")
+	assert.Nil(t, stepUpCookie(rec, tokens.DefaultAccessCookieName))
 	assert.Nil(t, stepUpCookie(rec, tokens.DefaultRefreshCookieName))
 }
