@@ -539,6 +539,10 @@ func (s *Service[C]) issuePair(ctx context.Context, claims tokens.Claims[C], fam
 	return pair, nil
 }
 
+// ErrInvalidPrincipalType is returned by IssueAPIKey when an API key is issued with an
+// empty or invalid principal type.
+var ErrInvalidPrincipalType = tokens.ErrInvalidPrincipalType
+
 // ErrPATSubjectMismatch is returned by IssueAPIKey when a KeyTypePAT is issued with a
 // Claims.Subject that names a different user than createdBy. A PAT acts as its creator, and its
 // revocation is scoped by CreatedBy, so the two must agree (leave Subject unset to default it).
@@ -552,12 +556,16 @@ var ErrPATSubjectMismatch = errors.New("jwt: a PAT's Claims.Subject must equal c
 // exactly the ones passed here, so callers should grant the narrowest set required.
 //
 // Claims.Subject is set per type and reflects what the key IS:
-//   - KeyTypePAT: the key acts on behalf of a human, so Subject is the user as supplied by the
-//     caller on claims.Subject (left untouched).
-//   - KeyTypeService: the key is a machine identity decoupled from any human, so Subject is
+//   - KeyTypePAT / KeyTypeUser: the key acts on behalf of a human, so Subject is the user as supplied by the
+//     caller on claims.Subject (left untouched or defaulting to createdBy).
+//   - KeyTypeService / KeyTypeSystem: the key is a machine identity decoupled from any human, so Subject is
 //     overwritten with the newly generated key ID; createdBy remains the only link back to the
 //     human who minted it (recorded on APIKey.CreatedBy, not on the subject).
 func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[C]) (*tokens.APIKey[C], error) {
+	if !keyType.Valid() {
+		return nil, tokens.ErrInvalidPrincipalType
+	}
+
 	keyBytes := make([]byte, s.apiKeyLength)
 	if _, err := rand.Read(keyBytes); err != nil {
 		return nil, fmt.Errorf("failed to generate api key: %w", err)
@@ -570,14 +578,14 @@ func (s *Service[C]) IssueAPIKey(ctx context.Context, prefix string, keyType tok
 
 	keyID := uuid.Must(uuid.NewV7())
 
-	// A Service token is a machine identity decoupled from any human: its subject is its own key
-	// ID, not the creator. A PAT acts on behalf of a human and MUST act as its creator: its
+	// A Service or System token is a machine identity decoupled from any human: its subject is its own key
+	// ID, not the creator. A PAT or User key acts on behalf of a human and MUST act as its creator: its
 	// subject is pinned to createdBy so that revocation scoped by CreatedBy (DisableUser →
 	// RevokeAllAPIKeysForUser) always severs it. A caller-supplied Subject naming a different user
 	// is rejected rather than silently honored (that divergence would let a PAT outlive the
 	// disable of the user it acts as). The authority on claims (scopes/roles/audiences) is used as
 	// given for either type — never inflated from the creator's stored roles.
-	if keyType == tokens.KeyTypeService {
+	if keyType == tokens.KeyTypeService || keyType == tokens.KeyTypeSystem {
 		claims.Subject = keyID
 	} else {
 		if claims.Subject != uuid.Nil && claims.Subject != createdBy {

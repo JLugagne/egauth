@@ -37,11 +37,14 @@ func ActorFromAPIKey[C any](key *APIKey[C]) egauth.Actor {
 	}
 
 	switch key.Type {
-	case KeyTypeService:
+	case KeyTypeService, KeyTypeSystem:
 		// Machine identity: the subject is the key itself (already in KeyID); no owning user.
 		actor.Kind = egauth.Service
 	case KeyTypePAT:
 		actor.Kind = egauth.PAT
+		actor.UserID = key.Claims.Subject
+	case KeyTypeUser:
+		actor.Kind = egauth.User
 		actor.UserID = key.Claims.Subject
 	default:
 		// Unclassified key: fail safe as a plain human principal, never as a machine.

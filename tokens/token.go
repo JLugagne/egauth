@@ -26,10 +26,26 @@ const (
 	// KeyTypePAT is a Personal Access Token acting on behalf of a human user.
 	// At the Actor boundary it maps to egauth.PrincipalKind == PAT, and IsHuman() is true.
 	KeyTypePAT KeyType = "pat"
+	// KeyTypeUser is a user principal identity acting on behalf of a human user.
+	// At the Actor boundary it maps to egauth.PrincipalKind == User, and IsHuman() is true.
+	KeyTypeUser KeyType = "user"
 	// KeyTypeService is a machine/service identity decoupled from any human.
 	// At the Actor boundary it maps to egauth.PrincipalKind == Service, and IsMachine() is true.
 	KeyTypeService KeyType = "service"
+	// KeyTypeSystem is a system principal identity decoupled from any human.
+	// At the Actor boundary it maps to egauth.PrincipalKind == Service, and IsMachine() is true.
+	KeyTypeSystem KeyType = "system"
 )
+
+// Valid reports whether kt is a recognized API key principal type.
+func (kt KeyType) Valid() bool {
+	switch kt {
+	case KeyTypePAT, KeyTypeUser, KeyTypeService, KeyTypeSystem:
+		return true
+	default:
+		return false
+	}
+}
 
 // Claims represents standard JWT claims plus custom generic claims.
 type Claims[C any] struct {

@@ -323,27 +323,38 @@ func TestVulnerability_SECTOK13_APIKeyTypeDesynchronization(t *testing.T) {
 		Issuer:    "test-issuer",
 	})
 
-	// Issue key with empty type.
-	key, err := svc.IssueAPIKey(ctx, "", "", creatorID, tokens.Claims[struct{}]{})
-	require.NoError(t, err)
-	assert.Equal(t, tokens.KeyType(""), key.Type, "key.Type was left empty as requested")
-	assert.Equal(t, creatorID, key.Claims.Subject, "IssueAPIKey treated empty type as PAT, binding subject to createdBy")
+	t.Run("empty principal type is rejected", func(t *testing.T) {
+		_, err := svc.IssueAPIKey(ctx, "", "", creatorID, tokens.Claims[struct{}]{})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, tokens.ErrInvalidPrincipalType,
+			"IssueAPIKey must reject empty principal type with ErrInvalidPrincipalType")
+	})
 
-	// On in-memory store, ActorFromAPIKey falls into default branch:
-	actorMem := tokens.ActorFromAPIKey(key)
-	assert.Equal(t, egauth.User, actorMem.Kind, "memory store treats untyped key as human User")
-	assert.Equal(t, creatorID, actorMem.UserID)
+	t.Run("invalid principal type is rejected", func(t *testing.T) {
+		_, err := svc.IssueAPIKey(ctx, "", "unknown_type", creatorID, tokens.Claims[struct{}]{})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, tokens.ErrInvalidPrincipalType,
+			"IssueAPIKey must reject invalid principal type with ErrInvalidPrincipalType")
+	})
 
-	// Simulating PostgreSQL store behavior (adapters/pgx/tokens/store.go:191):
-	// if keyType == "" { keyType = tokens.KeyTypeService }
-	pgKey := *key
-	pgKey.Type = tokens.KeyTypeService
-	actorPG := tokens.ActorFromAPIKey(&pgKey)
-	assert.Equal(t, egauth.Service, actorPG.Kind, "PostgreSQL store treats untyped key as machine Service")
-	assert.Equal(t, uuid.Nil, actorPG.UserID, "Service principal wipes UserID")
+	t.Run("valid principal types succeed with synchronized actor resolution", func(t *testing.T) {
+		for _, kt := range []tokens.KeyType{tokens.KeyTypeUser, tokens.KeyTypeService, tokens.KeyTypeSystem} {
+			key, err := svc.IssueAPIKey(ctx, "sk_", kt, creatorID, tokens.Claims[struct{}]{})
+			require.NoError(t, err, "issuing API key with valid type %q must succeed", kt)
+			assert.Equal(t, kt, key.Type)
 
-	assert.NotEqual(t, actorMem.Kind, actorPG.Kind,
-		"vulnerability confirmed: identical API key produces different Actor kinds depending on storage adapter")
+			actor := tokens.ActorFromAPIKey(key)
+			switch kt {
+			case tokens.KeyTypeUser:
+				assert.Equal(t, egauth.User, actor.Kind)
+				assert.Equal(t, creatorID, actor.UserID)
+			case tokens.KeyTypeService, tokens.KeyTypeSystem:
+				assert.Equal(t, egauth.Service, actor.Kind)
+				assert.Equal(t, uuid.Nil, actor.UserID)
+				assert.Equal(t, key.ID, actor.KeyID)
+			}
+		}
+	})
 }
 
 // mockStoreForFailure models transient store failures to exercise SEC-TOK-03.

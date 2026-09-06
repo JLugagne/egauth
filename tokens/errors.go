@@ -48,4 +48,7 @@ var (
 	// ErrTenantMismatch is returned by a Save* operation when the record already carries a
 	// non-empty TenantID that differs from the tenantID argument passed to the call.
 	ErrTenantMismatch = errors.New("tokens: tenant ID mismatch")
+
+	// ErrInvalidPrincipalType is returned when an API key is issued with an empty or unsupported principal type.
+	ErrInvalidPrincipalType = errors.New("tokens: invalid principal type")
 )

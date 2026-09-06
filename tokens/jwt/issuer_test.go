@@ -181,6 +181,76 @@ func TestIssueAPIKey(t *testing.T) {
 		assert.Equal(t, []string{"viewer"}, key.Claims.Roles, "roles must be exactly those passed by the caller")
 		assert.NotContains(t, key.Claims.Roles, "admin", "the user's broader stored roles must never be copied onto the key")
 	})
+
+	t.Run("empty principal type is rejected with ErrInvalidPrincipalType", func(t *testing.T) {
+		svc, _ := newIssueKeyService(t)
+		userID := uuid.Must(uuid.NewV7())
+
+		_, err := svc.IssueAPIKey(ctx, "sk_", "", userID, tokens.Claims[MyCustomClaims]{
+			TenantID: tenant,
+		})
+		require.Error(t, err)
+		assert.ErrorIs(t, err, tokens.ErrInvalidPrincipalType)
+		assert.ErrorIs(t, err, jwt.ErrInvalidPrincipalType)
+	})
+
+	t.Run("invalid principal type is rejected with ErrInvalidPrincipalType", func(t *testing.T) {
+		svc, _ := newIssueKeyService(t)
+		userID := uuid.Must(uuid.NewV7())
+
+		for _, invalid := range []tokens.KeyType{"invalid", "admin", "root", "unknown"} {
+			_, err := svc.IssueAPIKey(ctx, "sk_", invalid, userID, tokens.Claims[MyCustomClaims]{
+				TenantID: tenant,
+			})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tokens.ErrInvalidPrincipalType, "expected error for invalid key type %q", invalid)
+		}
+	})
+
+	t.Run("valid principal type 'user' sets subject to creator", func(t *testing.T) {
+		svc, saved := newIssueKeyService(t)
+		userID := uuid.Must(uuid.NewV7())
+
+		key, err := svc.IssueAPIKey(ctx, "sk_usr_", tokens.KeyTypeUser, userID, tokens.Claims[MyCustomClaims]{
+			TenantID: tenant,
+			Scopes:   []string{"profile:read"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, key)
+
+		assert.Equal(t, tokens.KeyTypeUser, key.Type)
+		assert.Equal(t, userID, key.CreatedBy)
+		assert.Equal(t, userID, key.Claims.Subject)
+
+		stored := saved[key.Hash]
+		require.NotNil(t, stored)
+		assert.Equal(t, tokens.KeyTypeUser, stored.Type)
+		assert.Equal(t, userID, stored.CreatedBy)
+		assert.Equal(t, userID, stored.Claims.Subject)
+	})
+
+	t.Run("valid principal type 'system' sets subject to key ID", func(t *testing.T) {
+		svc, saved := newIssueKeyService(t)
+		creatorID := uuid.Must(uuid.NewV7())
+
+		key, err := svc.IssueAPIKey(ctx, "sk_sys_", tokens.KeyTypeSystem, creatorID, tokens.Claims[MyCustomClaims]{
+			TenantID: tenant,
+			Scopes:   []string{"metrics:write"},
+		})
+		require.NoError(t, err)
+		require.NotNil(t, key)
+
+		assert.Equal(t, tokens.KeyTypeSystem, key.Type)
+		assert.Equal(t, creatorID, key.CreatedBy)
+		assert.Equal(t, key.ID, key.Claims.Subject)
+		assert.NotEqual(t, creatorID, key.Claims.Subject)
+
+		stored := saved[key.Hash]
+		require.NotNil(t, stored)
+		assert.Equal(t, tokens.KeyTypeSystem, stored.Type)
+		assert.Equal(t, creatorID, stored.CreatedBy)
+		assert.Equal(t, key.ID, stored.Claims.Subject)
+	})
 }
 
 func TestJWTIssuerVerifier_EdgeCases(t *testing.T) {
