@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.9.0] — 2026-09-06
+
+### Security & Hardening
+
+- **Comprehensive Security Audit Hardening** (Issues #60–#65, #89–#102):
+  - **Tokens & Keystore** (SEC-TOK): Retained revoked token families with `RevokedAt` timestamp for auditability while rejecting replayed tokens with `ErrTokenFamilyRevoked`. Added `HistoricalKeyStore` with soft-retire and retention options to prevent premature hard deletion of expired signing keys. Enforced atomic refresh rotation to prevent token burning on provider errors. Enforced explicit API key principal types (`user`, `service`, `system`, `pat`).
+  - **Identity & Passwords** (SEC-ID): Fully sanitized PII on account deletion (`DeleteUser`), redacting/clearing `Phone` and `RecoveryEmail` for GDPR compliance. Integrated offline breach detection in `policy.NewDefaultPolicy()` to reject compromised dictionary passwords. Added uniform timing / decoy token generation on non-existent account reset requests.
+  - **Sessions & WebApp** (SEC-SES): Made `RevokeSession` idempotent and emitted audit logout events. Added panic observation handlers to `janitor.Janitor` and clamped non-positive intervals to safe defaults. Sanitized `CookieDomain` configuration in `webapp.NewWebApp`.
+  - **MFA, OTP & Passkey** (SEC-MFA, SEC-PSK, SEC-OTP): Added `EnrollmentConfirmer` for atomic TOTP confirmation and recovery code persistence. Added `RecoveryAttemptStore` to isolate recovery code lockout from TOTP attempt exhaustion. Allowed backup recovery codes in `StepUpHandler`. Bound tenant context via AAD in KEK encryption for TOTP secrets. Enforced cooldown on OTP reissue and synchronized challenge generation prior to returning HTTP 204. Automatically revoked cloned passkey credentials upon signature counter regression. Bound ceremony cookies to tenant ID.
+  - **OAuth & OIDC** (SEC-OAU): Bound tenant ID and provider name via AAD in KEK encryption for client secrets. Added HMAC-SHA256 integrity protection to OAuth state cookies. Implemented bounded capacity and LRU eviction in pgx `providerCache`.
+  - **Global & Multi-Tenancy** (SEC-GLO): Synchronized tenant context propagation between `tokens.ContextMiddleware` and OTP handlers. Introduced `StopContext` and `WithStopTimeout` for bounded janitor shutdown.
+
 ### Added
 
 - **Forced-password-change for temporary credentials** (M7). Lets an admin provision a credential
