@@ -2,7 +2,6 @@ package e2esecurity_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -18,9 +17,9 @@ import (
 	otpmemory "github.com/JLugagne/egauth/otp/memory"
 	"github.com/JLugagne/egauth/passkey"
 	passkeymemory "github.com/JLugagne/egauth/passkey/memory"
+	"github.com/JLugagne/egauth/passkey/passkeytest"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/issuertest"
-	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -457,45 +456,52 @@ func TestSEC_PSK_01_PostgresChallengeStore_MissingImplementation(t *testing.T) {
 
 // TestSEC_PSK_03_ClonedCredential_NotRevokedInStore confirms that when a signature counter
 // regression is detected during passkey login (CloneWarning = true), the service emits an
-// event and returns ErrCredentialCloned, but DOES NOT revoke, disable, or delete the credential
-// from the store.
+// event, returns ErrCredentialCloned, and automatically revokes/deletes the compromised
+// passkey credential from the store so it cannot be used again (SEC-PSK-03).
 func TestSEC_PSK_03_ClonedCredential_NotRevokedInStore(t *testing.T) {
 	ctx := context.Background()
 	store := passkeymemory.NewStore()
 	tenant := "tenant-sec-03"
 	uid := uuid.Must(uuid.NewV7())
-	credID := []byte("test-credential-id")
 
-	// Store a credential with sign_count = 100
-	rawWebAuthnCred, err := json.Marshal(webauthn.Credential{
-		ID: credID,
-		Authenticator: webauthn.Authenticator{
-			SignCount: 100,
-		},
+	cookieKey := []byte("0123456789abcdef0123456789abcdef")
+	svc, err := passkey.NewService(store, passkey.Config{
+		RPID:                     "example.com",
+		RPDisplayName:            "Example",
+		RPOrigins:                []string{"https://example.com"},
+		CookieKey:                cookieKey,
+		InsecureNoChallengeStore: true,
 	})
 	require.NoError(t, err)
 
-	cred := &passkey.Credential{
-		UserID:    uid,
-		TenantID:  tenant,
-		ID:        credID,
-		PublicKey: []byte("public-key"),
-		SignCount: 100,
-		Data:      rawWebAuthnCred,
-		CreatedAt: time.Now(),
-	}
-	require.NoError(t, store.SaveCredential(ctx, tenant, cred))
+	auth := passkeytest.NewSoftAuthenticator(t, "example.com", "https://example.com")
 
-	// In FinishLogin, when CloneWarning is true:
-	// Service emits AccountBlocked and returns ErrCredentialCloned.
-	// But it never calls s.store.DeleteCredential or revokes it.
-	// We verify that the credential still remains in the store!
+	// 1. User registers a passkey credential
+	_, regSession, err := svc.BeginRegistration(ctx, tenant, uid, "alice", "Alice")
+	require.NoError(t, err)
+	_, err = svc.FinishRegistration(ctx, tenant, uid, "alice", "Alice", *regSession, auth.RegistrationRequest(t, regSession.Challenge))
+	require.NoError(t, err)
+
+	// 2. Legitimate login moves the stored counter to 1
+	_, loginSession1, err := svc.BeginLogin(ctx, tenant, uid)
+	require.NoError(t, err)
+	cred1, err := svc.FinishLogin(ctx, tenant, uid, *loginSession1, auth.LoginRequest(t, loginSession1.Challenge, nil))
+	require.NoError(t, err)
+	assert.Equal(t, uint32(1), cred1.SignCount)
+
+	// 3. Authenticator clone asserts with a non-advancing counter (<= stored). WebAuthn
+	// clone detection flags it and FinishLogin returns ErrCredentialCloned.
+	_, loginSession2, err := svc.BeginLogin(ctx, tenant, uid)
+	require.NoError(t, err)
+	_, err = svc.FinishLogin(ctx, tenant, uid, *loginSession2, auth.LoginRequestAtCount(t, loginSession2.Challenge, nil, 1))
+	require.ErrorIs(t, err, passkey.ErrCredentialCloned, "a regressed signature counter must be flagged as a clone")
+
+	// 4. Remediated SEC-PSK-03: Compromised cloned credential must be removed/revoked from the store!
 	creds, err := store.GetCredentials(ctx, tenant, uid)
 	require.NoError(t, err)
-	require.Len(t, creds, 1)
+	assert.Empty(t, creds, "SEC-PSK-03 Remediated: Cloned credential must be revoked/deleted from store upon clone detection")
 
-	// The credential is still active and stored without revocation:
-	assert.Equal(t, credID, creds[0].ID)
-	assert.Equal(t, uint32(100), creds[0].SignCount,
-		"SEC-PSK-03 Flawed Architecture Confirmed: Cloned credential remains active in store without revocation")
+	// 5. Subsequent login attempts can no longer use this compromised credential
+	_, _, err = svc.BeginLogin(ctx, tenant, uid)
+	assert.ErrorIs(t, err, passkey.ErrNoCredentials, "user must have no credentials left after revocation")
 }

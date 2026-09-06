@@ -49,7 +49,7 @@ func TestService_VerifyTOCTOU_DoesNotConsumeReplacement(t *testing.T) {
 	// replacing A with a brand-new code B in the backing store.
 	var chB *otp.Challenge
 	hooked := &hookStore{Store: backing, beforeFirst: func() {
-		chB, err = otp.NewService(backing).Issue(ctx, "t1", sub, "login")
+		chB, err = otp.NewService(backing, otp.WithCooldown(0)).Issue(ctx, "t1", sub, "login")
 		require.NoError(t, err)
 	}}
 

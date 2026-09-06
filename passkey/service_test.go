@@ -154,4 +154,3 @@ func TestNewService_AdoptsChallengeStoreFromStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, svc)
 }
-

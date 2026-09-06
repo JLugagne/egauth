@@ -72,7 +72,8 @@ func TestService_Expired(t *testing.T) {
 
 func TestService_ReissueReplacesAndResetsAttempts(t *testing.T) {
 	ctx := context.Background()
-	svc := otp.NewService(memory.NewStore(), otp.WithMaxAttempts(3))
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := otp.NewService(memory.NewStore(), otp.WithClock(clk.now), otp.WithMaxAttempts(3))
 	sub := uuid.Must(uuid.NewV7())
 
 	ch1, err := svc.Issue(ctx, "t1", sub, "login")
@@ -80,6 +81,13 @@ func TestService_ReissueReplacesAndResetsAttempts(t *testing.T) {
 	// Burn two attempts on the first code.
 	_ = svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code))
 	_ = svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code))
+
+	// Re-issue within cooldown is rejected (SEC-OTP-01)
+	_, err = svc.Issue(ctx, "t1", sub, "login")
+	assert.ErrorIs(t, err, otp.ErrCooldownActive)
+
+	// Advance clock past cooldown window
+	clk.t = clk.t.Add(otp.DefaultCooldown + time.Second)
 
 	// Re-issue: new code, attempts reset.
 	ch2, err := svc.Issue(ctx, "t1", sub, "login")
@@ -149,4 +157,39 @@ func TestNewService_DigitsBounds(t *testing.T) {
 	assert.Panics(t, func() {
 		otp.NewService(store, otp.WithDigits(11))
 	}, "NewService with digits=11 must panic: excessively large digit count is a footgun")
+}
+
+// TestService_SEC_OTP_01_CooldownAndAttackBudget verifies that:
+// 1. Rapid re-issuance for the same subject+purpose within the cooldown window returns ErrCooldownActive (preventing toll fraud).
+// 2. An attacker cannot reset the failed-attempt budget by reissuing within cooldown (preventing brute-force resets).
+// 3. Once cooldown elapses, re-issuance succeeds.
+func TestService_SEC_OTP_01_CooldownAndAttackBudget(t *testing.T) {
+	ctx := context.Background()
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := otp.NewService(memory.NewStore(), otp.WithClock(clk.now), otp.WithMaxAttempts(3))
+	sub := uuid.Must(uuid.NewV7())
+
+	ch1, err := svc.Issue(ctx, "t1", sub, "login")
+	require.NoError(t, err)
+
+	// 1. Immediate reissue returns ErrCooldownActive (toll fraud defense)
+	_, err = svc.Issue(ctx, "t1", sub, "login")
+	require.ErrorIs(t, err, otp.ErrCooldownActive, "rapid reissue within cooldown must return ErrCooldownActive")
+
+	// 2. Burn 2 attempts on the first code
+	assert.ErrorIs(t, svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code)), otp.ErrInvalidCode)
+	assert.ErrorIs(t, svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code)), otp.ErrInvalidCode)
+
+	// Attacker attempts to reset attempt budget via reissue within cooldown
+	_, err = svc.Issue(ctx, "t1", sub, "login")
+	require.ErrorIs(t, err, otp.ErrCooldownActive, "reissue within cooldown must not reset attack budget")
+
+	// 3rd wrong guess burns the code (budget was NOT reset)
+	assert.ErrorIs(t, svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code)), otp.ErrTooManyAttempts)
+
+	// 3. Advance clock past cooldown: reissue now succeeds
+	clk.t = clk.t.Add(otp.DefaultCooldown + time.Second)
+	ch2, err := svc.Issue(ctx, "t1", sub, "login")
+	require.NoError(t, err)
+	require.NotNil(t, ch2)
 }

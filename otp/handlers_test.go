@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/JLugagne/egauth/otp"
 	"github.com/JLugagne/egauth/otp/memory"
@@ -301,4 +303,36 @@ func TestIssueHandler_UniformResponseResolvedAndUnresolved(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, recResolved.Code)
 	assert.Equal(t, http.StatusNoContent, recUnresolved.Code)
 	assert.Equal(t, recResolved.Code, recUnresolved.Code, "response must be uniform for resolved and unresolved subjects")
+}
+
+// TestIssueHandler_CooldownSuppressesDelivery confirms that when IssueHandler is called
+// repeatedly within the cooldown window, HTTP 204 is returned (no timing or oracle leak),
+// but out-of-band delivery is NOT triggered a second time (toll fraud prevention).
+func TestIssueHandler_CooldownSuppressesDelivery(t *testing.T) {
+	svc := otp.NewService(memory.NewStore())
+	subject := uuid.Must(uuid.NewV7())
+
+	var deliverCount atomic.Int64
+	deliver := func(ctx context.Context, ch *otp.Challenge) error {
+		deliverCount.Add(1)
+		return nil
+	}
+
+	h := otp.IssueHandler(svc, deliver, otp.WithSubjectResolver(func(*http.Request) (uuid.UUID, bool) {
+		return subject, true
+	}))
+
+	// Request 1: triggers delivery
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, issuePost())
+	assert.Equal(t, http.StatusNoContent, rec1.Code)
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, int64(1), deliverCount.Load())
+
+	// Request 2: within cooldown window: returns 204 but deliver is NOT called again
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, issuePost())
+	assert.Equal(t, http.StatusNoContent, rec2.Code)
+	time.Sleep(20 * time.Millisecond)
+	assert.Equal(t, int64(1), deliverCount.Load(), "delivery must not be dispatched during cooldown (toll fraud prevention)")
 }

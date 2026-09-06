@@ -79,6 +79,10 @@ func TestFinishLogin_CloneDetection(t *testing.T) {
 	require.NoError(t, err)
 	_, err = svc.FinishLogin(ctx, "", userID, *session2, auth.assertionAtCount(t, session2.Challenge, nil, 1))
 	require.ErrorIs(t, err, passkey.ErrCredentialCloned, "a regressed signature counter must be flagged as a clone")
+
+	creds, err := svc.ListCredentials(ctx, "", userID)
+	require.NoError(t, err)
+	assert.Empty(t, creds, "cloned credential must be revoked from store upon clone detection")
 }
 
 func TestFinishLogin_WrongChallengeRejected(t *testing.T) {

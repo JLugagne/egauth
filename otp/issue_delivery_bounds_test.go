@@ -23,7 +23,7 @@ func TestIssueHandler_DeliveryConcurrencyBound(t *testing.T) {
 	const cap = 3
 	const total = 20
 
-	svc := otp.NewService(memory.NewStore())
+	svc := otp.NewService(memory.NewStore(), otp.WithCooldown(0))
 	subject := uuid.Must(uuid.NewV7())
 
 	// gate blocks every delivery goroutine until we release it, so we can count in-flight slots.

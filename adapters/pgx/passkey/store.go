@@ -49,7 +49,6 @@ func NewChallengeStore(db DBQuerier) *Store {
 	return &Store{db: db}
 }
 
-
 // SaveCredential persists a newly registered credential. If c.TenantID is non-empty and
 // differs from tenantID, it returns ErrTenantMismatch; otherwise it sets c.TenantID = tenantID.
 func (s *Store) SaveCredential(ctx context.Context, tenantID string, c *passkey.Credential) error {
@@ -162,7 +161,6 @@ func (s *Store) Consume(ctx context.Context, tenantID, challenge string) (bool, 
 	}
 	return true, nil
 }
-
 
 // Ping reports backend connectivity by issuing a trivial round-trip query over the store's
 // handle, satisfying the optional health.Pinger seam. It returns a non-nil error when the

@@ -24,6 +24,8 @@ const (
 	DefaultTTL = 10 * time.Minute
 	// DefaultMaxAttempts is how many wrong guesses are tolerated before the code is burned.
 	DefaultMaxAttempts = 5
+	// DefaultCooldown is how long a subject must wait before requesting another code for the same purpose.
+	DefaultCooldown = 30 * time.Second
 )
 
 // Challenge is everything the application needs to deliver a one-time passcode. egauth does

@@ -137,7 +137,6 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		}
 	}
 
-
 	// Secure-by-default: an unset UserVerification means REQUIRED (reject UV-cleared assertions).
 	// A caller wanting the weaker behavior sets VerificationPreferred/Discouraged explicitly.
 	uv := cfg.UserVerification
@@ -258,6 +257,7 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 		return nil, err
 	}
 	if cred.Authenticator.CloneWarning {
+		_ = s.store.DeleteCredential(ctx, tenantID, userID, cred.ID)
 		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: userID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, ErrCredentialCloned
 	}
@@ -319,6 +319,7 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 		return nil, uuid.Nil, err
 	}
 	if cred.Authenticator.CloneWarning {
+		_ = s.store.DeleteCredential(ctx, tenantID, resolvedID, cred.ID)
 		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, uuid.Nil, ErrCredentialCloned
 	}

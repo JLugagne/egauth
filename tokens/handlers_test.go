@@ -478,4 +478,3 @@ func TestRefreshHandler_PassesClientContext(t *testing.T) {
 	assert.Equal(t, "192.0.2.10", capturedCC.IP)
 	assert.Equal(t, "TestBrowser/2.0", capturedCC.UserAgent)
 }
-

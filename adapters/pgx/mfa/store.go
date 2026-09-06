@@ -56,6 +56,48 @@ func NewStore(db DBQuerier, kek KEK) *Store {
 	return &Store{db: db, kek: kek}
 }
 
+func totpAAD(tenantID string, userID uuid.UUID) []byte {
+	return []byte(tenantID + ":" + userID.String())
+}
+
+func (s *Store) sealSecret(secret string, aad []byte) ([]byte, error) {
+	if withAAD, ok := s.kek.(interface {
+		SealWithAAD(plaintext []byte, aad []byte) ([]byte, error)
+	}); ok {
+		return withAAD.SealWithAAD([]byte(secret), aad)
+	}
+	return s.kek.Seal([]byte(secret), aad)
+}
+
+func (s *Store) openSecret(sealed []byte, aad []byte) ([]byte, error) {
+	if withAAD, ok := s.kek.(interface {
+		OpenWithAAD(sealed []byte, aad []byte) ([]byte, error)
+	}); ok {
+		pt, err := withAAD.OpenWithAAD(sealed, aad)
+		if err == nil {
+			return pt, nil
+		}
+		// Fallback without AAD for backward-compatibility with legacy unauthenticated secrets
+		if withoutAAD, ok := s.kek.(interface {
+			Open(sealed []byte, aad ...[]byte) ([]byte, error)
+		}); ok {
+			if fallbackPt, fallbackErr := withoutAAD.Open(sealed); fallbackErr == nil {
+				return fallbackPt, nil
+			}
+		}
+		return nil, err
+	}
+	pt, err := s.kek.Open(sealed, aad)
+	if err != nil {
+		// Fallback without AAD for backward-compatibility with legacy unauthenticated secrets
+		if fallbackPt, fallbackErr := s.kek.Open(sealed); fallbackErr == nil {
+			return fallbackPt, nil
+		}
+		return nil, err
+	}
+	return pt, nil
+}
+
 func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnrollment) error {
 	if e.TenantID != "" && e.TenantID != tenantID {
 		return mfa.ErrTenantMismatch
@@ -81,7 +123,7 @@ func (s *Store) SaveTOTP(ctx context.Context, tenantID string, e *mfa.TOTPEnroll
 		lastAttemptAt = &t
 	}
 
-	sealed, err := s.kek.Seal([]byte(e.Secret))
+	sealed, err := s.sealSecret(e.Secret, totpAAD(tenantID, e.UserID))
 	if err != nil {
 		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
 	}
@@ -100,7 +142,7 @@ func (s *Store) ConfirmEnrollment(ctx context.Context, tenantID string, e *mfa.T
 		e.CreatedAt = time.Now().UTC()
 	}
 
-	sealed, err := s.kek.Seal([]byte(e.Secret))
+	sealed, err := s.sealSecret(e.Secret, totpAAD(tenantID, e.UserID))
 	if err != nil {
 		return fmt.Errorf("mfa pgx: sealing secret: %w", err)
 	}
@@ -186,7 +228,7 @@ func (s *Store) GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) 
 	if err != nil {
 		return nil, fmt.Errorf("mfa pgx: decoding secret: %w", err)
 	}
-	plaintext, err := s.kek.Open(sealed)
+	plaintext, err := s.openSecret(sealed, totpAAD(tenantID, userID))
 	if err != nil {
 		return nil, fmt.Errorf("mfa pgx: opening secret: %w", err)
 	}

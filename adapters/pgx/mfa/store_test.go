@@ -2,6 +2,7 @@ package pgx_test
 
 import (
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
@@ -157,4 +158,65 @@ func TestPgxStore_ConfirmEnrollmentAtomic(t *testing.T) {
 	assert.True(t, got.Confirmed())
 	assert.Equal(t, int64(42), got.LastUsedStep)
 	assert.NoError(t, store.ConsumeRecoveryCode(ctx, "t1", uid, "code1"))
+}
+
+// TestPgxStore_SEC_MFA_03_CrossTenantAAD verifies that TOTP secrets are cryptographically bound
+// to their tenant (and user) via AAD. An attacker copying a sealed ciphertext from tenant A to
+// tenant B cannot read/decrypt it under tenant B (SEC-MFA-03).
+func TestPgxStore_SEC_MFA_03_CrossTenantAAD(t *testing.T) {
+	ctx := context.Background()
+	store, pool := newStoreAndPool(t)
+	uid := uuid.Must(uuid.NewV7())
+
+	const secret = "super-secret-totp"
+	enr := &mfa.TOTPEnrollment{
+		UserID:   uid,
+		TenantID: "tenant-a",
+		Secret:   secret,
+	}
+	require.NoError(t, store.SaveTOTP(ctx, "tenant-a", enr))
+
+	// Retrieve the raw ciphertext sealed for tenant-a
+	var rawCiphertext string
+	err := pool.QueryRow(ctx, "SELECT secret FROM mfa_totp WHERE tenant_id = $1 AND user_id = $2", "tenant-a", uid).Scan(&rawCiphertext)
+	require.NoError(t, err)
+
+	// Simulate transposition of tenant-a's ciphertext into tenant-b's record
+	_, err = pool.Exec(ctx, `
+		INSERT INTO mfa_totp (tenant_id, user_id, secret, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at)
+		VALUES ($1, $2, $3, NULL, 0, 0, NULL, $4)
+	`, "tenant-b", uid, rawCiphertext, time.Now().UTC())
+	require.NoError(t, err)
+
+	// Attempting to read under tenant-b must fail due to AAD mismatch
+	_, err = store.GetTOTP(ctx, "tenant-b", uid)
+	require.Error(t, err, "reading transposed secret under tenant-b must fail due to AAD mismatch")
+}
+
+// TestPgxStore_SEC_MFA_03_BackwardCompatibility_LegacySecretWithoutAAD verifies that secrets sealed
+// without AAD (pre-migration / legacy) can still be decrypted via fallback (SEC-MFA-03).
+func TestPgxStore_SEC_MFA_03_BackwardCompatibility_LegacySecretWithoutAAD(t *testing.T) {
+	ctx := context.Background()
+	store, pool := newStoreAndPool(t)
+	uid := uuid.Must(uuid.NewV7())
+
+	dummyKey := make([]byte, 32)
+	kek, err := keystore.NewKEK(dummyKey)
+	require.NoError(t, err)
+
+	const legacySecret = "legacy-unauthenticated-secret"
+	// Seal without AAD (legacy behavior)
+	sealed, err := kek.Seal([]byte(legacySecret))
+	require.NoError(t, err)
+	secretStr := base64.StdEncoding.EncodeToString(sealed)
+
+	_, err = pool.Exec(ctx, `
+		INSERT INTO mfa_totp (tenant_id, user_id, secret, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at)
+		VALUES ($1, $2, $3, NULL, 0, 0, NULL, $4)
+	`, "tenant-legacy", uid, secretStr, time.Now().UTC())
+	require.NoError(t, err)
+
+	got, err := store.GetTOTP(ctx, "tenant-legacy", uid)
+	require.NoError(t, err, "legacy secret without AAD must be opened successfully via fallback")
+	assert.Equal(t, legacySecret, got.Secret)
 }

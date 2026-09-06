@@ -2,6 +2,7 @@ package otp
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/JLugagne/egauth/event"
@@ -26,6 +27,7 @@ type service struct {
 	digits      int
 	ttl         time.Duration
 	maxAttempts int
+	cooldown    time.Duration
 	now         func() time.Time
 	events      event.Sink
 }
@@ -46,6 +48,10 @@ func WithTTL(d time.Duration) ServiceOption { return func(s *service) { s.ttl = 
 // WithMaxAttempts sets how many wrong guesses burn the code (default 5).
 func WithMaxAttempts(n int) ServiceOption { return func(s *service) { s.maxAttempts = n } }
 
+// WithCooldown sets the minimum duration required between OTP issues for the same subject+purpose (default 30s).
+// Non-positive disables cooldown.
+func WithCooldown(d time.Duration) ServiceOption { return func(s *service) { s.cooldown = d } }
+
 // WithClock overrides the time source (primarily for tests).
 func WithClock(now func() time.Time) ServiceOption { return func(s *service) { s.now = now } }
 
@@ -61,6 +67,7 @@ func NewService(store Store, opts ...ServiceOption) Service {
 		digits:      DefaultDigits,
 		ttl:         DefaultTTL,
 		maxAttempts: DefaultMaxAttempts,
+		cooldown:    DefaultCooldown,
 		now:         time.Now,
 	}
 	for _, opt := range opts {
@@ -81,15 +88,29 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	if s.maxAttempts <= 0 {
 		s.maxAttempts = DefaultMaxAttempts
 	}
+	if s.cooldown < 0 {
+		s.cooldown = 0
+	}
 	return s
 }
 
 func (s *service) Issue(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*Challenge, error) {
+	now := s.now()
+	if s.cooldown > 0 {
+		existing, err := s.store.GetOTP(ctx, tenantID, subjectID, purpose)
+		if err == nil && existing != nil && !existing.CreatedAt.IsZero() {
+			if now.Sub(existing.CreatedAt) < s.cooldown || existing.CreatedAt.After(now) {
+				return nil, ErrCooldownActive
+			}
+		} else if err != nil && !errors.Is(err, ErrCodeNotFound) {
+			return nil, err
+		}
+	}
+
 	code, err := generateCode(s.digits)
 	if err != nil {
 		return nil, err
 	}
-	now := s.now()
 	expiresAt := now.Add(s.ttl)
 
 	record := &OTP{

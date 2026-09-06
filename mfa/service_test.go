@@ -370,3 +370,26 @@ func TestConfirmTOTP_AtomicOnRecoveryFailure(t *testing.T) {
 	// Recovery codes work
 	require.NoError(t, svc.VerifyRecoveryCode(ctx, "", uid, codes[0]))
 }
+
+func TestService_TenantIsolation(t *testing.T) {
+	ctx := context.Background()
+	c := &clock{t: time.Unix(1_700_000_000, 0)}
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(c.now))
+	uid := uuid.Must(uuid.NewV7())
+
+	enrollment, err := svc.EnrollTOTP(ctx, "tenant-a", uid, "alice@example.com")
+	require.NoError(t, err)
+
+	_, err = svc.ConfirmTOTP(ctx, "tenant-a", uid, c.code(t, enrollment.Secret))
+	require.NoError(t, err)
+
+	// In tenant-b, user is not enrolled
+	enrolled, err := svc.IsEnrolled(ctx, "tenant-b", uid)
+	require.NoError(t, err)
+	assert.False(t, enrolled, "tenant-b must not see enrollment from tenant-a")
+
+	// Verifying in tenant-b fails with ErrNotEnrolled
+	c.t = c.t.Add(mfa.DefaultPeriod)
+	err = svc.VerifyTOTP(ctx, "tenant-b", uid, c.code(t, enrollment.Secret))
+	assert.ErrorIs(t, err, mfa.ErrNotEnrolled)
+}

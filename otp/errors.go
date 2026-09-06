@@ -18,4 +18,8 @@ var (
 	// ErrTenantMismatch is returned by a SaveOTP operation when the record already carries a
 	// non-empty TenantID that differs from the tenantID argument passed to the call.
 	ErrTenantMismatch = errors.New("otp: tenant ID mismatch")
+
+	// ErrCooldownActive is returned by Issue when an OTP challenge was recently issued for the
+	// subject+purpose and the cooldown window has not elapsed yet.
+	ErrCooldownActive = errors.New("otp: cooldown active; please wait before requesting another code")
 )
