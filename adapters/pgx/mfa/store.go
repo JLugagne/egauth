@@ -213,6 +213,9 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userI
 		if _, err := q.Exec(ctx, `DELETE FROM mfa_recovery_codes WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
 			return err
 		}
+		if _, err := q.Exec(ctx, `DELETE FROM mfa_recovery_attempts WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID); err != nil {
+			return err
+		}
 		for _, h := range codeHashes {
 			if _, err := q.Exec(ctx, insert, tenantID, userID, h, now); err != nil {
 				return err
@@ -245,11 +248,15 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID
 		UPDATE mfa_recovery_codes SET used_at = now()
 		WHERE tenant_id = $1 AND user_id = $2 AND code_hash = $3 AND used_at IS NULL
 	`
-	// Resetting the TOTP lock-out budget on a successful consume must commit together with the
-	// consume itself; the recovery code (already marked used) is a successful second-factor
-	// verification. Run both in one transaction so the budget cannot leak a half-applied state.
+	// Resetting the TOTP and recovery-code lock-out budget on a successful consume must commit
+	// together with the consume itself; the recovery code (already marked used) is a successful
+	// second-factor verification. Run all in one transaction so the budget cannot leak a half-applied state.
 	const resetBudget = `
 		UPDATE mfa_totp SET failed_attempts = 0, last_attempt_at = NULL
+		WHERE tenant_id = $1 AND user_id = $2
+	`
+	const resetRecovery = `
+		UPDATE mfa_recovery_attempts SET failed_attempts = 0, last_attempt_at = NULL
 		WHERE tenant_id = $1 AND user_id = $2
 	`
 	consumeAndReset := func(q DBQuerier) error {
@@ -261,8 +268,9 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID
 			return mfa.ErrRecoveryCodeNotFound
 		}
 		// Best-effort reset; no-op when the user has recovery codes but no TOTP enrollment.
-		_, err = q.Exec(ctx, resetBudget, tenantID, userID)
-		return err
+		_, _ = q.Exec(ctx, resetBudget, tenantID, userID)
+		_, _ = q.Exec(ctx, resetRecovery, tenantID, userID)
+		return nil
 	}
 
 	beginner, ok := s.db.(interface {
@@ -283,7 +291,81 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID
 }
 
 func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	_, _ = s.db.Exec(ctx, `DELETE FROM mfa_recovery_attempts WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID)
 	_, err := s.db.Exec(ctx, `DELETE FROM mfa_recovery_codes WHERE tenant_id = $1 AND user_id = $2`, tenantID, userID)
+	return err
+}
+
+func (s *Store) IncrementRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
+	increment := func(q DBQuerier) (int, error) {
+		var currentAttempts int
+		var lastAttemptAt *time.Time
+		err := q.QueryRow(ctx, `SELECT failed_attempts, last_attempt_at FROM mfa_recovery_attempts WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`, tenantID, userID).Scan(&currentAttempts, &lastAttemptAt)
+		if err != nil {
+			if !errors.Is(err, pgx.ErrNoRows) {
+				return 0, err
+			}
+			currentAttempts = 0
+			lastAttemptAt = nil
+		}
+
+		newAttempts := currentAttempts + 1
+		newLastAttempt := now.UTC()
+
+		if maxAttempts > 0 && currentAttempts >= maxAttempts {
+			decayed := false
+			if lockoutDuration > 0 && lastAttemptAt != nil && now.Sub(*lastAttemptAt) > lockoutDuration {
+				decayed = true
+			}
+			if !decayed {
+				// Locked and not decayed: DoS fix: do not increment or bump timestamp,
+				// but return an over-limit count so the service knows it's locked.
+				return currentAttempts + 1, nil
+			}
+			newAttempts = 1
+		}
+
+		const upsert = `
+			INSERT INTO mfa_recovery_attempts (tenant_id, user_id, failed_attempts, last_attempt_at)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (tenant_id, user_id) DO UPDATE
+			SET failed_attempts = EXCLUDED.failed_attempts,
+			    last_attempt_at = EXCLUDED.last_attempt_at
+		`
+		_, err = q.Exec(ctx, upsert, tenantID, userID, newAttempts, newLastAttempt)
+		if err != nil {
+			return 0, err
+		}
+		return newAttempts, nil
+	}
+
+	beginner, ok := s.db.(interface {
+		Begin(context.Context) (pgx.Tx, error)
+	})
+	if !ok {
+		return increment(s.db)
+	}
+	tx, err := beginner.Begin(ctx)
+	if err != nil {
+		return 0, err
+	}
+	attempts, err := increment(tx)
+	if err != nil {
+		_ = tx.Rollback(ctx)
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, err
+	}
+	return attempts, nil
+}
+
+func (s *Store) ResetRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	const query = `
+		UPDATE mfa_recovery_attempts SET failed_attempts = 0, last_attempt_at = NULL
+		WHERE tenant_id = $1 AND user_id = $2
+	`
+	_, err := s.db.Exec(ctx, query, tenantID, userID)
 	return err
 }
 

@@ -191,9 +191,59 @@ func TestVerifyRecoveryCodeAttemptLimit(t *testing.T) {
 
 	// Locked: even a VALID recovery code is now rejected.
 	assert.ErrorIs(t, svc.VerifyRecoveryCode(ctx, "", uid, recovery[0]), mfa.ErrTooManyAttempts)
-	// And the TOTP path is locked too (shared budget).
+	// But the TOTP path is NOT locked (isolated budget).
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
+	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrInvalidCode)
+}
+
+// TestVerifyRecoveryCode_IsolatedFromTOTPLockout verifies that exhausting TOTP failed attempts
+// does not lock out recovery code verification (SEC-MFA-05).
+func TestVerifyRecoveryCode_IsolatedFromTOTPLockout(t *testing.T) {
+	ctx := context.Background()
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	const maxAttempts = 3
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
+	uid := uuid.Must(uuid.NewV7())
+	secret, recovery := enrollAndConfirm(t, ctx, svc, clk, uid)
+
+	// Exhaust TOTP attempts
+	for i := 0; i < maxAttempts; i++ {
+		_ = svc.VerifyTOTP(ctx, "", uid, "000000")
+	}
+	// TOTP is locked
 	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts)
+
+	// Valid recovery code must succeed despite TOTP lockout
+	require.NoError(t, svc.VerifyRecoveryCode(ctx, "", uid, recovery[0]),
+		"valid recovery code must succeed even when TOTP attempts are exhausted")
+
+	// Successful recovery code verification resets the TOTP counter
+	clk.t = clk.t.Add(mfa.DefaultPeriod)
+	require.NoError(t, svc.VerifyTOTP(ctx, "", uid, clk.code(t, secret)),
+		"successful recovery code verification must reset TOTP attempt budget")
+}
+
+// TestVerifyTOTP_IsolatedFromRecoveryCodeLockout verifies that exhausting recovery code attempts
+// does not lock out TOTP verification.
+func TestVerifyTOTP_IsolatedFromRecoveryCodeLockout(t *testing.T) {
+	ctx := context.Background()
+	clk := &clock{t: time.Unix(1_700_000_000, 0)}
+	const maxAttempts = 3
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithMaxAttempts(maxAttempts))
+	uid := uuid.Must(uuid.NewV7())
+	secret, _ := enrollAndConfirm(t, ctx, svc, clk, uid)
+
+	// Exhaust recovery code attempts
+	for i := 0; i < maxAttempts; i++ {
+		_ = svc.VerifyRecoveryCode(ctx, "", uid, "WRONG-CODE-0000")
+	}
+	// Recovery codes are locked
+	assert.ErrorIs(t, svc.VerifyRecoveryCode(ctx, "", uid, "WRONG-CODE-0000"), mfa.ErrTooManyAttempts)
+
+	// TOTP must still succeed with valid code
+	clk.t = clk.t.Add(mfa.DefaultPeriod)
+	require.NoError(t, svc.VerifyTOTP(ctx, "", uid, clk.code(t, secret)),
+		"valid TOTP code must succeed even when recovery codes are locked out")
 }
 
 func TestVerifyRecoveryCode_SuccessResetsAttemptCounter(t *testing.T) {

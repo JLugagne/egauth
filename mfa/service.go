@@ -299,38 +299,24 @@ func (s *service) VerifyTOTP(ctx context.Context, tenantID string, userID uuid.U
 }
 
 func (s *service) VerifyRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, code string) error {
-	// Recovery codes are an alternate proof of the SAME second factor, so they share the TOTP
-	// attempt budget when an enrollment exists. Reserve a slot before the lookup/compare so a
-	// locked factor cannot be brute-forced through the recovery path either.
-	_, err := s.store.GetTOTP(ctx, tenantID, userID)
-	gated := err == nil // a TOTP enrollment exists → gate the recovery attempt against its budget
-	var reserved int
-	switch {
-	case gated:
-		// Reserve a slot before the lookup/compare so a locked factor cannot be brute-forced
-		// through the recovery path either.
-		n, rerr := s.reserveAttempt(ctx, tenantID, userID)
-		if rerr != nil {
-			return rerr
-		}
-		reserved = n
-		if s.overLimit(n) {
-			s.emitBlocked(ctx, tenantID, userID, "recovery")
-			return ErrTooManyAttempts
-		}
-	case errors.Is(err, ErrNotEnrolled):
-		// No TOTP factor to gate against (recovery codes can exist on their own); fall through
-		// to the single-use consume, which is itself the only guard.
-	default:
+	// Recovery codes have their own independent attempt budget, isolated from TOTP attempts (SEC-MFA-05).
+	// Reserve a recovery attempt slot before lookup/consumption so brute-force guesses cannot exceed the limit.
+	reserved, err := s.reserveRecoveryAttempt(ctx, tenantID, userID)
+	if err != nil {
 		return err
 	}
+	if s.overLimit(reserved) {
+		s.emitBlocked(ctx, tenantID, userID, "recovery")
+		return ErrTooManyAttempts
+	}
 
-	// A successful consume resets the TOTP failed-attempt counter (see Store).
+	// Consume the recovery code. On success, the store resets both the recovery attempt counter
+	// and the TOTP failed-attempt counter (if enrolled).
 	if err := s.store.ConsumeRecoveryCode(ctx, tenantID, userID, HashRecoveryCode(code)); err != nil {
 		if errors.Is(err, ErrRecoveryCodeNotFound) {
 			// When this wrong code was the last allowed attempt the factor is now locked; report
 			// the lock-out so callers stop accepting further guesses.
-			if gated && s.atLimit(reserved) {
+			if s.atLimit(reserved) {
 				s.emitBlocked(ctx, tenantID, userID, "recovery")
 				return ErrTooManyAttempts
 			}
@@ -338,6 +324,8 @@ func (s *service) VerifyRecoveryCode(ctx context.Context, tenantID string, userI
 		}
 		return err
 	}
+
+	_ = s.resetRecoveryAttempts(ctx, tenantID, userID)
 	return nil
 }
 
@@ -358,6 +346,25 @@ func (s *service) reserveAttempt(ctx context.Context, tenantID string, userID uu
 		return 0, nil
 	}
 	return s.store.IncrementTOTPAttempts(ctx, tenantID, userID, s.now(), s.maxAttempts, s.lockoutDuration)
+}
+
+// reserveRecoveryAttempt atomically claims one slot of the recovery-code attempt budget.
+// It is completely isolated from TOTP attempts (SEC-MFA-05).
+func (s *service) reserveRecoveryAttempt(ctx context.Context, tenantID string, userID uuid.UUID) (int, error) {
+	if s.maxAttempts <= 0 {
+		return 0, nil
+	}
+	if ras, ok := s.store.(RecoveryAttemptStore); ok {
+		return ras.IncrementRecoveryAttempts(ctx, tenantID, userID, s.now(), s.maxAttempts, s.lockoutDuration)
+	}
+	return 0, nil
+}
+
+func (s *service) resetRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	if ras, ok := s.store.(RecoveryAttemptStore); ok {
+		return ras.ResetRecoveryAttempts(ctx, tenantID, userID)
+	}
+	return nil
 }
 
 // emitBlocked reports that a second factor was locked after exhausting its attempt budget.
@@ -405,6 +412,7 @@ func (s *service) IsEnrolled(ctx context.Context, tenantID string, userID uuid.U
 }
 
 func (s *service) UnlockMFA(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	_ = s.resetRecoveryAttempts(ctx, tenantID, userID)
 	return s.store.ResetTOTPAttempts(ctx, tenantID, userID)
 }
 

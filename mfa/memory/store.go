@@ -10,18 +10,25 @@ import (
 	"github.com/google/uuid"
 )
 
+type recoveryAttempt struct {
+	failedAttempts int
+	lastAttemptAt  time.Time
+}
+
 // Store is an in-memory implementation of mfa.Store.
 type Store struct {
-	mu       sync.RWMutex
-	totp     map[string]*mfa.TOTPEnrollment
-	recovery map[string][]*mfa.RecoveryCode
+	mu               sync.RWMutex
+	totp             map[string]*mfa.TOTPEnrollment
+	recovery         map[string][]*mfa.RecoveryCode
+	recoveryAttempts map[string]*recoveryAttempt
 }
 
 // NewStore creates a new in-memory Store.
 func NewStore() *Store {
 	return &Store{
-		totp:     make(map[string]*mfa.TOTPEnrollment),
-		recovery: make(map[string][]*mfa.RecoveryCode),
+		totp:             make(map[string]*mfa.TOTPEnrollment),
+		recovery:         make(map[string][]*mfa.RecoveryCode),
+		recoveryAttempts: make(map[string]*recoveryAttempt),
 	}
 }
 
@@ -125,6 +132,7 @@ func (s *Store) ReplaceRecoveryCodes(ctx context.Context, tenantID string, userI
 		})
 	}
 	s.recovery[key(tenantID, userID)] = codes
+	delete(s.recoveryAttempts, key(tenantID, userID))
 	return nil
 }
 
@@ -143,6 +151,7 @@ func (s *Store) ConsumeRecoveryCode(ctx context.Context, tenantID string, userID
 				e.FailedAttempts = 0
 				e.LastAttemptAt = time.Time{}
 			}
+			delete(s.recoveryAttempts, key(tenantID, userID))
 			return nil
 		}
 	}
@@ -154,6 +163,44 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID
 	defer s.mu.Unlock()
 
 	delete(s.recovery, key(tenantID, userID))
+	delete(s.recoveryAttempts, key(tenantID, userID))
+	return nil
+}
+
+func (s *Store) IncrementRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	k := key(tenantID, userID)
+	att, ok := s.recoveryAttempts[k]
+	if !ok {
+		att = &recoveryAttempt{}
+		s.recoveryAttempts[k] = att
+	}
+
+	if maxAttempts > 0 && att.failedAttempts >= maxAttempts {
+		decayed := false
+		if lockoutDuration > 0 && !att.lastAttemptAt.IsZero() && now.Sub(att.lastAttemptAt) > lockoutDuration {
+			decayed = true
+		}
+		if !decayed {
+			return att.failedAttempts + 1, nil
+		}
+		att.failedAttempts = 1
+		att.lastAttemptAt = now
+		return att.failedAttempts, nil
+	}
+
+	att.failedAttempts++
+	att.lastAttemptAt = now
+	return att.failedAttempts, nil
+}
+
+func (s *Store) ResetRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.recoveryAttempts, key(tenantID, userID))
 	return nil
 }
 

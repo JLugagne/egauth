@@ -68,11 +68,10 @@ func TestSEC_MFA_05_SharedLockout_TOTP_Exhaustion_Blocks_RecoveryCodes(t *testin
 	}
 
 	// 3. Legitimate user (who may have lost their phone) tries to log in using their valid recovery code.
-	// In the flawed implementation, VerifyRecoveryCode increments and checks the shared TOTP budget.
-	// Even though the recovery code is genuine and has 80 bits of entropy, it is immediately rejected!
+	// In the remediated implementation, recovery code verification has its own isolated attempt budget.
+	// Even though TOTP attempts are exhausted, verifying a valid recovery code succeeds.
 	err = svc.VerifyRecoveryCode(ctx, tenant, uid, validRecoveryCode)
-	assert.ErrorIs(t, err, mfa.ErrTooManyAttempts,
-		"SEC-MFA-05 Flawed Behavior Confirmed: Valid recovery code is locked out by shared TOTP attempt budget")
+	require.NoError(t, err, "valid recovery code must succeed even after TOTP attempts are exhausted")
 }
 
 // failingRecoveryStore proxies mfa.Store but injects a failure during ReplaceRecoveryCodes.

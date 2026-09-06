@@ -7,13 +7,11 @@ import (
 	"github.com/google/uuid"
 )
 
-// Store persists TOTP enrollments and recovery codes.
+// Store persists TOTP enrollments and recovery codes, and tracks their independent attempt limits.
 //
-// It is the composition of two capability interfaces — TOTPStore (the authenticator-app factor)
-// and RecoveryCodeStore (the single-use backup codes). Segmenting the contract this way means a
-// future v1.x capability can ship as a NEW optional interface rather than a method on this one,
-// which would break every external Store. Both the in-memory and pgx stores implement the whole
-// Store.
+// It is the composition of three capability interfaces — TOTPStore (the authenticator-app factor),
+// RecoveryCodeStore (the single-use backup codes), and RecoveryAttemptStore (isolated lockout tracking).
+// Both the in-memory and pgx stores implement the whole Store.
 //
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
 // string is a legal tenant key (the single-tenant default partition); it must still be
@@ -21,6 +19,7 @@ import (
 type Store interface {
 	TOTPStore
 	RecoveryCodeStore
+	RecoveryAttemptStore
 }
 
 // TOTPStore is the TOTP-enrollment capability of an mfa backend: persisting, reading,
@@ -68,4 +67,19 @@ type RecoveryCodeStore interface {
 	ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error
 	// DeleteRecoveryCodes removes all of the user's recovery codes. Idempotent.
 	DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
+
+// RecoveryAttemptStore is the recovery-code attempt-tracking capability of an mfa backend:
+// atomically counting and rate-limiting failed recovery code submissions independently of TOTP.
+type RecoveryAttemptStore interface {
+	// IncrementRecoveryAttempts atomically increments the failed-attempt count for recovery
+	// codes, sets the last attempt timestamp to now, and returns the new count. It is the
+	// lock-out gate for recovery codes: the service reserves a slot before lookup/consumption,
+	// isolated from TOTP attempts (SEC-MFA-05).
+	// If the recovery path is already locked (>= maxAttempts) and hasn't decayed (lockoutDuration),
+	// it MUST return the current count without updating the timestamp.
+	IncrementRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error)
+	// ResetRecoveryAttempts sets the recovery-code failed-attempt counter and timestamp back
+	// to their zero values.
+	ResetRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error
 }

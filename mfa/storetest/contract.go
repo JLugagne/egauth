@@ -228,6 +228,37 @@ func StoreContractTesting(t *testing.T, store mfa.Store, useMultiTenant bool) {
 		require.NoError(t, store.DeleteRecoveryCodes(ctx, tenantA, uid))
 	})
 
+	t.Run("recovery attempt counter increments, persists and resets", func(t *testing.T) {
+		uid := uuid.Must(uuid.NewV7())
+		now := time.Now()
+
+		n, err := store.IncrementRecoveryAttempts(ctx, tenantA, uid, now, 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+
+		n, err = store.IncrementRecoveryAttempts(ctx, tenantA, uid, now.Add(time.Second), 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 2, n)
+
+		require.NoError(t, store.ResetRecoveryAttempts(ctx, tenantA, uid))
+
+		n, err = store.IncrementRecoveryAttempts(ctx, tenantA, uid, now.Add(2*time.Second), 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+
+		// Consuming a recovery code also resets recovery attempts
+		require.NoError(t, store.ReplaceRecoveryCodes(ctx, tenantA, uid, []string{"rc-attempt"}))
+		_, err = store.IncrementRecoveryAttempts(ctx, tenantA, uid, now.Add(3*time.Second), 0, 0)
+		require.NoError(t, err)
+		require.NoError(t, store.ConsumeRecoveryCode(ctx, tenantA, uid, "rc-attempt"))
+
+		n, err = store.IncrementRecoveryAttempts(ctx, tenantA, uid, now.Add(4*time.Second), 0, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, n)
+
+		require.NoError(t, store.DeleteRecoveryCodes(ctx, tenantA, uid))
+	})
+
 	t.Run("SaveTOTP ErrTenantMismatch", func(t *testing.T) {
 		uid := uuid.Must(uuid.NewV7())
 		e := &mfa.TOTPEnrollment{UserID: uid, TenantID: "other-tenant", Secret: "S", CreatedAt: time.Now()}
