@@ -1,6 +1,7 @@
 package pgx
 
 import (
+	"container/list"
 	"context"
 	"embed"
 	"encoding/base64"
@@ -49,6 +50,9 @@ type OIDCProviderConfig struct {
 	Scopes       []string
 }
 
+// DefaultMaxCachedProviders is the default upper bound on cached oauth.Provider instances (SEC-OAU-10).
+const DefaultMaxCachedProviders = 1000
+
 // Store is a PostgreSQL-backed implementation of oauth.ProviderStore.
 // It retrieves OIDC provider configurations dynamically per-tenant.
 type Store struct {
@@ -56,7 +60,7 @@ type Store struct {
 	// issuerAllowlist, when non-empty, restricts which OIDC issuers a tenant may register or use.
 	// Empty (the default) means allow all, preserving existing single-operator setups.
 	issuerAllowlist map[string]struct{}
-	// mu guards the providerCache below.
+	// mu guards providerCache and lruList below.
 	mu sync.RWMutex
 	// providerCache memoizes built oauth.Provider instances keyed by (tenantID, providerName)
 	// so the verifier's 1h JWKS cache and warm OIDC discovery survive across requests. We map to
@@ -64,6 +68,10 @@ type Store struct {
 	// cache invalidation: every GetProvider hits the DB (which is cheap) but reuses the built
 	// *oauth.Provider if updated_at hasn't changed.
 	providerCache map[string]*cachedProvider
+	// lruList tracks cache entries in least-recently used order (SEC-OAU-10).
+	lruList *list.List
+	// maxCachedProviders bounds providerCache capacity under churning tenants (SEC-OAU-10).
+	maxCachedProviders int
 	// kek encrypts the OIDC client_secret at rest.
 	kek KEK
 }
@@ -89,6 +97,16 @@ func WithIssuerAllowlist(issuers []string) StoreOption {
 	}
 }
 
+// WithMaxCachedProviders sets the maximum number of cached oauth.Provider instances (SEC-OAU-10).
+// When capacity is reached, the least-recently used entry is evicted. If max <= 0, DefaultMaxCachedProviders is used.
+func WithMaxCachedProviders(max int) StoreOption {
+	return func(s *Store) {
+		if max > 0 {
+			s.maxCachedProviders = max
+		}
+	}
+}
+
 // ErrIssuerNotAllowed is returned when an OIDC issuer is not on a configured issuer allowlist.
 var ErrIssuerNotAllowed = errors.New("oauth/pgx: issuer not on allowlist")
 
@@ -106,8 +124,10 @@ type KEK interface {
 }
 
 type cachedProvider struct {
+	key       string
 	provider  *oauth.Provider
 	updatedAt time.Time
+	elem      *list.Element
 }
 
 // NewStore creates a new PostgreSQL store for OAuth providers. db may be a *pgxpool.Pool or a
@@ -117,11 +137,63 @@ func NewStore(db DBQuerier, kek KEK, opts ...StoreOption) *Store {
 	if kek == nil {
 		panic("oauth/pgx: kek is required")
 	}
-	s := &Store{db: db, kek: kek, providerCache: make(map[string]*cachedProvider)}
+	s := &Store{
+		db:                 db,
+		kek:                kek,
+		providerCache:      make(map[string]*cachedProvider),
+		lruList:            list.New(),
+		maxCachedProviders: DefaultMaxCachedProviders,
+	}
 	for _, o := range opts {
 		o(s)
 	}
 	return s
+}
+
+func oauthAAD(tenantID, providerName string) []byte {
+	return []byte(tenantID + ":" + providerName)
+}
+
+func (s *Store) sealSecret(ctx context.Context, secret string, aad []byte) ([]byte, error) {
+	if withAAD, ok := s.kek.(interface {
+		SealWithAAD(ctx context.Context, plaintext []byte, aad []byte) ([]byte, error)
+	}); ok {
+		return withAAD.SealWithAAD(ctx, []byte(secret), aad)
+	}
+	if withAAD, ok := s.kek.(interface {
+		SealWithAAD(plaintext []byte, aad []byte) ([]byte, error)
+	}); ok {
+		return withAAD.SealWithAAD([]byte(secret), aad)
+	}
+	return s.kek.Seal(ctx, []byte(secret))
+}
+
+func (s *Store) openSecret(ctx context.Context, sealed []byte, aad []byte) ([]byte, error) {
+	if withAAD, ok := s.kek.(interface {
+		OpenWithAAD(ctx context.Context, ciphertext []byte, aad []byte) ([]byte, error)
+	}); ok {
+		pt, err := withAAD.OpenWithAAD(ctx, sealed, aad)
+		if err == nil {
+			return pt, nil
+		}
+		if fallbackPt, fallbackErr := s.kek.Open(ctx, sealed); fallbackErr == nil {
+			return fallbackPt, nil
+		}
+		return nil, err
+	}
+	if withAAD, ok := s.kek.(interface {
+		OpenWithAAD(ciphertext []byte, aad []byte) ([]byte, error)
+	}); ok {
+		pt, err := withAAD.OpenWithAAD(sealed, aad)
+		if err == nil {
+			return pt, nil
+		}
+		if fallbackPt, fallbackErr := s.kek.Open(ctx, sealed); fallbackErr == nil {
+			return fallbackPt, nil
+		}
+		return nil, err
+	}
+	return s.kek.Open(ctx, sealed)
 }
 
 // checkIssuerAllowed enforces the optional issuer allowlist. It is a no-op when no allowlist is
@@ -164,12 +236,14 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 	// client_secret decrypt so a cache hit never performs a KEK round-trip — a transient KEK
 	// failure cannot take down a login the warm cache should have served, and cached logins
 	// avoid the decrypt entirely.
-	s.mu.RLock()
+	s.mu.Lock()
 	if cp, ok := s.providerCache[key]; ok && cp.updatedAt.Equal(updatedAt) {
-		s.mu.RUnlock()
-		return cp.provider, nil
+		s.lruList.MoveToFront(cp.elem)
+		p := cp.provider
+		s.mu.Unlock()
+		return p, nil
 	}
-	s.mu.RUnlock()
+	s.mu.Unlock()
 
 	var clientSecret string
 	if clientSecretEnc != "" {
@@ -177,7 +251,7 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 		if decErr != nil {
 			return nil, fmt.Errorf("oauth/pgx: failed to base64 decode client_secret: %w", decErr)
 		}
-		dec, decErr := s.kek.Open(ctx, sealed)
+		dec, decErr := s.openSecret(ctx, sealed, oauthAAD(tenantID, providerName))
 		if decErr != nil {
 			return nil, fmt.Errorf("oauth/pgx: failed to decrypt client_secret: %w", decErr)
 		}
@@ -222,12 +296,28 @@ func (s *Store) GetProvider(ctx context.Context, tenantID, providerName string) 
 	// instance (and therefore a single JWKS cache) from then on.
 	s.mu.Lock()
 	if existing, ok := s.providerCache[key]; ok && existing.updatedAt.Equal(updatedAt) {
+		s.lruList.MoveToFront(existing.elem)
 		s.mu.Unlock()
 		return existing.provider, nil
 	}
+	if existing, ok := s.providerCache[key]; ok {
+		s.lruList.Remove(existing.elem)
+		delete(s.providerCache, key)
+	}
+	for len(s.providerCache) >= s.maxCachedProviders {
+		oldest := s.lruList.Back()
+		if oldest == nil {
+			break
+		}
+		oldestCP := oldest.Value.(*cachedProvider)
+		s.lruList.Remove(oldest)
+		delete(s.providerCache, oldestCP.key)
+	}
 	p := oauth.New(providerName, clientID, clientSecret, authURL, tokenURL, scopes, fetch,
 		oauth.WithHTTPClient(safeClient), oauth.WithOIDC(cfg))
-	s.providerCache[key] = &cachedProvider{provider: p, updatedAt: updatedAt}
+	cp := &cachedProvider{key: key, provider: p, updatedAt: updatedAt}
+	cp.elem = s.lruList.PushFront(cp)
+	s.providerCache[key] = cp
 	s.mu.Unlock()
 	return p, nil
 }
@@ -260,7 +350,7 @@ func (s *Store) UpsertProvider(ctx context.Context, tenantID, providerName strin
 
 	var sealedSecret string
 	if config.ClientSecret != "" {
-		enc, err := s.kek.Seal(ctx, []byte(config.ClientSecret))
+		enc, err := s.sealSecret(ctx, config.ClientSecret, oauthAAD(tenantID, providerName))
 		if err != nil {
 			return fmt.Errorf("oauth/pgx: failed to encrypt client_secret: %w", err)
 		}
@@ -346,7 +436,11 @@ func providerCacheKey(tenantID, providerName string) string {
 // invalidateProvider drops any cached oauth.Provider for the given (tenant, provider) so the
 // next GetProvider rebuilds it from the current database row.
 func (s *Store) invalidateProvider(tenantID, providerName string) {
+	key := providerCacheKey(tenantID, providerName)
 	s.mu.Lock()
-	delete(s.providerCache, providerCacheKey(tenantID, providerName))
+	if cp, ok := s.providerCache[key]; ok {
+		s.lruList.Remove(cp.elem)
+		delete(s.providerCache, key)
+	}
 	s.mu.Unlock()
 }

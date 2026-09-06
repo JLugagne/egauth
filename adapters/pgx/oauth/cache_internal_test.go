@@ -133,3 +133,66 @@ func TestGetProviderCacheInvalidation(t *testing.T) {
 		t.Errorf("expected a DB re-read after DeleteProvider, got %d (was %d)", q.queryRowCalls, before)
 	}
 }
+
+// TestGetProviderCache_BoundedCapacity verifies that providerCache is bounded to maxCachedProviders
+// and evicts the least recently used entry when capacity is reached (SEC-OAU-10).
+func TestGetProviderCache_BoundedCapacity(t *testing.T) {
+	q := &countingQuerier{}
+	store := NewStore(q, dummyKEK{}, WithMaxCachedProviders(3))
+	ctx := context.Background()
+
+	p1, err := store.GetProvider(ctx, "tenant-1", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-1: %v", err)
+	}
+	p2, err := store.GetProvider(ctx, "tenant-2", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-2: %v", err)
+	}
+	_, err = store.GetProvider(ctx, "tenant-3", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-3: %v", err)
+	}
+
+	// Access tenant-1 so it is recently used.
+	// Order from oldest to newest: tenant-2, tenant-3, tenant-1.
+	p1Again, err := store.GetProvider(ctx, "tenant-1", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-1: %v", err)
+	}
+	if p1Again != p1 {
+		t.Fatalf("expected tenant-1 to be cached")
+	}
+
+	// Insert tenant-4. Capacity (3) exceeded, so tenant-2 should be evicted.
+	_, err = store.GetProvider(ctx, "tenant-4", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-4: %v", err)
+	}
+
+	store.mu.RLock()
+	cacheLen := len(store.providerCache)
+	store.mu.RUnlock()
+
+	if cacheLen > 3 {
+		t.Errorf("cache capacity exceeded: got %d, expected max 3", cacheLen)
+	}
+
+	// tenant-1 should still be cached (same pointer)
+	p1After, err := store.GetProvider(ctx, "tenant-1", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-1: %v", err)
+	}
+	if p1After != p1 {
+		t.Errorf("tenant-1 was unexpectedly evicted")
+	}
+
+	// tenant-2 was evicted, so it must return a new pointer
+	p2After, err := store.GetProvider(ctx, "tenant-2", "my-sso")
+	if err != nil {
+		t.Fatalf("GetProvider tenant-2: %v", err)
+	}
+	if p2After == p2 {
+		t.Errorf("tenant-2 was expected to be evicted, but was still cached")
+	}
+}

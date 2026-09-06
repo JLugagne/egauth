@@ -32,6 +32,7 @@ type handlerConfig struct {
 	cookies         tokens.Cookies
 	stateCookieName string
 	stateTTL        time.Duration
+	stateSigningKey []byte
 	redirectURL     string
 	allowedHosts    []string
 	usePKCE         bool
@@ -101,6 +102,16 @@ func WithStateCookieName(name string) HandlerOption {
 // WithStateTTL overrides how long the state cookie (and thus the in-flight flow) is valid.
 func WithStateTTL(d time.Duration) HandlerOption {
 	return func(h *handlerConfig) { h.stateTTL = d }
+}
+
+// WithStateSigningKey configures an HMAC secret key used to sign and authenticate the
+// short-lived state cookie (SEC-OAU-03). When set, state cookies are signed with HMAC-SHA256
+// at creation and verified upon callback. Any tampered, forged, or unsigned cookie is
+// rejected with invalid_state.
+func WithStateSigningKey(key []byte) HandlerOption {
+	return func(h *handlerConfig) {
+		h.stateSigningKey = append([]byte(nil), key...)
+	}
 }
 
 // WithoutPKCE disables the PKCE S256 challenge. PKCE is on by default (OAuth 2.1 best
@@ -182,7 +193,7 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r)))
+		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r), cfg.stateSigningKey))
 		http.Redirect(w, r, p.AuthCodeURL(state, redirectURI, challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -218,7 +229,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, nonce, cookieProvider, cookieTenant, ok := unpackState(raw)
+		cookieState, verifier, nonce, cookieProvider, cookieTenant, ok := unpackState(raw, cfg.stateSigningKey)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return

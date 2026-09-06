@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -48,30 +49,40 @@ func newPKCE() (verifier, challenge string, err error) {
 }
 
 // packState encodes the state, PKCE verifier, OIDC nonce, provider name and tenant into a
-// single opaque cookie value. The verifier and nonce may be empty (no PKCE / non-OIDC
-// provider). The provider and tenant bind the in-flight attempt to the specific
-// provider+tenant that started it, so a cookie minted for one cannot be replayed against
-// another (SEC-12).
-func packState(state, verifier, nonce, provider, tenant string) string {
-	// provider and tenant are caller-controlled strings that may contain the
-	// separator (or spaces / unicode), so they are base64url-encoded to keep the
-	// field count fixed at exactly five and the split unambiguous. state,
-	// verifier and nonce are already base64url and never contain the separator.
-	return state + stateSeparator + verifier + stateSeparator + nonce +
+// single opaque cookie value. If a signing key is provided, an HMAC-SHA256 signature is appended
+// as the sixth field to guarantee cookie authenticity and integrity (SEC-OAU-03).
+func packState(state, verifier, nonce, provider, tenant string, key ...[]byte) string {
+	payload := state + stateSeparator + verifier + stateSeparator + nonce +
 		stateSeparator + base64.RawURLEncoding.EncodeToString([]byte(provider)) +
 		stateSeparator + base64.RawURLEncoding.EncodeToString([]byte(tenant))
+	if len(key) > 0 && len(key[0]) > 0 {
+		sig := computeStateHMAC(payload, key[0])
+		return payload + stateSeparator + sig
+	}
+	return payload
 }
 
 // unpackState splits a cookie value back into its state, verifier, nonce, provider and tenant
-// parts. It requires exactly the five fields packState writes; any other shape (including the
-// legacy two/three-field form or a forged value) is rejected with ok=false so the callback
-// fails closed.
-func unpackState(raw string) (state, verifier, nonce, provider, tenant string, ok bool) {
+// parts. If a signing key is provided, the cookie must have a valid HMAC-SHA256 signature;
+// unsigned, tampered, or forged cookies fail closed with ok=false (SEC-OAU-03).
+func unpackState(raw string, key ...[]byte) (state, verifier, nonce, provider, tenant string, ok bool) {
 	parts := strings.Split(raw, stateSeparator)
-	// Require exactly the five fields packState writes. An old (3-field) or forged
-	// cookie that does not match the expected shape fails closed.
-	if len(parts) != 5 || parts[0] == "" {
-		return "", "", "", "", "", false
+	if len(key) > 0 && len(key[0]) > 0 {
+		// When a signing key is configured, exactly 6 fields are required (the 5 state fields + HMAC signature).
+		if len(parts) != 6 || parts[0] == "" {
+			return "", "", "", "", "", false
+		}
+		payload := strings.Join(parts[:5], stateSeparator)
+		expectedSig := computeStateHMAC(payload, key[0])
+		if !stateMatches(parts[5], expectedSig) {
+			return "", "", "", "", "", false
+		}
+	} else {
+		// Legacy / unconfigured: require exactly the five fields packState writes. An old (3-field) or forged
+		// cookie that does not match the expected shape fails closed.
+		if len(parts) != 5 || parts[0] == "" {
+			return "", "", "", "", "", false
+		}
 	}
 	state, verifier, nonce = parts[0], parts[1], parts[2]
 	rawProvider, err := base64.RawURLEncoding.DecodeString(parts[3])
@@ -83,6 +94,12 @@ func unpackState(raw string) (state, verifier, nonce, provider, tenant string, o
 		return "", "", "", "", "", false
 	}
 	return state, verifier, nonce, string(rawProvider), string(rawTenant), true
+}
+
+func computeStateHMAC(payload string, key []byte) string {
+	mac := hmac.New(sha256.New, key)
+	mac.Write([]byte(payload))
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 // stateMatches compares two state values in constant time.

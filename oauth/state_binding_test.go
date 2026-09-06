@@ -109,3 +109,81 @@ func TestCallbackHandler_TenantConfusionRejected(t *testing.T) {
 		WithRedirectURL(testRedirect), WithTenantResolver(tenantX))
 	assert.Equal(t, http.StatusNoContent, recX.Code, "same-tenant callback must still succeed")
 }
+
+// Tests for SEC-OAU-03: State cookie HMAC integrity verification.
+
+func TestPackUnpackState_HMAC(t *testing.T) {
+	key := []byte("01234567890123456789012345678901") // 32 bytes
+	state := "my-state"
+	verifier := "my-verifier"
+	nonce := "my-nonce"
+	provider := "google"
+	tenant := "acme"
+
+	packed := packState(state, verifier, nonce, provider, tenant, key)
+	gotState, gotVerifier, gotNonce, gotProvider, gotTenant, ok := unpackState(packed, key)
+	require.True(t, ok, "valid signed state must unpack successfully")
+	assert.Equal(t, state, gotState)
+	assert.Equal(t, verifier, gotVerifier)
+	assert.Equal(t, nonce, gotNonce)
+	assert.Equal(t, provider, gotProvider)
+	assert.Equal(t, tenant, gotTenant)
+
+	// Tampered payload must fail
+	tamperedPayload := "other-state" + packed[len(state):]
+	_, _, _, _, _, ok = unpackState(tamperedPayload, key)
+	assert.False(t, ok, "tampered state payload must fail unpackState")
+
+	// Tampered signature must fail
+	tamperedSig := packed[:len(packed)-3] + "xyz"
+	_, _, _, _, _, ok = unpackState(tamperedSig, key)
+	assert.False(t, ok, "tampered signature must fail unpackState")
+
+	// Unsigned (legacy 5-part) cookie must fail when key is required
+	unsigned := packState(state, verifier, nonce, provider, tenant)
+	_, _, _, _, _, ok = unpackState(unsigned, key)
+	assert.False(t, ok, "unsigned state cookie must fail when signing key is provided")
+
+	// Wrong key must fail
+	wrongKey := []byte("wrongwrongwrongwrongwrongwrong12")
+	_, _, _, _, _, ok = unpackState(packed, wrongKey)
+	assert.False(t, ok, "state cookie verified with wrong key must fail")
+}
+
+func TestCallbackHandler_StateHMAC_TamperedAndUnauthenticatedRejected(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true}`
+	p, _ := stubProviderServer(t, &body)
+	key := []byte("01234567890123456789012345678901")
+
+	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect), WithStateSigningKey(key))
+
+	// 1. Tampered cookie value rejected with 403 invalid_state
+	tamperedCookie := &http.Cookie{
+		Name:  stateCookie.Name,
+		Value: stateCookie.Value + "tampered",
+	}
+	recTampered := runCallback(t, p, &stubLinker{}, &stubIssuer{}, tamperedCookie,
+		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
+		WithRedirectURL(testRedirect), WithStateSigningKey(key))
+	assert.Equal(t, http.StatusForbidden, recTampered.Code)
+	assert.Contains(t, recTampered.Body.String(), "invalid_state")
+
+	// 2. Unsigned / unauthenticated cookie rejected with 403 invalid_state
+	unsignedCookie := &http.Cookie{
+		Name:  stateCookie.Name,
+		Value: packState(state, "vf", "nc", p.Name(), ""),
+	}
+	recUnsigned := runCallback(t, p, &stubLinker{}, &stubIssuer{}, unsignedCookie,
+		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
+		WithRedirectURL(testRedirect), WithStateSigningKey(key))
+	assert.Equal(t, http.StatusForbidden, recUnsigned.Code)
+	assert.Contains(t, recUnsigned.Body.String(), "invalid_state")
+
+	// 3. Legitimate signed cookie succeeds
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{AccessToken: "a", RefreshToken: "r", RefreshTokenExpiresAt: time.Now().Add(time.Hour)}}
+	recValid := runCallback(t, p, linker, issuer, stateCookie,
+		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
+		WithRedirectURL(testRedirect), WithStateSigningKey(key))
+	assert.Equal(t, http.StatusNoContent, recValid.Code)
+}
