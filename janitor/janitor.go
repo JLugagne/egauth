@@ -61,16 +61,56 @@ package janitor
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 )
 
+// ErrInvalidInterval is returned by [New] when interval <= 0.
+var ErrInvalidInterval = errors.New("janitor: interval must be positive")
+
+// DefaultInterval is the fallback duration used by [Start] when interval <= 0.
+const DefaultInterval = time.Minute
+
+// Option configures a [Janitor].
+type Option func(*options)
+
+type options struct {
+	panicHandler func(recovered any)
+	errorHandler func(err error)
+}
+
+// WithPanicHandler registers a callback to be invoked if the cleanup task panics.
+func WithPanicHandler(h func(recovered any)) Option {
+	return func(o *options) {
+		o.panicHandler = h
+	}
+}
+
+// WithOnError registers an error callback to be invoked if the cleanup task panics or fails.
+func WithOnError(h func(err error)) Option {
+	return func(o *options) {
+		o.errorHandler = h
+	}
+}
+
 // Janitor manages a single background goroutine that periodically calls a cleanup
-// function. Create one via [Start].
+// function. Create one via [Start] or [New].
 type Janitor struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	once   sync.Once
+}
+
+// New creates and starts a background goroutine that calls fn every interval.
+// It returns [ErrInvalidInterval] if interval <= 0.
+func New(ctx context.Context, interval time.Duration, fn func(), opts ...Option) (*Janitor, error) {
+	if interval <= 0 {
+		return nil, ErrInvalidInterval
+	}
+	return start(ctx, interval, fn, opts...), nil
 }
 
 // Start launches a background goroutine that calls fn every interval. The goroutine
@@ -78,10 +118,18 @@ type Janitor struct {
 // fn is called in the goroutine, not on the caller's goroutine; fn must be safe to call
 // concurrently with other operations on the store it wraps.
 //
-// interval is floored at 1ns to avoid a busy spin on a zero or negative value.
-func Start(ctx context.Context, interval time.Duration, fn func()) *Janitor {
+// If interval <= 0, interval defaults to [DefaultInterval] (1 minute) to prevent busy loops.
+func Start(ctx context.Context, interval time.Duration, fn func(), opts ...Option) *Janitor {
 	if interval <= 0 {
-		interval = time.Nanosecond
+		interval = DefaultInterval
+	}
+	return start(ctx, interval, fn, opts...)
+}
+
+func start(ctx context.Context, interval time.Duration, fn func(), opts ...Option) *Janitor {
+	var o options
+	for _, opt := range opts {
+		opt(&o)
 	}
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -101,7 +149,21 @@ func Start(ctx context.Context, interval time.Duration, fn func()) *Janitor {
 			case <-t.C:
 				func() {
 					defer func() {
-						_ = recover()
+						if r := recover(); r != nil {
+							if o.panicHandler != nil {
+								o.panicHandler(r)
+							}
+							if o.errorHandler != nil {
+								if err, ok := r.(error); ok {
+									o.errorHandler(err)
+								} else {
+									o.errorHandler(fmt.Errorf("janitor: panic: %v", r))
+								}
+							}
+							if o.panicHandler == nil && o.errorHandler == nil {
+								slog.Error("janitor: task panicked", "panic", r)
+							}
+						}
 					}()
 					fn()
 				}()

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -226,10 +227,19 @@ func (s *service) RevokeSession(ctx context.Context, tenantID string, token stri
 
 	session, err := s.store.FindSessionByHash(ctx, tenantID, hash)
 	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) {
+			reqCtx := event.RequestContextFrom(rc...)
+			s.emit(ctx, event.Event{
+				Type:     event.Logout,
+				TenantID: tenantID,
+				Attrs:    reqCtx.ApplyTo(nil),
+			})
+			return nil
+		}
 		return err
 	}
 
-	if err := s.store.DeleteSession(ctx, tenantID, session.ID); err != nil {
+	if err := s.store.DeleteSession(ctx, tenantID, session.ID); err != nil && !errors.Is(err, ErrSessionNotFound) {
 		return err
 	}
 	reqCtx := event.RequestContextFrom(rc...)

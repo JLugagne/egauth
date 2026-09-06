@@ -113,4 +113,32 @@ func TestService(t *testing.T) {
 		err := svc.RevokeSession(ctx, "", "token")
 		assert.ErrorIs(t, err, assert.AnError)
 	})
+
+	t.Run("Revoke Session Idempotent On Session Not Found", func(t *testing.T) {
+		mockStore := &storetest.MockStore{
+			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
+				return nil, sessions.ErrSessionNotFound
+			},
+		}
+
+		svc := sessions.NewService(mockStore)
+		err := svc.RevokeSession(ctx, "tenant", "token")
+		assert.NoError(t, err, "RevokeSession must succeed idempotently when session is not found")
+	})
+
+	t.Run("Revoke Session Idempotent On Delete NotFound Race", func(t *testing.T) {
+		sessID := uuid.Must(uuid.NewV7())
+		mockStore := &storetest.MockStore{
+			FindSessionByHashFunc: func(ctx context.Context, tID string, hash string) (*sessions.Session, error) {
+				return &sessions.Session{ID: sessID, UserID: userID}, nil
+			},
+			DeleteSessionFunc: func(ctx context.Context, tID string, id uuid.UUID) error {
+				return sessions.ErrSessionNotFound
+			},
+		}
+
+		svc := sessions.NewService(mockStore)
+		err := svc.RevokeSession(ctx, "tenant", "token")
+		assert.NoError(t, err, "RevokeSession must succeed idempotently when DeleteSession returns ErrSessionNotFound")
+	})
 }

@@ -143,26 +143,26 @@ func TestSecSes06_CreateSessionBypassesMaxLifetime_ZombieRetention(t *testing.T)
 }
 
 // SEC-SES-09 (CVSS 4.0): CPU-intensive busy loop (Busy Loop) in janitor.Start with non-positive interval.
-// janitor.Start clamps non-positive intervals to time.Nanosecond, starting a 1ns ticker that
-// spins a goroutine continuously at 100% CPU.
+// Calling Start with non-positive interval must not result in a high-frequency busy loop;
+// it should default to a safe minimum duration (e.g. 1 minute).
 func TestSecSes09_JanitorBusyLoopOnNonPositiveInterval(t *testing.T) {
 	var executions atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Calling Start with interval <= 0 triggers the 1ns fallback.
+	// Calling Start with interval <= 0 triggers the safe fallback duration.
 	j := janitor.Start(ctx, 0, func() {
 		executions.Add(1)
 	})
+	defer j.Stop()
 
-	// Wait 100ms — with a 1ns ticker, the callback executes many hundreds of times even on
-	// slow CI runners (Windows timer resolution is ~15ms, so we keep the threshold conservative).
+	// Wait 100ms — with a safe fallback interval, the callback must not execute in a high-frequency busy loop.
 	time.Sleep(100 * time.Millisecond)
 	j.Stop()
 
 	count := executions.Load()
-	assert.Greater(t, count, int64(10),
-		"Flaw confirmed: interval <= 0 resulted in a high-frequency busy loop (>10 executions in 100ms)")
+	assert.LessOrEqual(t, count, int64(1),
+		"SEC-SES-09 fixed: interval <= 0 must not result in a high-frequency busy loop")
 }
 
 // SEC-SES-14 (CVSS 4.2): Prevent arbitrary user identity reassignment in sessions.Service.BindUser.
@@ -198,10 +198,11 @@ func TestSecSes14_BindUserOverwritesAuthenticatedUser(t *testing.T) {
 }
 
 // SEC-SES-07 (CVSS 7.5): Paniques silencieusement avalées dans le Janitor.
-// janitor.Start swallows panics with `_ = recover()` without logging or error notification.
+// janitor.Start with panic handling must report panics instead of swallowing them silently.
 func TestSecSes07_JanitorSwallowsPanicsSilently(t *testing.T) {
 	var panicked atomic.Bool
-	var ranAfterPanic atomic.Bool
+	var panicHandled atomic.Bool
+	var recoveredValue atomic.Value
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -210,19 +211,22 @@ func TestSecSes07_JanitorSwallowsPanicsSilently(t *testing.T) {
 		if !panicked.Swap(true) {
 			panic("simulated fatal store connection failure")
 		}
-		ranAfterPanic.Store(true)
-	})
+	}, janitor.WithPanicHandler(func(recovered any) {
+		panicHandled.Store(true)
+		recoveredValue.Store(recovered)
+	}))
 
 	time.Sleep(30 * time.Millisecond)
 	j.Stop()
 
 	assert.True(t, panicked.Load(), "Callback panicked on first run")
-	assert.True(t, ranAfterPanic.Load(),
-		"Flaw confirmed: Janitor silently swallowed the panic and continued ticking without alerting or stopping")
+	assert.True(t, panicHandled.Load(),
+		"SEC-SES-07 fixed: Janitor reports panic via WithPanicHandler instead of silently swallowing it")
+	assert.Equal(t, "simulated fatal store connection failure", recoveredValue.Load())
 }
 
 // SEC-SES-08 (CVSS 4.3): Non-idempotence de RevokeSession et évasion des logs d'audit sur sessions expirées.
-// Calling RevokeSession a second time or on an expired session returns ErrSessionNotFound and skips event.Logout.
+// Calling RevokeSession a second time or on an expired session succeeds (idempotent) and emits event.Logout.
 func TestSecSes08_RevokeSessionNonIdempotentAndAuditEvasion(t *testing.T) {
 	ctx := context.Background()
 	store := memory.NewStore()
@@ -246,14 +250,14 @@ func TestSecSes08_RevokeSessionNonIdempotentAndAuditEvasion(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), logoutEvents.Load())
 
-	// Flawed behavior 1: Second revocation fails with ErrSessionNotFound (not idempotent)
+	// Remediated behavior 1: Second revocation succeeds without error (idempotent)
 	err = svc.RevokeSession(ctx, tenantID, token)
-	assert.ErrorIs(t, err, sessions.ErrSessionNotFound,
-		"Flaw confirmed: RevokeSession is non-idempotent and returns ErrSessionNotFound on second call")
+	require.NoError(t, err,
+		"SEC-SES-08 fixed: RevokeSession is idempotent and returns nil on already-revoked session")
 
-	// Flawed behavior 2: No audit event emitted on duplicate/already-revoked logout
-	assert.Equal(t, int64(1), logoutEvents.Load(),
-		"Flaw confirmed: No logout event emitted on subsequent revoke attempt")
+	// Remediated behavior 2: Logout audit event is emitted on subsequent revoke attempt
+	assert.Equal(t, int64(2), logoutEvents.Load(),
+		"SEC-SES-08 fixed: Logout event emitted on subsequent revoke attempt")
 }
 
 // SEC-SES-10: Origin validation in internal/httputil (Cross-Scheme & Permissive Default).

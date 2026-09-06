@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -166,8 +167,15 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 	idOpts := []identity.HandlerOption{identity.WithHandlerEventSink(sink)}
 	tkOpts := []tokens.HandlerOption{}
 	if cfg.CookieDomain != "" {
-		idOpts = append(idOpts, identity.WithCookieDomain(cfg.CookieDomain))
-		tkOpts = append(tkOpts, tokens.WithCookieDomain(cfg.CookieDomain))
+		if strings.Contains(cfg.CookieDomain, "://") || strings.Contains(cfg.CookieDomain, "/") || strings.Contains(cfg.CookieDomain, ":") {
+			return nil, errors.New("webapp: Config.CookieDomain must not include scheme, port, or path")
+		}
+		cookies := tokens.DefaultCookies()
+		cookies.Domain = cfg.CookieDomain
+		cookies.AccessName = "access_token"
+		cookies.RefreshName = "refresh_token"
+		idOpts = append(idOpts, identity.WithCookies(cookies))
+		tkOpts = append(tkOpts, tokens.WithCookies(cookies))
 	}
 	if len(cfg.TrustedOrigins) > 0 {
 		idOpts = append(idOpts, identity.WithTrustedOrigins(cfg.TrustedOrigins...))

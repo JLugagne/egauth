@@ -94,3 +94,93 @@ func TestJanitorStopAfterContextCancel(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	j.Stop() // must not panic or block
 }
+
+func TestJanitor_WithPanicHandler(t *testing.T) {
+	t.Parallel()
+
+	var panicked atomic.Bool
+	var handled atomic.Bool
+	var val atomic.Value
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	j := janitor.Start(ctx, 5*time.Millisecond, func() {
+		if !panicked.Swap(true) {
+			panic("boom")
+		}
+	}, janitor.WithPanicHandler(func(recovered any) {
+		handled.Store(true)
+		val.Store(recovered)
+	}))
+	defer j.Stop()
+
+	time.Sleep(30 * time.Millisecond)
+	if !handled.Load() {
+		t.Fatal("expected panic to be handled by WithPanicHandler")
+	}
+	if val.Load() != "boom" {
+		t.Fatalf("expected panic value 'boom', got %v", val.Load())
+	}
+}
+
+func TestJanitor_WithOnError(t *testing.T) {
+	t.Parallel()
+
+	var panicked atomic.Bool
+	var errHandled atomic.Bool
+	var errVal atomic.Value
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	j := janitor.Start(ctx, 5*time.Millisecond, func() {
+		if !panicked.Swap(true) {
+			panic("error boom")
+		}
+	}, janitor.WithOnError(func(err error) {
+		errHandled.Store(true)
+		errVal.Store(err)
+	}))
+	defer j.Stop()
+
+	time.Sleep(30 * time.Millisecond)
+	if !errHandled.Load() {
+		t.Fatal("expected error to be handled by WithOnError")
+	}
+	if errVal.Load() == nil {
+		t.Fatal("expected non-nil error in WithOnError")
+	}
+}
+
+func TestNew_RejectsNonPositiveInterval(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	_, err := janitor.New(ctx, 0, func() {})
+	if err == nil {
+		t.Fatal("expected error for zero interval")
+	}
+	_, err = janitor.New(ctx, -time.Second, func() {})
+	if err == nil {
+		t.Fatal("expected error for negative interval")
+	}
+}
+
+func TestStart_NonPositiveIntervalDefaultsToSafeInterval(t *testing.T) {
+	t.Parallel()
+
+	var count atomic.Int64
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	j := janitor.Start(ctx, 0, func() {
+		count.Add(1)
+	})
+	defer j.Stop()
+
+	time.Sleep(50 * time.Millisecond)
+	if count.Load() > 1 {
+		t.Fatalf("expected safe interval, but executed %d times in 50ms", count.Load())
+	}
+}
