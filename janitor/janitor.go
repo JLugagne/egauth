@@ -80,6 +80,7 @@ type Option func(*options)
 type options struct {
 	panicHandler func(recovered any)
 	errorHandler func(err error)
+	stopTimeout  time.Duration
 }
 
 // WithPanicHandler registers a callback to be invoked if the cleanup task panics.
@@ -96,12 +97,22 @@ func WithOnError(h func(err error)) Option {
 	}
 }
 
+// WithStopTimeout bounds the maximum duration [Janitor.Stop] will block waiting for the
+// cleanup goroutine to exit. If the timeout expires before the goroutine finishes, Stop
+// returns without blocking indefinitely.
+func WithStopTimeout(d time.Duration) Option {
+	return func(o *options) {
+		o.stopTimeout = d
+	}
+}
+
 // Janitor manages a single background goroutine that periodically calls a cleanup
 // function. Create one via [Start] or [New].
 type Janitor struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	once   sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{}
+	stopOnce    sync.Once
+	stopTimeout time.Duration
 }
 
 // New creates and starts a background goroutine that calls fn every interval.
@@ -134,8 +145,9 @@ func start(ctx context.Context, interval time.Duration, fn func(), opts ...Optio
 
 	ctx, cancel := context.WithCancel(ctx)
 	j := &Janitor{
-		cancel: cancel,
-		done:   make(chan struct{}),
+		cancel:      cancel,
+		done:        make(chan struct{}),
+		stopTimeout: o.stopTimeout,
 	}
 
 	go func() {
@@ -174,10 +186,38 @@ func start(ctx context.Context, interval time.Duration, fn func(), opts ...Optio
 	return j
 }
 
-// Stop cancels the janitor goroutine and blocks until it exits. It is idempotent.
-func (j *Janitor) Stop() {
-	j.once.Do(func() {
+// StopContext cancels the janitor goroutine and waits for it to exit, or until ctx
+// is done. If ctx is cancelled or times out before the janitor exits, StopContext
+// returns ctx.Err(). It is idempotent.
+func (j *Janitor) StopContext(ctx context.Context) error {
+	j.stopOnce.Do(func() {
 		j.cancel()
-		<-j.done
 	})
+
+	select {
+	case <-j.done:
+		return nil
+	default:
+	}
+
+	if j.stopTimeout > 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, j.stopTimeout)
+			defer cancel()
+		}
+	}
+
+	select {
+	case <-j.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// Stop cancels the janitor goroutine and blocks until it exits, or until the configured
+// stop timeout (if any) expires. It is idempotent.
+func (j *Janitor) Stop() {
+	_ = j.StopContext(context.Background())
 }

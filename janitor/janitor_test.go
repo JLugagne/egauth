@@ -184,3 +184,108 @@ func TestStart_NonPositiveIntervalDefaultsToSafeInterval(t *testing.T) {
 		t.Fatalf("expected safe interval, but executed %d times in 50ms", count.Load())
 	}
 }
+
+func TestJanitor_StopContext_Success(t *testing.T) {
+	t.Parallel()
+
+	j := janitor.Start(context.Background(), time.Hour, func() {})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	err := j.StopContext(ctx)
+	if err != nil {
+		t.Fatalf("expected nil error on clean stop, got %v", err)
+	}
+}
+
+func TestJanitor_StopContext_BoundedTimeout(t *testing.T) {
+	t.Parallel()
+
+	blocker := make(chan struct{})
+	started := make(chan struct{})
+
+	j := janitor.Start(context.Background(), time.Millisecond, func() {
+		close(started)
+		<-blocker
+	})
+
+	<-started
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := j.StopContext(stopCtx)
+	if err != context.DeadlineExceeded {
+		t.Fatalf("expected DeadlineExceeded, got %v", err)
+	}
+
+	close(blocker)
+
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), time.Second)
+	defer cleanupCancel()
+
+	if err := j.StopContext(cleanupCtx); err != nil {
+		t.Fatalf("expected nil error after unblocking, got %v", err)
+	}
+}
+
+func TestJanitor_StopContext_ContextCancelled(t *testing.T) {
+	t.Parallel()
+
+	blocker := make(chan struct{})
+	started := make(chan struct{})
+
+	j := janitor.Start(context.Background(), time.Millisecond, func() {
+		close(started)
+		<-blocker
+	})
+
+	<-started
+
+	stopCtx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	err := j.StopContext(stopCtx)
+	if err != context.Canceled {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+
+	close(blocker)
+	_ = j.StopContext(context.Background())
+}
+
+func TestJanitor_WithStopTimeout(t *testing.T) {
+	t.Parallel()
+
+	blocker := make(chan struct{})
+	started := make(chan struct{})
+
+	j := janitor.Start(context.Background(), time.Millisecond, func() {
+		close(started)
+		<-blocker
+	}, janitor.WithStopTimeout(30*time.Millisecond))
+
+	<-started
+
+	start := time.Now()
+	j.Stop() // Should return after ~30ms timeout rather than blocking indefinitely
+	elapsed := time.Since(start)
+
+	if elapsed < 20*time.Millisecond || elapsed > 300*time.Millisecond {
+		t.Fatalf("expected Stop() to return in ~30ms, took %v", elapsed)
+	}
+
+	close(blocker)
+}
+
+func TestJanitor_StopContext_Idempotent(t *testing.T) {
+	t.Parallel()
+
+	j := janitor.Start(context.Background(), time.Hour, func() {})
+	if err := j.StopContext(context.Background()); err != nil {
+		t.Fatalf("first StopContext failed: %v", err)
+	}
+	if err := j.StopContext(context.Background()); err != nil {
+		t.Fatalf("second StopContext failed: %v", err)
+	}
+}

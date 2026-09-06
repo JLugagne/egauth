@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/otp"
 	"github.com/JLugagne/egauth/otp/memory"
 	"github.com/google/uuid"
@@ -335,4 +336,66 @@ func TestIssueHandler_CooldownSuppressesDelivery(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec2.Code)
 	time.Sleep(20 * time.Millisecond)
 	assert.Equal(t, int64(1), deliverCount.Load(), "delivery must not be dispatched during cooldown (toll fraud prevention)")
+}
+
+func TestIssueHandler_UsesContextActorTenantWhenNoResolver(t *testing.T) {
+	svc := otp.NewService(memory.NewStore())
+	subject := uuid.Must(uuid.NewV7())
+	const tenant = "tenant-xyz"
+
+	var issuedCode string
+	done := make(chan struct{})
+	deliver := func(ctx context.Context, ch *otp.Challenge) error {
+		issuedCode = ch.Code
+		close(done)
+		return nil
+	}
+
+	h := otp.IssueHandler(svc, deliver, otp.WithSubjectResolver(func(r *http.Request) (uuid.UUID, bool) {
+		return subject, true
+	}))
+
+	req := issuePost()
+	req = req.WithContext(egauth.ContextWithActor(req.Context(), egauth.Actor{
+		UserID:   subject,
+		TenantID: tenant,
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	<-done
+	require.NotEmpty(t, issuedCode)
+
+	// Must be stored under tenant-xyz
+	err := svc.Verify(context.Background(), tenant, subject, "login", issuedCode)
+	assert.NoError(t, err, "challenge must be verifiable under context actor's tenant")
+
+	// Must NOT be stored under ""
+	errEmpty := svc.Verify(context.Background(), "", subject, "login", issuedCode)
+	assert.Error(t, errEmpty, "challenge must not be stored under empty tenant")
+}
+
+func TestVerifyHandler_UsesContextActorTenantWhenNoResolver(t *testing.T) {
+	svc := otp.NewService(memory.NewStore())
+	subject := uuid.Must(uuid.NewV7())
+	const tenant = "tenant-xyz"
+
+	ch, err := svc.Issue(context.Background(), tenant, subject, "login")
+	require.NoError(t, err)
+
+	h := otp.VerifyHandler(svc, otp.WithSubjectResolver(func(r *http.Request) (uuid.UUID, bool) {
+		return subject, true
+	}))
+
+	req := codeForm(ch.Code)
+	req = req.WithContext(egauth.ContextWithActor(req.Context(), egauth.Actor{
+		UserID:   subject,
+		TenantID: tenant,
+	}))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusNoContent, rec.Code, "verification must succeed when actor tenant matches")
 }

@@ -63,7 +63,8 @@ func ContextMiddleware[C any](verifier Verifier[C], next http.Handler, opts ...A
 				wrongPrincipalKind(w)
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxKey{}, authContext[C]{
+			ctx := egauth.ContextWithActor(r.Context(), actor)
+			ctx = context.WithValue(ctx, ctxKey{}, authContext[C]{
 				actorValue: actor,
 				claims:     claims,
 			})
@@ -77,6 +78,9 @@ func ContextMiddleware[C any](verifier Verifier[C], next http.Handler, opts ...A
 // it and fail closed — a zero Actor is never an authenticated one. It is non-generic so
 // the resolver-based modules can call it without knowing the claims type.
 func ActorFromContext(ctx context.Context) (egauth.Actor, bool) {
+	if a, ok := egauth.ActorFromContext(ctx); ok {
+		return a, true
+	}
 	carrier, ok := ctx.Value(ctxKey{}).(actorCarrier)
 	if !ok {
 		return egauth.Actor{}, false

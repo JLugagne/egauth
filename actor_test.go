@@ -1,6 +1,7 @@
 package egauth_test
 
 import (
+	"context"
 	"testing"
 
 	egauth "github.com/JLugagne/egauth"
@@ -437,6 +438,31 @@ func TestActorGroupHelpers(t *testing.T) {
 		a := egauth.Actor{}
 		if a.HasAnyGroup("engineers") {
 			t.Error("HasAnyGroup on empty Groups = true, want false")
+		}
+	})
+}
+
+func TestActorContext(t *testing.T) {
+	t.Run("empty context returns false", func(t *testing.T) {
+		a, ok := egauth.ActorFromContext(context.Background())
+		if ok || !a.IsAnonymous() {
+			t.Errorf("expected false and empty actor, got ok=%v, actor=%v", ok, a)
+		}
+	})
+
+	t.Run("context with actor returns actor", func(t *testing.T) {
+		expected := egauth.Actor{
+			UserID:   uuid.New(),
+			TenantID: "tenant-1",
+			Kind:     egauth.User,
+		}
+		ctx := egauth.ContextWithActor(context.Background(), expected)
+		actual, ok := egauth.ActorFromContext(ctx)
+		if !ok {
+			t.Fatal("expected ok=true")
+		}
+		if actual.UserID != expected.UserID || actual.TenantID != expected.TenantID {
+			t.Errorf("got %v, want %v", actual, expected)
 		}
 	})
 }

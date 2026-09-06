@@ -1,6 +1,10 @@
 package egauth
 
-import "github.com/google/uuid"
+import (
+	"context"
+
+	"github.com/google/uuid"
+)
 
 // PrincipalKind classifies the authenticated entity making a request. It lets egauth tell the
 // application whether a request is a user action or a machine action without requiring the
@@ -176,4 +180,19 @@ func (a Actor) HasAnyGroup(groups ...string) bool {
 		}
 	}
 	return false
+}
+
+type actorContextKey struct{}
+
+// ContextWithActor returns a copy of parent context with actor attached.
+func ContextWithActor(ctx context.Context, actor Actor) context.Context {
+	return context.WithValue(ctx, actorContextKey{}, actor)
+}
+
+// ActorFromContext returns the Actor attached to ctx, if any.
+func ActorFromContext(ctx context.Context) (Actor, bool) {
+	if a, ok := ctx.Value(actorContextKey{}).(Actor); ok {
+		return a, true
+	}
+	return Actor{}, false
 }

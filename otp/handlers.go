@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/tokens"
 
 	"github.com/google/uuid"
 )
@@ -301,13 +303,21 @@ func (cfg handlerConfig) purposeOf(r *http.Request) string {
 	return cfg.purpose
 }
 
-// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
-// configured (the single-tenant default partition).
+// tenant returns the tenant derived from the request's resolver. When no explicit resolver is
+// configured, it checks for an authenticated Actor in the request context (populated by
+// tokens.ContextMiddleware or egauth.ContextWithActor) and uses its TenantID if non-empty,
+// preventing tenant desynchronization. Otherwise, it returns "" (the single-tenant default partition).
 func (cfg handlerConfig) tenant(r *http.Request) string {
-	if cfg.tenantResolver == nil {
-		return ""
+	if cfg.tenantResolver != nil {
+		return cfg.tenantResolver(r)
 	}
-	return cfg.tenantResolver(r)
+	if a, ok := egauth.ActorFromContext(r.Context()); ok && a.TenantID != "" {
+		return a.TenantID
+	}
+	if a, ok := tokens.ActorFromContext(r.Context()); ok && a.TenantID != "" {
+		return a.TenantID
+	}
+	return ""
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {

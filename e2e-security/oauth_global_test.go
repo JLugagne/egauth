@@ -275,21 +275,20 @@ func TestSecGlo07_OTP_TenantDesynchronization_TokensContextMiddleware(t *testing
 	}
 	require.NotEmpty(t, issuedCode)
 
-	// Flaw confirmed: Verifying under the user's actual tenant fails with ErrCodeNotFound!
+	// Remediated behavior: Challenge is properly saved and verified under user's actual tenant!
 	err = otpSvc.Verify(ctx, userTenant, userUUID, purpose, issuedCode)
-	assert.ErrorIs(t, err, otp.ErrCodeNotFound,
-		"Flaw confirmed: Challenge was NOT saved under user's actual tenant")
+	assert.NoError(t, err,
+		"Remediated: Challenge must be saved under user's actual tenant")
 
-	// Instead, the challenge was saved under the empty tenant partition ""!
+	// And the challenge is NOT saved under the empty tenant partition ""!
 	errEmptyTenant := otpSvc.Verify(ctx, "", userUUID, purpose, issuedCode)
-	assert.NoError(t, errEmptyTenant,
-		"Flaw confirmed: Challenge was saved under empty tenant partition '' due to resolver desync")
+	assert.ErrorIs(t, errEmptyTenant, otp.ErrCodeNotFound,
+		"Remediated: Challenge must NOT be saved under empty tenant partition")
 }
 
 // SEC-GLO-10 (CVSS 5.3): Indefinite blocking on Janitor shutdown (janitor.Stop).
-// janitor.Start launches a background loop that invokes fn() without passing context.Context.
-// When j.Stop() is called, it waits unconditionally on <-j.done. If fn() is performing a
-// long-running or hanging operation, Stop() blocks indefinitely until fn() completes.
+// Remediated: StopContext bounds the shutdown wait and returns ctx.Err() (e.g. context.DeadlineExceeded)
+// instead of blocking indefinitely when cleanup is long-running or hung.
 func TestSecGlo10_JanitorStop_BlocksIndefinitelyOnLongRunningCleanup(t *testing.T) {
 	ctx := context.Background()
 	fnStarted := make(chan struct{})
@@ -308,29 +307,21 @@ func TestSecGlo10_JanitorStop_BlocksIndefinitelyOnLongRunningCleanup(t *testing.
 		t.Fatal("Janitor fn() did not start in time")
 	}
 
-	// Call Stop() in a separate goroutine
-	stopFinished := make(chan struct{})
-	go func() {
-		j.Stop()
-		close(stopFinished)
-	}()
+	// Bounded shutdown via StopContext with a short timeout
+	stopCtx, cancel := context.WithTimeout(ctx, 50*time.Millisecond)
+	defer cancel()
 
-	// Confirm that Stop() does NOT return while fn() is running
-	select {
-	case <-stopFinished:
-		t.Fatal("Stop() returned while fn() was still blocked!")
-	case <-time.After(50 * time.Millisecond):
-		// Flaw confirmed: Stop() is blocked waiting for fn() to finish
-	}
+	err := j.StopContext(stopCtx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded,
+		"StopContext must return DeadlineExceeded instead of hanging indefinitely")
 
-	// Once the blocker is released, Stop() finally finishes
+	// Once the blocker is released, subsequent StopContext finishes cleanly
 	close(blocker)
-	select {
-	case <-stopFinished:
-		// Succeeded after unblocking
-	case <-time.After(1 * time.Second):
-		t.Fatal("Stop() did not finish even after unblocking fn()")
-	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cleanupCancel()
+
+	err = j.StopContext(cleanupCtx)
+	assert.NoError(t, err, "StopContext should succeed once fn() finishes")
 }
 
 // SEC-OAU-06 (CVSS 6.9): Sanitize Host and X-Forwarded-Proto in redirect_uri derivation.
