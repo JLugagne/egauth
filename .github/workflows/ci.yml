@@ -242,7 +242,7 @@ jobs:
           if-no-files-found: error
 
   govulncheck:
-    name: Vulnerability Check (both modules)
+    name: Vulnerability Check (all modules)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -261,6 +261,10 @@ jobs:
 
       - name: govulncheck — adapters/pgx
         working-directory: adapters/pgx
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: govulncheck — adapters/otel
+        working-directory: adapters/otel
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
   lint:
