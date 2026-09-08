@@ -164,7 +164,7 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		return claimsForUser(u.ID, cfg.Tenant)
 	}
 
-	idOpts := []identity.HandlerOption{identity.WithHandlerEventSink(sink)}
+	idOpts := []identity.HandlerOption{identity.WithHandlerEventSink(sink), identity.WithUniformAuthErrors()}
 	tkOpts := []tokens.HandlerOption{}
 	if cfg.CookieDomain != "" {
 		if strings.Contains(cfg.CookieDomain, "://") || strings.Contains(cfg.CookieDomain, "/") || strings.Contains(cfg.CookieDomain, ":") {

@@ -84,7 +84,7 @@ type handlerConfig struct {
 	interimTTL time.Duration
 	// authFlow, when non-nil, delegates the post-credential pipeline of MagicLinkLoginHandler to a unified flow engine (see AuthFlow / WithAuthFlow): account state, MFA policy, must-change gating and issuance all move into the engine, and the handler-side issuer is bypassed.
 	authFlow AuthFlow
-	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration.
+	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration (ENUM-01). True by default; WithVerboseLockoutStatus opts out.
 	uniformAuthErrors bool
 	amrResolver       func(*http.Request) []string
 }
@@ -95,6 +95,7 @@ type HandlerOption func(*handlerConfig)
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
 		provider:             "password",
+		uniformAuthErrors:    true,
 		cookies:              tokens.DefaultCookies(),
 		emailField:           "email",
 		passwordField:        "password",
@@ -239,9 +240,19 @@ func WithTrustedOrigins(origins ...string) HandlerOption {
 
 // WithUniformAuthErrors configures LoginHandler to reply uniformly with HTTP 401
 // "invalid_credentials" on failed authentication even when an account is locked or disabled,
-// preventing user enumeration attacks (SEC-ID-04).
+// preventing user enumeration attacks (SEC-ID-04, ENUM-01). This is the default behavior;
+// the option remains as an explicit affirmation for deployments that call it for clarity.
 func WithUniformAuthErrors() HandlerOption {
 	return func(h *handlerConfig) { h.uniformAuthErrors = true }
+}
+
+// WithVerboseLockoutStatus opts out of the default uniform 401 responses and restores the
+// explicit HTTP 429 "account_locked" feedback on locked or disabled accounts. This is a
+// deployment opt-in that trades away the anti-enumeration guarantee (SEC-ID-04, ENUM-01):
+// the divergent status code is an account-existence oracle. Use it only when that feedback
+// is worth the oracle for your user experience.
+func WithVerboseLockoutStatus() HandlerOption {
+	return func(h *handlerConfig) { h.uniformAuthErrors = false }
 }
 
 // WithPasswordChangeFields overrides the form field names read by ChangePasswordHandler

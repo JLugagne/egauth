@@ -387,7 +387,7 @@ func TestLoginHandler_AccountLocked(t *testing.T) {
 			return nil, identity.ErrAccountLocked
 		},
 	}
-	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder())
+	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(), identity.WithVerboseLockoutStatus())
 
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
@@ -885,4 +885,65 @@ func TestRequestPasswordResetHandler_DeliverySaturation_BoundedWaitAndFailure(t 
 		assert.Equal(t, http.StatusTooManyRequests, recUnknown.Code)
 		assert.Contains(t, recUnknown.Body.String(), "service_busy")
 	})
+}
+
+func TestLoginHandler_LockedAccount_UniformByDefault(t *testing.T) {
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrAccountLocked
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "victim@example.com", "secret", ""))
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"default wiring must not answer 429 on a locked account (account enumeration oracle)")
+	assert.Contains(t, rec.Body.String(), "invalid_credentials")
+	assert.NotContains(t, rec.Body.String(), "account_locked")
+}
+
+func TestLoginHandler_DisabledAccount_UniformByDefault(t *testing.T) {
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return nil, identity.ErrAccountDisabled
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "gone@example.com", "secret", ""))
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code,
+		"default wiring must not answer 429 on a disabled account (account enumeration oracle)")
+	assert.Contains(t, rec.Body.String(), "invalid_credentials")
+	assert.NotContains(t, rec.Body.String(), "account_locked")
+}
+
+func TestLoginHandler_VerboseLockoutStatus_OptIn(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"locked", identity.ErrAccountLocked},
+		{"disabled", identity.ErrAccountDisabled},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &servicetest.MockService{
+				AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+					return nil, tc.err
+				},
+			}
+			h := identity.LoginHandler[struct{}](svc, &issuertest.MockIssuer[struct{}]{}, testClaimsBuilder(), identity.WithVerboseLockoutStatus())
+
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+			assert.Equal(t, http.StatusTooManyRequests, rec.Code,
+				"WithVerboseLockoutStatus must restore the explicit 429 account_locked feedback")
+			assert.Contains(t, rec.Body.String(), "account_locked")
+		})
+	}
 }
