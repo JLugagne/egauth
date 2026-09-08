@@ -63,6 +63,8 @@ type StatefulSessionMinter struct {
 	svc        sessions.Service
 	cookieName string
 	duration   time.Duration
+	// insecureCookies drops the Secure attribute on the session cookie (WithInsecureCookies opt-out, local HTTP dev only). __Host- prefixed names always stay Secure regardless.
+	insecureCookies bool
 }
 
 // NewStatefulSessionMinter creates a SessionMinter that issues stateful cookie-backed sessions.
@@ -79,6 +81,18 @@ func NewStatefulSessionMinter(svc sessions.Service, duration time.Duration, cook
 		cookieName: cName,
 		duration:   duration,
 	}
+}
+
+// WithInsecureCookies disables the Secure attribute on the session cookie this minter writes.
+// Use only for local HTTP development, and only with a cookie name WITHOUT the browser-enforced
+// __Host- prefix: the default name (sessions.DefaultSessionCookieName) carries that prefix, and
+// for __Host- names Secure is browser-mandatory — it is kept even when this opt-out is set,
+// mirroring the tokens.Cookies.Validate() contract. The minter has no event seam, so unlike the
+// engine-level WithInsecureCookies it cannot emit the InsecureCookieMisuse warning; configure
+// the engine's own opt-out and event sink for that signal. Returns the minter for chaining.
+func (m *StatefulSessionMinter) WithInsecureCookies() *StatefulSessionMinter {
+	m.insecureCookies = true
+	return m
 }
 
 // Mint creates a stateful session and writes the session cookie.
@@ -101,7 +115,7 @@ func (m *StatefulSessionMinter) Mint(ctx context.Context, w http.ResponseWriter,
 			Value:    token,
 			Path:     "/",
 			HttpOnly: true,
-			Secure:   r != nil && r.TLS != nil,
+			Secure:   !m.insecureCookies || isHostPrefixedCookieName(m.cookieName),
 			SameSite: http.SameSiteLaxMode,
 			MaxAge:   int(m.duration.Seconds()),
 		})
