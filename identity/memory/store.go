@@ -334,9 +334,10 @@ func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, us
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Mirror the pgx foreign-key constraint: the user must exist (and be live) in the tenant.
+	// Mirror the pgx EXISTS guard: the user must exist and be live in the tenant (neither
+	// soft-deleted nor administratively disabled).
 	user, exists := s.users[userID]
-	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil || user.DisabledAt != nil {
 		return "", identity.ErrUserNotFound
 	}
 

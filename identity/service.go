@@ -646,6 +646,13 @@ func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, ema
 		return "", nil, err
 	}
 
+	// A disabled (administratively suspended) account must not receive credential mail:
+	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	if user.DisabledAt != nil {
+		s.decoyToken()
+		return "", nil, nil
+	}
+
 	// Only an account that actually has a password can reset it. Minting a token for an
 	// OAuth-only account would hand the holder a single-use token that ResetPassword can never
 	// apply (no password identity), burning it for nothing. Stay uniform: behave as if the
@@ -1072,6 +1079,13 @@ func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email s
 		return "", nil, err
 	}
 
+	// A disabled (administratively suspended) account must not receive credential mail:
+	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	if user.DisabledAt != nil {
+		s.decoyToken()
+		return "", nil, nil
+	}
+
 	token, err := s.store.CreateVerificationToken(ctx, tenantID, user.ID, KindMagicLink, s.magicLinkTTL, nil)
 	if err != nil {
 		return "", nil, err
@@ -1300,6 +1314,13 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 			return "", nil, RecoveryChannels{}, nil
 		}
 		return "", nil, RecoveryChannels{}, err
+	}
+
+	// A disabled (administratively suspended) account must not receive credential mail:
+	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	if user.DisabledAt != nil {
+		s.decoyToken()
+		return "", nil, RecoveryChannels{}, nil
 	}
 
 	// Only an account that actually has a password can reset it (mirrors RequestPasswordReset);

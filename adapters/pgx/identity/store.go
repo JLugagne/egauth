@@ -364,8 +364,8 @@ func (s *Store) UpdateIdentityPassword(ctx context.Context, tenantID string, use
 
 // CreateVerificationToken mints, persists and returns a single-use plaintext token. Only the
 // selector and the verifier hash are stored. The INSERT is gated on the target being a LIVE
-// user in the SAME tenant (the bare user_id foreign key alone would accept a cross-tenant or
-// soft-deleted user), so this matches the memory store's invariant exactly.
+// user in the SAME tenant (the bare user_id foreign key alone would accept a cross-tenant,
+// soft-deleted or disabled user), so this matches the memory store's invariant exactly.
 func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error) {
 	token, selector, verifierHash, err := identity.GenerateVerificationToken()
 	if err != nil {
@@ -378,7 +378,7 @@ func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, us
 	query := `
 		INSERT INTO verification_tokens (selector, verifier_hash, user_id, tenant_id, kind, metadata, expires_at, created_at)
 		SELECT $1::varchar, $2::varchar, $3::uuid, $4::varchar, $5::varchar, $6::bytea, $7::timestamptz, $8::timestamptz
-		WHERE EXISTS (SELECT 1 FROM users WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL)
+		WHERE EXISTS (SELECT 1 FROM users WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL AND disabled_at IS NULL)
 	`
 	tag, err := s.db.Exec(ctx, query, selector, verifierHash, userID, tenantID, kind, metadata, now.Add(ttl), now)
 	if err != nil {

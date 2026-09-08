@@ -849,6 +849,12 @@ func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant strin
 	assert.Equal(t, user.ID, byEmail.ID)
 	require.NotNil(t, byEmail.DisabledAt)
 
+	// A disabled account must not be mintable: CreateVerificationToken gates on a live
+	// (not disabled) user, mirroring the soft-delete guard, so suspended accounts stop
+	// receiving credential tokens at mint time, not just at consume time.
+	_, err = store.CreateVerificationToken(ctx, tenant, user.ID, identity.KindPasswordReset, time.Hour, nil)
+	assert.ErrorIs(t, err, identity.ErrUserNotFound, "must not mint a token for a disabled user")
+
 	// Disabling an already-disabled user is an idempotent success.
 	require.NoError(t, store.DisableUser(ctx, tenant, user.ID, time.Now()))
 
@@ -860,6 +866,11 @@ func StoreDisableEnableContract(t *testing.T, store identity.Store, tenant strin
 
 	// Enabling an account that is not disabled is an idempotent success.
 	require.NoError(t, store.EnableUser(ctx, tenant, user.ID))
+
+	// Once re-enabled, minting works again: the gate is specifically about DisabledAt.
+	reMinted, err := store.CreateVerificationToken(ctx, tenant, user.ID, identity.KindPasswordReset, time.Hour, nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, reMinted, "a re-enabled account can receive tokens again")
 
 	// Unknown users are reported as not found on both operations.
 	assert.ErrorIs(t, store.DisableUser(ctx, tenant, uuid.Must(uuid.NewV7()), time.Now()), identity.ErrUserNotFound)
