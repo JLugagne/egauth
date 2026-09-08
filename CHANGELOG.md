@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.10.0] — 2026-09-08
+
+### Added
+
+- **Unified authentication state machine** (#71): a single state machine governs the
+  account lifecycle across login, lockout, disablement, and recovery paths.
+- **Unified cross-module revocation bus** (#72): revocation events fan out to all
+  stores (tokens, sessions, MFA factors) through one in-process bus.
+
+### Security
+
+- **Published example keys rejected** (#104, #105): `tokens/jwt` and `passkey`
+  refuse attacker-known keys published in examples/docs (exact-match denylist,
+  all-zero cookie-key guard); the fullstack example generates keys with
+  `crypto/rand` and the docs use `os.Getenv` patterns.
+- **Uniform login responses by default** (#106): locked and disabled accounts
+  answer 401 `invalid_credentials` like unknown identifiers, closing the
+  429-vs-401 enumeration oracle; deployments wanting verbose lockout feedback
+  opt in with `identity.WithVerboseLockoutStatus`.
+- **MFA step-up preserves must-change** (#107): `mfa.StepUpHandler` propagates
+  `MustChangePassword` from the interim token's verified claims by default;
+  `WithMustChangeResolver` remains an explicit override.
+- **No tokens minted for disabled accounts** (#108): `RequestMagicLink`,
+  `RequestPasswordReset`, `RequestPasswordResetViaRecovery`, and
+  `RequestEmailVerification` return empty results for disabled accounts
+  (decoy-timed), with matching store-level `disabled_at IS NULL` guards.
+- **Hardened OAuth state cookie** (#109): a state signing key is now required
+  (startup `ValidateHandlerConfig`, fail-closed handlers), and the default state
+  cookie is `__Host-`-prefixed with Secure/`Path=/`/no-Domain enforced.
+- **Spoof-proof redirect scheme** (#110): `X-Forwarded-Proto` is never trusted;
+  the Host-derived `redirect_uri` fallback is dev-only and emits a
+  `oauth.redirect_fallback_misuse` warning event when used.
+- **`adapters/otel` covered by govulncheck** (#111).
+
+### Dependencies
+
+- Updated `golang.org/x/crypto`, `golang.org/x/net`, `golang.org/x/text`,
+  `jackc/pgx/v5`, and related modules.
+
 ## [v0.9.0] — 2026-09-06
 
 ### Security & Hardening
