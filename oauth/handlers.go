@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
@@ -39,6 +41,8 @@ type handlerConfig struct {
 	cookies         tokens.Cookies
 	stateCookieName string
 	stateTTL        time.Duration
+	// events receives security events (see WithEventSink); nil disables emission.
+	events          event.Sink
 	stateSigningKey []byte
 	redirectURL     string
 	allowedHosts    []string
@@ -51,6 +55,8 @@ type handlerConfig struct {
 	// issuance) of CallbackHandler to a unified flow engine (see AuthFlow / WithAuthFlow).
 	authFlow             AuthFlow
 	allowUnverifiedEmail bool
+	// redirectFallbackWarned rate-limits the WEB-02 fallback misuse event to once per handler.
+	redirectFallbackWarned *sync.Once
 	// configErr records a startup validation failure (see validate); the handlers fail
 	// closed with 500 on it.
 	configErr error
@@ -61,10 +67,11 @@ type HandlerOption func(*handlerConfig)
 
 func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	c := handlerConfig{
-		cookies:         tokens.DefaultCookies(),
-		stateCookieName: DefaultStateCookieName,
-		stateTTL:        DefaultStateTTL,
-		usePKCE:         true,
+		cookies:                tokens.DefaultCookies(),
+		stateCookieName:        DefaultStateCookieName,
+		stateTTL:               DefaultStateTTL,
+		redirectFallbackWarned: &sync.Once{},
+		usePKCE:                true,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -136,6 +143,20 @@ func WithStateSigningKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) {
 		h.stateSigningKey = append([]byte(nil), key...)
 	}
+}
+
+// WithEventSink registers a security-event sink for the OAuth handlers. A nil sink (the
+// default) makes every emission a no-op, and emission never changes the handlers'
+// client-visible behavior (see the event package contract).
+//
+// The WEB-02 misuse guard uses it: when neither WithRedirectURL nor WithAllowedHosts is
+// configured, the handlers derive redirect_uri from the request Host — a fallback intended
+// for local development only. When such a request looks production-like (a non-loopback
+// Host over a non-TLS connection), they emit a single WARN-level event.RedirectFallbackMisuse
+// per handler instance. To silence it legitimately, configure WithRedirectURL or
+// WithAllowedHosts, serve over TLS, or develop against a loopback host.
+func WithEventSink(sink event.Sink) HandlerOption {
+	return func(h *handlerConfig) { h.events = sink }
 }
 
 // WithoutPKCE disables the PKCE S256 challenge. PKCE is on by default (OAuth 2.1 best
@@ -428,7 +449,9 @@ func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 			return ""
 		}
 	}
-	return requestScheme(r) + "://" + r.Host + r.URL.Path
+	uri := requestScheme(r) + "://" + r.Host + r.URL.Path
+	cfg.warnIfRedirectFallbackMisuse(r)
+	return uri
 }
 
 func isValidHost(rawHost string) bool {
@@ -485,13 +508,15 @@ func isValidHost(rawHost string) bool {
 	return true
 }
 
+// requestScheme derives the scheme of the redirect_uri from the request itself: https only
+// when the connection carries r.TLS, http otherwise. The spoofable X-Forwarded-Proto (and
+// Forwarded) headers are deliberately never consulted (WEB-02): a client-controlled header
+// must not choose the scheme sent to the provider. Deployments behind a TLS-terminating
+// reverse proxy therefore get an http scheme here and must pin the redirect_uri with
+// WithRedirectURL instead.
 func requestScheme(r *http.Request) string {
 	if r.TLS != nil {
 		return "https"
-	}
-	proto := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")))
-	if proto == "https" || proto == "http" {
-		return proto
 	}
 	return "http"
 }
@@ -595,4 +620,60 @@ func (cfg handlerConfig) validate() error {
 
 func ValidateHandlerConfig(opts ...HandlerOption) error {
 	return newHandlerConfig(opts).configErr
+}
+
+// warnIfRedirectFallbackMisuse emits a one-shot WARN event when the handler is falling back
+// to a Host-derived redirect_uri (WEB-02) on a request that looks production-like: a
+// non-loopback Host over a plaintext (non-TLS) connection. It deliberately warns rather than
+// refusing: the fallback is a documented dev convenience, and refusing would break existing
+// deployments that rely on it. The warning fires at most once per handler instance
+// (redirectFallbackWarned), so it never spams per request. Only the bare fallback warns:
+// with WithRedirectURL the URI is pinned, and with WithAllowedHosts the operator has declared
+// the acceptable Hosts.
+func (cfg handlerConfig) warnIfRedirectFallbackMisuse(r *http.Request) {
+	if cfg.redirectURL != "" || len(cfg.allowedHosts) > 0 {
+		return
+	}
+	if r.TLS != nil {
+		return
+	}
+	if isLoopbackHost(r.Host) {
+		return
+	}
+	once := cfg.redirectFallbackWarned
+	if once == nil {
+		// Defensive: a handler built without newHandlerConfig still must not panic; emit every
+		// time rather than crash (the supported path always has a non-nil Once).
+		once = &sync.Once{}
+	}
+	once.Do(func() {
+		event.Emit(r.Context(), cfg.events, event.Event{
+			Type:   event.RedirectFallbackMisuse,
+			Reason: "host_derived_redirect_uri",
+			Attrs:  map[string]any{"host": r.Host},
+		})
+	})
+}
+
+// isLoopbackHost reports whether host (an HTTP Host header value, optionally with a port) refers
+// to the local machine — localhost or a loopback IP literal. These are the legitimate local-HTTP
+// development targets for the redirect_uri fallback, so they must never trigger the misuse
+// warning.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		// No Host at all is not a host we can call "production"; stay quiet.
+		return true
+	}
+	h := host
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		h = hostOnly
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }

@@ -48,11 +48,12 @@ const (
 	MFAVerified             Type = "mfa.verified" // a second factor (TOTP or recovery code) was successfully verified
 	MFAVerificationFailed   Type = "mfa.verification_failed"
 	MFADisabled             Type = "mfa.disabled"
-	MFAUnlocked             Type = "mfa.unlocked"            // an operator reset a locked-out second factor (UnlockMFA)
-	CredentialAdded         Type = "credential.added"        // a passkey/WebAuthn credential was registered
-	CredentialRemoved       Type = "credential.removed"      // a passkey/WebAuthn credential was deleted
-	DeliveryFailed          Type = "delivery.failed"         // a swallowed mailer/delivery error (outage signal)
-	InsecureCookieMisuse    Type = "cookies.insecure_misuse" // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
+	MFAUnlocked             Type = "mfa.unlocked"                   // an operator reset a locked-out second factor (UnlockMFA)
+	CredentialAdded         Type = "credential.added"               // a passkey/WebAuthn credential was registered
+	CredentialRemoved       Type = "credential.removed"             // a passkey/WebAuthn credential was deleted
+	DeliveryFailed          Type = "delivery.failed"                // a swallowed mailer/delivery error (outage signal)
+	InsecureCookieMisuse    Type = "cookies.insecure_misuse"        // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
+	RedirectFallbackMisuse  Type = "oauth.redirect_fallback_misuse" // redirect_uri derived from the request Host in a production-like request (WEB-02): deploy WithRedirectURL or WithAllowedHosts in production
 
 	// API-key lifecycle events.
 	APIKeyCreated       Type = "api_key.created"        // a new API key (PAT or service token) was issued; carries type and created_by in Attrs
@@ -180,7 +181,7 @@ func levelFor(e Event) slog.Level {
 		return slog.LevelError
 	}
 	switch e.Type {
-	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse:
+	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse, RedirectFallbackMisuse:
 		return slog.LevelWarn
 	default:
 		return slog.LevelInfo

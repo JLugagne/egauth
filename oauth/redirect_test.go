@@ -72,20 +72,22 @@ func TestBeginHandler_AllowedHostSucceeds(t *testing.T) {
 		name       string
 		host       string
 		wantHost   string
-		proto      string
+		tlsOn      bool
 		wantScheme string
 	}{
-		{"exact match", "app.example.com", "app.example.com", "https", "https"},
-		{"case insensitive", "APP.EXAMPLE.COM", "APP.EXAMPLE.COM", "https", "https"},
-		{"with port", "app.example.com:8443", "app.example.com:8443", "https", "https"},
-		{"http scheme", "app.example.com", "app.example.com", "http", "http"},
+		{"exact match", "app.example.com", "app.example.com", false, "http"},
+		{"case insensitive", "APP.EXAMPLE.COM", "APP.EXAMPLE.COM", false, "http"},
+		{"with port", "app.example.com:8443", "app.example.com:8443", false, "http"},
+		{"TLS connection", "app.example.com", "app.example.com", true, "https"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
 			req.Host = tc.host
-			req.Header.Set("X-Forwarded-Proto", tc.proto)
+			if tc.tlsOn {
+				req.TLS = &tls.ConnectionState{}
+			}
 			rec := httptest.NewRecorder()
 
 			handler.ServeHTTP(rec, req)
@@ -159,52 +161,4 @@ func TestCallbackHandler_AllowedHostSucceeds(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, "u@example.com", linker.gotEmail)
-}
-
-func TestRequestScheme_Sanitization(t *testing.T) {
-	t.Run("TLS connection is always https", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.TLS = &tls.ConnectionState{}
-		req.Header.Set("X-Forwarded-Proto", "http")
-
-		assert.Equal(t, "https", requestScheme(req))
-	})
-
-	t.Run("X-Forwarded-Proto https", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("X-Forwarded-Proto", "https")
-
-		assert.Equal(t, "https", requestScheme(req))
-	})
-
-	t.Run("X-Forwarded-Proto HTTPS with whitespace", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("X-Forwarded-Proto", "  HTTPS  ")
-
-		assert.Equal(t, "https", requestScheme(req))
-	})
-
-	t.Run("X-Forwarded-Proto http", func(t *testing.T) {
-		req := httptest.NewRequest(http.MethodGet, "/", nil)
-		req.Header.Set("X-Forwarded-Proto", "http")
-
-		assert.Equal(t, "http", requestScheme(req))
-	})
-
-	t.Run("Arbitrary / malicious scheme falls back to http", func(t *testing.T) {
-		maliciousSchemes := []string{
-			"javascript:alert(1)",
-			"ftp",
-			"data",
-			"evil://attack",
-			"",
-			" ",
-		}
-
-		for _, s := range maliciousSchemes {
-			req := httptest.NewRequest(http.MethodGet, "/", nil)
-			req.Header.Set("X-Forwarded-Proto", s)
-			assert.Equal(t, "http", requestScheme(req), "scheme %q must fall back to http", s)
-		}
-	})
 }

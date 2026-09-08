@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -352,7 +353,7 @@ func TestSecOau06_ResolveRedirectURL_UnsanitizedHostAndForwardedProto(t *testing
 	// 2. Legitimate host produces the expected redirect URI
 	reqLegit := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
 	reqLegit.Host = "app.example.com"
-	reqLegit.Header.Set("X-Forwarded-Proto", "https")
+	reqLegit.TLS = &tls.ConnectionState{}
 	recLegit := httptest.NewRecorder()
 
 	beginHandler.ServeHTTP(recLegit, reqLegit)
