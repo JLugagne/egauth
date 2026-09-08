@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,8 +16,24 @@ import (
 )
 
 const (
-	DefaultTokenTTL       = 5 * time.Minute
-	DefaultFlowCookieName = "auth_flow_token"
+	DefaultTokenTTL = 5 * time.Minute
+
+	// DefaultFlowCookieName is the secure-by-default name of the HTTP-only cookie that
+	// carries the HMAC-sealed MFA step-up flow token (tenant/user/state). It carries the
+	// browser-enforced __Host- prefix, which guarantees the cookie is host-locked: browsers
+	// refuse to store it unless it is Secure, carries no Domain, and has Path=/. That
+	// structurally defeats sibling-subdomain cookie-tossing — an attacker controlling
+	// evil.example.com could otherwise plant their own legitimately-obtained flow cookie in
+	// a victim's browser and drive the victim's second factor against the attacker's
+	// account. Use WithCookieName to override it only when the deployment genuinely cannot
+	// meet the __Host- requirements (plain-HTTP local development, a path-scoped mount);
+	// overriding to a plain name forfeits the host-lock hardening.
+
+	// hostPrefix is the browser-enforced __Host- cookie-name prefix (see
+	// DefaultFlowCookieName and validate).
+	hostPrefix = "__Host-"
+
+	DefaultFlowCookieName = hostPrefix + "auth_flow_token"
 )
 
 // Engine orchestrates the authentication state machine and credentials pipeline.
@@ -28,8 +45,11 @@ type Engine struct {
 	validator  AccountValidator
 	pwChecker  PasswordPolicyChecker
 	cookieName string
-	sink       event.Sink
-	now        func() time.Time
+	// cookieDomain and cookiePath are the attributes the flow-cookie set/clear sites write. There are deliberately no options to change them: the default __Host- name is only storable with an empty Domain and Path="/", and validate fails construction if that invariant is ever broken (e.g. by adding attribute options without extending the guard).
+	cookieDomain string
+	cookiePath   string
+	sink         event.Sink
+	now          func() time.Time
 }
 
 // Option configures an Engine instance.
@@ -59,6 +79,14 @@ func WithTokenTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithCookieName overrides the name of the HTTP-only cookie that carries the MFA step-up
+// flow token. The secure default is DefaultFlowCookieName ("__Host-auth_flow_token"), whose
+// __Host- prefix makes browsers enforce the host-lock (Secure, no Domain, Path=/) that
+// defeats sibling-subdomain cookie-tossing of the sealed flow state. Use it only as an
+// escape hatch when the deployment genuinely cannot satisfy the __Host- requirements (e.g.
+// a path-scoped cookie mount, or local plain-HTTP development); overriding to a plain name
+// forfeits that hardening, and the trade-off is the caller's explicit choice. An empty name
+// disables the flow cookie entirely (the flow token must then be carried by other means).
 func WithCookieName(name string) Option {
 	return func(e *Engine) { e.cookieName = name }
 }
@@ -77,11 +105,19 @@ func NewEngine(secret []byte, opts ...Option) (*Engine, error) {
 		secret:     secret,
 		ttl:        DefaultTokenTTL,
 		cookieName: DefaultFlowCookieName,
+		cookiePath: "/",
 		now:        time.Now,
 	}
 
 	for _, opt := range opts {
 		opt(e)
+	}
+
+	// Fail construction loudly on a cookie configuration browsers would silently refuse to
+	// store: a __Host- flow cookie that never reaches the browser breaks MFA step-up with
+	// no visible cause.
+	if err := e.validate(); err != nil {
+		return nil, err
 	}
 
 	return e, nil
@@ -171,7 +207,8 @@ func (e *Engine) ProcessPrimaryAuth(
 			http.SetCookie(w, &http.Cookie{
 				Name:     e.cookieName,
 				Value:    flowToken,
-				Path:     "/",
+				Domain:   e.cookieDomain,
+				Path:     e.cookiePath,
 				HttpOnly: true,
 				Secure:   r != nil && r.TLS != nil,
 				SameSite: http.SameSiteLaxMode,
@@ -295,7 +332,8 @@ func (e *Engine) clearFlowCookie(w http.ResponseWriter, r *http.Request) {
 		http.SetCookie(w, &http.Cookie{
 			Name:     e.cookieName,
 			Value:    "",
-			Path:     "/",
+			Domain:   e.cookieDomain,
+			Path:     e.cookiePath,
 			HttpOnly: true,
 			Secure:   r != nil && r.TLS != nil,
 			MaxAge:   -1,
@@ -316,4 +354,24 @@ func contains(slice []string, val string) bool {
 		}
 	}
 	return false
+}
+
+// validate fails construction when the flow-cookie name and the attributes the engine writes
+// are incompatible. The __Host- prefix is browser-enforced: a cookie named __Host-* is
+// silently discarded unless it is written with no Domain and Path=/ — the cookie would then
+// never reach the browser and MFA step-up would fail with no visible cause, so the
+// misconfiguration must be caught here, loudly, before the engine serves a single request.
+// (The Secure attribute is request-driven; it is the deployment's job, not this guard's.)
+func (e *Engine) validate() error {
+	if !strings.HasPrefix(e.cookieName, hostPrefix) {
+		return nil
+	}
+	var errs []error
+	if e.cookieDomain != "" {
+		errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Domain to be empty, got %q", e.cookieName, e.cookieDomain))
+	}
+	if e.cookiePath != "/" {
+		errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Path=\"/\", got %q", e.cookieName, e.cookiePath))
+	}
+	return errors.Join(errs...)
 }
