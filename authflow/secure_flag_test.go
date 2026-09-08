@@ -142,15 +142,16 @@ func (s *recordingSink) EmitEvent(_ context.Context, e event.Event) {
 // TestAuthFlow_InsecureOptOut_DropsSecureOnlyForNonHostNames proves that WithInsecureCookies
 // removes the Secure attribute for plain (non-__Host-) cookie names — the documented local-HTTP
 // development escape hatch — on both cookie writers the authflow package owns: the engine's flow
-// cookie (default name is plain) and the stateful session minter (custom non-__Host- name).
+// cookie (with a plain name chosen via WithCookieName; the default name is __Host- prefixed and
+// therefore always Secure) and the stateful session minter (custom non-__Host- name).
 func TestAuthFlow_InsecureOptOut_DropsSecureOnlyForNonHostNames(t *testing.T) {
 	ctx := context.Background()
 	secret := []byte("01234567890123456789012345678901")
 	user := &identity.User{ID: uuid.New(), TenantID: "tenant-1", Email: "user@example.com"}
 
-	t.Run("flow cookie (default non-__Host- name)", func(t *testing.T) {
+	t.Run("flow cookie with explicit plain name", func(t *testing.T) {
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return true, nil }}
-		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithInsecureCookies())
+		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithCookieName("auth_flow_token"), authflow.WithInsecureCookies())
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "http://api.example.com/login", nil)
@@ -159,7 +160,7 @@ func TestAuthFlow_InsecureOptOut_DropsSecureOnlyForNonHostNames(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, authflow.StateMFAChallenged, result.State)
 
-		c := cookieByName(t, rec, authflow.DefaultFlowCookieName)
+		c := cookieByName(t, rec, "auth_flow_token")
 		assert.False(t, c.Secure, "WithInsecureCookies must drop Secure on the plain flow-cookie name")
 	})
 
