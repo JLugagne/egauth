@@ -54,10 +54,14 @@ func challengedFlowToken(t *testing.T, engine *authflow.Engine, user *identity.U
 }
 
 // stepUpRequest builds a step-up POST carrying the flow-token cookie and a code form field.
+// Same-origin by default so business-logic tests pass the strict-by-default CSRF check
+// (httptest.NewRequest sets Host to "example.com"); the origin-behavior tests in
+// origin_check_test.go override the header to exercise the cross-origin path explicitly.
 func stepUpRequest(flowToken, code string) *http.Request {
 	form := url.Values{"code": {code}}
 	req := httptest.NewRequest(http.MethodPost, "/auth/mfa/step-up", strings.NewReader(form.Encode()))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://"+req.Host)
 	req.AddCookie(&http.Cookie{Name: authflow.DefaultFlowCookieName, Value: flowToken})
 	return req
 }
@@ -153,7 +157,10 @@ func TestStepUpHandler_InvalidCodeRejected(t *testing.T) {
 }
 
 // TestStepUpHandler_MissingFlowTokenRejected proves an anonymous POST cannot reach the verifier:
-// without a flow token there is no challenged ceremony to complete.
+// without a flow token there is no challenged ceremony to complete. The request carries a
+// same-origin Origin so it reaches the flow-token check (an absent Origin is rejected earlier by
+// the strict-by-default CSRF check, which TestStepUpHandler_OriginCheck_MissingOriginUntrusted
+// pins separately).
 func TestStepUpHandler_MissingFlowTokenRejected(t *testing.T) {
 	minter := &mockSessionMinter{}
 	engine := stepUpEngine(t, minter)
@@ -161,6 +168,7 @@ func TestStepUpHandler_MissingFlowTokenRejected(t *testing.T) {
 	v := &mockVerifier{}
 	req := httptest.NewRequest(http.MethodPost, "/auth/mfa/step-up", strings.NewReader("code=123456"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Origin", "https://"+req.Host)
 	rec := httptest.NewRecorder()
 	authflow.StepUpHandler(engine, v)(rec, req)
 
