@@ -31,4 +31,16 @@ var (
 	// is refused by the configured attestation policy (e.g. its AAGUID is outside the allow-list or
 	// on the deny-list). No credential is stored when this is returned.
 	ErrAttestationRejected = errors.New("passkey: attestation rejected by policy")
+
+	// ErrAccountDisabled is returned by BeginLogin, FinishLogin and FinishDiscoverableLogin when
+	// the configured account-lifecycle gate (Config.AccountGate) reports the resolved account as
+	// administratively suspended (e.g. identity.DisableUser, which preserves passkey enrollment
+	// by design). A suspended account must not mint a session. Handlers surface it as 403
+	// "account_disabled".
+	ErrAccountDisabled = errors.New("passkey: account is disabled")
+
+	// ErrAccountDeleted is returned by the login ceremonies when the lifecycle gate reports the
+	// resolved account as soft-deleted (or otherwise no longer present). Handlers surface it as
+	// 403 "account_deleted".
+	ErrAccountDeleted = errors.New("passkey: account is deleted")
 )

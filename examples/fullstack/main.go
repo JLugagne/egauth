@@ -175,6 +175,9 @@ func BuildServer() (http.Handler, error) {
 		return nil, fmt.Errorf("generate passkey cookie key: %w", err)
 	}
 	// Using InsecureNoChallengeStore is NOT set: we always supply a real challenge store.
+	// AccountGate wires the passkey login paths to the identity user store's lifecycle
+	// (identity.DisableUser / DeleteUser): a suspended or soft-deleted account is refused at
+	// BeginLogin (defense in depth) and at FinishLogin, instead of minting a session.
 	pkSvc, err := passkey.NewService(passkeyStore, passkey.Config{
 		RPID:             "localhost",
 		RPDisplayName:    "egauth fullstack example",
@@ -183,6 +186,7 @@ func BuildServer() (http.Handler, error) {
 		CookieKey:        cookieKey,
 		ChallengeStore:   challengeStore,
 		Events:           audit,
+		AccountGate:      passkey.NewIdentityAccountGate(idStore),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("passkey.NewService: %w", err)

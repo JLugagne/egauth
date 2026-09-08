@@ -59,8 +59,31 @@ type Config struct {
     ChallengeStore           ChallengeStore                       // single-use replay protection; REQUIRED unless InsecureNoChallengeStore
     InsecureNoChallengeStore bool                                 // opt-out of ChallengeStore requirement (NOT for passwordless)
     Events                   event.Sink                           // optional; receives LoginSucceeded / AccountBlocked events
+    AccountGate              AccountGate                          // optional lifecycle gate; REQUIRED when accounts can be disabled/deleted
 }
 ```
+
+### AccountGate
+
+```go
+type AccountGate func(ctx context.Context, tenantID string, userID uuid.UUID) error
+```
+
+Account-lifecycle chokepoint for the login ceremonies (mirrors `authflow`'s AccountValidator).
+When wired via `Config.AccountGate` it is consulted:
+
+- on `BeginLogin` — before any ceremony state is issued (disabled/deleted accounts cannot even
+  start a ceremony; defense in depth);
+- on `FinishLogin` / `FinishDiscoverableLogin` — after the assertion is cryptographically
+  verified but BEFORE the login is reported successful, so an account suspended with
+  `identity.DisableUser` (which deliberately preserves passkey enrollment) or soft-deleted can
+  no longer mint a session.
+
+Return `ErrAccountDisabled` for a suspended account and `ErrAccountDeleted` for a deleted one
+(handlers map them to 403 `account_disabled` / `account_deleted`); any other error is a
+gate/infrastructure failure and fails closed (500). `BeginDiscoverableLogin` has no user to
+gate — the discoverable flow is enforced at Finish. A nil gate skips the check (passkey-only
+deployments without the identity module).
 
 ### Ceremony session type
 
@@ -79,6 +102,9 @@ st.Service() // returns underlying *Service when explicit tenant needed
 // Memory stores (tests / single-process)
 store   := memory.NewStore()
 chStore := memory.NewChallengeStore()
+
+// Ready-made identity-backed lifecycle gate (wire it into Config.AccountGate)
+gate := passkey.NewIdentityAccountGate(identityStore) // identity.UserStore
 ```
 
 ### SingleTenant method signatures
@@ -170,6 +196,9 @@ var ErrCredentialExists     = errors.New("passkey: credential already exists")
 var ErrCredentialCloned     = errors.New("passkey: authenticator signature counter regressed (possible clone)")
 var ErrSessionInvalid       = errors.New("passkey: ceremony session is missing or invalid")
 var ErrTenantMismatch       = errors.New("passkey: tenant ID mismatch")
+var ErrAttestationRejected  = errors.New("passkey: attestation rejected by policy")
+var ErrAccountDisabled      = errors.New("passkey: account is disabled")
+var ErrAccountDeleted       = errors.New("passkey: account is deleted")
 ```
 
 HTTP error mapping (via `fail`):
@@ -181,6 +210,9 @@ HTTP error mapping (via `fail`):
 | `ErrCredentialCloned` | 401 `credential_cloned` |
 | `ErrCredentialNotFound` | 404 `credential_not_found` |
 | `ErrCredentialExists` | 409 `credential_exists` |
+| `ErrAttestationRejected` | 403 `attestation_rejected` |
+| `ErrAccountDisabled` | 403 `account_disabled` |
+| `ErrAccountDeleted` | 403 `account_deleted` |
 | `*protocol.Error` | 400 `verification_failed` |
 | other | 500 `internal_error` |
 
@@ -190,6 +222,7 @@ HTTP error mapping (via `fail`):
 - **Cookie authentication**: ceremony cookie is HMAC-SHA256 signed with `CookieKey` (prepended 32-byte tag + base64url). Tampered or missing cookies → `ErrSessionInvalid`. Cookie is single-use: cleared on every `loadSession` call regardless of outcome.
 - **Replay protection**: `ChallengeStore.Consume` called on Finish before assertion verification. Second Consume of same challenge returns false → 400. Atomic Consume is a contract requirement on implementations.
 - **Clone detection**: regressed signature counter → `ErrCredentialCloned` + `AccountBlocked` event emitted.
+- **Account lifecycle**: wire `Config.AccountGate` (`passkey.NewIdentityAccountGate(identityStore)`) so `identity.DisableUser`/`DeleteUser` take effect on the passkey login path — `DisableUser` preserves passkey enrollment by design, so without the gate a suspended account still mints sessions. Blocked logins emit an `AccountBlocked` event with `Reason="account_disabled"` / `"account_deleted"`.
 - **Body cap**: Finish handlers wrap `r.Body` in `http.MaxBytesReader` at `DefaultMaxBodyBytes` (64 KiB) to prevent memory-pressure DoS.
 - **Origin/RPID checks**: enforced by go-webauthn; RPID and RPOrigins must match the frontend exactly.
 - **Ceremony timeout**: 5 min, enforced server-side via `Timeouts.Enforce: true` in go-webauthn config.

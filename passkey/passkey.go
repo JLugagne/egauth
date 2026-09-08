@@ -24,6 +24,13 @@
 //     it at the zero value for passwordless/step-up; set it explicitly to
 //     protocol.VerificationPreferred/Discouraged ONLY for a flow where another factor already
 //     authenticated the user.
+//   - Config.AccountGate — REQUIRED for deployments that can administratively disable or delete
+//     accounts. identity.DisableUser deliberately preserves passkey enrollment (a reversible
+//     suspension), so WITHOUT the gate a suspended account still completes FinishLogin and
+//     mints a session. Wire NewIdentityAccountGate(identityStore): BeginLogin refuses a
+//     suspended/deleted account up front, and FinishLogin / FinishDiscoverableLogin refuse an
+//     otherwise-valid assertion with 403 "account_disabled" / "account_deleted". A nil gate
+//     skips the check (passkey-only deployments without the identity module).
 //   - Serve over HTTPS so the Secure ceremony cookie is sent. WithInsecureCookies is for local
 //     HTTP development only.
 //   - Rate-limit ceremony attempts in front of the handlers (egauth does not throttle them).
