@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Passkey login enforces account lifecycle** (#116): a new `passkey.Config.AccountGate`
+  (wire `passkey.NewIdentityAccountGate(identityStore)`) refuses login ceremonies for
+  accounts administratively disabled with `identity.DisableUser` (which preserves passkey
+  enrollment) or soft-deleted — `BeginLogin` refuses up front, `FinishLogin` /
+  `FinishDiscoverableLogin` refuse after a valid assertion with 403 `account_disabled` /
+  `account_deleted`, and the blocked attempt is audited as an `AccountBlocked` event. The
+  fullstack example wires the gate.
+
 ## [v0.10.0] — 2026-09-08
 
 ### Added

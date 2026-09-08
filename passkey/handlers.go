@@ -422,6 +422,12 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 		http.Error(w, "credential_exists", http.StatusConflict)
 	case errors.Is(err, ErrAttestationRejected):
 		http.Error(w, "attestation_rejected", http.StatusForbidden)
+	case errors.Is(err, ErrAccountDisabled):
+		// The account-lifecycle gate refused the login (Config.AccountGate): a suspended
+		// account must not mint a session, surfaced distinctly so UX can explain it.
+		http.Error(w, "account_disabled", http.StatusForbidden)
+	case errors.Is(err, ErrAccountDeleted):
+		http.Error(w, "account_deleted", http.StatusForbidden)
 	case errors.As(err, &protoErr):
 		// A WebAuthn protocol error is a bad/invalid attestation or assertion from the client.
 		http.Error(w, "verification_failed", http.StatusBadRequest)

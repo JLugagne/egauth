@@ -83,9 +83,26 @@ type Config struct {
 	InsecureNoChallengeStore bool
 	// Events is an optional security-event sink (see the event package). When set it receives a
 	// LoginSucceeded event on each completed passkey login and an AccountBlocked event when a
-	// regressed signature counter flags a possible cloned authenticator. A nil sink disables
-	// emission.
+	// regressed signature counter flags a possible cloned authenticator (or when the account
+	// lifecycle gate refuses the login). A nil sink disables emission.
 	Events event.Sink
+	// AccountGate optionally enforces the account lifecycle on the login ceremonies. When set,
+	// it is consulted with the resolved (tenant, user) pair:
+	//
+	//   - on BeginLogin — before any ceremony state is issued, so a disabled or soft-deleted
+	//     account cannot even start a ceremony (defense in depth);
+	//   - on FinishLogin / FinishDiscoverableLogin — after the assertion is cryptographically
+	//     verified but BEFORE the login is reported successful, so an account administratively
+	//     disabled (identity.DisableUser, which preserves passkey enrollment by design) or
+	//     soft-deleted can no longer mint a session.
+	//
+	// Return ErrAccountDisabled for a suspended account and ErrAccountDeleted for a deleted one
+	// — handlers map those to 403 "account_disabled" / "account_deleted". Any other error is a
+	// gate/infrastructure failure and fails the request closed (500). BeginDiscoverableLogin
+	// has no user to gate; the discoverable flow is enforced at Finish. A nil AccountGate skips
+	// the lifecycle check entirely (passkey can be deployed without the identity module);
+	// wire NewIdentityAccountGate(identityStore) for standard enforcement.
+	AccountGate AccountGate
 	// Attestation is the opt-in attestation policy (conveyance preference + AAGUID allow/deny +
 	// optional MDS trust validation). Its zero value preserves today's behavior: no preference, no
 	// filtering, no MDS. See AttestationConfig.
@@ -94,11 +111,12 @@ type Config struct {
 
 // Service runs the WebAuthn registration and login ceremonies over a credential Store.
 type Service struct {
-	wa         *webauthn.WebAuthn
-	store      Store
-	events     event.Sink
-	cookieKey  []byte
-	challenges ChallengeStore
+	wa          *webauthn.WebAuthn
+	store       Store
+	events      event.Sink
+	cookieKey   []byte
+	challenges  ChallengeStore
+	accountGate AccountGate
 }
 
 // ceremonyTimeout bounds how long an in-flight registration/login ceremony stays valid.
@@ -186,11 +204,12 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		return nil, err
 	}
 	return &Service{
-		wa:         wa,
-		store:      store,
-		events:     cfg.Events,
-		cookieKey:  cfg.CookieKey,
-		challenges: cfg.ChallengeStore,
+		wa:          wa,
+		store:       store,
+		events:      cfg.Events,
+		cookieKey:   cfg.CookieKey,
+		challenges:  cfg.ChallengeStore,
+		accountGate: cfg.AccountGate,
 	}, nil
 }
 
@@ -241,6 +260,12 @@ func (s *Service) FinishRegistration(ctx context.Context, tenantID string, userI
 // BeginLogin starts a login ceremony for a user that has at least one passkey, returning the
 // assertion options for navigator.credentials.get() and the SessionData.
 func (s *Service) BeginLogin(ctx context.Context, tenantID string, userID uuid.UUID) (*protocol.CredentialAssertion, *webauthn.SessionData, error) {
+	// Defense in depth: refuse to start a ceremony for an account the lifecycle gate rejects
+	// (disabled / soft-deleted). The Finish-time check stays authoritative — an account can be
+	// suspended mid-ceremony — but this saves the ceremony for an already-suspended account.
+	if err := s.checkAccountGate(ctx, tenantID, userID); err != nil {
+		return nil, nil, err
+	}
 	u, err := s.loadUser(ctx, tenantID, userID, "", "")
 	if err != nil {
 		return nil, nil, err
@@ -266,6 +291,13 @@ func (s *Service) FinishLogin(ctx context.Context, tenantID string, userID uuid.
 		_ = s.store.DeleteCredential(ctx, tenantID, userID, cred.ID)
 		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: userID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, ErrCredentialCloned
+	}
+	// Lifecycle chokepoint: the assertion just verified cryptographically, so consult the
+	// account gate BEFORE reporting success — a disabled or soft-deleted account must not mint
+	// a session, even though DisableUser preserves its passkey enrollment by design.
+	if err := s.checkAccountGate(ctx, tenantID, userID); err != nil {
+		s.emitLifecycleBlocked(ctx, tenantID, userID, err)
+		return nil, err
 	}
 	stored, err := toStored(userID, cred)
 	if err != nil {
@@ -328,6 +360,12 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 		_ = s.store.DeleteCredential(ctx, tenantID, resolvedID, cred.ID)
 		s.emit(ctx, event.Event{Type: event.AccountBlocked, UserID: resolvedID.String(), TenantID: tenantID, Reason: "passkey_clone_detected"})
 		return nil, uuid.Nil, ErrCredentialCloned
+	}
+	// Lifecycle chokepoint, same as FinishLogin, applied to the account resolved from the
+	// credential's user handle before the login is reported successful.
+	if err := s.checkAccountGate(ctx, tenantID, resolvedID); err != nil {
+		s.emitLifecycleBlocked(ctx, tenantID, resolvedID, err)
+		return nil, uuid.Nil, err
 	}
 	stored, err := toStored(resolvedID, cred)
 	if err != nil {
