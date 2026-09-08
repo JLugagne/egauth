@@ -37,7 +37,7 @@ type handlerConfig struct {
 	insecureNoOriginCheck bool
 	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
 	maxBodyBytes int64
-	// mustChangeResolve, when set and reporting true, marks the stepped-up user as must-change: StepUpHandler stamps Claims.MustChangePassword=true on the re-issued full pair. The pair is renewable, but the refresh family persists the flag (Rotate replays it on every refresh), so a verified interim token carrying the flag cannot escape the forced-change gate after a second factor. Nil (default) leaves the flag unset.
+	// mustChangeResolve, when set, overrides the default must-change propagation: reporting true stamps Claims.MustChangePassword=true on the re-issued full pair, reporting false clears a stale interim flag (e.g. a live re-check of identity.PasswordChangeRequired). Nil (default) propagates the verified interim token's flag, so a flagged interim yields a flagged pair and the forced-change gate survives step-up on default wiring.
 	mustChangeResolve func(r *http.Request) bool
 	stepUpRequired    bool
 	amrResolve        func(r *http.Request) []string
@@ -441,14 +441,24 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		// did not verify (SEC-MFA-01). With no interim AMR resolvable, the historical password
 		// default applies.
 		claims.AMR = steppedUpAMR[C](cfg, r)
-		// Carry the forced-change gate forward: if the verified interim token was flagged
-		// must-change, the stepped-up full pair stays flagged. The session is fully renewable — the
-		// refresh family persists the flag and Rotate replays it onto every silent refresh — so an
-		// MFA-enrolled must-change user cannot escape WithPasswordChangeGate by completing a second
-		// factor and then refreshing. The flag clears only on a fresh login after the password is
-		// changed (or when an admin revokes the family).
-		if cfg.mustChangeResolve != nil && cfg.mustChangeResolve(r) {
-			claims.MustChangePassword = true
+		// Carry the forced-change gate forward: the stepped-up full pair keeps the verified interim
+		// token's must-change flag. The session is fully renewable — the refresh family persists the
+		// flag and Rotate replays it onto every silent refresh — so an MFA-enrolled must-change user
+		// cannot escape WithPasswordChangeGate by completing a second factor and then refreshing. The
+		// flag clears only on a fresh login after the password is changed (or when an admin revokes
+		// the family). By default the flag is read from the interim claims in r.Context() (the entry
+		// tokens.ContextMiddleware injects), so default wiring is safe. WithMustChangeResolver
+		// overrides the interim flag per request — reporting true flags the pair unconditionally,
+		// reporting false clears it (a live re-check of identity.PasswordChangeRequired, e.g. after
+		// the user changed their password in the meantime). Custom StepUpClaimsBuilders that mint
+		// claims from the user record SHOULD still re-check identity.PasswordChangeRequired: the
+		// interim flag is advisory and may be stale within the interim token's TTL.
+		if cfg.mustChangeResolve != nil {
+			if cfg.mustChangeResolve(r) {
+				claims.MustChangePassword = true
+			}
+		} else if interim, ok := tokens.ClaimsFromContext[C](r.Context()); ok {
+			claims.MustChangePassword = interim.MustChangePassword
 		}
 		pair, err := issuer.IssueTokenPair(r.Context(), claims)
 		if err != nil {
