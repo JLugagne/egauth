@@ -75,17 +75,21 @@ func (s *eddsaSigner) Method() jwt.SigningMethod { return jwt.SigningMethodEdDSA
 func (s *eddsaSigner) SignKey() any              { return s.key }
 func (s *eddsaSigner) VerifyKey() any            { return s.key.Public() }
 
-// NewHMACSigner builds an HS256 signer. The secret must be at least MinSecretKeyLength bytes; the
-// key id may be empty (the legacy kid-less mode). The weak-key bypass lives at the Config level,
-// not here.
+// NewHMACSigner builds an HS256 signer. The secret must be at least MinSecretKeyLength bytes and
+// must not match a key published in this project's examples or documentation (see denylist.go);
+// the key id may be empty (the legacy kid-less mode). The weak-key bypass lives at the Config
+// level, not here.
 func NewHMACSigner(keyID string, secret []byte) (Signer, error) {
 	return newHMACSignerAllowWeak(keyID, secret, false)
 }
 
 // newHMACSignerAllowWeak builds an HS256 signer, optionally permitting a sub-minimum secret. It is
 // the unexported seam used by resolveKeyset to honor Config.InsecureAllowWeakKey; NewHMACSigner
-// always passes allowWeak=false.
+// always passes allowWeak=false. The published-key denylist is checked regardless of allowWeak.
 func newHMACSignerAllowWeak(keyID string, secret []byte, allowWeak bool) (Signer, error) {
+	if err := deniedSecretError(secret); err != nil {
+		return nil, err
+	}
 	if !allowWeak && len(secret) < MinSecretKeyLength {
 		return nil, fmt.Errorf(
 			"secret is only %d bytes; HS256 requires at least %d bytes to resist brute-force attacks (set InsecureAllowWeakKey in tests only)",

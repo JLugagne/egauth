@@ -161,7 +161,8 @@ const MinSecretKeyLength = 32
 const MinTokenLength = 16
 
 // Validate reports configuration that would make the issuer insecure or non-functional: an
-// empty/too-short signing key (or keyset), an empty Issuer, or a non-positive Access/Refresh
+// empty/too-short signing key (or keyset), a key matching one published in this project's
+// examples/docs, an empty Issuer, or a non-positive Access/Refresh
 // TTL. Production callers SHOULD call it at startup (it returns all problems joined). New itself
 // only hard-fails configurations from which no coherent signer can be built, so test code may
 // still construct an issuer with, e.g., a deliberately negative AccessTTL to exercise expiry.
@@ -223,6 +224,9 @@ func (cfg Config[C]) Validate() error {
 			if len(k.Secret) < MinSecretKeyLength {
 				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q].Secret must be at least %d bytes for HS256", k.KeyID, MinSecretKeyLength))
 			}
+			if err := deniedSecretError([]byte(k.Secret)); err != nil {
+				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q]: %w", k.KeyID, err))
+			}
 		}
 		if cfg.ActiveKeyID == "" {
 			if len(cfg.SigningKeys) > 1 {
@@ -237,6 +241,11 @@ func (cfg Config[C]) Validate() error {
 		}
 	}
 
+	if cfg.SecretKey != "" {
+		if err := deniedSecretError([]byte(cfg.SecretKey)); err != nil {
+			errs = append(errs, fmt.Errorf("jwt: SecretKey: %w", err))
+		}
+	}
 	if cfg.Issuer == "" {
 		errs = append(errs, errors.New("jwt: Issuer must not be empty"))
 	}
@@ -350,10 +359,12 @@ func resolveKeyset[C any](cfg Config[C]) (active Signer, verify map[string]Signe
 }
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
-// be built: no signing key, a malformed keyset, any key shorter than MinSecretKeyLength, or a
+// be built: no signing key, a malformed keyset, any key shorter than MinSecretKeyLength, any key
+// matching one published in this project's examples/docs (attacker-known), or a
 // RefreshLength/APIKeyLength below MinTokenLength.
 // The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
 // exists exclusively for test code that needs short keys; production callers must never set it.
+// The published-key denylist is enforced unconditionally and cannot be bypassed.
 // For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
 	// Fail fast at startup rather than with a nil-pointer panic deep in a request,

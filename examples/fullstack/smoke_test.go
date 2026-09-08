@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 
@@ -211,4 +212,25 @@ func ExampleBuildServer() {
 	// Output:
 	// status: 204
 	// access cookie set: true
+}
+
+// TestNoPublishedSigningKeys is the regression guard for SECRETS-01 (issue #104):
+// the example must never ship a signing key that was published in this repo.
+// BuildServer generates its HS256 key with crypto/rand at startup; if anyone
+// reintroduces a published literal here, this test (and, via the jwt package
+// denylist, the smoke tests) fail.
+func TestNoPublishedSigningKeys(t *testing.T) {
+	raw, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("read main.go: %v", err)
+	}
+	src := string(raw)
+	for _, literal := range []string{
+		"replace-with-a-32-byte-minimum-secret-in-production!",
+		"super-secret-32-byte-key-here!!!",
+	} {
+		if strings.Contains(src, literal) {
+			t.Errorf("examples/fullstack/main.go still contains the published signing key %q — a copy-pasted deployment would mint forgeable tokens", literal)
+		}
+	}
 }

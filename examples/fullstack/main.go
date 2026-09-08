@@ -42,6 +42,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -119,10 +121,19 @@ func BuildServer() (http.Handler, error) {
 			}, nil
 		},
 	)
+	// The HS256 signing key is generated fresh at startup with crypto/rand: it is never
+	// committed to the repo, and jwt.New refuses any key copied from a published example.
+	// Random-per-boot means issued tokens do not survive a restart — acceptable for this
+	// demo and safer than a constant. In production, load the key from a secret manager
+	// (environment variable, vault) instead of generating one here.
+	signingKey := make([]byte, 32)
+	if _, err := rand.Read(signingKey); err != nil {
+		return nil, fmt.Errorf("generate HS256 signing key: %w", err)
+	}
 	issuer := jwt.New[AppClaims](jwt.Config[AppClaims]{
 		Store:          tokenStore,
 		Issuer:         "egauth-fullstack-example",
-		SecretKey:      "replace-with-a-32-byte-minimum-secret-in-production!",
+		SecretKey:      hex.EncodeToString(signingKey),
 		AccessTTL:      15 * time.Minute,
 		RefreshTTL:     720 * time.Hour,
 		ClaimsProvider: claimsProvider,

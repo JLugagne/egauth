@@ -13,6 +13,8 @@ The `tokens` module manages stateless Access Tokens (JWT) and stateful Refresh T
 
 ```go
 import (
+	"os"
+
 	"github.com/JLugagne/egauth/tokens"
 	jwtissuer "github.com/JLugagne/egauth/tokens/jwt"
 )
@@ -28,8 +30,11 @@ tokenService := jwtissuer.New(jwtissuer.Config[MyClaims]{
 	Store:            tokensStore,
 	Issuer:           "https://auth.example.com",  // stamped at issuance AND verified
 	ExpectedAudience: []string{"api.example.com"}, // any-of; verified on the access path
-	SecretKey:        "super-secret-32-byte-key-here!!!", // HS256 signing key
-	ClaimsProvider:   myClaimsProvider,            // required for Rotate (refresh)
+	// The HS256 signing key must come from your environment or a secret manager —
+	// never hardcode it in source. jwtissuer.New rejects keys shorter than 32 bytes
+	// and any key copied from a published example or doc.
+	SecretKey:        os.Getenv("EGAUTH_SECRET_KEY"), // HS256 signing key, >= 32 bytes
+	ClaimsProvider:   myClaimsProvider,               // required for Rotate (refresh)
 })
 
 // Build a Claims value (it carries the Subject, TenantID and custom data)
@@ -48,6 +53,8 @@ pair, err := tokenService.IssueTokenPair(ctx, tokens.Claims[MyClaims]{
 
 fmt.Println("Access Token:", pair.AccessToken)
 ```
+
+> **Security Note:** the HS256 `SecretKey` must never be hardcoded or copied from documentation — a key published anywhere is attacker-known, and `jwtissuer.New` (plus `Config.Validate`) rejects such values outright. Generate a unique key with `crypto/rand` and load it at startup from your secret manager (environment variable, vault). Keys shorter than `jwt.MinSecretKeyLength` (32 bytes) are also rejected.
 
 > **Security Note:** Refresh tokens are opaque strings. Only their SHA-256 hash (via `tokens.HashToken`) is stored in the database.
 
