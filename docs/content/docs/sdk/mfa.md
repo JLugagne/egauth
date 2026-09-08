@@ -77,6 +77,7 @@ Passkeys eliminate passwords entirely by using the user's device (FaceID, TouchI
 ```go
 import (
 	"net/http"
+	"os"
 
 	"github.com/JLugagne/egauth/passkey"
 	"github.com/go-webauthn/webauthn/protocol"
@@ -93,8 +94,10 @@ if err != nil {
 	// handle error
 }
 
-// Requires a random, stable 32-byte key to HMAC sign the ceremony cookies
-cookieKey := []byte("very-secure-32-byte-secret-key!!")
+// The ceremony-cookie HMAC key must come from your environment or a secret manager —
+// never hardcode it in source. passkey.NewService rejects keys shorter than 32 bytes,
+// all-zero keys, and any key copied from a published example or doc.
+cookieKey := []byte(os.Getenv("EGAUTH_PASSKEY_COOKIE_KEY")) // crypto/rand-generated, >= 32 bytes
 
 // Registration endpoints
 mux.Handle("/passkey/register/begin", passkey.BeginRegistrationHandler(passkeySvc, passkey.WithCookieKey(cookieKey)))
@@ -110,6 +113,8 @@ mux.Handle("/passkey/login/finish", passkey.FinishLoginHandler(passkeySvc,
 	}),
 ))
 ```
+
+> **Security Note:** the passkey `CookieKey` must never be hardcoded or copied from documentation — a key published anywhere is attacker-known, and `passkey.NewService` rejects such values outright. Generate a unique 32-byte key with `crypto/rand` and load it at startup from your secret manager (environment variable, vault). Keys shorter than `passkey.MinCookieKeyLength` (32 bytes) are also rejected.
 
 `Config.UserVerification` controls whether the authenticator must prove user presence with a PIN/biometric; setting `protocol.VerificationRequired` enforces it during both registration and login. For replay protection of one-time challenges across a cluster, supply a `passkey.ChallengeStore` via the `passkey.WithChallengeStore(...)` handler option. See [Security Hardening]({{< ref "security-hardening" >}}) for depth on both.
 

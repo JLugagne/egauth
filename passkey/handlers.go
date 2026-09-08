@@ -604,19 +604,19 @@ func WithTenantCookieKeys(resolver CookieKeyResolver) HandlerOption {
 
 // cookieKeyFor resolves the ceremony-cookie HMAC key for the request's tenant. When a per-tenant
 // resolver is configured (WithTenantCookieKeys) it is consulted; otherwise the static cookieKey
-// (Config.CookieKey / WithCookieKey) is returned. A resolver error or a too-short / missing key
-// fails the request closed with 500 and ok=false, mirroring storeSession/loadSession's existing
+// (Config.CookieKey / WithCookieKey) is returned. A resolver error or a too-short / missing /
+// all-zero / published-example key fails the request closed with 500 and ok=false, mirroring storeSession/loadSession's existing
 // fail-closed behavior for an unconfigured key — never silently downgrading to a shared key.
 func (cfg handlerConfig) cookieKeyFor(w http.ResponseWriter, ctx context.Context, tenant string) ([]byte, bool) {
 	if cfg.cookieKeys == nil {
-		if len(cfg.cookieKey) < MinCookieKeyLength {
+		if len(cfg.cookieKey) < MinCookieKeyLength || cookieKeyError(cfg.cookieKey) != nil {
 			http.Error(w, "server_misconfigured", http.StatusInternalServerError)
 			return nil, false
 		}
 		return cfg.cookieKey, true
 	}
 	key, err := cfg.cookieKeys(ctx, tenant)
-	if err != nil || len(key) < MinCookieKeyLength {
+	if err != nil || len(key) < MinCookieKeyLength || cookieKeyError(key) != nil {
 		http.Error(w, "server_misconfigured", http.StatusInternalServerError)
 		return nil, false
 	}

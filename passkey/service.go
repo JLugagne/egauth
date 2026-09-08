@@ -63,8 +63,9 @@ type Config struct {
 	// CookieKey is the secret key used to HMAC-authenticate the short-lived ceremony cookie that
 	// carries the WebAuthn challenge and the user-verification requirement between Begin and
 	// Finish. It is REQUIRED and validated at construction (NewService fails fast with
-	// ErrCookieKeyMissing if it is unset or shorter than MinCookieKeyLength), matching jwt.New's
-	// fail-fast behavior. Use a stable, random secret of at least 32 bytes. The per-request
+	// ErrCookieKeyMissing if it is unset or shorter than MinCookieKeyLength). All-zero keys and
+	// keys copied from a published example or doc are rejected outright. Use a stable, random
+	// secret of at least 32 bytes generated with crypto/rand or loaded from a secret manager. The per-request
 	// WithCookieKey HandlerOption can still override it for a specific handler, but a service-wide
 	// key here is the recommended way to configure it once.
 	CookieKey []byte
@@ -112,7 +113,9 @@ const ceremonyTimeout = 5 * time.Minute
 //     is the zero value, so a UV-cleared assertion is rejected at Finish unless the caller
 //     explicitly relaxes it.
 //   - A ceremony-cookie HMAC key is required: NewService returns ErrCookieKeyMissing if
-//     Config.CookieKey is unset or shorter than MinCookieKeyLength.
+//     Config.CookieKey is unset or shorter than MinCookieKeyLength. An all-zero key (e.g.
+//     make([]byte, 32)) or a key matching one published in this repo's examples/docs is
+//     rejected outright — generate it with crypto/rand or load it from a secret manager.
 //   - A ChallengeStore is required for single-use replay protection: NewService returns
 //     ErrChallengeStoreMissing unless Config.ChallengeStore is set, store implements
 //     ChallengeStore, or the explicit opt-out Config.InsecureNoChallengeStore is true.
@@ -128,6 +131,9 @@ func NewService(store Store, cfg Config) (*Service, error) {
 	// Fail fast on an unusable security configuration before building anything.
 	if len(cfg.CookieKey) < MinCookieKeyLength {
 		return nil, ErrCookieKeyMissing
+	}
+	if err := cookieKeyError(cfg.CookieKey); err != nil {
+		return nil, err
 	}
 	if cfg.ChallengeStore == nil && !cfg.InsecureNoChallengeStore {
 		if cs, ok := store.(ChallengeStore); ok {

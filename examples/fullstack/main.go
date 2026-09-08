@@ -165,7 +165,15 @@ func BuildServer() (http.Handler, error) {
 	// ------------------------------------------------------------------ passkey
 	passkeyStore := passkeymem.NewStore()
 	challengeStore := passkeymem.NewChallengeStore()
-	cookieKey := make([]byte, 32) // zero key — replace with crypto/rand in production
+	// The ceremony-cookie HMAC key is generated fresh at startup with crypto/rand: it is
+	// never committed to the repo, and passkey.NewService refuses all-zero keys or any key
+	// copied from a published example. Random-per-boot means in-flight ceremonies do not
+	// survive a restart — acceptable for this demo. In production, load the key from a
+	// secret manager (environment variable, vault) instead of generating one here.
+	cookieKey := make([]byte, 32)
+	if _, err := rand.Read(cookieKey); err != nil {
+		return nil, fmt.Errorf("generate passkey cookie key: %w", err)
+	}
 	// Using InsecureNoChallengeStore is NOT set: we always supply a real challenge store.
 	pkSvc, err := passkey.NewService(passkeyStore, passkey.Config{
 		RPID:             "localhost",
