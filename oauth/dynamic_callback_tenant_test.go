@@ -96,7 +96,7 @@ func TestDynamicCallbackHandler_ImpureResolverUsesPreResolvedTenant(t *testing.T
 func runDynamicBegin(t *testing.T, store ProviderStore, providerName string, opts ...HandlerOption) (*http.Cookie, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	DynamicBeginHandler(store, providerName, opts...)(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
+	DynamicBeginHandler(store, providerName, withTestStateKey(opts)...)(rec, httptest.NewRequest(http.MethodGet, "/auth/login", nil))
 	require.Equal(t, http.StatusFound, rec.Code)
 
 	res := rec.Result()
@@ -121,6 +121,6 @@ func runDynamicCallback(t *testing.T, store ProviderStore, providerName string, 
 	if stateCookie != nil {
 		req.AddCookie(stateCookie)
 	}
-	DynamicCallbackHandler[struct{}](store, providerName, linker, issuer, claimsOf, opts...)(rec, req)
+	DynamicCallbackHandler[struct{}](store, providerName, linker, issuer, claimsOf, withTestStateKey(opts)...)(rec, req)
 	return rec
 }

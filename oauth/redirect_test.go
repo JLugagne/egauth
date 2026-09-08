@@ -21,7 +21,7 @@ func TestBeginHandler_UntrustedHostRejected(t *testing.T) {
 	p := New("google", "client-id", "secret", "https://accounts.google.com/o/oauth2/v2/auth",
 		"https://oauth2.googleapis.com/token", []string{"openid"}, nil)
 
-	handler := BeginHandler(p, WithAllowedHosts("app.example.com", "auth.example.com"))
+	handler := BeginHandler(p, WithAllowedHosts("app.example.com", "auth.example.com"), WithStateSigningKey(testStateKey))
 
 	req := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
 	req.Host = "evil.attacker.com"
@@ -36,7 +36,7 @@ func TestBeginHandler_InvalidHostSyntaxRejected(t *testing.T) {
 	p := New("google", "client-id", "secret", "https://accounts.google.com/o/oauth2/v2/auth",
 		"https://oauth2.googleapis.com/token", []string{"openid"}, nil)
 
-	handler := BeginHandler(p) // even without WithAllowedHosts, malformed host must be rejected
+	handler := BeginHandler(p, WithStateSigningKey(testStateKey)) // even without WithAllowedHosts, malformed host must be rejected
 
 	invalidHosts := []string{
 		"evil.attacker.com/oauth/begin",
@@ -66,7 +66,7 @@ func TestBeginHandler_AllowedHostSucceeds(t *testing.T) {
 	p := New("google", "client-id", "secret", "https://accounts.google.com/o/oauth2/v2/auth",
 		"https://oauth2.googleapis.com/token", []string{"openid"}, nil)
 
-	handler := BeginHandler(p, WithAllowedHosts("app.example.com"))
+	handler := BeginHandler(p, WithAllowedHosts("app.example.com"), WithStateSigningKey(testStateKey))
 
 	cases := []struct {
 		name       string
@@ -108,7 +108,7 @@ func TestCallbackHandler_UntrustedHostRejected(t *testing.T) {
 	linker := &stubLinker{}
 	issuer := &stubIssuer{}
 	handler := CallbackHandler[struct{}](p, linker, issuer, claimsOf,
-		WithAllowedHosts("app.example.com"))
+		WithAllowedHosts("app.example.com"), WithStateSigningKey(testStateKey))
 
 	req := httptest.NewRequest(http.MethodGet, "/oauth/callback?state=xyz&code=abc", nil)
 	req.Host = "evil.attacker.com"
@@ -126,7 +126,7 @@ func TestCallbackHandler_AllowedHostSucceeds(t *testing.T) {
 	beginReq := httptest.NewRequest(http.MethodGet, "/auth/test/login", nil)
 	beginReq.Host = "app.example.com"
 	beginRec := httptest.NewRecorder()
-	BeginHandler(p, WithAllowedHosts("app.example.com"))(beginRec, beginReq)
+	BeginHandler(p, WithAllowedHosts("app.example.com"), WithStateSigningKey(testStateKey))(beginRec, beginReq)
 	require.Equal(t, http.StatusFound, beginRec.Code)
 
 	var stateCookie *http.Cookie
@@ -155,7 +155,7 @@ func TestCallbackHandler_AllowedHostSucceeds(t *testing.T) {
 		req.AddCookie(stateCookie)
 	}
 
-	CallbackHandler[struct{}](p, linker, issuer, claimsOf, WithAllowedHosts("app.example.com"))(rec, req)
+	CallbackHandler[struct{}](p, linker, issuer, claimsOf, WithAllowedHosts("app.example.com"), WithStateSigningKey(testStateKey))(rec, req)
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, "u@example.com", linker.gotEmail)

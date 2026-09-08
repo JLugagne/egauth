@@ -28,6 +28,7 @@ func TestDynamicBeginHandler_ConcurrentDistinctTenantsNoAliasing(t *testing.T) {
 	base := make([]HandlerOption, 0, 8)
 	base = append(base, WithRedirectURL(testRedirect))
 	base = append(base, WithTenantResolver(func(r *http.Request) string { return r.Header.Get("X-Tenant") }))
+	base = append(base, WithStateSigningKey(testStateKey))
 
 	h := DynamicBeginHandler(store, p.Name(), base...)
 
@@ -59,7 +60,7 @@ func TestDynamicBeginHandler_ConcurrentDistinctTenantsNoAliasing(t *testing.T) {
 				errs <- fmt.Errorf("tenant %s: no state cookie", tenant)
 				return
 			}
-			_, _, _, _, cookieTenant, ok := unpackState(sc.Value)
+			_, _, _, _, cookieTenant, ok := unpackState(sc.Value, testStateKey)
 			if !ok {
 				errs <- fmt.Errorf("tenant %s: state cookie did not unpack", tenant)
 				return

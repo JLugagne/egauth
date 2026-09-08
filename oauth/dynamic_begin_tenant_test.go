@@ -42,7 +42,7 @@ func TestDynamicBeginHandler_ImpureResolverUsesPreResolvedTenant(t *testing.T) {
 	// The state cookie must be minted for "tenant-a" (the provider lookup tenant).
 	// Before the fix, the cookie would incorrectly bind to "tenant-b", causing
 	// the callback to fail tenant_mismatch later when using a pure resolver.
-	_, _, _, _, cookieTenant, ok := unpackState(stateCookie.Value)
+	_, _, _, _, cookieTenant, ok := unpackState(stateCookie.Value, testStateKey)
 	require.True(t, ok, "state cookie must unpack successfully")
 
 	assert.Equal(t, "tenant-a", cookieTenant,

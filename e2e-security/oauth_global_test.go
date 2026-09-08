@@ -337,7 +337,7 @@ func TestSecOau06_ResolveRedirectURL_UnsanitizedHostAndForwardedProto(t *testing
 	)
 
 	// BeginHandler configured with WithAllowedHosts
-	beginHandler := oauth.BeginHandler(p, oauth.WithAllowedHosts("app.example.com"))
+	beginHandler := oauth.BeginHandler(p, oauth.WithAllowedHosts("app.example.com"), oauth.WithStateSigningKey(testOAuthStateKey))
 
 	// 1. Host header poisoning attempt is rejected with 400 Bad Request
 	reqAttack := httptest.NewRequest(http.MethodGet, "/oauth/begin", nil)
@@ -490,6 +490,8 @@ func TestSecOau08_CallbackHandler_IgnoresRFC9207IssuerParameter(t *testing.T) {
 	dummyLinker := &mockIdentityLinker{}
 	dummyIssuer := &mockTokenIssuer{}
 	callbackHandler := oauth.CallbackHandler[struct{}](p, dummyLinker, dummyIssuer, nil,
+		oauth.WithStateSigningKey(testOAuthStateKey),
+		oauth.WithStateCookieName("oauth_state"), // plaintext HTTP dev: opt out of the default __Host- name
 		oauth.WithInsecureCookies(),
 	)
 
@@ -540,3 +542,7 @@ func (m *mockTokenIssuer) IssueTokenPair(ctx context.Context, claims tokens.Clai
 func (m *mockTokenIssuer) IssueAPIKey(ctx context.Context, prefix string, keyType tokens.KeyType, createdBy uuid.UUID, claims tokens.Claims[struct{}]) (*tokens.APIKey[struct{}], error) {
 	return &tokens.APIKey[struct{}]{ID: uuid.New()}, nil
 }
+
+// testOAuthStateKey satisfies the oauth package's STATE-01 requirement that the OAuth
+// state cookie is signed; the e2e tests below are not about signing semantics.
+var testOAuthStateKey = []byte("e2e-security-test-state-signing-key")

@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -14,10 +15,16 @@ import (
 	"github.com/JLugagne/egauth/tokens"
 )
 
-// Default state-cookie configuration.
+// Default state-cookie configuration. The state cookie carries the CSRF state, the PKCE
+// verifier and the OIDC nonce, so it is host-locked by default via the __Host- prefix
+// (STATE-01): the browser then refuses to send it to or receive it from a sibling subdomain.
 const (
-	DefaultStateCookieName = "oauth_state"
+	DefaultStateCookieName = "__Host-oauth_state"
 	DefaultStateTTL        = 10 * time.Minute
+
+	// hostPrefix is the browser-enforced cookie name prefix that requires Secure, no
+	// Domain and Path=/ (mirrors the __Host- auth cookies in tokens).
+	hostPrefix = "__Host-"
 )
 
 // IdentityLinker resolves the local user behind an external identity. identity.Service
@@ -42,9 +49,11 @@ type handlerConfig struct {
 	persistRefresh  bool
 	// authFlow, when non-nil, delegates the post-callback pipeline (account state, MFA policy,
 	// issuance) of CallbackHandler to a unified flow engine (see AuthFlow / WithAuthFlow).
-	authFlow AuthFlow
-
+	authFlow             AuthFlow
 	allowUnverifiedEmail bool
+	// configErr records a startup validation failure (see validate); the handlers fail
+	// closed with 500 on it.
+	configErr error
 }
 
 // HandlerOption configures the OAuth handlers (BeginHandler, CallbackHandler).
@@ -60,13 +69,19 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
+	// STATE-01: validate the configuration eagerly and record the outcome; the handlers
+	// fail closed with 500 at request time when it is invalid, and the same check is
+	// exposed by ValidateHandlerConfig for a server startup check.
+	c.configErr = c.validate()
 	return c
 }
 
 // WithCookies replaces the auth-cookie configuration wholesale.
 func WithCookies(c tokens.Cookies) HandlerOption { return func(h *handlerConfig) { h.cookies = c } }
 
-// WithCookieDomain scopes the auth and state cookies to a domain.
+// WithCookieDomain scopes the auth and state cookies to a domain. Incompatible with the
+// default __Host- state cookie name; pair it with WithStateCookieName to opt out of the
+// __Host- host-locking (and accept the login-CSRF residual of a tossable state cookie).
 func WithCookieDomain(domain string) HandlerOption {
 	return func(h *handlerConfig) { h.cookies.Domain = domain }
 }
@@ -78,6 +93,8 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 }
 
 // WithInsecureCookies disables the Secure attribute on all cookies. Local HTTP dev only.
+// Incompatible with the default __Host- state cookie name: rename the state cookie via
+// WithStateCookieName when serving plaintext HTTP.
 func WithInsecureCookies() HandlerOption {
 	return func(h *handlerConfig) { h.cookies.Insecure = true }
 }
@@ -97,7 +114,10 @@ func WithAllowedHosts(hosts ...string) HandlerOption {
 	return func(h *handlerConfig) { h.allowedHosts = append(h.allowedHosts, hosts...) }
 }
 
-// WithStateCookieName overrides the CSRF state cookie name (default "oauth_state").
+// WithStateCookieName overrides the CSRF state cookie name (default "__Host-oauth_state",
+// host-locked per STATE-01). Only override it for cross-subdomain deployments that must share
+// the in-flight state cookie across subdomains (with WithCookieDomain): those explicitly opt
+// out of host-locking and accept the login-CSRF residual of a tossable state cookie.
 func WithStateCookieName(name string) HandlerOption {
 	return func(h *handlerConfig) { h.stateCookieName = name }
 }
@@ -107,10 +127,11 @@ func WithStateTTL(d time.Duration) HandlerOption {
 	return func(h *handlerConfig) { h.stateTTL = d }
 }
 
-// WithStateSigningKey configures an HMAC secret key used to sign and authenticate the
-// short-lived state cookie (SEC-OAU-03). When set, state cookies are signed with HMAC-SHA256
-// at creation and verified upon callback. Any tampered, forged, or unsigned cookie is
-// rejected with invalid_state.
+// WithStateSigningKey configures the HMAC secret key used to sign and authenticate the
+// short-lived state cookie (SEC-OAU-03). The key is REQUIRED (STATE-01): the handlers fail
+// closed with 500 when it is missing, because an unsigned state cookie can be forged by any
+// attacker able to plant a cookie (sibling-subdomain tossing, plaintext HTTP). Use a
+// persistent random key of at least 32 bytes; rotating it invalidates in-flight flows.
 func WithStateSigningKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) {
 		h.stateSigningKey = append([]byte(nil), key...)
@@ -168,6 +189,10 @@ func WithAllowUnverifiedEmail() HandlerOption {
 func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.configErr != nil {
+			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
+			return
+		}
 		redirectURI := cfg.resolveRedirectURL(r)
 		if redirectURI == "" {
 			http.Error(w, "invalid or untrusted host", http.StatusBadRequest)
@@ -212,6 +237,10 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.configErr != nil {
+			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
+			return
+		}
 		redirectURI := cfg.resolveRedirectURL(r)
 		if redirectURI == "" {
 			cfg.fail(w, r, http.StatusBadRequest, "untrusted_host")
@@ -546,4 +575,24 @@ func DynamicCallbackHandler[C any](store ProviderStore, providerName string, lin
 		reqOpts := append(append([]HandlerOption(nil), opts...), fixedTenantOpt)
 		CallbackHandler(p, linker, issuer, claimsOf, reqOpts...)(w, r)
 	}
+}
+
+func (cfg handlerConfig) validate() error {
+	var errs []error
+	if len(cfg.stateSigningKey) == 0 {
+		errs = append(errs, errors.New("oauth: WithStateSigningKey is required: the OAuth state cookie must be HMAC-signed, otherwise a cookie an attacker can plant (sibling-subdomain tossing, plaintext HTTP) drives the callback into a forged login (STATE-01)"))
+	}
+	if strings.HasPrefix(cfg.stateCookieName, hostPrefix) {
+		if cfg.cookies.Domain != "" {
+			errs = append(errs, fmt.Errorf("oauth: state cookie %q: __Host- prefix requires Domain to be empty, got %q", cfg.stateCookieName, cfg.cookies.Domain))
+		}
+		if cfg.cookies.Insecure {
+			errs = append(errs, fmt.Errorf("oauth: state cookie %q: __Host- prefix requires Secure (Insecure must be false)", cfg.stateCookieName))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func ValidateHandlerConfig(opts ...HandlerOption) error {
+	return newHandlerConfig(opts).configErr
 }

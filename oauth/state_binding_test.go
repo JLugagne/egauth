@@ -28,8 +28,8 @@ func TestPackUnpackState_RoundTripWithProviderTenant(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			packed := packState(tc.state, tc.verifier, tc.nonce, tc.provider, tc.tenant)
-			state, verifier, nonce, provider, tenant, ok := unpackState(packed)
+			packed := packState(tc.state, tc.verifier, tc.nonce, tc.provider, tc.tenant, testStateKey)
+			state, verifier, nonce, provider, tenant, ok := unpackState(packed, testStateKey)
 			require.True(t, ok, "well-formed packed state must unpack")
 			assert.Equal(t, tc.state, state)
 			assert.Equal(t, tc.verifier, verifier)
@@ -43,15 +43,15 @@ func TestPackUnpackState_RoundTripWithProviderTenant(t *testing.T) {
 func TestUnpackState_RejectsWrongFieldCount(t *testing.T) {
 	// A legacy / forged 3-field cookie must fail closed.
 	legacy := "st" + stateSeparator + "vf" + stateSeparator + "nc"
-	_, _, _, _, _, ok := unpackState(legacy)
+	_, _, _, _, _, ok := unpackState(legacy, testStateKey)
 	assert.False(t, ok, "old 3-field cookie must be rejected")
 
 	// Too many fields.
-	_, _, _, _, _, ok = unpackState("a.b.c.d.e.f")
+	_, _, _, _, _, ok = unpackState("a.b.c.d.e.f", testStateKey)
 	assert.False(t, ok, "6-field cookie must be rejected")
 
 	// Empty state.
-	_, _, _, _, _, ok = unpackState("")
+	_, _, _, _, _, ok = unpackState("", testStateKey)
 	assert.False(t, ok, "empty cookie must be rejected")
 }
 
@@ -140,7 +140,7 @@ func TestPackUnpackState_HMAC(t *testing.T) {
 	assert.False(t, ok, "tampered signature must fail unpackState")
 
 	// Unsigned (legacy 5-part) cookie must fail when key is required
-	unsigned := packState(state, verifier, nonce, provider, tenant)
+	unsigned := packState(state, verifier, nonce, provider, tenant, nil)
 	_, _, _, _, _, ok = unpackState(unsigned, key)
 	assert.False(t, ok, "unsigned state cookie must fail when signing key is provided")
 
@@ -171,7 +171,7 @@ func TestCallbackHandler_StateHMAC_TamperedAndUnauthenticatedRejected(t *testing
 	// 2. Unsigned / unauthenticated cookie rejected with 403 invalid_state
 	unsignedCookie := &http.Cookie{
 		Name:  stateCookie.Name,
-		Value: packState(state, "vf", "nc", p.Name(), ""),
+		Value: packState(state, "vf", "nc", p.Name(), "", nil),
 	}
 	recUnsigned := runCallback(t, p, &stubLinker{}, &stubIssuer{}, unsignedCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),

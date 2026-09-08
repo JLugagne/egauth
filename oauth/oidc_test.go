@@ -409,7 +409,7 @@ func TestNewOIDCVerifier_Validation(t *testing.T) {
 func runBeginCapture(t *testing.T, p *Provider, opts ...HandlerOption) (*http.Cookie, string, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	BeginHandler(p, opts...)(rec, httptest.NewRequest(http.MethodGet, "/auth/oidc/login", nil))
+	BeginHandler(p, withTestStateKey(opts)...)(rec, httptest.NewRequest(http.MethodGet, "/auth/oidc/login", nil))
 	require.Equal(t, http.StatusFound, rec.Code)
 
 	res := rec.Result()

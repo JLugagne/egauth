@@ -137,7 +137,7 @@ const testRedirect = "https://app.example.com/auth/test/callback"
 func runBegin(t *testing.T, p *Provider, opts ...HandlerOption) (*http.Cookie, string) {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	BeginHandler(p, opts...)(rec, httptest.NewRequest(http.MethodGet, "/auth/test/login", nil))
+	BeginHandler(p, withTestStateKey(opts)...)(rec, httptest.NewRequest(http.MethodGet, "/auth/test/login", nil))
 	require.Equal(t, http.StatusFound, rec.Code)
 
 	res := rec.Result()
@@ -163,7 +163,7 @@ func runCallback(t *testing.T, p *Provider, linker IdentityLinker, issuer tokens
 	if stateCookie != nil {
 		req.AddCookie(stateCookie)
 	}
-	CallbackHandler[struct{}](p, linker, issuer, claimsOf, opts...)(rec, req)
+	CallbackHandler[struct{}](p, linker, issuer, claimsOf, withTestStateKey(opts)...)(rec, req)
 	return rec
 }
 
@@ -496,4 +496,18 @@ func TestExchange_RefusesRedirects(t *testing.T) {
 		assert.Empty(t, capturedSecret, "client_secret must not be sent to redirect target")
 		assert.Contains(t, err.Error(), "redirects are disabled for security")
 	})
+}
+
+// withTestStateKey appends WithStateSigningKey(testStateKey) to opts unless the caller
+// already configured a signing key, mirroring the STATE-01 requirement that the handlers
+// refuse to start without one.
+func withTestStateKey(opts []HandlerOption) []HandlerOption {
+	var probe handlerConfig
+	for _, opt := range opts {
+		opt(&probe)
+	}
+	if len(probe.stateSigningKey) > 0 {
+		return opts
+	}
+	return append(append([]HandlerOption(nil), opts...), WithStateSigningKey(testStateKey))
 }
