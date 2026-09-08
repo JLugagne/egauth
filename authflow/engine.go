@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,8 +31,12 @@ type Engine struct {
 	validator  AccountValidator
 	pwChecker  PasswordPolicyChecker
 	cookieName string
-	sink       event.Sink
-	now        func() time.Time
+	// insecureCookies drops the Secure attribute on the flow cookie (WithInsecureCookies opt-out, local HTTP dev only). __Host- prefixed names always stay Secure regardless.
+	insecureCookies bool
+	// insecureWarnedOnce guards the one-shot InsecureCookieMisuse emission (see warnIfInsecureMisuse).
+	insecureWarnedOnce *sync.Once
+	sink               event.Sink
+	now                func() time.Time
 }
 
 // Option configures an Engine instance.
@@ -59,6 +66,26 @@ func WithTokenTTL(ttl time.Duration) Option {
 	}
 }
 
+// WithInsecureCookies disables the Secure attribute on the flow cookie this engine writes and
+// clears. Use only for local HTTP development: the default is Secure regardless of r.TLS, so a
+// TLS-terminating reverse proxy forwarding plaintext no longer silently drops the attribute
+// (browsers refuse __Host- cookies without Secure, which would break the MFA challenge
+// round-trip) and a custom non-__Host- flow-cookie name would carry the bearer flow token on
+// any plaintext request.
+//
+// The escape hatch is bounded: when the cookie name carries the browser-enforced __Host-
+// prefix, Secure is ALWAYS kept (the tokens.Cookies.Validate() contract — Insecure may only
+// apply to non-__Host- names).
+//
+// Misuse guard: when insecure cookies are served over a plaintext connection to a non-loopback
+// host, the engine emits a one-shot event.InsecureCookieMisuse on its event sink (the same
+// signal the tokens handlers emit), so a dev-only opt-out that leaked into a production-like
+// deployment is observable. A nil sink makes the warning a no-op.
+func WithInsecureCookies() Option {
+	return func(e *Engine) { e.insecureCookies = true }
+}
+
+// WithCookieName overrides the flow-token cookie name.
 func WithCookieName(name string) Option {
 	return func(e *Engine) { e.cookieName = name }
 }
@@ -74,10 +101,11 @@ func NewEngine(secret []byte, opts ...Option) (*Engine, error) {
 	}
 
 	e := &Engine{
-		secret:     secret,
-		ttl:        DefaultTokenTTL,
-		cookieName: DefaultFlowCookieName,
-		now:        time.Now,
+		secret:             secret,
+		ttl:                DefaultTokenTTL,
+		cookieName:         DefaultFlowCookieName,
+		now:                time.Now,
+		insecureWarnedOnce: &sync.Once{},
 	}
 
 	for _, opt := range opts {
@@ -97,6 +125,7 @@ func (e *Engine) ProcessPrimaryAuth(
 	initialAMR []string,
 	remember bool,
 ) (*FlowResult, error) {
+	e.warnIfInsecureMisuse(ctx, r)
 	if user == nil {
 		return nil, identity.ErrUserNotFound
 	}
@@ -173,7 +202,7 @@ func (e *Engine) ProcessPrimaryAuth(
 				Value:    flowToken,
 				Path:     "/",
 				HttpOnly: true,
-				Secure:   r != nil && r.TLS != nil,
+				Secure:   e.secureCookie(),
 				SameSite: http.SameSiteLaxMode,
 				MaxAge:   int(e.ttl.Seconds()),
 			})
@@ -224,6 +253,7 @@ func (e *Engine) ProcessStepUp(
 	factor string,
 	factorAMR []string,
 ) (*FlowResult, error) {
+	e.warnIfInsecureMisuse(ctx, r)
 	now := e.now()
 	flow, err := decodeFlowToken(flowToken, e.secret, now)
 	if err != nil {
@@ -297,10 +327,75 @@ func (e *Engine) clearFlowCookie(w http.ResponseWriter, r *http.Request) {
 			Value:    "",
 			Path:     "/",
 			HttpOnly: true,
-			Secure:   r != nil && r.TLS != nil,
+			Secure:   e.secureCookie(),
 			MaxAge:   -1,
 		})
 	}
+}
+
+// hostCookiePrefix is the browser-enforced cookie name prefix that requires Secure, no Domain,
+// and Path=/ (the same contract as tokens' hostPrefix).
+const hostCookiePrefix = "__Host-"
+
+// isHostPrefixedCookieName reports whether name carries the browser-enforced __Host- prefix.
+func isHostPrefixedCookieName(name string) bool {
+	return strings.HasPrefix(name, hostCookiePrefix)
+}
+
+// secureCookie reports whether the cookies this engine writes must carry the Secure attribute.
+// Secure is on by default — the WithInsecureCookies opt-out can only drop it for names WITHOUT
+// the browser-enforced __Host- prefix, for which Secure is browser-mandatory and therefore
+// always kept (the tokens.Cookies.Validate() contract).
+func (e *Engine) secureCookie() bool {
+	return !e.insecureCookies || isHostPrefixedCookieName(e.cookieName)
+}
+
+// warnIfInsecureMisuse emits a one-shot WARN event when the engine is configured with insecure
+// (non-Secure) cookies yet is serving a request that looks like production: a non-loopback Host
+// over a plaintext (non-TLS) connection. It mirrors the tokens handler-level guard: a legitimate
+// reverse proxy that terminates TLS and forwards plaintext presents a non-loopback Host with
+// r.TLS == nil, so it deliberately warns rather than refusing (refusing would brick that setup).
+// The warning fires at most once per engine instance (sync.Once); with no event sink configured
+// it is a no-op.
+func (e *Engine) warnIfInsecureMisuse(ctx context.Context, r *http.Request) {
+	if !e.insecureCookies || r == nil || r.TLS != nil || isLoopbackHost(r.Host) {
+		return
+	}
+	once := e.insecureWarnedOnce
+	if once == nil {
+		// Defensive: an Engine built without NewEngine still must not panic; emit every time
+		// rather than crash (the supported path always has a non-nil Once).
+		once = &sync.Once{}
+	}
+	once.Do(func() {
+		e.emit(ctx, event.Event{
+			Type:   event.InsecureCookieMisuse,
+			Reason: "non_loopback_plaintext_host",
+			Attrs:  map[string]any{"host": r.Host},
+		})
+	})
+}
+
+// isLoopbackHost reports whether host (an HTTP Host header value, optionally with a port) refers
+// to the local machine — localhost or a loopback IP literal. These are the legitimate local-HTTP
+// development targets for WithInsecureCookies, so they must never trigger the misuse warning.
+func isLoopbackHost(host string) bool {
+	if host == "" {
+		// No Host at all is not a host we can call "production"; stay quiet.
+		return true
+	}
+	h := host
+	if hostOnly, _, err := net.SplitHostPort(host); err == nil {
+		h = hostOnly
+	}
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func (e *Engine) emit(ctx context.Context, ev event.Event) {
