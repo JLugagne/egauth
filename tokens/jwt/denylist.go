@@ -10,6 +10,8 @@ import "errors"
 var deniedSecrets = map[string]bool{
 	"replace-with-a-32-byte-minimum-secret-in-production!": true,
 	"super-secret-32-byte-key-here!!!":                     true,
+	"a-high-entropy-secret-kept-out-of-source-control":     true,
+	"super-secret-key-change-me-in-production":             true,
 }
 
 // deniedSecretError reports a non-nil error when secret matches a publicly

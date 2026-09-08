@@ -22,6 +22,8 @@ import (
 var publishedKeys = []string{
 	"replace-with-a-32-byte-minimum-secret-in-production!",
 	"super-secret-32-byte-key-here!!!",
+	"a-high-entropy-secret-kept-out-of-source-control",
+	"super-secret-key-change-me-in-production",
 }
 
 func TestNew_PanicsOnPublishedExampleKey(t *testing.T) {
