@@ -1,6 +1,8 @@
 package webapp_test
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -19,10 +21,13 @@ import (
 func newTestHandler(t *testing.T, routes webapp.Routes) http.Handler {
 	t.Helper()
 	idSvc := identity.NewService(identitymem.NewStore(), argon2.NewHasher(), policy.NewDefaultPolicy())
+	signingKey := make([]byte, 32)
+	_, err := rand.Read(signingKey)
+	require.NoError(t, err)
 	h, err := webapp.NewWebApp(webapp.Config{
 		Identity:   idSvc,
 		TokenStore: basic.NewMemoryStore(),
-		SigningKey: "a-high-entropy-secret-kept-out-of-source-control",
+		SigningKey: hex.EncodeToString(signingKey),
 		Issuer:     "test-app",
 		Routes:     routes,
 		// These tests exercise routing, not CSRF, and drive the handler with http.PostForm (which

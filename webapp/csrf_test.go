@@ -1,6 +1,8 @@
 package webapp_test
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -16,10 +18,12 @@ import (
 )
 
 func baseConfig() webapp.Config {
+	signingKey := make([]byte, 32)
+	_, _ = rand.Read(signingKey)
 	return webapp.Config{
 		Identity:   identity.NewService(identitymem.NewStore(), argon2.NewHasher(), policy.NewDefaultPolicy()),
 		TokenStore: basic.NewMemoryStore(),
-		SigningKey: "a-high-entropy-secret-kept-out-of-source-control",
+		SigningKey: hex.EncodeToString(signingKey),
 		Issuer:     "test-app",
 	}
 }

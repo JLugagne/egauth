@@ -1,6 +1,8 @@
 package webapp_test
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -24,10 +26,15 @@ func ExampleNewWebApp() {
 	idStore := identitymem.NewStore()
 	idSvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
 
+	signingKey := make([]byte, 32)
+	if _, err := rand.Read(signingKey); err != nil {
+		log.Fatal(err)
+	}
+
 	handler, err := webapp.NewWebApp(webapp.Config{
 		Identity:   idSvc,
 		TokenStore: basic.NewMemoryStore(),
-		SigningKey: "a-high-entropy-secret-kept-out-of-source-control",
+		SigningKey: hex.EncodeToString(signingKey),
 		Issuer:     "example-app",
 		// A real deployment lists the origins its forms are served from, e.g.
 		// TrustedOrigins: []string{"app.example.com"}, which enforces a strict same-origin CSRF
