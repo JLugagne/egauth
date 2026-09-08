@@ -128,9 +128,9 @@ type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.U
 
 | Handler | Resp on success | Body / cookie |
 |---|---|---|
-| `BeginRegistrationHandler(svc, opts...)` | 200 JSON `*protocol.CredentialCreation` | Sets `passkey_ceremony` cookie (HMAC-signed SessionData) |
+| `BeginRegistrationHandler(svc, opts...)` | 200 JSON `*protocol.CredentialCreation` | Sets `__Host-passkey_ceremony` cookie (HMAC-signed SessionData) |
 | `FinishRegistrationHandler(svc, opts...)` | 204 | Reads cookie; POST body = attestation response (capped at 64 KiB) |
-| `BeginLoginHandler(svc, opts...)` | 200 JSON `*protocol.CredentialAssertion` | Sets `passkey_ceremony` cookie |
+| `BeginLoginHandler(svc, opts...)` | 200 JSON `*protocol.CredentialAssertion` | Sets `__Host-passkey_ceremony` cookie |
 | `FinishLoginHandler(svc, opts...)` | 204 (or LoginSuccessFunc) | Reads cookie; POST body = assertion response (capped at 64 KiB) |
 
 Discoverable login has no dedicated handlers; call `BeginDiscoverableLogin` / `FinishDiscoverableLogin` directly and manage the session cookie manually (or build thin wrappers matching the pattern above).
@@ -142,19 +142,21 @@ WithUserResolver(r UserResolver)          // required
 WithLoginSuccess(f LoginSuccessFunc)      // called on FinishLogin success; default: 204
 WithCookieKey(key []byte)                 // override per-handler (normally set in Config)
 WithChallengeStore(cs ChallengeStore)     // override per-handler
-WithSessionCookieName(name string)        // default: "passkey_ceremony"
+WithSessionCookieName(name string)        // default: "__Host-passkey_ceremony" (override only when the __Host- rules can't be met)
 WithSessionTTL(d time.Duration)           // default: 5 min
-WithCookieDomain(domain string)
+WithCookieDomain(domain string)           // incompatible with the default __Host- name; pair with WithSessionCookieName
 WithSameSite(mode http.SameSite)          // default: Lax
-WithInsecureCookies()                     // clear Secure flag (local HTTP dev only)
+WithInsecureCookies()                     // clear Secure flag (local HTTP dev only; incompatible with the default __Host- name)
 WithMaxBodyBytes(n int64)                 // default: 64 KiB; <=0 disables cap
 ```
+
+The `__Host-` prefix is browser-enforced (Secure, no `Domain`, `Path=/`); a misconfigured pairing (e.g. `WithCookieDomain` or `WithInsecureCookies` under the default name) makes handlers fail closed with 500. Check it at startup with `ValidateHandlerConfig(opts...)` (returns an error).
 
 Body cap constants:
 ```go
 const DefaultMaxBodyBytes int64 = 64 << 10  // 65536 bytes
 const DefaultSessionTTL        = 5 * time.Minute
-const DefaultSessionCookieName = "passkey_ceremony"
+const DefaultSessionCookieName = "__Host-passkey_ceremony"
 const MinCookieKeyLength       = 32
 ```
 

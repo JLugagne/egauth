@@ -276,6 +276,8 @@ func BuildServer() (http.Handler, error) {
 		issuer,
 		passkey.BeginRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
+			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
+			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),
 		),
 		tokens.WithCookieAuth[AppClaims](cookies),
@@ -284,16 +286,24 @@ func BuildServer() (http.Handler, error) {
 		issuer,
 		passkey.FinishRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
+			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
+			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),
 		),
 		tokens.WithCookieAuth[AppClaims](cookies),
 	))
 	mux.Handle("POST /passkey/login/begin",
-		passkey.BeginLoginHandler(pkSvc, passkey.WithInsecureCookies()),
+		passkey.BeginLoginHandler(pkSvc,
+			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
+			passkey.WithSessionCookieName("passkey_ceremony"),
+			passkey.WithInsecureCookies(),
+		),
 	)
 	mux.Handle("POST /passkey/login/finish",
 		passkey.FinishLoginHandler(pkSvc,
 			passkey.WithLoginSuccess(passkeyLoginSuccess),
+			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
+			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),
 		),
 	)

@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/internal/httputil"
@@ -19,9 +21,24 @@ import (
 
 // Default ceremony-cookie configuration.
 const (
-	DefaultSessionCookieName = "passkey_ceremony"
+	// DefaultSessionCookieName is the secure-by-default name of the HTTP-only ceremony
+	// cookie that carries the HMAC-sealed WebAuthn SessionData (challenge + user-verification
+	// level) between Begin and Finish. It carries the browser-enforced __Host- prefix, which
+	// guarantees the cookie is host-locked: browsers refuse to store it unless it is Secure,
+	// carries no Domain, and has Path=/. That structurally defeats sibling-subdomain
+	// cookie-tossing — an attacker controlling evil.example.com could otherwise plant their
+	// own legitimately-obtained ceremony cookie in a victim's browser and drive the victim's
+	// registration/login against the attacker's challenge and account. Use
+	// WithSessionCookieName to override it only when the deployment genuinely cannot meet
+	// the __Host- requirements (plain-HTTP local development, a path-scoped mount);
+	// overriding to a plain name forfeits the host-lock hardening.
+	DefaultSessionCookieName = hostPrefix + "passkey_ceremony"
 	DefaultSessionTTL        = 5 * time.Minute
 )
+
+// hostPrefix is the browser-enforced __Host- cookie-name prefix (see
+// DefaultSessionCookieName and handlerConfig.validate).
+const hostPrefix = "__Host-"
 
 // DefaultMaxBodyBytes is the default cap applied to the request body of the Finish ceremony
 // handlers. A WebAuthn attestation/assertion response is small; this bound prevents an
@@ -51,6 +68,8 @@ type handlerConfig struct {
 	challenges         ChallengeStore
 	discoverableTenant TenantExtractor
 	maxBodyBytes       int64
+	// configErr records a construction-time validation failure (see validate); the handlers fail closed with 500 on it.
+	configErr error
 	// cookieKeys, when set, resolves the ceremony-cookie HMAC key per tenant so a cookie sealed for one tenant cannot be opened under another (per-tenant cryptographic isolation). When nil the static cookieKey is used for every tenant (unchanged single-key behavior).
 	cookieKeys CookieKeyResolver
 }
@@ -64,17 +83,16 @@ type HandlerOption func(*handlerConfig)
 // via NewService — which fails fast without a cookie key — yields handlers that are secure by
 // default without repeating WithCookieKey/WithChallengeStore at every call site.
 func newHandlerConfig(svc *Service, opts []HandlerOption) handlerConfig {
-	c := handlerConfig{
-		sessionCookie:  DefaultSessionCookieName,
-		sessionTTL:     DefaultSessionTTL,
-		cookieSameSite: http.SameSiteLaxMode,
-		maxBodyBytes:   DefaultMaxBodyBytes,
-		cookieKey:      svc.cookieKey,
-		challenges:     svc.challenges,
-	}
+	c := defaultHandlerConfig()
+	c.cookieKey = svc.cookieKey
+	c.challenges = svc.challenges
 	for _, opt := range opts {
 		opt(&c)
 	}
+	// Fail loudly: validate the configuration eagerly and record the outcome; the handlers
+	// fail closed with 500 at request time when it is invalid, and the same check is
+	// exposed by ValidateHandlerConfig for a server startup check.
+	c.configErr = c.validate()
 	return c
 }
 
@@ -88,7 +106,13 @@ func WithLoginSuccess(f LoginSuccessFunc) HandlerOption {
 	return func(h *handlerConfig) { h.onLoginSuccess = f }
 }
 
-// WithSessionCookieName overrides the ceremony cookie name.
+// WithSessionCookieName overrides the ceremony cookie name. The secure default is
+// DefaultSessionCookieName ("__Host-passkey_ceremony"), whose __Host- prefix makes browsers
+// enforce the host-lock (Secure, no Domain, Path=/) that defeats sibling-subdomain
+// cookie-tossing of the sealed ceremony state. Override it only when the deployment
+// genuinely cannot satisfy the __Host- requirements — plaintext-HTTP local development, or
+// a cross-subdomain shared cookie mount (pair with WithCookieDomain) — and accept that a
+// sibling subdomain can then toss a ceremony cookie into a victim's browser.
 func WithSessionCookieName(name string) HandlerOption {
 	return func(h *handlerConfig) { h.sessionCookie = name }
 }
@@ -98,7 +122,10 @@ func WithSessionTTL(d time.Duration) HandlerOption {
 	return func(h *handlerConfig) { h.sessionTTL = d }
 }
 
-// WithCookieDomain scopes the ceremony cookie to a domain.
+// WithCookieDomain scopes the ceremony cookie to a domain. Incompatible with the default
+// __Host- ceremony cookie name; pair it with WithSessionCookieName to opt out of the
+// __Host- host-locking (and accept the credential-binding confusion a tossable ceremony
+// cookie enables).
 func WithCookieDomain(domain string) HandlerOption {
 	return func(h *handlerConfig) { h.cookieDomain = domain }
 }
@@ -108,7 +135,10 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 	return func(h *handlerConfig) { h.cookieSameSite = mode }
 }
 
-// WithInsecureCookies disables the Secure attribute on the ceremony cookie (local HTTP dev).
+// WithInsecureCookies disables the Secure attribute on the ceremony cookie (local HTTP dev
+// only). Incompatible with the default __Host- ceremony cookie name: browsers refuse to
+// store a __Host- cookie that is not Secure, so pair it with WithSessionCookieName to opt
+// out of the prefix when serving plaintext HTTP.
 func WithInsecureCookies() HandlerOption {
 	return func(h *handlerConfig) { h.insecureCookies = true }
 }
@@ -129,6 +159,9 @@ func WithCookieKey(key []byte) HandlerOption {
 func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		uid, name, displayName, tenant, ok := cfg.subject(w, r)
 		if !ok {
 			return
@@ -154,6 +187,9 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		uid, name, displayName, tenant, ok := cfg.subject(w, r)
 		if !ok {
 			return
@@ -184,6 +220,9 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		uid, _, _, tenant, ok := cfg.subject(w, r)
 		if !ok {
 			return
@@ -209,6 +248,9 @@ func BeginLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		uid, _, _, tenant, ok := cfg.subject(w, r)
 		if !ok {
 			return
@@ -473,6 +515,9 @@ func WithDiscoverableTenant(fn TenantExtractor) HandlerOption {
 func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -505,6 +550,9 @@ func BeginDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Han
 func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -555,6 +603,9 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(svc, opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		if cfg.failClosedOnMisconfig(w) {
+			return
+		}
 		uid, _, _, tenant, ok := cfg.subject(w, r)
 		if !ok {
 			return
@@ -621,4 +672,61 @@ func (cfg handlerConfig) cookieKeyFor(w http.ResponseWriter, ctx context.Context
 		return nil, false
 	}
 	return key, true
+}
+
+// defaultHandlerConfig seeds the secure ceremony-cookie defaults shared by newHandlerConfig
+// (which layers the Service's construction-validated cookie key and ChallengeStore on top)
+// and ValidateHandlerConfig (which checks options without needing a Service).
+func defaultHandlerConfig() handlerConfig {
+	return handlerConfig{
+		sessionCookie:  DefaultSessionCookieName,
+		sessionTTL:     DefaultSessionTTL,
+		cookieSameSite: http.SameSiteLaxMode,
+		maxBodyBytes:   DefaultMaxBodyBytes,
+	}
+}
+
+// validate rejects handler configurations where the ceremony cookie name and its attributes
+// are incompatible. The __Host- prefix is browser-enforced: a cookie named __Host-* is
+// silently discarded unless it is Secure and written with no Domain and Path=/ — the
+// ceremony would then break with no visible cause (the cookie never reaches the browser),
+// so the misconfiguration must fail loudly here, the handlers fail closed at request time,
+// and ValidateHandlerConfig surfaces it for a server startup check. The ceremony cookie's
+// path is hardcoded to Path=/ (storeSession/clearSession) with no option to change it, so
+// only a shared Domain and the Secure attribute can conflict with the prefix today.
+func (cfg handlerConfig) validate() error {
+	if !strings.HasPrefix(cfg.sessionCookie, hostPrefix) {
+		return nil
+	}
+	var errs []error
+	if cfg.cookieDomain != "" {
+		errs = append(errs, fmt.Errorf("passkey: ceremony cookie %q: __Host- prefix requires Domain to be empty, got %q", cfg.sessionCookie, cfg.cookieDomain))
+	}
+	if cfg.insecureCookies {
+		errs = append(errs, fmt.Errorf("passkey: ceremony cookie %q: __Host- prefix requires Secure (insecure cookies must be disabled)", cfg.sessionCookie))
+	}
+	return errors.Join(errs...)
+}
+
+// ValidateHandlerConfig runs the handler-option validation without building a handler, so a
+// server can fail fast at startup the same way the handlers fail closed at request time
+// (mirrors oauth.ValidateHandlerConfig).
+func ValidateHandlerConfig(opts ...HandlerOption) error {
+	c := defaultHandlerConfig()
+	for _, opt := range opts {
+		opt(&c)
+	}
+	return c.validate()
+}
+
+// failClosedOnMisconfig writes a 500 and reports true when the handler configuration failed
+// construction-time validation (see validate): a __Host- ceremony cookie with a Domain or
+// without Secure never reaches the browser, so any response other than a loud 500 would
+// break ceremonies invisibly.
+func (cfg handlerConfig) failClosedOnMisconfig(w http.ResponseWriter) bool {
+	if cfg.configErr == nil {
+		return false
+	}
+	http.Error(w, "passkey handler misconfigured", http.StatusInternalServerError)
+	return true
 }
