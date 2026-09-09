@@ -23,6 +23,7 @@ func ClientIP(r *http.Request) string {
 // WriteJSON writes a JSON-encoded body with the given HTTP status.
 
 func WriteJSON(w http.ResponseWriter, status int, body any) {
+	MarkNoStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
@@ -116,6 +117,7 @@ func OriginAllowed(r *http.Request, trustedOrigins map[string]bool) bool {
 // Fail writes an error response: it redirects to failureURL (with an ?error= parameter) when
 // failureURL is non-empty, otherwise it writes a plain-text HTTP error with the given status.
 func Fail(w http.ResponseWriter, r *http.Request, failureURL string, status int, code string) {
+	MarkNoStore(w)
 	if failureURL != "" {
 		http.Redirect(w, r, WithErrorParam(failureURL, code), http.StatusSeeOther)
 		return
@@ -145,9 +147,28 @@ func ParseLimitedForm(w http.ResponseWriter, r *http.Request, maxBodyBytes int64
 // RedirectOrStatus redirects to rawURL when it is non-empty, otherwise writes the given HTTP
 // status code with no body.
 func RedirectOrStatus(w http.ResponseWriter, r *http.Request, rawURL string, okStatus int) {
+	MarkNoStore(w)
 	if rawURL != "" {
 		http.Redirect(w, r, rawURL, http.StatusSeeOther)
 		return
 	}
 	w.WriteHeader(okStatus)
+}
+
+// MarkNoStore marks the response uncacheable: Cache-Control: no-store paired with the legacy
+// Pragma: no-cache. The shared response helpers (WriteJSON, Fail, RedirectOrStatus) and every
+// token/session-cookie write in the module call it, because auth-flow responses (login,
+// register, refresh, logout, OAuth callback, MFA/OTP/passkey/authflow handlers, auto-refresh)
+// routinely carry Set-Cookie headers holding live token material: OWASP session-management
+// guidance requires such responses to be uncacheable, and RFC 9111 §3.2 lets shared caches
+// store Set-Cookie responses unless explicitly barred. Only the auth handler packages use
+// these helpers, so the policy is scoped to auth endpoints by construction — unrelated
+// packages keep full control of their own caching headers. Callers may still override the
+// header afterwards (Header().Set is last-write-wins); the helper only installs the safe
+// default. Must be invoked before any WriteHeader/redirect, since header writes after the
+// first byte are dropped. Idempotent: repeated calls overwrite the same two headers.
+func MarkNoStore(w http.ResponseWriter) {
+	h := w.Header()
+	h.Set("Cache-Control", "no-store")
+	h.Set("Pragma", "no-cache")
 }

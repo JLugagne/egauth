@@ -14,6 +14,7 @@ import (
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
 )
 
@@ -230,6 +231,7 @@ func (e *Engine) ProcessPrimaryAuth(
 		}
 
 		if e.cookieName != "" && w != nil {
+			httputil.MarkNoStore(w)
 			http.SetCookie(w, &http.Cookie{
 				Name:     e.cookieName,
 				Value:    flowToken,
@@ -356,6 +358,7 @@ func (e *Engine) ExtractFlowToken(r *http.Request) string {
 
 func (e *Engine) clearFlowCookie(w http.ResponseWriter, r *http.Request) {
 	if w != nil && e.cookieName != "" {
+		httputil.MarkNoStore(w)
 		http.SetCookie(w, &http.Cookie{
 			Name:     e.cookieName,
 			Value:    "",

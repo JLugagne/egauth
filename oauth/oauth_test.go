@@ -511,3 +511,37 @@ func withTestStateKey(opts []HandlerOption) []HandlerOption {
 	}
 	return append(append([]HandlerOption(nil), opts...), WithStateSigningKey(testStateKey))
 }
+
+// TestCallbackHandler_SuccessRedirectSetsNoStore: the OAuth callback issues the auth cookies
+// and answers with a 303 redirect; a cacheable 303 carrying fresh Set-Cookie headers is a
+// token-duplication hazard, so it must carry Cache-Control: no-store.
+func TestCallbackHandler_SuccessRedirectSetsNoStore(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+	p, _ := stubProviderServer(t, &body)
+
+	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+
+	linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+		AccessToken:           "access",
+		RefreshToken:          "refresh",
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+	}}
+
+	rec := runCallback(t, p, linker, issuer, stateCookie,
+		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
+		WithRedirectURL(testRedirect), WithSuccessRedirect("https://app.example.com/after-login"))
+
+	require.Equal(t, http.StatusSeeOther, rec.Code, "with a success redirect configured the callback must answer 303")
+	assert.NotEmpty(t, rec.Header().Get("Location"))
+
+	var gotAuthCookie bool
+	for _, c := range rec.Result().Cookies() {
+		if c.Name == tokens.DefaultAccessCookieName || c.Name == tokens.DefaultRefreshCookieName {
+			gotAuthCookie = true
+		}
+	}
+	assert.True(t, gotAuthCookie, "callback redirect must carry the fresh auth cookies")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), "303 Set-Cookie response must be uncacheable")
+	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}

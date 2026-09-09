@@ -328,6 +328,7 @@ func (cfg handlerConfig) storeSession(w http.ResponseWriter, r *http.Request, te
 		http.Error(w, "session_error", http.StatusInternalServerError)
 		return false
 	}
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cfg.sessionCookie,
 		Value:    cfg.seal(key, raw),
@@ -395,6 +396,7 @@ func (cfg handlerConfig) open(key []byte, value string) ([]byte, bool) {
 }
 
 func (cfg handlerConfig) clearSession(w http.ResponseWriter) {
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cfg.sessionCookie,
 		Value:    "",
@@ -408,6 +410,7 @@ func (cfg handlerConfig) clearSession(w http.ResponseWriter) {
 }
 
 func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
+	httputil.MarkNoStore(w)
 	var protoErr *protocol.Error
 	switch {
 	case errors.Is(err, ErrSessionInvalid):
