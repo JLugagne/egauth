@@ -7,10 +7,9 @@ on:
   workflow_dispatch:
 
 # Sets permissions of the GITHUB_TOKEN to allow deployment to GitHub Pages
+# Workflow-level baseline; jobs elevate only what they need (see per-job permissions).
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 # Allow only one concurrent deployment, skipping runs queued between the run in-progress and latest queued.
 # However, do NOT cancel in-progress runs as we want to allow these production deployments to complete.
@@ -26,13 +25,21 @@ jobs:
   # Build job
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       HUGO_VERSION: 0.162.1
     steps:
       - name: Install Hugo CLI
         run: |
-          wget -O ${{ runner.temp }}/hugo.deb https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb \
-          && sudo dpkg -i ${{ runner.temp }}/hugo.deb
+          wget -O ${{ runner.temp }}/hugo.deb https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb
+          # Expected SHA256 of hugo_extended_0.162.1_linux-amd64.deb, fetched from the official
+          # release checksums file:
+          # https://github.com/gohugoio/hugo/releases/download/v0.162.1/hugo_0.162.1_checksums.txt
+          echo "9678d806aa1382742e7d61a4e96b174560ff81f82ad6e75c1d69b40d85fe4210  hugo.deb" > ${{ runner.temp }}/hugo.sha256
+          cd ${{ runner.temp }}
+          sha256sum --check --strict hugo.sha256
+          sudo dpkg -i hugo.deb
 
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -62,6 +69,9 @@ jobs:
 
   # Deployment job
   deploy:
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
