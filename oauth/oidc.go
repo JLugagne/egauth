@@ -101,8 +101,11 @@ type OIDCConfig struct {
 	// ClaimsMapper maps the validated id_token claims to a UserInfo. Defaults to the standard
 	// OIDC claims (sub → ProviderID, email, email_verified, name).
 	ClaimsMapper func(claims map[string]any) (*UserInfo, error)
-	// HTTPClient fetches the discovery document and the JWKS. Defaults to a client with a 10s
-	// timeout. On the untrusted/dynamic path callers must inject oauth.SafeHTTPClient().
+	// HTTPClient fetches the discovery document and the JWKS. Defaults to oauth.SafeHTTPClient()
+	// — the SSRF dial guard and 3xx rejection apply on the static path too — with a plain 10s
+	// client only under AllowInsecureURLs (dev). Inject a client explicitly only when you need a
+	// custom transport (e.g. a stub server in tests); on the untrusted/dynamic path callers must
+	// inject oauth.SafeHTTPClient().
 	HTTPClient *http.Client
 	// AllowInsecureURLs opts INTO accepting non-https Issuer / JWKS / discovery URLs. It exists
 	// only for local development against an http loopback IdP; it is secure-by-default (false) and
@@ -175,10 +178,17 @@ func newOIDCVerifier(cfg OIDCConfig, defaultAudience string) (*oidcVerifier, err
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		// In the dev/insecure path the SSRF-safe client (used on the untrusted dynamic path)
-		// would block the loopback IdP at dial time, so fall back to a plain client. Production
-		// callers on the dynamic path inject oauth.SafeHTTPClient() explicitly.
-		client = &http.Client{Timeout: 10 * time.Second}
+		// SEC-SSRF (issue #117): a static provider with no injected client defaults to the
+		// SSRF-safe client — the same dial-time internal-IP guard and 3xx rejection as the
+		// untrusted dynamic path — so a misbehaving or compromised issuer cannot pivot the
+		// discovery/JWKS GETs onto internal targets (loopback, RFC1918, cloud metadata) via a
+		// crafted jwks_uri or a 302. The plain client is reserved for the AllowInsecureURLs dev
+		// opt-in: the safe client would block the local loopback IdP at dial time.
+		if cfg.AllowInsecureURLs {
+			client = &http.Client{Timeout: 10 * time.Second}
+		} else {
+			client = SafeHTTPClient()
+		}
 	}
 	return &oidcVerifier{
 		issuer:      cfg.Issuer,
