@@ -25,6 +25,12 @@
 //
 // # Usage
 //
+// WithAccountValidator is REQUIRED whenever WithMFAGate is configured (NewEngine fails
+// construction with ErrMissingAccountValidator otherwise): step-up re-mints final
+// credentials after the flow-token window opens at primary auth, so the account lifecycle
+// must be re-checked there — an account disabled or soft-deleted mid-flow must not
+// complete the ceremony (issue #120).
+//
 //	engine, _ := authflow.NewEngine(secret,
 //	    authflow.WithMFAGate(mfaSvc),
 //	    authflow.WithMinter(authflow.NewJWTMinter(issuer, claimsOf, cookies, false)),

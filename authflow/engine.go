@@ -61,6 +61,17 @@ type Engine struct {
 // Option configures an Engine instance.
 type Option func(*Engine)
 
+// WithMFAGate gates logins on a second factor: when gate.IsEnrolled is true,
+// ProcessPrimaryAuth parks the ceremony in StateMFAChallenged (flow-token cookie, no
+// credentials) until the second factor completes through ProcessStepUp.
+//
+// Required companion: an MFA-gated engine MUST also configure an account lifecycle
+// validator with WithAccountValidator. The challenge round-trip outlives the primary-auth
+// lifecycle check by up to the flow-token TTL, so the account can be administratively
+// disabled or soft-deleted in between; the validator re-checks that lifecycle at step-up,
+// before any credential is minted. NewEngine refuses construction
+// (ErrMissingAccountValidator) when a MFAGate is configured without a validator — the only
+// way to skip the re-check is to not require MFA at all.
 func WithMFAGate(gate MFAGate) Option {
 	return func(e *Engine) { e.mfaGate = gate }
 }
@@ -69,6 +80,16 @@ func WithMinter(minter SessionMinter) Option {
 	return func(e *Engine) { e.minter = minter }
 }
 
+// WithAccountValidator wires the account lifecycle re-check (active, not disabled, not
+// deleted — see IdentityAccountValidator) into the flow. It runs on every
+// ProcessPrimaryAuth, in addition to the DeletedAt/DisabledAt check on the caller-supplied
+// user, and again on every ProcessStepUp — where it is the only lifecycle check, because
+// the flow token may have been issued up to the flow TTL earlier: an account disabled
+// after the challenge must not complete the flow.
+//
+// Required when WithMFAGate is configured: NewEngine fails construction with
+// ErrMissingAccountValidator otherwise, because step-up is the credential-minting point of
+// an MFA-gated flow and must re-check lifecycle there.
 func WithAccountValidator(v AccountValidator) Option {
 	return func(e *Engine) { e.validator = v }
 }
@@ -120,7 +141,10 @@ func WithEventSink(sink event.Sink) Option {
 	return func(e *Engine) { e.sink = sink }
 }
 
-// NewEngine constructs a new authentication flow Engine.
+// NewEngine constructs a new authentication flow Engine, validating the wiring loudly:
+// it fails construction on a flow-cookie configuration browsers would silently refuse to
+// store, and on an MFA-gated engine without the account lifecycle validator its step-up
+// path requires (ErrMissingAccountValidator).
 func NewEngine(secret []byte, opts ...Option) (*Engine, error) {
 	if len(secret) < 16 {
 		return nil, errors.New("authflow: secret must be at least 16 bytes")
@@ -300,11 +324,15 @@ func (e *Engine) ProcessStepUp(
 		return nil, ErrInvalidFlowState
 	}
 
-	// Re-verify account lifecycle
-	if e.validator != nil {
-		if err := e.validator.ValidateAccount(ctx, flow.TenantID, flow.UserID); err != nil {
-			return nil, err
-		}
+	// Re-verify account lifecycle, failing closed (issue #120): step-up mints the final
+	// credentials, so an engine that reached runtime without a validator — e.g. a struct
+	// literal bypassing NewEngine's construction guard — must refuse instead of minting
+	// with the re-check silently skipped.
+	if e.validator == nil {
+		return nil, ErrMissingAccountValidator
+	}
+	if err := e.validator.ValidateAccount(ctx, flow.TenantID, flow.UserID); err != nil {
+		return nil, err
 	}
 
 	// Append factor and AMR
@@ -447,22 +475,32 @@ func contains(slice []string, val string) bool {
 	return false
 }
 
-// validate fails construction when the flow-cookie name and the attributes the engine writes
-// are incompatible. The __Host- prefix is browser-enforced: a cookie named __Host-* is
-// silently discarded unless it is written with no Domain and Path=/ — the cookie would then
-// never reach the browser and MFA step-up would fail with no visible cause, so the
-// misconfiguration must be caught here, loudly, before the engine serves a single request.
-// (The Secure attribute is governed by secureCookie(), not this guard.)
+// validate fails construction on wirings that would break or weaken the flow silently.
+//
+//   - An MFA-gated engine without an AccountValidator (fail-closed-by-construction,
+//     issue #120): ProcessStepUp is the credential-minting point of every challenged flow,
+//     and the flow token outlives the primary-auth lifecycle check by up to the flow TTL,
+//     so a disabled or soft-deleted account must be re-checked there. Without a validator
+//     that re-check silently disappears; the only way to skip it is to not require MFA
+//     at all.
+//
+//   - A flow-cookie name/attribute combination browsers would silently refuse to store:
+//     the __Host- prefix is browser-enforced, so a cookie named __Host-* is discarded
+//     unless it is written with no Domain and Path=/ — it would then never reach the
+//     browser and MFA step-up would fail with no visible cause, hence the loud error.
+//     (The Secure attribute is governed by secureCookie(), not this guard.)
 func (e *Engine) validate() error {
-	if !strings.HasPrefix(e.cookieName, hostPrefix) {
-		return nil
-	}
 	var errs []error
-	if e.cookieDomain != "" {
-		errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Domain to be empty, got %q", e.cookieName, e.cookieDomain))
+	if e.mfaGate != nil && e.validator == nil {
+		errs = append(errs, fmt.Errorf("authflow: an MFA-gated engine (WithMFAGate) must also configure an account lifecycle validator (WithAccountValidator): step-up mints final credentials after the flow-token window, so a disabled or deleted account must be re-checked then; %w", ErrMissingAccountValidator))
 	}
-	if e.cookiePath != "/" {
-		errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Path=\"/\", got %q", e.cookieName, e.cookiePath))
+	if strings.HasPrefix(e.cookieName, hostPrefix) {
+		if e.cookieDomain != "" {
+			errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Domain to be empty, got %q", e.cookieName, e.cookieDomain))
+		}
+		if e.cookiePath != "/" {
+			errs = append(errs, fmt.Errorf("authflow: flow cookie %q: __Host- prefix requires Path=\"/\", got %q", e.cookieName, e.cookiePath))
+		}
 	}
 	return errors.Join(errs...)
 }

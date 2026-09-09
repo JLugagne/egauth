@@ -34,6 +34,12 @@ var (
 
 	// ErrMFARequired is returned or flagged when MFA is mandatory before final session issuance.
 	ErrMFARequired = errors.New("mfa verification required")
+
+	// ErrMissingAccountValidator is returned when an MFA-gated flow reaches credential
+	// issuance without an AccountValidator configured: NewEngine refuses the wiring at
+	// construction (fail-closed-by-construction, issue #120) and ProcessStepUp refuses the
+	// request itself (defense in depth for Engines built without NewEngine).
+	ErrMissingAccountValidator = errors.New("account lifecycle validator required for mfa-gated flows")
 )
 
 // FlowContext holds the accumulated state and assurance metadata of an authentication ceremony.

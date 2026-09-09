@@ -85,7 +85,7 @@ func TestAuthFlow_CookiesSecureByDefault(t *testing.T) {
 
 	t.Run("flow cookie on the MFA-challenged path", func(t *testing.T) {
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return true, nil }}
-		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}))
+		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}))
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/login", nil)
@@ -100,7 +100,7 @@ func TestAuthFlow_CookiesSecureByDefault(t *testing.T) {
 
 	t.Run("cleared flow cookie on the completed path", func(t *testing.T) {
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return false, nil }}
-		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(minter))
+		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(minter), authflow.WithAccountValidator(&mockAccountValidator{}))
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "/login", nil)
@@ -151,7 +151,7 @@ func TestAuthFlow_InsecureOptOut_DropsSecureOnlyForNonHostNames(t *testing.T) {
 
 	t.Run("flow cookie with explicit plain name", func(t *testing.T) {
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return true, nil }}
-		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithCookieName("auth_flow_token"), authflow.WithInsecureCookies())
+		engine, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}), authflow.WithCookieName("auth_flow_token"), authflow.WithInsecureCookies())
 		require.NoError(t, err)
 
 		req := httptest.NewRequest(http.MethodPost, "http://api.example.com/login", nil)
@@ -188,7 +188,7 @@ func TestAuthFlow_InsecureOptOut_KeepsSecureForHostPrefixedNames(t *testing.T) {
 	t.Run("flow cookie with __Host- name", func(t *testing.T) {
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return true, nil }}
 		engine, err := authflow.NewEngine(secret,
-			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}),
+			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}),
 			authflow.WithInsecureCookies(), authflow.WithCookieName("__Host-auth_flow_token"))
 		require.NoError(t, err)
 
@@ -238,7 +238,7 @@ func TestAuthFlow_InsecureMisuseWarning(t *testing.T) {
 		sink := &recordingSink{}
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return false, nil }}
 		engine, err := authflow.NewEngine(secret,
-			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}),
+			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}),
 			authflow.WithInsecureCookies(), authflow.WithEventSink(sink))
 		require.NoError(t, err)
 
@@ -257,7 +257,7 @@ func TestAuthFlow_InsecureMisuseWarning(t *testing.T) {
 		sink := &recordingSink{}
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return false, nil }}
 		engine, err := authflow.NewEngine(secret,
-			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}),
+			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}),
 			authflow.WithInsecureCookies(), authflow.WithEventSink(sink))
 		require.NoError(t, err)
 
@@ -271,7 +271,7 @@ func TestAuthFlow_InsecureMisuseWarning(t *testing.T) {
 		sink := &recordingSink{}
 		gate := &mockMFAGate{isEnrolledFunc: func(context.Context, string, uuid.UUID) (bool, error) { return false, nil }}
 		engine, err := authflow.NewEngine(secret,
-			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}),
+			authflow.WithMFAGate(gate), authflow.WithMinter(&mockSessionMinter{}), authflow.WithAccountValidator(&mockAccountValidator{}),
 			authflow.WithEventSink(sink))
 		require.NoError(t, err)
 

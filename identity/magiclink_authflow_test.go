@@ -29,6 +29,13 @@ func (m *recordingMinter) Mint(ctx context.Context, w http.ResponseWriter, r *ht
 	return m.err
 }
 
+// permissiveValidator is an authflow.AccountValidator stub that always allows: the
+// magic-link wiring tests exercise MFA challenge/mint behavior, not lifecycle semantics,
+// so it only satisfies the engine's MFA-gated construction guard (issue #120).
+type permissiveValidator struct{}
+
+func (permissiveValidator) ValidateAccount(context.Context, string, uuid.UUID) error { return nil }
+
 // testFlowEngine builds an authflow engine wired with the given MFA enrollment answer and a
 // recording minter, matching how an application would assemble it.
 func testFlowEngine(t *testing.T, enrolled bool, minter *recordingMinter) *authflow.Engine {
@@ -36,6 +43,7 @@ func testFlowEngine(t *testing.T, enrolled bool, minter *recordingMinter) *authf
 	engine, err := authflow.NewEngine([]byte("01234567890123456789012345678901"),
 		authflow.WithMFAGate(stubMFAGate{enrolled: enrolled}),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(permissiveValidator{}),
 	)
 	require.NoError(t, err)
 	return engine

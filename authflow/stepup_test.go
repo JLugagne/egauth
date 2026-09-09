@@ -77,6 +77,7 @@ func stepUpEngine(t *testing.T, minter *mockSessionMinter) *authflow.Engine {
 	engine, err := authflow.NewEngine([]byte("01234567890123456789012345678901"),
 		authflow.WithMFAGate(gate),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(&mockAccountValidator{}),
 	)
 	require.NoError(t, err)
 	return engine
