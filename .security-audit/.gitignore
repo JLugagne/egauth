@@ -1,0 +1,3 @@
+# Audit run folders are local-only artifacts — never commit them.
+*
+!.gitignore
