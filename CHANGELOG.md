@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.11.0] — 2026-09-09
+
 ### Security
 
 - **Passkey login enforces account lifecycle** (#116): a new `passkey.Config.AccountGate`
@@ -16,6 +18,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FinishDiscoverableLogin` refuse after a valid assertion with 403 `account_disabled` /
   `account_deleted`, and the blocked attempt is audited as an `AccountBlocked` event. The
   fullstack example wires the gate.
+- **Published example signing keys denied** (#112): the `tokens/jwt` denylist now also
+  rejects two publicly published valid-length signing keys (a godoc example key and a
+  docs-published key) so copy-paste deployments fail fast instead of shipping
+  attacker-known HMAC secrets; the `webapp` example/tests generate keys with `crypto/rand`.
+- **authflow cookies are Secure by default** (#113): the MFA flow cookie and
+  `StatefulSessionMinter` session cookie no longer derive `Secure` from `r.TLS` (behind a
+  TLS-terminating proxy the attribute was silently dropped, breaking `__Host-` cookies and
+  exposing non-prefixed session tokens). `Secure` is always on; an explicit
+  `WithInsecureCookies` opt-out serves local HTTP development, cannot drop `Secure` from
+  `__Host-` names, and emits a one-shot `InsecureCookieMisuse` event on non-loopback
+  plaintext hosts.
+- **Host-locked flow and ceremony cookies** (#114): `authflow` defaults to
+  `__Host-auth_flow_token` and `passkey` to `__Host-passkey_ceremony`, structurally
+  defeating sibling-subdomain cookie-tossing of the HMAC-sealed flow/ceremony state;
+  attribute misconfigurations fail construction (`ValidateHandlerConfig` /
+  engine validation) and plain names remain an explicit opt-out.
+- **Default CSRF origin check on authflow step-up** (#115): `authflow.StepUpHandler` now
+  applies the library-wide origin check (403 `cross_site_blocked` for cross-origin
+  requests), with the same `WithTrustedOrigins` / `WithInsecureNoOriginCheck` options and
+  semantics as identity/tokens/mfa — it was the only state-changing POST without one.
+- **SSRF guard covers the static OIDC path** (#117): operator-configured OIDC
+  discovery/JWKS fetches default to the SSRF-safe HTTP client (dial-time
+  internal-address guard, DNS-rebinding-proof, redirects never followed) and discovered
+  endpoints (`userinfo_endpoint` et al.) are validated before use; a plain client only
+  behind the explicit `AllowInsecureURLs` dev opt-in.
+- **OAuth state signing key minimum length** (#118): `WithStateSigningKey` enforces
+  `MinStateSigningKeyLength` (32 bytes) — shorter keys now fail handler construction
+  instead of producing offline-brute-forceable state cookies.
+- **Uncacheable auth responses** (#119): every token/session-cookie response (login,
+  register, refresh, logout, OAuth callback, MFA/OTP/passkey/authflow handlers, and the
+  auto-refresh middleware — including its GETs) sends `Cache-Control: no-store` /
+  `Pragma: no-cache`, so shared caches cannot retain live token material.
+- **Step-up requires an account-lifecycle validator** (#120): constructing an authflow
+  engine with a `MFAGate` but no `AccountValidator` is now a construction error, and
+  `ProcessStepUp` fails closed without one — an account disabled after the challenge can
+  no longer complete step-up and mint credentials.
+- **TrustedOrigins format normalized in webapp** (#121): `webapp.Config.TrustedOrigins`
+  now accepts both full origins (`https://app.example.com`) and bare hosts
+  (`app.example.com`) — the previously documented format silently never matched and
+  403'd the legit front-end, tempting operators into disabling the origin check; invalid
+  entries fail construction.
+
+### Internal
+
+- CI: every job is capped with `timeout-minutes` so a hung job cannot burn the default
+  360-minute runner budget; pgx testcontainers postgres readiness timeout raised to 60s
+  (eliminates load-related `TestPgxStore_Contract` flakiness); docs-pages workflow moved
+  to per-job least-privilege permissions with a checksum-verified Hugo install (#122).
 
 ## [v0.10.0] — 2026-09-08
 
