@@ -23,6 +23,12 @@ func (alwaysEnrolledGate) IsEnrolled(context.Context, string, uuid.UUID) (bool, 
 
 const hostPrefixTestEngineSecret = "01234567890123456789012345678901"
 
+// allowAllValidator is the minimal AccountValidator stub satisfying the MFA-gated
+// construction guard; the host-prefix tests never exercise lifecycle semantics.
+type allowAllValidator struct{}
+
+func (allowAllValidator) ValidateAccount(context.Context, string, uuid.UUID) error { return nil }
+
 func TestDefaultFlowCookieName_IsHostPrefixed(t *testing.T) {
 	require.True(t, strings.HasPrefix(DefaultFlowCookieName, hostPrefix),
 		"the default flow cookie name must carry the __Host- prefix (host-lock hardening)")
@@ -33,7 +39,7 @@ func TestDefaultFlowCookieName_IsHostPrefixed(t *testing.T) {
 // (The Secure attribute is owned by the request-TLS handling and is deliberately not asserted
 // here.)
 func TestProcessPrimaryAuth_HostLockedFlowCookieAttributes(t *testing.T) {
-	engine, err := NewEngine([]byte(hostPrefixTestEngineSecret), WithMFAGate(alwaysEnrolledGate{}))
+	engine, err := NewEngine([]byte(hostPrefixTestEngineSecret), WithMFAGate(alwaysEnrolledGate{}), WithAccountValidator(allowAllValidator{}))
 	require.NoError(t, err)
 
 	user := &identity.User{ID: uuid.Must(uuid.NewV7()), TenantID: "tenant-1", Email: "u@example.com"}

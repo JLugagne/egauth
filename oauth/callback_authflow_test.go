@@ -32,6 +32,13 @@ func (g enrolledGateStub) IsEnrolled(ctx context.Context, tenantID string, userI
 	return g.enrolled, nil
 }
 
+// permissiveValidator is an authflow.AccountValidator stub that always allows: the callback
+// wiring tests exercise MFA challenge/mint behavior, not lifecycle semantics, so it only
+// satisfies the engine's MFA-gated construction guard (issue #120).
+type permissiveValidator struct{}
+
+func (permissiveValidator) ValidateAccount(context.Context, string, uuid.UUID) error { return nil }
+
 // newFlowTestEngine assembles an authflow engine the way an application would: signed flow
 // tokens, an MFA enrollment gate, and a recording minter.
 func newFlowTestEngine(t *testing.T, enrolled bool, minter *flowRecordingMinter) *authflow.Engine {
@@ -39,6 +46,7 @@ func newFlowTestEngine(t *testing.T, enrolled bool, minter *flowRecordingMinter)
 	engine, err := authflow.NewEngine([]byte("01234567890123456789012345678901"),
 		authflow.WithMFAGate(enrolledGateStub{enrolled: enrolled}),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(permissiveValidator{}),
 	)
 	require.NoError(t, err)
 	return engine

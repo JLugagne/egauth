@@ -69,6 +69,7 @@ func TestAuthFlow_PasswordLogin_NoMFA_CompletesSuccessfully(t *testing.T) {
 		secret,
 		authflow.WithMFAGate(gate),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(&mockAccountValidator{}),
 	)
 	require.NoError(t, err)
 
@@ -106,6 +107,7 @@ func TestAuthFlow_PasswordLogin_WithMFA_IssuesFlowTokenAndRequiresStepUp(t *test
 		secret,
 		authflow.WithMFAGate(gate),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(&mockAccountValidator{}),
 	)
 	require.NoError(t, err)
 
@@ -160,6 +162,7 @@ func TestAuthFlow_OAuthLogin_WithMFA_PreservesOAuthAMR(t *testing.T) {
 		secret,
 		authflow.WithMFAGate(gate),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(&mockAccountValidator{}),
 	)
 	require.NoError(t, err)
 
@@ -207,6 +210,7 @@ func TestAuthFlow_MagicLink_WithMFA_EnforcesStepUp(t *testing.T) {
 		secret,
 		authflow.WithMFAGate(gate),
 		authflow.WithMinter(minter),
+		authflow.WithAccountValidator(&mockAccountValidator{}),
 	)
 	require.NoError(t, err)
 
@@ -272,7 +276,8 @@ func TestAuthFlow_ExpiredOrTamperedFlowToken_Fails(t *testing.T) {
 
 	// Create a flow with MFA required
 	gate := &mockMFAGate{isEnrolledFunc: func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) { return true, nil }}
-	engineWithGate, _ := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithTokenTTL(10*time.Millisecond))
+	engineWithGate, err := authflow.NewEngine(secret, authflow.WithMFAGate(gate), authflow.WithTokenTTL(10*time.Millisecond), authflow.WithAccountValidator(&mockAccountValidator{}))
+	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodPost, "/login", nil)
 	rec := httptest.NewRecorder()
