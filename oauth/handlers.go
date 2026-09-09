@@ -24,6 +24,13 @@ const (
 	DefaultStateCookieName = "__Host-oauth_state"
 	DefaultStateTTL        = 10 * time.Minute
 
+	// MinStateSigningKeyLength is the minimum length (in bytes) accepted for the state-cookie
+	// HMAC key. The cookie is authenticated with HMAC-SHA-256, so a key shorter than the
+	// 32-byte hash output is recoverable offline from a single captured state cookie;
+	// WithStateSigningKey rejects anything shorter. Use a persistent random key of at least
+	// this length.
+	MinStateSigningKeyLength = 32
+
 	// hostPrefix is the browser-enforced cookie name prefix that requires Secure, no
 	// Domain and Path=/ (mirrors the __Host- auth cookies in tokens).
 	hostPrefix = "__Host-"
@@ -135,10 +142,12 @@ func WithStateTTL(d time.Duration) HandlerOption {
 }
 
 // WithStateSigningKey configures the HMAC secret key used to sign and authenticate the
-// short-lived state cookie (SEC-OAU-03). The key is REQUIRED (STATE-01): the handlers fail
-// closed with 500 when it is missing, because an unsigned state cookie can be forged by any
-// attacker able to plant a cookie (sibling-subdomain tossing, plaintext HTTP). Use a
-// persistent random key of at least 32 bytes; rotating it invalidates in-flight flows.
+// short-lived state cookie (SEC-OAU-03). The key is REQUIRED (STATE-01) and must be at least
+// MinStateSigningKeyLength (32) bytes: the handlers fail closed with 500 when it is missing
+// or too short, because an unsigned state cookie can be forged by any attacker able to plant
+// a cookie (sibling-subdomain tossing, plaintext HTTP), and a shorter HMAC key is
+// brute-forceable offline from a single captured cookie. Use a persistent random key of at
+// least 32 bytes; rotating it invalidates in-flight flows.
 func WithStateSigningKey(key []byte) HandlerOption {
 	return func(h *handlerConfig) {
 		h.stateSigningKey = append([]byte(nil), key...)
@@ -606,6 +615,8 @@ func (cfg handlerConfig) validate() error {
 	var errs []error
 	if len(cfg.stateSigningKey) == 0 {
 		errs = append(errs, errors.New("oauth: WithStateSigningKey is required: the OAuth state cookie must be HMAC-signed, otherwise a cookie an attacker can plant (sibling-subdomain tossing, plaintext HTTP) drives the callback into a forged login (STATE-01)"))
+	} else if len(cfg.stateSigningKey) < MinStateSigningKeyLength {
+		errs = append(errs, fmt.Errorf("oauth: WithStateSigningKey key must be at least %d bytes, got %d: a shorter HMAC-SHA-256 key is brute-forceable offline from a single captured state cookie, re-enabling forged logins (STATE-01)", MinStateSigningKeyLength, len(cfg.stateSigningKey)))
 	}
 	if strings.HasPrefix(cfg.stateCookieName, hostPrefix) {
 		if cfg.cookies.Domain != "" {
