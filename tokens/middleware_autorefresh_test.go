@@ -260,3 +260,27 @@ func TestRequireAuth_ExpiredWithoutAutoRefreshRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, called)
 }
+
+// TestRequireAuth_AutoRefreshGETSetsNoStore proves the regression the issue targets: the
+// auto-refresh middleware rotates the refresh cookie on ordinary cacheable GETs, so the
+// response it touches MUST be marked uncacheable — a shared cache storing it would duplicate
+// live refresh tokens (RFC 9111 §3.2 / OWASP session management).
+func TestRequireAuth_AutoRefreshGETSetsNoStore(t *testing.T) {
+	f := newAutoRefreshFixture(t)
+	uid := uuid.Must(uuid.NewV7())
+	pair, err := f.expiredMinter.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uid})
+	require.NoError(t, err)
+
+	h := tokens.RequireAuth[struct{}](f.svc, func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ struct{}) {
+		w.WriteHeader(http.StatusOK)
+	}, tokens.WithAutoRefresh[struct{}](f.svc, f.cookies))
+
+	// f.request builds a GET /protected with the stale access + valid refresh cookies.
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, f.request(pair.AccessToken, pair.RefreshToken))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, findCookie(t, rec, f.cookies.AccessName) != nil, "auto-refresh must reissue the access cookie")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), "auto-refresh GET response must be uncacheable")
+	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}

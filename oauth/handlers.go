@@ -393,6 +393,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 // SameSite=Lax (Lax is required so the cookie is sent on the top-level GET redirect back from
 // the provider; Strict would drop it and break the flow).
 func (cfg handlerConfig) setStateCookie(w http.ResponseWriter, value string) {
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cfg.stateCookieName,
 		Value:    value,
@@ -414,6 +415,7 @@ func (cfg handlerConfig) readStateCookie(r *http.Request) (string, bool) {
 }
 
 func (cfg handlerConfig) clearStateCookie(w http.ResponseWriter) {
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     cfg.stateCookieName,
 		Value:    "",

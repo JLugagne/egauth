@@ -947,3 +947,23 @@ func TestLoginHandler_VerboseLockoutStatus_OptIn(t *testing.T) {
 		})
 	}
 }
+
+// TestLoginHandler_SetsNoStore: the login pair issuance writes Set-Cookie headers, so the
+// response must carry Cache-Control: no-store (OWASP session management; RFC 9111 §3.2).
+func TestLoginHandler_SetsNoStore(t *testing.T) {
+	uid := uuid.Must(uuid.NewV7())
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			return &identity.User{ID: uid}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NotNil(t, cookieByName(rec, tokens.DefaultAccessCookieName), "login must issue the access cookie")
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), "login response with Set-Cookie must be uncacheable")
+	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}

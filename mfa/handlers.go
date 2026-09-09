@@ -342,6 +342,7 @@ func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request
 }
 
 func (cfg handlerConfig) ok(w http.ResponseWriter, r *http.Request) {
+	httputil.MarkNoStore(w)
 	if cfg.successURL != "" {
 		http.Redirect(w, r, cfg.successURL, http.StatusSeeOther)
 		return

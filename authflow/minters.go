@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/sessions"
 	"github.com/JLugagne/egauth/tokens"
 )
@@ -110,6 +111,7 @@ func (m *StatefulSessionMinter) Mint(ctx context.Context, w http.ResponseWriter,
 	}
 
 	if w != nil {
+		httputil.MarkNoStore(w)
 		http.SetCookie(w, &http.Cookie{
 			Name:     m.cookieName,
 			Value:    token,

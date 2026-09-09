@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/JLugagne/egauth/internal/httputil"
 )
 
 // Default cookie names used by egauth handlers and middleware.
@@ -146,6 +148,7 @@ func (c Cookies) withDefaults() Cookies {
 // rotate transparently.
 func (c Cookies) SetAccess(w http.ResponseWriter, accessToken string) {
 	c = c.withDefaults()
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     c.AccessName,
 		Value:    accessToken,
@@ -176,12 +179,14 @@ func (c Cookies) SetRefresh(w http.ResponseWriter, refreshToken string, expiresA
 		cookie.MaxAge = maxAge
 		cookie.Expires = expiresAt
 	}
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, cookie)
 }
 
 // ClearAccess expires the access-token cookie.
 func (c Cookies) ClearAccess(w http.ResponseWriter) {
 	c = c.withDefaults()
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     c.AccessName,
 		Value:    "",
@@ -197,6 +202,7 @@ func (c Cookies) ClearAccess(w http.ResponseWriter) {
 // ClearRefresh expires the refresh-token cookie.
 func (c Cookies) ClearRefresh(w http.ResponseWriter) {
 	c = c.withDefaults()
+	httputil.MarkNoStore(w)
 	http.SetCookie(w, &http.Cookie{
 		Name:     c.RefreshName,
 		Value:    "",
