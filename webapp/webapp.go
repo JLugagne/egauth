@@ -19,6 +19,7 @@ package webapp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ import (
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/basic"
 )
@@ -67,8 +69,11 @@ type Config struct {
 	// CookieDomain optionally scopes the auth cookies to a domain (empty = host-only).
 	CookieDomain string
 	// TrustedOrigins, when non-empty, enables the CSRF origin check on every cookie-bearing
-	// POST endpoint (login, register, refresh, logout). List the exact origins your forms
-	// are served from, e.g. "https://app.example.com".
+	// POST endpoint (login, register, refresh, logout). Entries may be full origins
+	// ("https://app.example.com") or bare hosts ("app.example.com"); both are accepted and
+	// normalized to bare hosts before the handlers see them, so the two forms are equivalent.
+	// List every origin your forms are served from. Entries that cannot be normalized to a
+	// host make NewWebApp fail with an error.
 	TrustedOrigins []string
 	// InsecureNoOriginCheck opts out of the preset's CSRF-by-default guarantee. NewWebApp refuses
 	// to build when TrustedOrigins is empty unless this is set; when set, it wires
@@ -178,8 +183,15 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		tkOpts = append(tkOpts, tokens.WithCookies(cookies))
 	}
 	if len(cfg.TrustedOrigins) > 0 {
-		idOpts = append(idOpts, identity.WithTrustedOrigins(cfg.TrustedOrigins...))
-		tkOpts = append(tkOpts, tokens.WithTrustedOrigins(cfg.TrustedOrigins...))
+		// Accept both the documented full-origin format ("https://app.example.com") and the
+		// bare-host format the handlers expect; normalize loudly so a mistyped entry fails
+		// at construction time instead of silently never matching at request time.
+		hosts, err := httputil.NormalizeHosts(cfg.TrustedOrigins)
+		if err != nil {
+			return nil, fmt.Errorf("webapp: Config.TrustedOrigins: %w", err)
+		}
+		idOpts = append(idOpts, identity.WithTrustedOrigins(hosts...))
+		tkOpts = append(tkOpts, tokens.WithTrustedOrigins(hosts...))
 	}
 	if cfg.InsecureNoOriginCheck {
 		// Opt-out: disable the same-origin check on BOTH families so the preset is consistently
