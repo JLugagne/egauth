@@ -5,6 +5,7 @@ package httputil
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/url"
@@ -171,4 +172,54 @@ func MarkNoStore(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Cache-Control", "no-store")
 	h.Set("Pragma", "no-cache")
+}
+
+// NormalizeHosts normalizes trusted-origin entries to the bare hosts that OriginAllowed
+// matches on. Each entry may be a full origin ("https://app.example.com:8443") or a bare
+// host ("app.example.com"): full origins are reduced to their URL Host (host or host:port,
+// lowercased by url.Parse, with scheme, path, query and userinfo dropped), and bare-host
+// entries are validated and returned as-is. The result is suitable both for the
+// WithTrustedOrigins options and for comparison with an Origin header's host. It returns
+// an error naming the first entry that fails to parse or yields no host.
+func NormalizeHosts(entries []string) ([]string, error) {
+	hosts := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		host, err := originHost(entry)
+		if err != nil {
+			return nil, fmt.Errorf("invalid host entry %q: %w", entry, err)
+		}
+		// Hostnames are case-insensitive, and OriginAllowed compares hosts exactly, so the
+		// allowlist is stored lowercase to match the lowercase Origin headers browsers send.
+		hosts = append(hosts, strings.ToLower(host))
+	}
+	return hosts, nil
+}
+
+// originHost extracts the host from one allowlist entry. A full origin parses with a
+// non-empty Host and is returned as-is; a bare host parses as a path (or scheme:opaque,
+// e.g. "app.example.com:8443"), so it is re-validated by re-parsing with a default scheme
+// and only accepted when the result is an unambiguous bare host.
+func originHost(entry string) (string, error) {
+	if entry == "" {
+		return "", errors.New("empty entry")
+	}
+	u, err := url.Parse(entry)
+	if err != nil {
+		return "", err
+	}
+	if u.Host != "" {
+		return u.Host, nil
+	}
+	u, err = url.Parse("https://" + entry)
+	if err != nil {
+		return "", err
+	}
+	if u.Host == "" {
+		return "", errors.New("no host")
+	}
+	if u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("not a bare host")
+	}
+	return u.Host, nil
 }
