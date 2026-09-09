@@ -32,7 +32,7 @@ func TestStore_Ping(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second)),
+				WithStartupTimeout(60*time.Second)),
 	)
 	require.NoError(t, err)
 	defer func() { _ = pgContainer.Terminate(ctx) }()

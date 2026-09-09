@@ -34,7 +34,7 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second)),
+				WithStartupTimeout(60*time.Second)),
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = pgContainer.Terminate(ctx) })

@@ -66,7 +66,7 @@ func newIntegrationPool(ctx context.Context, t *testing.T) *pgxpool.Pool {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(30*time.Second)),
+				WithStartupTimeout(60*time.Second)),
 	)
 	if err != nil {
 		// No Docker daemon (or it is unreachable): skip rather than fail, matching the

@@ -28,7 +28,7 @@ func TestPgxStore_Contract(t *testing.T) {
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("database system is ready to accept connections").
 				WithOccurrence(2).
-				WithStartupTimeout(15*time.Second),
+				WithStartupTimeout(60*time.Second),
 		),
 	)
 	require.NoError(t, err)
