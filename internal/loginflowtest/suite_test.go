@@ -81,10 +81,9 @@ const (
 type tenantMode int
 
 const (
-	// tenantNormal uses the single-tenant default partition ("").
-	tenantNormal tenantMode = iota
-	// tenantUnresolved configures a request-tenant resolver that answers "".
-	tenantUnresolved
+	// tenantUnresolved configures a request-tenant resolver that answers "". The zero value is
+	// the normal single-tenant default partition ("").
+	tenantUnresolved tenantMode = iota + 1
 	// tenantCross drives the flow for a different, existing partition.
 	tenantCross
 )
@@ -152,11 +151,6 @@ func (o observed) refreshCookie() *http.Cookie { return o.cookie(tokens.DefaultR
 // fullSessionMinted reports whether a complete, renewable pair reached the client.
 func (o observed) fullSessionMinted() bool {
 	return o.accessCookie() != nil && o.refreshCookie() != nil
-}
-
-// sessionMinted reports whether the flow minted or delivered any session material at all.
-func (o observed) sessionMinted() bool {
-	return len(o.Pairs) > 0 || o.accessCookie() != nil || o.refreshCookie() != nil
 }
 
 // challengedOrInterim reports whether an enrolled user was parked short of a full session: an
