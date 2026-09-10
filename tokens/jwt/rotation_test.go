@@ -195,14 +195,12 @@ func TestRotate_NotFound(t *testing.T) {
 func TestRotate_NoClaimsProvider(t *testing.T) {
 	ctx := context.Background()
 	// Build a service WITHOUT a ClaimsProvider.
-	// InsecureAllowWeakKey is set because the key length is not the subject of this test.
 	store := memory.NewStore[struct{}]()
 	svc := jwt.New[struct{}](jwt.Config[struct{}]{
-		Store:                store,
-		SecretKey:            "s",
-		AccessTTL:            time.Minute,
-		RefreshTTL:           time.Hour,
-		InsecureAllowWeakKey: true,
+		Store:      store,
+		SecretKey:  "0123456789abcdef0123456789abcdef",
+		AccessTTL:  time.Minute,
+		RefreshTTL: time.Hour,
 	})
 
 	pair, err := svc.IssueTokenPair(ctx, tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})

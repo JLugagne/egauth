@@ -147,7 +147,9 @@ type Config[C any] struct {
 	// InsecureAllowWeakKey suppresses the MinSecretKeyLength enforcement inside New. It must
 	// only be set in test code that intentionally uses short keys (e.g. to exercise edge-case
 	// paths without needing a 32-byte secret). Production callers must never set this field —
-	// doing so removes the brute-force resistance guarantee for HS256.
+	// doing so removes the brute-force resistance guarantee for HS256. It does NOT suppress the
+	// published-key denylist or the rejection of trivially known keys (all-zero / repeated
+	// single byte): those checks are unconditional.
 	InsecureAllowWeakKey bool
 }
 
@@ -162,10 +164,11 @@ const MinTokenLength = 16
 
 // Validate reports configuration that would make the issuer insecure or non-functional: an
 // empty/too-short signing key (or keyset), a key matching one published in this project's
-// examples/docs, an empty Issuer, or a non-positive Access/Refresh
-// TTL. Production callers SHOULD call it at startup (it returns all problems joined). New itself
-// only hard-fails configurations from which no coherent signer can be built, so test code may
-// still construct an issuer with, e.g., a deliberately negative AccessTTL to exercise expiry.
+// examples/docs or a trivially known key (all-zero / repeated single byte), an empty Issuer, or a
+// non-positive Access/Refresh TTL. Production callers SHOULD call it at startup (it returns all
+// problems joined). New itself only hard-fails configurations from which no coherent signer can
+// be built, so test code may still construct an issuer with, e.g., a deliberately negative
+// AccessTTL to exercise expiry.
 func (cfg Config[C]) Validate() error {
 	var errs []error
 
@@ -227,6 +230,9 @@ func (cfg Config[C]) Validate() error {
 			if err := deniedSecretError([]byte(k.Secret)); err != nil {
 				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q]: %w", k.KeyID, err))
 			}
+			if err := trivialSecretError([]byte(k.Secret)); err != nil {
+				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q]: %w", k.KeyID, err))
+			}
 		}
 		if cfg.ActiveKeyID == "" {
 			if len(cfg.SigningKeys) > 1 {
@@ -243,6 +249,9 @@ func (cfg Config[C]) Validate() error {
 
 	if cfg.SecretKey != "" {
 		if err := deniedSecretError([]byte(cfg.SecretKey)); err != nil {
+			errs = append(errs, fmt.Errorf("jwt: SecretKey: %w", err))
+		}
+		if err := trivialSecretError([]byte(cfg.SecretKey)); err != nil {
 			errs = append(errs, fmt.Errorf("jwt: SecretKey: %w", err))
 		}
 	}
@@ -360,11 +369,12 @@ func resolveKeyset[C any](cfg Config[C]) (active Signer, verify map[string]Signe
 
 // New creates a new JWT Service. It panics on a configuration from which no coherent signer can
 // be built: no signing key, a malformed keyset, any key shorter than MinSecretKeyLength, any key
-// matching one published in this project's examples/docs (attacker-known), or a
-// RefreshLength/APIKeyLength below MinTokenLength.
+// matching one published in this project's examples/docs (attacker-known) or trivially known
+// (all-zero / repeated single byte), or a RefreshLength/APIKeyLength below MinTokenLength.
 // The MinSecretKeyLength check can be suppressed via Config.InsecureAllowWeakKey — that field
 // exists exclusively for test code that needs short keys; production callers must never set it.
-// The published-key denylist is enforced unconditionally and cannot be bypassed.
+// The published-key denylist and the trivially-known-key rejection are enforced unconditionally
+// and cannot be bypassed.
 // For comprehensive startup validation (TTLs, Issuer, etc.) call Config.Validate before New.
 func New[C any](cfg Config[C]) *Service[C] {
 	// Fail fast at startup rather than with a nil-pointer panic deep in a request,

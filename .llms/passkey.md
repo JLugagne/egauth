@@ -61,6 +61,7 @@ type Config struct {
     Events                   event.Sink                           // optional; receives LoginSucceeded / AccountBlocked events
     AccountGate              AccountGate                          // optional lifecycle gate; REQUIRED when accounts can be disabled/deleted
 }
+// Config implements String/GoString/LogValue; CookieKey is redacted on every fmt/slog path.
 ```
 
 ### AccountGate

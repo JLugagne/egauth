@@ -7,6 +7,7 @@ package keystore
 // Alg) being silently projected into a Signer instead of failing closed.
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -65,6 +66,24 @@ func TestSignerFor_RejectsCorruptKeyMaterial(t *testing.T) {
 			signer, err := signerFor(tc.key)
 			if err == nil {
 				t.Fatalf("signerFor(%s) = %v, nil; want an error", tc.name, signer)
+			}
+		})
+	}
+}
+
+// TestSignerFor_RejectsAllZeroOrRepeatedHMACSecret guards the HS256 adapter path: an all-zero or
+// repeated-single-byte secret is attacker-known at any length, so signerFor must fail closed
+// rather than project it into a Signer.
+func TestSignerFor_RejectsAllZeroOrRepeatedHMACSecret(t *testing.T) {
+	cases := map[string][]byte{
+		"all zero":             make([]byte, 32),
+		"repeated single byte": bytes.Repeat([]byte{0x42}, 32),
+	}
+	for name, secret := range cases {
+		t.Run(name, func(t *testing.T) {
+			signer, err := signerFor(SigningKey{KeyID: "k", Alg: AlgHS256, Secret: secret})
+			if err == nil {
+				t.Fatalf("signerFor accepted a trivially known HMAC secret: %v", signer)
 			}
 		})
 	}

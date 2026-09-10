@@ -206,7 +206,7 @@ mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolv
 
 ## Gotchas
 
-- `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md.
+- `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md. `TOTPEnrollment` implements `String`/`GoString`/`LogValue` and redacts `Secret` on all fmt/slog paths.
 - `ErrAlreadyEnrolled` is returned if attempting to re-enroll a CONFIRMED factor. Call `DisableTOTP` first.
 - `VerifyTOTP` returns `ErrNotConfirmed` (not `ErrNotEnrolled`) if enrollment exists but was never confirmed.
 - Attempt counter is shared between TOTP and recovery code paths. Locking one locks both.

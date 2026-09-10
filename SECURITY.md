@@ -350,12 +350,19 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
   `slog`): `tokens.TokenPair` (access + refresh token), `tokens.APIKey` (the clear-text `Token`),
-  and — because the HS256 signing key is the most catastrophic secret to leak — `tokens/jwt.Config`,
-  `tokens/jwt.SigningKey` and the running `tokens/jwt.Service` (its `SecretKey` / `SigningKeys[].Secret`
-  and the resolved key bytes). Non-secret identifiers (key IDs, issuer, expiry) stay visible to aid
-  debugging. This is a safety net, **not** a licence to log these values (see below). JSON
-  marshalling is intentionally **not** redacted, since returning a freshly issued token to its
-  owner in a response body is a legitimate use.
+  `tokens/jwt.Config`, `tokens/jwt.SigningKey` and the running `tokens/jwt.Service`
+  (`SecretKey` / `SigningKeys[].Secret` and the resolved key bytes), `webapp.Config.SigningKey`,
+  `passkey.Config.CookieKey`, the `oauth.Provider` client secret, `keystore.SigningKey` /
+  `keystore.Keyset` (`Secret`), and `mfa.TOTPEnrollment.Secret`. Non-secret identifiers (key IDs,
+  issuer, tenant, endpoints, expiry) stay visible to aid debugging. This is a safety net, **not**
+  a licence to log these values (see below). JSON marshalling is intentionally **not** redacted,
+  since returning a freshly issued token to its owner in a response body is a legitimate use.
+- **Trivially known signing keys are rejected at construction.** `tokens/jwt` (and therefore the
+  `keystore` JWT adapter, which projects each key through `jwt.NewHMACSigner`) refuses an HS256
+  secret that is all-zero or a single repeated byte in addition to one shorter than
+  `MinSecretKeyLength` or matching a published example key. `Config.InsecureAllowWeakKey`
+  suppresses only the minimum-length gate — the published-key denylist and the trivially-known-key
+  check are unconditional.
 - **Errors do not echo secrets.** Wrapped errors carry the underlying cause
   (`%w`) or non-sensitive metadata (e.g. a JWT `alg` header), never the plaintext
   password or token bytes.
@@ -371,18 +378,21 @@ as credentials:
   struct field — `sessions.Session` persists only `TokenHash`).
 - Any password passed into `Register` / `Authenticate`.
 
-The `tokens.*` structs above redact their secret fields on `fmt`/`slog` (see the redaction note
+The key-bearing structs above redact their secret fields on `fmt`/`slog` (see the redaction note
 above), but a session token / password is a bare string with **no** such safety net, and the
 redaction is in any case only a backstop. Therefore the consumer must:
 
 - **Never log them** (no `log`, `slog`, `fmt.Printf`, request/response dumps, etc.). The
   redaction stops an accidental struct dump; it does not make logging a token's *value* safe.
-- **Never serialize them by accident.** The `tokens.*` structs carry no `json` tags and JSON
+- **Never serialize them by accident.** The key-bearing structs carry no `json` tags and JSON
   marshalling is deliberately *not* redacted, so a consumer that JSON-encodes them will emit the
   plaintext. Send a token to the client deliberately (cookie/body) and nowhere else.
-- **Never log the JWT signing key.** Load `tokens/jwt.Config.SecretKey` / `SigningKeys` from a
-  secret store; `Config`, `SigningKey` and `Service` redact it on `fmt`/`slog`, but do not
-  serialize the config or persist the key in plaintext.
+- **Never log key material.** Load `tokens/jwt.Config.SecretKey` / `SigningKeys`,
+  `webapp.Config.SigningKey`, `passkey.Config.CookieKey`, `oauth.Provider`'s client secret and
+  `keystore.SigningKey.Secret` from a secret store; those types redact the secret on `fmt`/`slog`,
+  but do not serialize a key-bearing config or persist a signing key in plaintext.
+  `mfa.TOTPEnrollment.Secret` is deliberately recoverable so the server can recompute codes — it
+  too is redacted on `fmt`/`slog`, but must still be encrypted at rest and treated as a credential.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
 - **Access-token tenant binding (fail-closed when multi-tenant).** When one `tokens/jwt.Service`

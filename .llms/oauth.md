@@ -72,6 +72,8 @@ func New(
 ) *Provider
 ```
 
+`Provider` implements `String`/`GoString`/`LogValue`; the `clientSecret` is redacted on every fmt/slog path while the name, client ID and endpoint URLs remain visible.
+
 ### ProviderOption
 
 ```go

@@ -153,7 +153,7 @@ Methods:
 - `RevokeTenantKeys(ctx, tenantID) error`
 - `DeleteTenant(ctx, tenantID) error`
 
-`keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only).
+`keystore.SigningKey` carries an `Alg` field (`HS256` default, or `RS256`/`ES256`/`ES384`/`ES512`/`EdDSA`); `Secret` holds the KEK-sealed HMAC secret for HS256 or the sealed PKCS#8 DER of the private key for an asymmetric alg. Provision/renew the algorithm via `keystore.ProvisionOptions.Alg` / `RenewOptions.Alg`; `Manager.JWKS` publishes the asymmetric public keys (HMAC stays metadata-only). `keystore.SigningKey` and `keystore.Keyset` implement `String`/`GoString`/`LogValue`, redacting `Secret` on every fmt/slog path while key IDs, tenant and algorithm stay visible.
 
 Migrations:
 ```
