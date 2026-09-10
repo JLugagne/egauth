@@ -35,6 +35,12 @@
 // SMS toll-fraud warning: phone verification spends real money per message. Always rate-limit
 // RequestPhoneVerificationHandler per destination number (not only per IP/account), cap your
 // SMS provider's spend, and prefer an allowlist of dialing regions you actually serve.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package ratelimit
 
 import (

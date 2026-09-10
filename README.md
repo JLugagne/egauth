@@ -370,6 +370,19 @@ stores for their `pgx` counterparts (which rely on the database for eviction ins
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
 follow SemVer with a CHANGELOG. Pin a commit or tag in `go.mod` for reproducible builds.
 
+**Stability classes (proposed for v1).** The packages proposed for the v1 SemVer freeze — and the
+ones that deliberately stay outside it — are analysed in
+[ADR 0001](docs/adr/0001-v1-scope-and-stability-classes.md). In short:
+
+| Class | Packages |
+|---|---|
+| Frozen v1 (proposed) | `identity`, `tokens` + subpackages, `sessions`, `passwords`, `mfa`, `otp`, `passkey`, `oauth`, `keystore`, `issuance`, `event`, `health`, `ratelimit`, `revocation`, `janitor`, `adapters/pgx`, `adapters/otel` |
+| Experimental (no SemVer guarantee) | `authflow`, `oauth/providers`, and `webapp` (proposed) |
+
+Each package's godoc repeats its own class. `experimental` packages remain supported and tested
+but may change or be removed in any release; the à-la-carte handlers and the `issuance` pipeline
+are the frozen path.
+
 **Go version support policy.**
 
 - **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.

@@ -77,4 +77,12 @@
 // model as identity.LoginHandler (short-lived access token, no refresh cookie) completed through
 // mfa.StepUpHandler. Choose that lighter path when you want MFA gating without adopting the full
 // flow-token engine; choose WithAuthFlow when you want every login method to share one pipeline.
+//
+// # Stability
+//
+// Stability class: experimental. This composition layer is outside the proposed v1 frozen core
+// and carries no SemVer guarantee — its API may change or be removed in any release. The frozen
+// building blocks are the issuance pipeline plus the per-handler MFA gate
+// (identity.WithMFAGate, completed by mfa.StepUpHandler). See
+// docs/adr/0001-v1-scope-and-stability-classes.md.
 package authflow

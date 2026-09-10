@@ -1,6 +1,12 @@
 // Package health defines the optional health-check seam implemented by egauth's pgx-backed
 // stores, so readiness/liveness probes can be written against any store without depending on a
 // specific backend or holding a separate handle to the underlying connection pool.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package health
 
 import "context"

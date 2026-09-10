@@ -3,6 +3,13 @@
 // dedicated package so the core oauth machinery stays free of provider-specific endpoints and
 // userinfo parsing. Write your own constructor the same way: call oauth.New with the provider
 // endpoints and a fetch func built on oauth.GetJSON.
+//
+// # Stability
+//
+// Stability class: experimental. The provider constructors are convenience wrappers outside the
+// proposed v1 frozen core and carry no SemVer guarantee — endpoints, scopes and constructor
+// signatures may change in any release as providers evolve. The frozen surface is oauth.New and
+// the rest of the oauth package. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package providers
 
 import (

@@ -40,4 +40,10 @@
 // Enumeration-safe by default (uniform responses and decoy hashing on unknown accounts),
 // brute-force lockout, single-use selector/verifier tokens, email normalization, and a pre-auth
 // body cap against hashing-DoS. See SECURITY.md for the full model.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package identity

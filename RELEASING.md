@@ -311,3 +311,70 @@ libauth follows [Semantic Versioning](https://semver.org/):
 - **Minor** (vX.Y.Z → vX.Y+1.0): backwards-compatible new features or additions.
 - **Major** (vX.Y.Z → vX+1.0.0): breaking API changes; requires updating the module path
   (e.g. `github.com/JLugagne/egauth/v2`).
+
+The packages covered by the promise, and the ones that are explicitly experimental, are listed
+in [docs/adr/0001-v1-scope-and-stability-classes.md](docs/adr/0001-v1-scope-and-stability-classes.md).
+
+---
+
+## v1 API-freeze review checklist
+
+Run this before tagging v1.0.0, and re-run the relevant parts before any change to a
+`frozen-v1` package. The goal is that the SemVer promise covers a surface that is named
+deliberately, reviewed for security defaults, and able to grow without breaking implementers.
+
+### Naming and stability
+
+- [ ] Every exported identifier in a `frozen-v1` package is named for its final meaning; no
+      temporary, internal or placeholder names survive the freeze.
+- [ ] A `go doc -all` sweep per frozen package was reviewed against the stability table, and each
+      package doc carries its stability class.
+- [ ] New exported surface is either part of the frozen contract or explicitly marked
+      `// Experimental:`; nothing is added silently.
+- [ ] No `frozen-v1` exported signature exposes an experimental package's type in a way that
+      would freeze it transitively. If it does, promote the type or change the signature before
+      the tag.
+- [ ] Options follow the `WithX` convention, and every opt-out that weakens a security default is
+      named `WithInsecure*` or `Insecure*` and documented as a risk.
+
+### Security-relevant options
+
+- [ ] Every exported option and `Config` field was reviewed for security impact and defaults to
+      the safe behavior.
+- [ ] A test fails if a secure default flips silently (same-origin gate, cookie flags, token
+      length, lockout, OTP/TOTP attempt limits, challenge store, state signing key).
+- [ ] Secret-bearing types keep their `fmt`/`slog` redaction, and no exported type adds a secret
+      field without it.
+- [ ] Sensitive comparisons on the authentication path are constant-time or explicitly documented
+      as not requiring it.
+
+### Store interface growth
+
+- [ ] Each core `Store` interface is segmented into a stable core plus optional capability
+      interfaces; adding a capability in v1.x adds a new interface, never a method to a frozen
+      one.
+- [ ] Adding a method to a `frozen-v1` interface is treated as a breaking change: it is deferred
+      to the next major version or shipped as a new optional interface.
+- [ ] Every new optional interface has a conformance suite (`*/storetest` or the equivalent
+      exported contract helper), and every bundled backend passes it.
+- [ ] Concurrency-critical methods (single-use consumption, compare-and-set, atomic counters)
+      remain documented as such, and their contract tests still assert the atomic behavior.
+
+---
+
+## Deprecation policy
+
+- **Announce before removing.** An exported symbol in a `frozen-v1` package is marked
+  `// Deprecated: <reason>. Use <replacement> instead.`, documented in `CHANGELOG.md`, and left
+  working for at least one minor release before it is removed in the next major version.
+- **Removal only in a major.** Within v1.x, a deprecated symbol keeps compiling and working; its
+  removal requires a new module major (`.../v2`).
+- **Safety wins over the compatibility promise.** A symbol that cannot be made safe is the one
+  exception: it may be disabled or removed in a minor or patch release, with the reason recorded
+  in `CHANGELOG.md` and `SECURITY.md`.
+- **Retract unusable releases.** A published version that must not be used is handled with a
+  `retract` directive in `go.mod` (see "Step 2 — Update `retract` in go.mod").
+- **Experimental packages are exempt.** They may change or be removed in any release without a
+  major-version bump; the change is still called out in `CHANGELOG.md`.
+- **Update the stability docs.** When a package is deprecated or removed, update the stability
+  table in the ADR and the package's godoc in the same change.

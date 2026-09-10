@@ -10,6 +10,10 @@
 This document describes how `egauth` handles sensitive values (passwords, opaque
 tokens, hashes) and what the **consumer** of the library is responsible for.
 
+The per-module summary — what each package guarantees and what the consumer must do — lives in
+[docs/security-guarantees.md](docs/security-guarantees.md). This document remains the detailed
+model behind those statements.
+
 ## What egauth guarantees
 
 - **Hashing at rest.** Opaque tokens (refresh tokens, API keys, session tokens) are
@@ -429,25 +433,28 @@ redaction is in any case only a backstop. Therefore the consumer must:
   hatch for deployments that genuinely cannot satisfy the `__Host-` requirements (e.g. a
   path-scoped cookie or local plain-HTTP development); overriding to a name without the prefix
   forfeits the host-lock hardening and is the consumer's explicit choice.
-- **OAuth state cookie carries secrets in plaintext.** The short-lived OAuth `state` cookie
-  (default name `oauth_state`) is a plain concatenation of the CSRF state, the **PKCE code
-  verifier**, the **OIDC nonce**, the provider name and the tenant — it is *not* signed or
-  encrypted. Its integrity model is "the attacker cannot read or write the cookie," resting on
-  `HttpOnly` + `Secure` + `SameSite=Lax` (set automatically) plus a constant-time `state`
-  comparison on callback — **not** on the cookie being tamper-evident. Two consequences for the
-  consumer:
+- **OAuth state cookie carries secrets in plaintext, but is authenticated and host-locked.**
+  The short-lived OAuth `state` cookie (default name `__Host-oauth_state`) is a plain
+  concatenation of the CSRF state, the **PKCE code verifier**, the **OIDC nonce**, the provider
+  name and the tenant — it is *not encrypted*, but it **is** HMAC-SHA-256 authenticated and
+  host-locked by the `__Host-` prefix. `WithStateSigningKey` is **required** and must supply at
+  least `oauth.MinStateSigningKeyLength` (32) bytes; the handlers fail closed with `500` when the
+  key is missing or too short, so a cookie an attacker can plant (sibling-subdomain tossing,
+  plaintext HTTP) cannot drive a forged login, and a short key cannot be brute-forced offline
+  from a captured cookie. On callback the `state` binding is additionally compared in constant
+  time. Two consequences for the consumer:
   - **Never log or mirror request cookies.** The verifier and nonce sit in the cookie in
     plaintext; any infra that logs cookies, ships them to an observability backend, or proxies
     them through something that persists headers is recording sensitive material.
   - **Do not move `state` out of the cookie without re-deriving the guarantee.** If you refactor
     it to a server-side handle, a header, or a differently-prefixed cookie, you can silently
-    lose the read/write protection the current scheme depends on.
-  Unlike the `tokens`/`sessions` cookies, the state cookie name is **not** `__Host-` prefixed by
-  default (it must survive the provider's top-level redirect, which `SameSite=Lax` already
-  handles; `__Host-` is independently compatible). For defence against subdomain cookie-tossing,
-  set a `__Host-`-prefixed name via `oauth.WithStateCookieName("__Host-oauth_state")` **when your
-  deployment serves OAuth over HTTPS with no cookie `Domain`** (the `__Host-` prefix requires
-  `Secure`, `Path=/`, and no `Domain`).
+    lose the authenticity/host-lock protection the current scheme depends on.
+  The state cookie stays `HttpOnly` + `Secure` + `SameSite=Lax`, and `__Host-` by default. A
+  deployment that must share the in-flight state cookie across subdomains opts out explicitly
+  with `oauth.WithCookieDomain` plus a non-`__Host-` `oauth.WithStateCookieName`, accepting the
+  cookie-tossing residual; `oauth.ValidateHandlerConfig` reports both misconfigurations at
+  startup. `WithInsecureCookies` (local HTTP development only) is likewise incompatible with the
+  default name — rename the cookie when serving plaintext HTTP.
 - **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
   lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
   timeout). Regardless of how recently `Touch` was called, a session is rejected once
