@@ -31,6 +31,12 @@
 //     suspended/deleted account up front, and FinishLogin / FinishDiscoverableLogin refuse an
 //     otherwise-valid assertion with 403 "account_disabled" / "account_deleted". A nil gate
 //     skips the check (passkey-only deployments without the identity module).
+//   - CSRF origin check — ON BY DEFAULT for RenameCredentialHandler, the only state-changing
+//     endpoint outside the WebAuthn ceremony-cookie protection. A POST whose Origin (or Referer
+//     fallback) host is neither the request's own Host nor a WithTrustedOrigins entry is rejected
+//     with 403 "cross_site_blocked", and the JSON body must be sent as Content-Type
+//     application/json (415 otherwise). Widen the allowlist with WithTrustedOrigins, or use the
+//     explicit WithInsecureNoOriginCheck opt-out when CSRF is handled by another layer.
 //   - Serve over HTTPS so the Secure ceremony cookie is sent. WithInsecureCookies is for local
 //     HTTP development only.
 //   - Rate-limit ceremony attempts in front of the handlers (egauth does not throttle them).

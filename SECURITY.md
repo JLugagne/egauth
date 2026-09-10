@@ -137,6 +137,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   `HttpOnly`/`Secure` cookie so the client cannot tamper with the challenge or downgrade user
   verification; the cookie is single-use and the ceremony has a server-enforced expiry. A
   regressed signature counter (possible cloned authenticator) is rejected (`ErrCredentialCloned`).
+  The non-ceremony `passkey.RenameCredentialHandler` mutation applies the library-wide strict
+  same-origin CSRF check — on by default, with `passkey.WithTrustedOrigins` /
+  `passkey.WithInsecureNoOriginCheck` — and requires `Content-Type: application/json` (415
+  otherwise) as defense in depth; see the CSRF section below.
   The module is **secure by default**: `passkey.NewService` fails fast on a misconfigured
   passwordless/step-up setup rather than degrading silently (mirroring `jwt.New`). See the
   hardening checklist below.
@@ -446,10 +450,10 @@ redaction is in any case only a backstop. Therefore the consumer must:
 `LoginHandler`, `RegisterHandler`, the authenticated identity mutations
 (`ChangePasswordHandler`, change-email, delete-account, recovery, phone/email
 verification), `RefreshHandler`, `LogoutHandler`, `sessions.RequireSession`, the `mfa`
-handlers and the `otp` handlers are all state-changing endpoints driven by the request
-(form body / cookies). egauth does **not** ship a full CSRF-token system (per the PRD,
-that is left to the application layer), but it now applies a **strict same-origin check on
-every one of these handler families by default**:
+handlers, the `otp` handlers and `passkey.RenameCredentialHandler` are all state-changing
+endpoints driven by the request (form body / cookies). egauth does **not** ship a full
+CSRF-token system (per the PRD, that is left to the application layer), but it now applies a
+**strict same-origin check on every one of these handler families by default**:
 
 - **Same-origin is enforced even with no configuration.** A state-changing POST is allowed
   only when its `Origin` (or `Referer` fallback) host equals the request's own `Host` or an
@@ -463,11 +467,11 @@ every one of these handler families by default**:
 - **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
   from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
   against classic CSRF on an existing session.
-- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`) **widens**
-  the same-origin allowlist to additional hosts — e.g. a front-end served from another
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
+  **widens** the same-origin allowlist to additional hosts — e.g. a front-end served from another
   subdomain. Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
-- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`) is the
-  explicit, loudly-named opt-out: it disables the same-origin check entirely, restoring the
+- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
+  is the explicit, loudly-named opt-out: it disables the same-origin check entirely, restoring the
   pre-v1 accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g.
   a synchronizer/double-submit token middleware) or in trusted test setups.
 - **`sessions.RequireSession` gates only cookie authentication.** When the session token comes
@@ -496,6 +500,17 @@ hosts when the MFA endpoints are reachable from a browser session on another ori
 cross-subdomain or embedded app); supply hostnames without scheme, e.g.
 `mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
 `mfa.WithInsecureNoOriginCheck()` opt-out.
+
+The **`passkey.RenameCredentialHandler`** is the one passkey mutation outside the WebAuthn
+ceremony-cookie protection, and it enforces the same strict same-origin check **by default**: a
+cross-origin POST is rejected with `403 cross_site_blocked` (a request carrying neither `Origin`
+nor `Referer` is untrusted), before the body is decoded or the service is called. Widen with
+**`passkey.WithTrustedOrigins(...)`**; disable only via the explicit
+`passkey.WithInsecureNoOriginCheck()` opt-out. As defense in depth it also requires
+`Content-Type: application/json` (415 otherwise), so a CORS-simple `text/plain` form POST cannot
+smuggle the JSON body. The WebAuthn ceremony handlers (Begin/Finish registration/login) are not
+subject to this gate because they are already protected by the HMAC-sealed
+`__Host-passkey_ceremony` cookie and go-webauthn's own origin validation.
 
 ## Observability and idempotency (consumer responsibility)
 

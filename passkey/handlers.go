@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"net/http"
 	"strings"
 	"time"
@@ -68,6 +69,13 @@ type handlerConfig struct {
 	challenges         ChallengeStore
 	discoverableTenant TenantExtractor
 	maxBodyBytes       int64
+	// trustedOrigins widens the strict same-origin CSRF allowlist (see WithTrustedOrigins); the
+	// check remains on by default with an empty allowlist.
+	trustedOrigins map[string]bool
+	// insecureNoOriginCheck disables the strict same-origin CSRF check (see
+	// WithInsecureNoOriginCheck). By default the check is ON even with an empty trustedOrigins
+	// allowlist.
+	insecureNoOriginCheck bool
 	// configErr records a construction-time validation failure (see validate); the handlers fail closed with 500 on it.
 	configErr error
 	// cookieKeys, when set, resolves the ceremony-cookie HMAC key per tenant so a cookie sealed for one tenant cannot be opened under another (per-tenant cryptographic isolation). When nil the static cookieKey is used for every tenant (unchanged single-key behavior).
@@ -289,6 +297,13 @@ func (cfg handlerConfig) subject(w http.ResponseWriter, r *http.Request) (uuid.U
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return uuid.Nil, "", "", "", false
 	}
+	return cfg.resolveSubject(w, r)
+}
+
+// resolveSubject applies the authenticated-subject half of the preamble (the configured user
+// resolver) without the method check. Mutation handlers run the CSRF origin gate between the
+// method check and this call.
+func (cfg handlerConfig) resolveSubject(w http.ResponseWriter, r *http.Request) (uuid.UUID, string, string, string, bool) {
 	if cfg.resolve == nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return uuid.Nil, "", "", "", false
@@ -600,9 +615,76 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 	}
 }
 
+// WithTrustedOrigins adds extra hosts to the CSRF same-origin allowlist for
+// RenameCredentialHandler.
+//
+// The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
+// trusted origins configured, a POST whose Origin — or, failing that, Referer — host is not the
+// request's own Host is rejected with 403 cross_site_blocked. This option WIDENS that allowlist to
+// permit additional hosts (e.g. a separate front-end origin on another subdomain). Supply hosts
+// WITHOUT scheme, e.g. "app.example.com". To turn the check off entirely, use
+// WithInsecureNoOriginCheck.
+//
+// Renewing a credential nickname is a state-changing endpoint authenticated purely by the
+// consumer's session (ambient cookie), so SameSite=Lax alone does not prevent a forged same-site
+// request; the strict check is therefore on by default, exactly as in the identity/tokens/mfa/otp
+// handler families. The WebAuthn ceremony handlers are exempt: they are protected by the
+// HMAC-sealed __Host- ceremony cookie and go-webauthn's own origin validation.
+func WithTrustedOrigins(origins ...string) HandlerOption {
+	return func(h *handlerConfig) {
+		h.trustedOrigins = make(map[string]bool, len(origins))
+		for _, o := range origins {
+			h.trustedOrigins[o] = true
+		}
+	}
+}
+
+// WithInsecureNoOriginCheck disables the CSRF same-origin check on RenameCredentialHandler.
+//
+// By default the handler rejects any state-changing request whose Origin (or Referer fallback)
+// host is neither the request's own Host nor an explicitly trusted origin (see
+// WithTrustedOrigins), because the consumer's session cookie is ambient and SameSite=Lax alone
+// does not prevent a forged same-site request.
+//
+// This option turns that protection OFF, restoring the pre-v1 behavior where every origin is
+// accepted. It is named "Insecure" deliberately: only reach for it when CSRF is handled by a
+// separate layer (e.g. a synchronizer-token middleware) or in trusted test setups. Prefer
+// WithTrustedOrigins to extend, rather than remove, the allowlist.
+func WithInsecureNoOriginCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
+}
+
+// originAllowed reports whether the request passes the CSRF same-origin check. The check is ON
+// by default — even with an empty trustedOrigins allowlist — to match the tokens/identity
+// handlers and make "CSRF-by-default" mean the same thing across handler families. A request is
+// allowed only when its Origin (or Referer fallback) host equals the request's own Host or an
+// allowlisted host (enforced by httputil.OriginAllowed, which also enforces cross-scheme
+// protection); a request carrying neither header is treated as untrusted.
+// WithInsecureNoOriginCheck restores the pre-v1 accept-all behavior.
+func (cfg handlerConfig) originAllowed(r *http.Request) bool {
+	if cfg.insecureNoOriginCheck {
+		return true
+	}
+	return httputil.OriginAllowed(r, cfg.trustedOrigins)
+}
+
+// requireJSON enforces an application/json Content-Type on the JSON body and writes a 415 when it
+// is absent or different. It is defense in depth on top of the origin gate: a CORS-simple
+// cross-site form POST must not be able to smuggle a JSON payload through this endpoint.
+func (cfg handlerConfig) requireJSON(w http.ResponseWriter, r *http.Request) bool {
+	mediaType, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if err != nil || mediaType != "application/json" {
+		http.Error(w, "unsupported_media_type", http.StatusUnsupportedMediaType)
+		return false
+	}
+	return true
+}
+
 // RenameCredentialHandler sets a human-friendly nickname on one of the authenticated user's
-// credentials. It is POST-only and requires the user resolver (cfg.subject preamble), caps the
-// request body via http.MaxBytesReader, and decodes a JSON body of the shape:
+// credentials. It is POST-only and requires the user resolver (the preamble), applies the strict
+// CSRF same-origin origin gate by default (see WithTrustedOrigins / WithInsecureNoOriginCheck),
+// requires a Content-Type of application/json (415 otherwise), caps the request body via
+// http.MaxBytesReader, and decodes a JSON body of the shape:
 //
 //	{"credentialId": "<base64url, no padding>", "nickname": "..."}
 //
@@ -615,8 +697,20 @@ func RenameCredentialHandler(svc *Service, opts ...HandlerOption) http.HandlerFu
 		if cfg.failClosedOnMisconfig(w) {
 			return
 		}
-		uid, _, _, tenant, ok := cfg.subject(w, r)
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !cfg.originAllowed(r) {
+			http.Error(w, "cross_site_blocked", http.StatusForbidden)
+			return
+		}
+		uid, _, _, tenant, ok := cfg.resolveSubject(w, r)
 		if !ok {
+			return
+		}
+		if !cfg.requireJSON(w, r) {
 			return
 		}
 		if cfg.maxBodyBytes > 0 {
