@@ -9,6 +9,13 @@ audit-status sentence above is reused verbatim across the README, the root packa
 (`doc.go`), `llms.txt`, `SECURITY.md`, and the v1.0.0 `CHANGELOG` entry, and its presence on
 those surfaces is enforced by a build-failing test (`TestDisclosure*` in `disclosure_test.go`).
 
+The preparation work for an independent third-party audit — prioritized scope, required
+deliverables, auditor qualification criteria, evidence package, effort estimate, and the
+step-by-step commissioning checklist — is maintained in
+[`docs/security/independent-audit-scope.md`](docs/security/independent-audit-scope.md). That
+document is a plan/RFP, **not** a report: it does not state or imply that any independent audit
+has been commissioned, performed, or completed.
+
 ## What "AI-driven audit" means here
 
 The security review behind v1.0 was performed with AI-assisted (LLM-driven) analysis plus the
@@ -62,6 +69,24 @@ clearly-labeled options, in increasing order of assurance:
 ## Independent human audits
 
 _None yet._
+
+### Pending — not yet commissioned (template only)
+
+This is a **result-recording template, not a result.** No auditor or firm has been engaged, no
+audit has been performed, and therefore no finding counts, dates, or report link exist. Keep it
+marked pending until a real audit concludes; then fill in every field, remove the pending marker,
+and delete this note. The planned scope is in
+[`docs/security/independent-audit-scope.md`](docs/security/independent-audit-scope.md).
+
+- **Auditor / firm:** TBD
+- **Audit date(s):** TBD
+- **Commit reviewed:** TBD (pinned SHA; signed tag where available)
+- **Scope:** TBD (areas reviewed, with what was in and out of scope)
+- **Findings:** TBD (counts by severity: critical / high / medium / low / informational)
+- **Report:** TBD (public link, or a clear statement of publication status)
+- **Retest:** TBD (date(s) and status of accepted findings)
+- **Independence statement:** TBD (link to the auditor's statement in the report)
+- **Ledger note:** TBD (surface changes made alongside this entry, if any)
 
 <!--
   When an independent human audit is completed, append an entry here. Suggested shape:

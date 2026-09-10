@@ -1,16 +1,18 @@
 // Package memory provides an in-memory otp.Store, primarily for tests and
 // single-process use.
 //
-// # Production requirement: periodic eviction is MANDATORY
+// # Bounding memory growth
 //
-// The Store grows without bound unless DeleteExpired is called periodically.
-// Every expired OTP code row remains in the in-memory map until explicitly
-// purged; under load a production deployment that skips periodic eviction will
-// exhaust available memory, creating a trivial denial-of-service vector.
+// [NewStore] is bounded by default: a hard cap of [DefaultMaxEntries] codes that
+// self-evicts expired rows first and then the soonest-expiring code, so live
+// codes are preserved as long as possible. No external scheduler is needed.
 //
-// Use [github.com/JLugagne/egauth/janitor] to schedule eviction at startup:
+// [NewUnboundedStore] preserves the previous unbounded model, where every
+// expired code remains in the map until explicitly purged. Such a store MUST
+// have DeleteExpired scheduled periodically (e.g. via
+// [github.com/JLugagne/egauth/janitor]) or it will exhaust memory under load:
 //
-//	store := memory.NewStore()
+//	store := memory.NewUnboundedStore()
 //	j := janitor.Start(ctx, 5*time.Minute, func() {
 //	    store.DeleteExpired(context.Background(), tenantID)
 //	})
@@ -31,21 +33,37 @@ import (
 )
 
 // Store is an in-memory implementation of otp.Store.
-// Store is an in-memory implementation of otp.Store.
 //
-// By default the store is unbounded; OTP growth is controlled by periodic
-// calls to DeleteExpired (e.g. via [github.com/JLugagne/egauth/janitor]).
-// Use [NewBoundedStore] for a store that enforces a hard cap and self-evicts
-// on insertion: it first removes already-expired codes, then the code with
-// the soonest ExpiresAt, so live codes are preserved as long as possible.
+// Stores created by [NewStore] are bounded by [DefaultMaxEntries] and self-evict
+// on insertion: they first remove already-expired codes, then the code with the
+// soonest ExpiresAt, so live codes are preserved as long as possible. Use
+// [NewBoundedStore] to pick a different cap or [NewUnboundedStore] for the
+// previous unbounded behaviour, where OTP growth is controlled by periodic calls
+// to DeleteExpired (e.g. via [github.com/JLugagne/egauth/janitor]).
 type Store struct {
 	mu      sync.RWMutex
 	maxSize int                 // 0 means unbounded
 	codes   map[string]*otp.OTP // key: tenant \x00 subject \x00 purpose
 }
 
-// NewStore creates a new in-memory Store.
+// DefaultMaxEntries is the default hard cap on the number of codes an in-memory Store created by
+// [NewStore] retains. It is deliberately generous so ordinary single-process use never hits it;
+// it exists so a flood of codes cannot exhaust memory. On insertion at the cap the store evicts
+// expired codes first, then the soonest-expiring code.
+const DefaultMaxEntries = 100_000
+
+// NewStore creates a new in-memory Store bounded by [DefaultMaxEntries]. Callers
+// that schedule periodic [Store.DeleteExpired] eviction and want no hard cap can
+// use [NewUnboundedStore] instead.
 func NewStore() *Store {
+	return NewBoundedStore(DefaultMaxEntries)
+}
+
+// NewUnboundedStore creates a new in-memory Store with no entry cap. Growth is
+// controlled entirely by periodic [Store.DeleteExpired] calls (e.g. via
+// [github.com/JLugagne/egauth/janitor]); prefer [NewStore]'s bounded default
+// unless the caller guarantees that eviction runs.
+func NewUnboundedStore() *Store {
 	return &Store{codes: make(map[string]*otp.OTP)}
 }
 
@@ -150,9 +168,10 @@ var _ otp.Store = (*Store)(nil)
 // the code with the soonest ExpiresAt. maxSize must be >= 1; values below 1
 // are floored to 1.
 //
-// The existing [NewStore] constructor remains available for callers who prefer
-// the unbounded model and control growth via periodic [Store.DeleteExpired]
-// calls (e.g. via [github.com/JLugagne/egauth/janitor]).
+// [NewStore] uses this constructor with [DefaultMaxEntries];
+// [NewUnboundedStore] remains available for callers who prefer the unbounded
+// model and control growth via periodic [Store.DeleteExpired] calls (e.g. via
+// [github.com/JLugagne/egauth/janitor]).
 func NewBoundedStore(maxSize int) *Store {
 	if maxSize < 1 {
 		maxSize = 1
@@ -169,6 +188,14 @@ func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.codes)
+}
+
+// MaxEntries returns the configured hard cap on the number of codes the store
+// retains. Zero means the store is unbounded (see [NewUnboundedStore]).
+func (s *Store) MaxEntries() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxSize
 }
 
 // evictOneLocked removes one OTP code to make room for a new insertion.

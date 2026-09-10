@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,8 @@ import (
 type stubLinker struct {
 	user          *identity.User
 	err           error
+	mustChange    bool
+	mustChangeErr error
 	gotProvider   string
 	gotProviderID string
 	gotEmail      string
@@ -39,12 +42,36 @@ func (s *stubLinker) LinkOrCreateIdentity(_ context.Context, _ string, provider,
 	return s.user, nil
 }
 
-type stubIssuer struct {
-	pair *tokens.TokenPair[struct{}]
-	err  error
+func (s *stubLinker) PasswordChangeRequired(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+	return s.mustChange, s.mustChangeErr
 }
 
-func (s *stubIssuer) IssueTokenPair(_ context.Context, _ tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+// ResolveSessionState makes the stub an authoritative issuance resolver: it reports the linked
+// account as live and mirrors PasswordChangeRequired's answer/error.
+func (s *stubLinker) ResolveSessionState(_ context.Context, tenantID string, userID uuid.UUID) (issuance.State, error) {
+	if s.mustChangeErr != nil {
+		return issuance.State{}, s.mustChangeErr
+	}
+	state := issuance.State{UserID: userID, TenantID: tenantID, MustChangePassword: s.mustChange}
+	if s.user != nil {
+		if s.user.ID != uuid.Nil {
+			state.UserID = s.user.ID
+		}
+		if s.user.TenantID != "" {
+			state.TenantID = s.user.TenantID
+		}
+	}
+	return state, nil
+}
+
+type stubIssuer struct {
+	pair      *tokens.TokenPair[struct{}]
+	err       error
+	gotClaims tokens.Claims[struct{}]
+}
+
+func (s *stubIssuer) IssueTokenPair(_ context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+	s.gotClaims = claims
 	return s.pair, s.err
 }
 

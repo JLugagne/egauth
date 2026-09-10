@@ -5,6 +5,12 @@
 // and depends only on the standard library plus google/uuid.
 //
 // SMS / phone factors are intentionally NOT supported (authenticator apps only).
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package mfa
 
 import (

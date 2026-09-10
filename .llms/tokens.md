@@ -252,7 +252,7 @@ type Config[C any] struct {
     Clock            func() time.Time // override for deterministic tests; zero = time.Now
 }
 
-func (cfg Config[C]) Validate() error  // checks key size, non-empty Issuer, positive TTLs
+func (cfg Config[C]) Validate() error  // checks key size, denylist/trivial-key, non-empty Issuer, positive TTLs
 ```
 
 `basic.Config` = `jwt.Config[struct{}]`
@@ -277,7 +277,7 @@ type Signer interface {
 }
 
 // Built-in constructors (all validate and return an error). Pass the result(s) via Config.Signers.
-func NewHMACSigner(keyID string, secret []byte) (Signer, error)        // HS256; secret >= 32 bytes; empty keyID allowed
+func NewHMACSigner(keyID string, secret []byte) (Signer, error)        // HS256; secret >= 32 bytes; rejects published-example and trivially known (all-zero / repeated byte) secrets; empty keyID allowed
 func NewRSASigner(keyID string, key *rsa.PrivateKey) (Signer, error)   // RS256; key >= 2048 bits; keyID required
 func NewECDSASigner(keyID string, key *ecdsa.PrivateKey) (Signer, error) // ES256/ES384/ES512 chosen from the curve (P-256/384/521); keyID required
 func NewEdDSASigner(keyID string, key ed25519.PrivateKey) (Signer, error) // EdDSA; keyID required
@@ -333,7 +333,10 @@ func NewMemoryStore() Store                     // wraps memory.NewStore[struct{
 
 ### memory package
 ```go
-func NewStore[C any]() *Store[C]
+func NewStore[C any]() *Store[C]              // bounded by DefaultMaxEntries (100,000) refresh-token records
+func NewBoundedStore[C any](maxSize int) *Store[C]
+func NewUnboundedStore[C any]() *Store[C]     // explicit opt-out; schedule DeleteExpired with janitor
+func (s *Store[C]) MaxEntries() int
 ```
 
 ### Cookie helpers
@@ -542,7 +545,8 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Publishable JWKS**: `Service.PublicJWKS()` returns an RFC 7517 key set. Asymmetric public keys are safe to serve at `/.well-known/jwks.json`; HMAC keys are emitted metadata-only (`kty:"oct"`) and the secret (`k`) is NEVER published.
 - **SHA-256 at rest / no clear-text retrieval**: refresh tokens and API keys are stored as `HashToken(raw)` (SHA-256 hex); the clear-text value is never persisted and is unrecoverable after issuance. `IssueAPIKey` returns `APIKey.Token` exactly once; subsequent reads (e.g. via `ListAPIKeysByCreator`) always return a blank `Token` field. Revocation is therefore always by key ID (`RevokeAPIKey`), not by token value.
 - **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
-- **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths.
+- **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths. The same applies to the other key-bearing types across the library: `webapp.Config` (SigningKey), `passkey.Config` (CookieKey), `oauth.Provider` (client secret), `keystore.SigningKey`/`keystore.Keyset` (Secret) and `mfa.TOTPEnrollment` (Secret).
+- **Trivially known keys rejected**: `jwt.New`/`Config.Validate`/`NewHMACSigner` (and therefore the `keystore` JWT adapter) refuse every-byte-zero and repeated-single-byte HMAC secrets, not only short or published-example ones. `InsecureAllowWeakKey` suppresses only the minimum-length gate, never the denylist or the trivially-known-key check.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
 - **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
@@ -622,5 +626,5 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 - `Store` is **monolithic** in v0.x (no capability split before v1); external implementations must run `tokens/storetest` conformance suite on each upgrade.
 - `RefreshPath` on `Cookies` must remain `"/"` when using `WithAutoRefresh` middleware (the browser only sends the refresh cookie on matching paths).
 - Single-tenant shortcut: `jwt.NewSingleTenant(svc)` hard-wires `tenantID=""` on `Rotate`; do NOT mix with multi-tenant calls against the same `Service`.
-- Consumed refresh rows are retained until `ExpiresAt` for replay detection; run `Store.DeleteExpired` periodically (e.g. hourly) to prevent unbounded growth.
+- Consumed refresh rows are retained until `ExpiresAt` for replay detection. The default memory store is bounded (`DefaultMaxEntries`, evicting expired then soonest-expiring); `Store.DeleteExpired` is only needed for the explicit `NewUnboundedStore()` opt-in. API keys are durable and never evicted — revoke them explicitly.
 - `WithAutoRefresh`: on expired access token + valid refresh cookie the middleware rotates transparently and proceeds — no redirect. On rotation failure it clears cookies and returns `401`.

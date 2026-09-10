@@ -96,7 +96,11 @@ func WithCodeField(name string) HandlerOption {
 	return func(h *handlerConfig) { h.codeField = name }
 }
 
-// WithTenantResolver derives the tenant from the request to scope store operations.
+// WithTenantResolver derives the tenant from the request to scope store operations. A configured
+// resolver MUST return a non-empty tenant for any request it can map; returning "" is treated as
+// a resolution failure and the handler rejects the request with 401 instead of falling back to
+// the single-tenant ("") partition. When no resolver is configured at all, the authenticated
+// Actor's tenant (or "" in a single-tenant deployment) is used.
 func WithTenantResolver(f func(*http.Request) string) HandlerOption {
 	return func(h *handlerConfig) { h.tenantResolver = f }
 }
@@ -187,6 +191,10 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.subjectResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -196,7 +204,6 @@ func IssueHandler(svc Service, deliver func(ctx context.Context, ch *Challenge) 
 		}
 
 		if subjectID, ok := cfg.subjectResolver(r); ok {
-			tenant := cfg.tenant(r)
 			purpose := cfg.purposeOf(r)
 			if ch, err := svc.Issue(r.Context(), tenant, subjectID, purpose); err == nil && deliver != nil {
 				cfg.dispatchDelivery(r, func(ctx context.Context) error {
@@ -225,6 +232,10 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusForbidden, "cross_site_blocked")
 			return
 		}
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
+			return
+		}
 		if cfg.subjectResolver == nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
@@ -240,7 +251,7 @@ func VerifyHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
-		if err := svc.Verify(r.Context(), cfg.tenant(r), subjectID, cfg.purposeOf(r), code); err != nil {
+		if err := svc.Verify(r.Context(), tenant, subjectID, cfg.purposeOf(r), code); err != nil {
 			cfg.fail(w, r, http.StatusUnauthorized, "invalid_code")
 			return
 		}
@@ -303,21 +314,29 @@ func (cfg handlerConfig) purposeOf(r *http.Request) string {
 	return cfg.purpose
 }
 
-// tenant returns the tenant derived from the request's resolver. When no explicit resolver is
-// configured, it checks for an authenticated Actor in the request context (populated by
-// tokens.ContextMiddleware or egauth.ContextWithActor) and uses its TenantID if non-empty,
-// preventing tenant desynchronization. Otherwise, it returns "" (the single-tenant default partition).
-func (cfg handlerConfig) tenant(r *http.Request) string {
+// resolveTenant derives the tenant for the request. When a tenant resolver is configured it MUST
+// yield a non-empty tenant: an empty result means the request could not be mapped, and falling
+// back to the "" partition would let it reach single-tenant state, so the handler fails closed
+// with 401 "unresolved_tenant". When no explicit resolver is configured, it checks for an
+// authenticated Actor in the request context (populated by tokens.ContextMiddleware or
+// egauth.ContextWithActor) and uses its TenantID if non-empty, preventing tenant
+// desynchronization; otherwise "" is the valid single-tenant default partition.
+func (cfg handlerConfig) resolveTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if cfg.tenantResolver != nil {
-		return cfg.tenantResolver(r)
+		tenant := cfg.tenantResolver(r)
+		if tenant == "" {
+			cfg.fail(w, r, http.StatusUnauthorized, "unresolved_tenant")
+			return "", false
+		}
+		return tenant, true
 	}
 	if a, ok := egauth.ActorFromContext(r.Context()); ok && a.TenantID != "" {
-		return a.TenantID
+		return a.TenantID, true
 	}
 	if a, ok := tokens.ActorFromContext(r.Context()); ok && a.TenantID != "" {
-		return a.TenantID
+		return a.TenantID, true
 	}
-	return ""
+	return "", true
 }
 
 func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request) bool {

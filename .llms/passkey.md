@@ -61,6 +61,7 @@ type Config struct {
     Events                   event.Sink                           // optional; receives LoginSucceeded / AccountBlocked events
     AccountGate              AccountGate                          // optional lifecycle gate; REQUIRED when accounts can be disabled/deleted
 }
+// Config implements String/GoString/LogValue; CookieKey is redacted on every fmt/slog path.
 ```
 
 ### AccountGate
@@ -145,7 +146,7 @@ type ChallengeStore interface {
 
 ## HTTP handlers
 
-All four handlers accept only `POST`. `UserResolver` is required; nil resolver returns 401.
+All ceremony handlers accept only `POST`. `UserResolver` is required; nil resolver returns 401.
 
 ```go
 type UserResolver    func(r *http.Request) (userID uuid.UUID, name, displayName, tenant string, ok bool)
@@ -158,6 +159,7 @@ type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.U
 | `FinishRegistrationHandler(svc, opts...)` | 204 | Reads cookie; POST body = attestation response (capped at 64 KiB) |
 | `BeginLoginHandler(svc, opts...)` | 200 JSON `*protocol.CredentialAssertion` | Sets `__Host-passkey_ceremony` cookie |
 | `FinishLoginHandler(svc, opts...)` | 204 (or LoginSuccessFunc) | Reads cookie; POST body = assertion response (capped at 64 KiB) |
+| `RenameCredentialHandler(svc, opts...)` | 204 | JSON `{"credentialId": "<base64url>", "nickname": "..."}`; strict same-origin CSRF gate; `application/json` required (415 otherwise) |
 
 Discoverable login has no dedicated handlers; call `BeginDiscoverableLogin` / `FinishDiscoverableLogin` directly and manage the session cookie manually (or build thin wrappers matching the pattern above).
 
@@ -174,6 +176,8 @@ WithCookieDomain(domain string)           // incompatible with the default __Hos
 WithSameSite(mode http.SameSite)          // default: Lax
 WithInsecureCookies()                     // clear Secure flag (local HTTP dev only; incompatible with the default __Host- name)
 WithMaxBodyBytes(n int64)                 // default: 64 KiB; <=0 disables cap
+WithTrustedOrigins(origins ...string)     // widen the strict CSRF allowlist for RenameCredentialHandler (hosts, no scheme)
+WithInsecureNoOriginCheck()               // explicit opt-out of the RenameCredentialHandler CSRF gate
 ```
 
 The `__Host-` prefix is browser-enforced (Secure, no `Domain`, `Path=/`); a misconfigured pairing (e.g. `WithCookieDomain` or `WithInsecureCookies` under the default name) makes handlers fail closed with 500. Check it at startup with `ValidateHandlerConfig(opts...)` (returns an error).
@@ -226,7 +230,8 @@ HTTP error mapping (via `fail`):
 - **Clone detection**: regressed signature counter → `ErrCredentialCloned` + `AccountBlocked` event emitted.
 - **Account lifecycle**: wire `Config.AccountGate` (`passkey.NewIdentityAccountGate(identityStore)`) so `identity.DisableUser`/`DeleteUser` take effect on the passkey login path — `DisableUser` preserves passkey enrollment by design, so without the gate a suspended account still mints sessions. Blocked logins emit an `AccountBlocked` event with `Reason="account_disabled"` / `"account_deleted"`.
 - **Body cap**: Finish handlers wrap `r.Body` in `http.MaxBytesReader` at `DefaultMaxBodyBytes` (64 KiB) to prevent memory-pressure DoS.
-- **Origin/RPID checks**: enforced by go-webauthn; RPID and RPOrigins must match the frontend exactly.
+- **CSRF on `RenameCredentialHandler`**: the endpoint is POST-only, authenticated by the consumer's session (ambient cookie) and is the one mutation outside the WebAuthn ceremony protection. The strict same-origin check is **ON by default**: a POST whose `Origin` (or `Referer` fallback) host is neither the request's own `Host` nor a `WithTrustedOrigins` entry is rejected with `403 cross_site_blocked` before body decode / service call. A missing `Origin`/`Referer` is untrusted. The JSON body must be sent with `Content-Type: application/json` (415 otherwise). Widen with `WithTrustedOrigins`, or opt out with `WithInsecureNoOriginCheck` only when CSRF is handled elsewhere.
+- **Origin/RPID checks**: enforced by go-webauthn for the ceremony Begin/Finish endpoints; RPID and RPOrigins must match the frontend exactly. (The non-ceremony `RenameCredentialHandler` is covered by the CSRF gate above, not by go-webauthn.)
 - **Ceremony timeout**: 5 min, enforced server-side via `Timeouts.Enforce: true` in go-webauthn config.
 
 ## Wiring

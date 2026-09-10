@@ -34,8 +34,9 @@ explicitly so you can decide deliberately rather than inherit a silent default.
 | OAuth/OIDC | HTTPS on provider URLs | **enforced** | Leave on; never `WithInsecureURLs` in prod |
 | OAuth/OIDC | JWKS bound to issuer (discovery) | enforced | Provide only the `Issuer` on the dynamic store |
 | OAuth/OIDC | Issuer allowlist (BYO-SSO) | **off** | `WithIssuerAllowlist` for untrusted tenants |
-| OAuth/OIDC | SSRF-safe HTTP client | on for the dynamic store | Use `SafeHTTPClient()` for any tenant-supplied URL |
+| OAuth/OIDC | SSRF-safe HTTP client | **on** (token, userinfo, discovery, JWKS) | Leave it on; opt out only for a controlled internal/dev IdP |
 | HTTP | Rate limiting on `Request*` | **off** | Wrap with the `ratelimit` middleware |
+| HTTP | `webapp.NewWebApp` auth endpoints | **on** (per-IP `TokenBucket` on login/register/refresh/logout) | Tune `RateLimitBurst`/`RateLimitRefill` or replace with `RateLimiter`; `InsecureNoRateLimit` to opt out |
 
 ---
 
@@ -332,7 +333,10 @@ documented here so you know the limits.
 > attacker-controlled numbers to burn your SMS budget).
 
 `egauth` does not throttle these for you (rate, key, and backing store are deployment policy), but
-the `ratelimit` package is the ready seam. Apply defence in depth:
+the `ratelimit` package is the ready seam. (The `webapp` preset is the exception: it throttles the
+login/register/refresh/logout routes it mounts per client IP by default — see
+[SECURITY.md](https://github.com/JLugagne/egauth/blob/main/SECURITY.md) and the `webapp.Config`
+rate-limit fields.) Apply defence in depth:
 
 **1. Per client IP** — the cheap blanket cap on every `Request*` endpoint:
 

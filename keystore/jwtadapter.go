@@ -59,8 +59,10 @@ func (a *JWTKeyStore) VerificationKeys(ctx context.Context, tenantID string) (ma
 }
 
 // signerFor builds a jwt.Signer from a SigningKey whose Secret has already been KEK-opened by the
-// Manager. For HS256 the Secret is the raw HMAC secret; for asymmetric algs it is the PKCS#8 DER of
-// the private key. An empty Alg is treated as HS256 (backward compat).
+// Manager. For HS256 the Secret is the raw HMAC secret and is validated by jwt.NewHMACSigner
+// (minimum length, published-example denylist, and all-zero / repeated single-byte rejection); for
+// asymmetric algs it is the PKCS#8 DER of the private key. An empty Alg is treated as HS256
+// (backward compat).
 func signerFor(k SigningKey) (jwt.Signer, error) {
 	alg := k.Alg
 	if alg == "" {

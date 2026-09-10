@@ -35,6 +35,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 |--------------|------------------------------------------------------------------------------|
 | `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; forced-password-change for temporary credentials (`AdminCreateUser`, `SetTemporaryPassword`) |
 | `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys (PAT & service tokens) with a full lifecycle — issue, list, revoke. Reference impl in `tokens/jwt` |
+| `issuance`   | The single post-authentication session-issuance pipeline every login path terminates in: authoritative account re-load, tenant binding, forced-change propagation, MFA gate and one uniform `session.issued` audit event |
 | `sessions`   | Server-side, revocable sessions with idle-timeout (`Touch`) and fixation defense (`Rotate`) |
 | `passwords`  | Hashing/policy/breach **seams** + references: `argon2`, `policy`, `breach/hibp`, `breach/offline` |
 | `mfa`        | TOTP (RFC 6238) with recovery codes                                          |
@@ -301,13 +302,15 @@ observability, idempotency).
 **Forced-password-change for temporary credentials.** Provision a one-time credential via
 `identity.AdminCreateUser` (admin-created account) or `identity.SetTemporaryPassword` (admin-issued
 temporary password); both flag the credential so the user must choose a new password at next login.
-A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`; the
-flag is recorded on the refresh-token family and carried onto every silent refresh, so mounting
-`tokens.WithPasswordChangeGate` on your protected routes keeps soft-redirecting to the reset page
-until the password is changed — a user cannot escape by waiting for the access token to expire. The
-credential stays valid throughout — never a lockout. egauth does NOT do periodic, age-based rotation
-(NIST SP 800-63B discourages fixed-interval expiry). See [SECURITY.md](SECURITY.md) for the full
-semantics.
+A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`. The
+flag is resolved from the authoritative credential state by the `issuance` pipeline at issuance time
+— every login path (password, magic link, OAuth, MFA step-up) funnels through it, and a caller can
+add the flag but never clear it. It is recorded on the refresh-token family and carried onto every
+silent refresh, so mounting `tokens.WithPasswordChangeGate` on your protected routes keeps
+soft-redirecting to the reset page until the password is changed — a user cannot escape by waiting
+for the access token to expire. The credential stays valid throughout — never a lockout. egauth does
+NOT do periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval expiry). See
+[SECURITY.md](SECURITY.md) for the full semantics.
 
 **Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
 for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for
@@ -335,23 +338,30 @@ Full API reference: [pkg.go.dev/github.com/JLugagne/egauth](https://pkg.go.dev/g
 Each module has a package overview (`go doc github.com/JLugagne/egauth/identity`) and the
 login-critical packages carry runnable examples.
 
-## Production: evict in-memory stores
+## Production: in-memory stores are bounded by default
 
-The `sessions/memory`, `otp/memory`, and `ratelimit.TokenBucket` backends grow without bound
-unless their eviction methods (`DeleteExpired` / `Cleanup`) are called periodically. In any
-non-trivial production deployment you **must** schedule this — a flood of unique keys, sessions,
-or OTP codes otherwise exhausts available memory. Use the optional `janitor` helper:
+The in-memory backends (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`,
+`tokens/memory`) and `ratelimit.TokenBucket` are **bounded by default**, so a flood of unique
+keys, sessions, OTP codes or refresh tokens cannot exhaust memory without an explicit opt-in.
+Eviction runs automatically at the cap (expired first, then soonest-expiring); `sessions/memory`
+never evicts live sessions and instead fails the insert.
+
+If you prefer caller-managed eviction, opt into the unbounded model with `NewUnboundedStore()`
+(memory stores) or a larger `ratelimit.WithMaxKeys(n)`, then **you must** schedule eviction with
+the optional `janitor` helper:
 
 ```go
 import "github.com/JLugagne/egauth/janitor"
 
+sessStore := memory.NewUnboundedStore()
 j := janitor.Start(ctx, 5*time.Minute, func() {
     sessStore.DeleteExpired(context.Background(), tenantID)
 })
 defer j.Stop()
 ```
 
-`janitor.Start` accepts any `func()`, so the same pattern covers `otpStore.DeleteExpired` and
+`janitor.Start` accepts any `func()`, so the same pattern covers `otpStore.DeleteExpired`,
+`identityStore.DeleteExpiredVerificationTokens`, `tokenStore.DeleteExpired` and
 `tokenBucket.Cleanup`. For production deployments beyond a single binary, swap the in-memory
 stores for their `pgx` counterparts (which rely on the database for eviction instead).
 
@@ -359,6 +369,19 @@ stores for their `pgx` counterparts (which rely on the database for eviction ins
 
 Pre-1.0: the API may change between minor versions until it settles, at which point releases will
 follow SemVer with a CHANGELOG. Pin a commit or tag in `go.mod` for reproducible builds.
+
+**Stability classes (proposed for v1).** The packages proposed for the v1 SemVer freeze — and the
+ones that deliberately stay outside it — are analysed in
+[ADR 0001](docs/adr/0001-v1-scope-and-stability-classes.md). In short:
+
+| Class | Packages |
+|---|---|
+| Frozen v1 (proposed) | `identity`, `tokens` + subpackages, `sessions`, `passwords`, `mfa`, `otp`, `passkey`, `oauth`, `keystore`, `issuance`, `event`, `health`, `ratelimit`, `revocation`, `janitor`, `adapters/pgx`, `adapters/otel` |
+| Experimental (no SemVer guarantee) | `authflow`, `oauth/providers`, and `webapp` (proposed) |
+
+Each package's godoc repeats its own class. `experimental` packages remain supported and tested
+but may change or be removed in any release; the à-la-carte handlers and the `issuance` pipeline
+are the frozen path.
 
 **Go version support policy.**
 

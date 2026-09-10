@@ -85,7 +85,7 @@ mux.Handle("GET /me", sessions.RequireSession(sessSvc,
 newSess, newToken, _ := sessSvc.Rotate(ctx, tenant, token, 24*time.Hour)
 ```
 
-Details: [sessions.md](sessions.md). MUST schedule `DeleteExpired` eviction (recipe 8).
+Details: [sessions.md](sessions.md). The memory store is bounded by default; schedule `DeleteExpired` only for the explicit unbounded opt-in (recipe 8).
 
 ---
 
@@ -199,7 +199,7 @@ mux.Handle("POST /otp/verify", otp.VerifyHandler(otpSvc, otp.WithSubjectResolver
     otp.WithOnVerified(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID) { /* issue token/session */ })))
 ```
 
-Details: [otp.md](otp.md). MUST schedule `DeleteExpired` eviction (recipe 8).
+Details: [otp.md](otp.md). The memory store is bounded by default; schedule `DeleteExpired` only for the explicit unbounded opt-in (recipe 8).
 
 ---
 
@@ -249,11 +249,15 @@ svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(
 // 3. breach check (HIBP k-anonymity) — pass to policy/registration per passwords.md
 breach := hibp.New()
 
-// 4. rate-limit login (token bucket) — see infra.md for middleware signature
+// 4. rate-limit login (token bucket, bounded by DefaultMaxKeys) — see infra.md for the middleware
+//    signature. The webapp preset already wires this per client IP on its mounted routes:
+//    tune via webapp.Config.RateLimiter/RateLimitBurst/RateLimitRefill, opt out with
+//    webapp.Config.InsecureNoRateLimit. À-la-carte handlers are wrapped manually.
 limiter := ratelimit.NewTokenBucket(/* burst */ 5, /* refillInterval */ time.Minute)
+mux.Handle("/login", ratelimit.Middleware(limiter, ratelimit.ClientIP)(loginHandler))
 
-// 5. eviction loop — REQUIRED for in-memory stores (sessions/otp) + TokenBucket, else unbounded growth.
-//    pgx stores evict via DB; skip for those.
+// 5. eviction loop — optional: in-memory stores are bounded by default. Schedule janitor only when
+//    opted into NewUnboundedStore() or a larger WithMaxKeys cap; pgx stores evict via the DB.
 j := janitor.Start(ctx, 5*time.Minute, func() {
     sessStore.DeleteExpired(context.Background(), tenant)
     otpStore.DeleteExpired(context.Background(), tenant)

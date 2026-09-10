@@ -1,19 +1,22 @@
 // Package janitor provides a lightweight, optional ticker-based eviction helper for
 // egauth's in-memory stores and rate-limit buckets.
 //
-// # Why you need this in production
+// # Why you might need this
 //
-// The in-memory stores in [github.com/JLugagne/egauth/sessions/memory],
-// [github.com/JLugagne/egauth/otp/memory], and the [github.com/JLugagne/egauth/ratelimit]
-// TokenBucket all grow without bound until a periodic eviction call is made:
+// The in-memory stores and the [github.com/JLugagne/egauth/ratelimit] TokenBucket are
+// bounded by default and need no scheduler. Janitor is for deployments that explicitly
+// opt into caller-managed eviction:
 //
-//   - sessions/memory.Store.DeleteExpired — purges expired session rows
-//   - otp/memory.Store.DeleteExpired     — purges expired OTP codes
-//   - ratelimit.TokenBucket.Cleanup      — drops fully-refilled rate-limit buckets
+//   - sessions/memory.NewUnboundedStore()          → Store.DeleteExpired
+//   - otp/memory.NewUnboundedStore()               → Store.DeleteExpired
+//   - identity/memory.NewUnboundedStore()          → Store.DeleteExpiredVerificationTokens
+//   - mfa/memory.NewUnboundedStore()               → Store.DeleteStaleRecoveryAttempts
+//   - tokens/memory.NewUnboundedStore[C]()         → Store.DeleteExpired
+//   - ratelimit.NewTokenBucket(…, WithMaxKeys(n))  → TokenBucket.Cleanup
 //
-// Any production deployment using these in-memory backends MUST schedule periodic
-// eviction; failing to do so leaks memory proportional to load and creates a trivial
-// denial-of-service vector (a flood of unique keys/IPs/OTPs grows the map indefinitely).
+// A deployment that opts into an unbounded store MUST schedule periodic eviction;
+// failing to do so leaks memory proportional to load and creates a denial-of-service
+// vector (a flood of unique keys/IPs/OTPs grows the map indefinitely).
 //
 // # Usage
 //
@@ -23,15 +26,15 @@
 //	ctx, cancel := context.WithCancel(context.Background())
 //	defer cancel()
 //
-//	sessStore := memory.NewStore()
+//	sessStore := memory.NewUnboundedStore()
 //	j := janitor.Start(ctx, 5*time.Minute, func() {
 //	    sessStore.DeleteExpired(context.Background(), tenantID)
 //	})
 //	defer j.Stop()
 //
-// The same pattern works for otp/memory and ratelimit.TokenBucket:
+// The same pattern works for the other unbounded stores and ratelimit.TokenBucket:
 //
-//	otpStore := otpmemory.NewStore()
+//	otpStore := otpmemory.NewUnboundedStore()
 //	janitor.Start(ctx, 5*time.Minute, func() {
 //	    otpStore.DeleteExpired(context.Background(), tenantID)
 //	})
@@ -57,6 +60,12 @@
 // idempotent — calling Stop more than once is safe. Cancelling the parent context
 // passed to [Start] also stops the janitor (Stop need not be called in that case, but
 // is harmless).
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package janitor
 
 import (

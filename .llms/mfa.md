@@ -74,7 +74,10 @@ func WithEventSink(sink event.Sink) ServiceOption     // optional security-event
 func NewSingleTenant(svc Service) *SingleTenant
 
 // Memory store
-func memory.NewStore() *memory.Store
+func memory.NewStore() *memory.Store              // bounded by DefaultMaxEntries recovery-attempt records
+func memory.NewBoundedStore(n int) *memory.Store  // pick the cap
+func memory.NewUnboundedStore() *memory.Store     // explicit opt-out; reap with DeleteStaleRecoveryAttempts
+func (s *memory.Store) DeleteStaleRecoveryAttempts(ctx, tenantID string, cutoff time.Time) (int64, error)
 ```
 
 ## Store contract
@@ -206,7 +209,7 @@ mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolv
 
 ## Gotchas
 
-- `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md.
+- `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md. `TOTPEnrollment` implements `String`/`GoString`/`LogValue` and redacts `Secret` on all fmt/slog paths.
 - `ErrAlreadyEnrolled` is returned if attempting to re-enroll a CONFIRMED factor. Call `DisableTOTP` first.
 - `VerifyTOTP` returns `ErrNotConfirmed` (not `ErrNotEnrolled`) if enrollment exists but was never confirmed.
 - Attempt counter is shared between TOTP and recovery code paths. Locking one locks both.

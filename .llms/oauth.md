@@ -35,7 +35,7 @@ type OIDCConfig struct {
     AllowedAlgs       []string          // default: RS256/384/512, ES256/384/512; "none"/HMAC always rejected
     Leeway            time.Duration     // clock skew tolerance (default 1m)
     ClaimsMapper      func(map[string]any) (*UserInfo, error) // default: OIDC standard claims
-    HTTPClient        *http.Client      // default: 10s-timeout; use SafeHTTPClient() on untrusted path
+    HTTPClient        *http.Client      // default: SafeHTTPClient() (dial-time SSRF guard); plain 10s only under AllowInsecureURLs
     AllowInsecureURLs bool              // dev-only; never set in production
 }
 
@@ -53,6 +53,7 @@ func (m *MemoryStore) GetProvider(ctx context.Context, tenantID, providerName st
 // IdentityLinker — narrow interface satisfied by identity.Service.
 type IdentityLinker interface {
     LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
+    PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
 // FetchUserFunc — custom userinfo fetcher for oauth.New.
@@ -71,13 +72,15 @@ func New(
 ) *Provider
 ```
 
+`Provider` implements `String`/`GoString`/`LogValue`; the `clientSecret` is redacted on every fmt/slog path while the name, client ID and endpoint URLs remain visible.
+
 ### ProviderOption
 
 ```go
 WithScopes(scopes ...string) ProviderOption         // override default scopes
-WithHTTPClient(c *http.Client) ProviderOption       // custom transport / test stub
+WithHTTPClient(c *http.Client) ProviderOption       // custom transport / test stub; bypasses the default SSRF guard
 WithOIDC(cfg OIDCConfig) ProviderOption             // enable OIDC id_token validation
-WithInsecureURLs() ProviderOption                   // dev-only: allow http endpoints
+WithInsecureURLs() ProviderOption                   // dev-only: allow http endpoints and an unguarded client
 ```
 
 ### AuthCodeOption / ExchangeOption
@@ -97,9 +100,12 @@ All handlers are `http.HandlerFunc` values — attach to any mux.
 func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc
 
 // Callback: validates state cookie (CSRF + provider/tenant binding), exchanges code (PKCE),
-// fetches/verifies UserInfo, links/JIT-provisions identity, issues access+refresh token pair
-// as auth cookies. On success: 204 No Content (or 303 if WithSuccessRedirect). State cookie
-// always cleared regardless of outcome.
+// fetches/verifies UserInfo, links/JIT-provisions identity, resolves the linked credential's
+// forced-password-change state and stamps Claims.MustChangePassword onto the issued pair (a
+// lookup error aborts the callback without a session), then issues access+refresh token pair
+// as auth cookies. With WithAuthFlow the same value is handed to the flow engine instead.
+// On success: 204 No Content (or 303 if WithSuccessRedirect). State cookie always cleared
+// regardless of outcome.
 func CallbackHandler[C any](
     p *Provider,
     linker IdentityLinker,
@@ -146,6 +152,8 @@ func ValidateOIDCEndpointURL(rawURL string, allowInsecure bool) error
 
 // Hardened *http.Client for tenant-supplied URLs: dial-time IP guard (DNS-rebinding safe),
 // blocks loopback/link-local/RFC1918/RFC6598/multicast/unspecified, Proxy=nil (env proxies ignored).
+// Default client for provider token/userinfo fetches, OIDC discovery and JWKS (oauth.New,
+// newOIDCVerifier); WithHTTPClient / WithInsecureURLs opt out.
 func SafeHTTPClient() *http.Client
 
 // Utility for custom provider userinfo fetchers: bearer-auth GET with bounded response (1MiB).
@@ -248,7 +256,7 @@ func OIDC(ctx context.Context, issuer, clientID, clientSecret string,
     providerOpts []oauth.ProviderOption, opts ...OIDCOption) *oauth.Provider
 
 type OIDCOption func(*oidcSettings)
-func WithDiscoveryHTTPClient(c *http.Client) OIDCOption  // use SafeHTTPClient() on untrusted path
+func WithDiscoveryHTTPClient(c *http.Client) OIDCOption  // default: SafeHTTPClient(); override for a custom transport / test stub
 func WithInsecureDiscoveryURLs() OIDCOption              // dev-only
 func WithOIDCScopes(scopes ...string) OIDCOption         // default: {"openid","email","profile"}
 func WithProviderName(name string) OIDCOption            // default: "oidc"; set stable key for identity linking
@@ -304,7 +312,7 @@ mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
 - **State cookie is opaque, NOT signed/encrypted**: it is a plain concatenation; the PKCE verifier and OIDC nonce sit in it **in plaintext**. Integrity model is "attacker can't read/write the cookie" (`HttpOnly` + `Secure` + `SameSite=Lax`), not tamper-evidence. Consumer must **never log/mirror request cookies** (the verifier/nonce would leak), and must re-derive the guarantee if moving `state` off the cookie (server-side handle, header, different prefix). Default name `oauth_state` is **not** `__Host-` prefixed (unlike tokens/sessions cookies); for subdomain cookie-tossing defence set `WithStateCookieName("__Host-oauth_state")` when serving over HTTPS with no cookie `Domain`.
 - **Nonce replay**: nonce minted per flow (32 random bytes), bound in state cookie, verified against id_token `nonce` claim; single-use (state cookie cleared on any callback outcome).
 - **JWKS id_token verification**: signature checked against issuer's JWKS; JWKS host must match issuer host (`ErrJWKSHostMismatch`); `"none"` and HMAC algs always rejected.
-- **SSRF**: two-layer guard — `ValidateExternalURL` at registration time (https, no literal internal IP), `SafeHTTPClient` at dial time (post-DNS-resolution, DNS-rebinding-proof); env proxies ignored.
+- **SSRF**: two-layer guard — `ValidateExternalURL` at registration time (https, no literal internal IP), `SafeHTTPClient` at dial time (post-DNS-resolution, DNS-rebinding-proof); env proxies ignored. `SafeHTTPClient` is the default for the provider's token/userinfo fetches as well as discovery/JWKS; `oauth.WithHTTPClient` and the dev-only `oauth.WithInsecureURLs` opt out.
 - **Unverified email**: rejected by default (`WithAllowUnverifiedEmail` to opt in); prevents account squatting.
 - **Deferred config errors**: invalid provider config (non-https endpoint, bad OIDC config) is recorded at construction and surfaced on first use; never panics (safe for dynamic `ProviderStore` over tenant-controlled data).
 - **Apple**: no userinfo endpoint — `WithOIDC` is mandatory, not optional.
@@ -314,7 +322,7 @@ mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
 
 - `WithRedirectURL` must be set explicitly in production and must be identical on `BeginHandler` and `CallbackHandler`; the fallback (derived from request) is only reliable for the callback handler.
 - State cookie and nonce are single-use; do not retry the callback on the same cookie.
-- For self-hosted issuers (Keycloak, GitLab self-hosted, Cognito), add the base URL / issuer to `SafeHTTPClient`'s SSRF allowlist by supplying a non-safe client via `oauth.WithHTTPClient` only if the issuer is on an internal host — otherwise `SafeHTTPClient` will block it.
+- The default `SafeHTTPClient` refuses loopback/link-local/RFC1918 issuers and endpoints. For a self-hosted issuer (Keycloak, GitLab self-hosted, Cognito) reachable only on an internal host, inject a client via `oauth.WithHTTPClient` — or, for a non-https local dev IdP, set `oauth.WithInsecureURLs`; both replace the guard with an unguarded client, so keep them confined to controlled deployments.
 - `providers.OIDC` performs network I/O at construction; build once at startup (or memoize in `ProviderStore`), never per request.
 - Multi-tenant providers: use `WithTenantResolver` on both `Begin` and `Callback` handlers to bind the in-flight flow to the correct tenant; mismatch returns `tenant_mismatch`.
 - Microsoft `"common"` / `"organizations"` tenants: the id_token `iss` contains the caller's home tenant GUID, not the literal `"common"` — prefer a specific tenant GUID for issuer validation.

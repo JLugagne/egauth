@@ -18,6 +18,11 @@ import (
 // everything the client needs directly to w — either the final credentials (flow completed) or
 // the short-lived flow-token cookie (MFA challenged, to be completed through the engine's
 // step-up endpoint). A non-nil error means the flow was rejected and nothing was written.
+//
+// mustChange is the authoritative forced-password-change answer for the linked credential,
+// resolved by the caller from identity state (IdentityLinker.PasswordChangeRequired). The flow
+// MUST propagate it onto any issued credentials — including through an MFA challenge — so a
+// temporary-password user cannot escape the gate by signing in through an external provider.
 type AuthFlow interface {
 	ProcessPrimaryAuth(
 		ctx context.Context,
@@ -27,6 +32,7 @@ type AuthFlow interface {
 		method string,
 		initialAMR []string,
 		remember bool,
+		mustChange bool,
 	) error
 }
 
@@ -35,7 +41,10 @@ type AuthFlow interface {
 // does NOT receive a full access+refresh pair on the callback: the engine parks the ceremony in
 // the MFA-challenged state and sets only its flow-token cookie, closing the SEC-GLO-02 bypass.
 // The handler-side issuer/claims builder is bypassed entirely — the engine's SessionMinter owns
-// issuance. Wrap an authflow.Engine with authflow.NewHandlerFlow to obtain an AuthFlow.
+// issuance. The callback still resolves the linked credential's forced-password-change state
+// (IdentityLinker.PasswordChangeRequired) and passes it to the flow, which ORs it into the issued
+// session, so the gate survives even when the engine has no WithPasswordPolicyChecker of its own.
+// Wrap an authflow.Engine with authflow.NewHandlerFlow to obtain an AuthFlow.
 func WithAuthFlow(f AuthFlow) HandlerOption {
 	return func(h *handlerConfig) { h.authFlow = f }
 }

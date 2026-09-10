@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -204,4 +205,95 @@ func TestIncrementFailedAttempts_DecaysStaleAttemptsWithSetIdentityUpdatedAt(t *
 	require.NoError(t, err)
 	assert.Equal(t, 1, found.FailedAttempts)
 	assert.Nil(t, found.LockedUntil)
+}
+
+// TestNewStore_BoundedByDefault confirms NewStore caps pending verification tokens by
+// DefaultMaxEntries and that NewUnboundedStore is the explicitly named opt-out.
+func TestNewStore_BoundedByDefault(t *testing.T) {
+	if got := memory.NewStore().MaxEntries(); got != memory.DefaultMaxEntries {
+		t.Fatalf("NewStore MaxEntries: got %d want %d (bounded default)", got, memory.DefaultMaxEntries)
+	}
+	if got := memory.NewUnboundedStore().MaxEntries(); got != 0 {
+		t.Fatalf("NewUnboundedStore MaxEntries: got %d want 0 (unbounded)", got)
+	}
+}
+
+// TestBoundedStore_EvictsExpiredFirst verifies that an already-expired verification token is
+// evicted before a live one when the cap is reached.
+func TestBoundedStore_EvictsExpiredFirst(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "tenant-A"
+	now := time.Now()
+	store := memory.NewBoundedStore(2, memory.WithClock(func() time.Time { return now }))
+
+	user, err := store.CreateUser(ctx, tenant, "evict-expired@example.com")
+	require.NoError(t, err)
+
+	expiredToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", -time.Minute, nil)
+	require.NoError(t, err)
+	liveToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", time.Hour, nil)
+	require.NoError(t, err)
+	newToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", 2*time.Hour, nil)
+	require.NoError(t, err)
+
+	_, _, err = store.ConsumeVerificationToken(ctx, tenant, expiredToken, "reset")
+	assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "expired token must be evicted first")
+
+	for name, token := range map[string]string{"live": liveToken, "new": newToken} {
+		if _, _, err := store.ConsumeVerificationToken(ctx, tenant, token, "reset"); err != nil {
+			t.Fatalf("%s token must survive eviction: %v", name, err)
+		}
+	}
+}
+
+// TestBoundedStore_EvictsSoonestExpiring verifies that, absent expired tokens, the token with
+// the soonest ExpiresAt is evicted when the cap is reached.
+func TestBoundedStore_EvictsSoonestExpiring(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "tenant-A"
+	now := time.Now()
+	store := memory.NewBoundedStore(2, memory.WithClock(func() time.Time { return now }))
+
+	user, err := store.CreateUser(ctx, tenant, "evict-soonest@example.com")
+	require.NoError(t, err)
+
+	soonestToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", time.Hour, nil)
+	require.NoError(t, err)
+	laterToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", 2*time.Hour, nil)
+	require.NoError(t, err)
+	newToken, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", 3*time.Hour, nil)
+	require.NoError(t, err)
+
+	if _, _, err := store.ConsumeVerificationToken(ctx, tenant, soonestToken, "reset"); !errors.Is(err, identity.ErrVerificationTokenNotFound) {
+		t.Fatalf("soonest-expiring token must be evicted: got %v", err)
+	}
+	for name, token := range map[string]string{"later": laterToken, "new": newToken} {
+		if _, _, err := store.ConsumeVerificationToken(ctx, tenant, token, "reset"); err != nil {
+			t.Fatalf("%s token must survive eviction: %v", name, err)
+		}
+	}
+}
+
+// TestUnboundedStore_NotCapped proves that an unbounded store retains more than DefaultMaxEntries
+// pending tokens: after overflowing the default cap, the very first (soonest-expiring) token is
+// still consumable, so nothing was evicted.
+func TestUnboundedStore_NotCapped(t *testing.T) {
+	ctx := context.Background()
+	const tenant = "tenant-A"
+	store := memory.NewUnboundedStore()
+
+	user, err := store.CreateUser(ctx, tenant, "unbounded@example.com")
+	require.NoError(t, err)
+
+	var firstToken string
+	for i := range memory.DefaultMaxEntries + 1 {
+		token, err := store.CreateVerificationToken(ctx, tenant, user.ID, "reset", time.Hour, nil)
+		require.NoError(t, err)
+		if i == 0 {
+			firstToken = token
+		}
+	}
+	if _, _, err := store.ConsumeVerificationToken(ctx, tenant, firstToken, "reset"); err != nil {
+		t.Fatalf("unbounded store evicted the first token: %v", err)
+	}
 }

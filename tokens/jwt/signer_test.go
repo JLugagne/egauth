@@ -13,7 +13,7 @@ func TestNewHMACSigner_RejectsShortSecret(t *testing.T) {
 	if _, err := NewHMACSigner("k", make([]byte, MinSecretKeyLength-1)); err == nil {
 		t.Fatal("expected error for a short HMAC secret")
 	}
-	s, err := NewHMACSigner("k", make([]byte, MinSecretKeyLength))
+	s, err := NewHMACSigner("k", []byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatalf("unexpected error for a 32-byte secret: %v", err)
 	}
@@ -26,7 +26,7 @@ func TestNewHMACSigner_RejectsShortSecret(t *testing.T) {
 }
 
 func TestNewHMACSigner_AllowsEmptyKeyID(t *testing.T) {
-	s, err := NewHMACSigner("", make([]byte, MinSecretKeyLength))
+	s, err := NewHMACSigner("", []byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

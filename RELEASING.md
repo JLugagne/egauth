@@ -77,58 +77,109 @@ Generate a Software Bill of Materials (SBOM) in CycloneDX format. This documents
 and their versions, critical for supply-chain transparency and vulnerability tracking:
 
 ```sh
-# Install syft if not already present (https://github.com/anchore/syft)
-go install github.com/anchore/syft@latest
+# Install syft if not already present (https://github.com/anchore/syft).
+# Pinned to an exact version — keep in sync with SYFT_VERSION in the Makefile.
+go install github.com/anchore/syft@v1.51.1
 
 # Generate SBOM from the module and save to the release directory
 syft -o cyclonedx-json github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.json
 syft -o cyclonedx github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.xml
 ```
 
+To update the pinned syft version, run `go list -m -versions github.com/anchore/syft`, review the
+upstream release notes, then bump `SYFT_VERSION` in the Makefile and the version above together.
+
 Verify the SBOM is generated and contains an entry for each direct and transitive dependency.
 Attach both JSON and XML versions to the GitHub Release (Step 6).
 
 ---
 
-## Step 5 — Sign the release tag with GPG
+## Step 5 — Sign and verify the release tag
 
-Before creating the tag, ensure your GPG key is configured:
+The release identity model is **keyless Sigstore signing via
+[gitsign](https://github.com/sigstore/gitsign) (OIDC)**. OpenPGP and SSH signing are supported
+alternatives. Regardless of the mechanism, a release tag is accepted only when
+`scripts/verify-release-tag.sh <tag>` passes, which requires `git verify-tag <tag>` to succeed
+against the annotated tag object.
+
+### Primary: keyless Sigstore (gitsign)
+
+One-time setup (maintainer machine and, to verify, consumer machines):
 
 ```sh
-# List your GPG keys (choose the one you want to use for releases)
-gpg --list-keys
+# Install gitsign (pin a version you have reviewed; `latest` is shown for brevity).
+go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
 
-# Configure git to sign tags with your key (optional, if not already set)
-git config user.signingkey <KEY_ID>
+git config --global gpg.x509.program gitsign
+git config --global gpg.format x509
 ```
 
-Create a signed (GPG-annotated) tag. This adds cryptographic assurance that the tag was
-created by you:
+Create the signed, annotated tag. gitsign opens a browser for the OIDC flow:
 
 ```sh
 git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z    # release gate — must pass before pushing
 git push origin vX.Y.Z
 ```
 
-The `-s` flag signs the tag with your GPG key; `-a` makes it an annotated tag.
-
-**Verification:**
-Others can verify the tag signature with:
+Consumers verify the signature and, separately, the signer identity:
 
 ```sh
-git tag -v vX.Y.Z
+git verify-tag vX.Y.Z
+gitsign verify \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  vX.Y.Z
 ```
 
-If you are using ephemeral keys or do not have GPG set up, you may alternatively use
-[Sigstore/cosign](https://docs.sigstore.dev/):
+`git verify-tag` proves the tag content was signed by the certificate embedded in the tag and
+recorded in the Sigstore transparency log; it does not check *who* the signer is, hence the
+additional `gitsign verify` identity check. The exact `--certificate-identity` for a release is
+recorded in its GitHub release notes. Keyless verification uses the local Sigstore trust root;
+the first run may need network access to refresh it, after which verification works offline.
+
+### Alternative: OpenPGP or SSH
+
+OpenPGP:
 
 ```sh
-# Sign the tag with cosign (requires GITHUB_TOKEN)
-cosign sign-blob --key cosign.key vX.Y.Z
+gpg --list-secret-keys                       # find the release key fingerprint
+git config --global gpg.format openpgp
+git config --global user.signingkey <FINGERPRINT>
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Publish the armored public key in the release notes (`gpg --armor --export <FINGERPRINT>`).
+Consumers import it and run `git verify-tag vX.Y.Z`.
+
+SSH:
+
+```sh
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Consumers must allow the signing key before `git verify-tag` will trust the tag:
+
+```sh
+git config gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+echo '<identity> ssh-ed25519 AAAA...' >> ~/.config/git/allowed_signers
+git verify-tag vX.Y.Z
 ```
 
 Signed tags are recorded in the repository history and serve as a tamper-evident record
 of the release date, author, and message.
+
+> **Unsigned tags before the gate.** Release tags up to and including `v0.11.0`, including all
+> `adapters/pgx` tags, are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag):
+> `git verify-tag` fails on them. They predate this gate and cannot be signed retroactively.
+> Treat them as unverified and prefer the first signed release; verification instructions are
+> in [SECURITY.md](SECURITY.md#verifying-a-release).
 
 ---
 
@@ -155,6 +206,57 @@ Alternatively, create the release manually in the GitHub UI:
 
 ---
 
+## Step 7 — Attest the release artifacts
+
+The SBOM files are release artifacts just like the source tag; sign or attest them so a
+consumer can verify they were published by the same identity. The choice is the maintainer's;
+both consumer verification commands are documented below.
+
+### Option A — keyless cosign (available today)
+
+```sh
+# Install cosign (pin a version you have reviewed; `latest` is shown for brevity).
+go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+
+cosign sign-blob --yes \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  libauth-vX.Y.Z.sbom.json
+cosign sign-blob --yes \
+  --bundle libauth-vX.Y.Z.sbom.xml.sigstore.json \
+  libauth-vX.Y.Z.sbom.xml
+
+# Attach the signature bundles next to the SBOMs.
+gh release upload vX.Y.Z \
+  libauth-vX.Y.Z.sbom.json.sigstore.json \
+  libauth-vX.Y.Z.sbom.xml.sigstore.json
+```
+
+Consumers verify an artifact against the signer identity:
+
+```sh
+cosign verify-blob \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  libauth-vX.Y.Z.sbom.json
+```
+
+### Option B — GitHub artifact attestations (recommended once the repository is public)
+
+GitHub serves artifact attestations for private repositories only on GitHub Enterprise Cloud,
+so this is a **maintainer step to enable when the repository goes public**, not a wired-in
+workflow today. Once public, add a workflow triggered on `release: [published]` with
+`id-token: write` and `attestations: write` that checks out the tag, regenerates the SBOM with
+the pinned syft version, and attests it with
+[`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
+(`subject-path: libauth-*.sbom.*`). Consumers then verify with the GitHub CLI:
+
+```sh
+gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
+```
+
+---
+
 ## Multi-module release: core + `adapters/pgx`
 
 The repository is a **multi-module monorepo**: the core flagship module
@@ -168,8 +270,36 @@ github.com/JLugagne/egauth => ../..` that resolves the (as-yet-unpublished, priv
 from this repo's root, so every go command — `build`, `test`, `vet`, `tidy`, `go work sync` — works
 offline without reaching the proxy for a core version that doesn't exist yet. A committed `go.work`
 also lists both modules so the workspace spans them. Both are **development-only**: `go.work` is
-never seen by external consumers, and the `replace` is dropped at release (and is ignored by
-importers even if it shipped). `go.work.sum` is a derived lock file and is not tracked.
+never seen by external consumers, and the adapter drops its `replace` at release. A shipped
+`replace` is ignored by importers, but that does **not** make it harmless: it can only be left in
+place while the matching `require` names a real published version, because consumers resolve that
+`require` themselves. The root module's adapter requirement is the critical case — see below.
+`go.work.sum` is a derived lock file and is not tracked.
+
+### Root module `adapters/pgx` requirement (verify before every core tag)
+
+The root `go.mod` requires the adapter because the `e2e-security` tests import
+`adapters/pgx/passkey`. External consumers cannot see the root module's local
+`replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx`, so the `require` must
+always name a version the module proxy can serve. A placeholder left over from local
+development (such as the zero pseudo-version `v0.0.0-00010101000000-000000000000`) makes
+`go list -m all`, `go mod download all`, and SBOM tooling fail for every consumer even
+though `go build` of imported packages still succeeds.
+
+Before tagging core, confirm the pinned adapter version is published and that the consumer
+module commands succeed offline against a local file proxy:
+
+```sh
+# The pinned version must be listed by the proxy.
+go list -m -versions github.com/JLugagne/egauth/adapters/pgx
+
+# Warm the module cache for the offline consumer check, then run it.
+go mod download github.com/JLugagne/egauth/adapters/pgx@vX.Y.Z
+bash scripts/consumer-smoke.sh   # asserts consumer `go list -m all` and `go mod download all`
+```
+
+The `replace` directive may stay in the repository for development; consumers ignore it,
+and the published `require` resolves on its own.
 
 ### Adapter granularity convention
 
@@ -181,8 +311,9 @@ consumer who picks pgx never inherits another backend's driver.
 
 ### The two-tag release dance (ordered, maintainer-manual)
 
-1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. The adapter's `require` can only point at
-   a published core version, so core must exist on the proxy before the adapter is tagged.
+1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. First run the root module's adapter-pin
+   check (see "Root module `adapters/pgx` requirement" above). The adapter's `require` can only point
+   at a published core version, so core must exist on the proxy before the adapter is tagged.
 2. **Point the adapter at the published core version.** Pre-tag, `adapters/pgx/go.mod` pins the core
    `require` and carries the dev `replace github.com/JLugagne/egauth => ../..`. Now that core is
    published, drop the replace, pin the require to the freshly-cut version, and regenerate `go.sum`
@@ -197,12 +328,16 @@ consumer who picks pgx never inherits another backend's driver.
    git commit -m "chore: point adapters/pgx at egauth vX.Y.Z"
    ```
 
-   A `replace` left in the shipped go.mod is ignored by external importers (so it's harmless if
-   forgotten), but dropping it keeps the published module clean.
-3. **Cut the adapter tag**, which is path-prefixed because it is a nested module:
+   A `replace` left in the shipped go.mod is ignored by external importers, but it is only benign
+   while the matching `require` names a real published version — do not treat it as harmless by
+   default and do not leave a placeholder behind. Dropping it keeps the published module clean.
+3. **Cut the adapter tag**, which is path-prefixed because it is a nested module. Like the
+   core tag it must be annotated and signed, and it must pass the release gate before it is
+   pushed:
 
    ```sh
-   git tag -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
+   git tag -s -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
+   scripts/verify-release-tag.sh adapters/pgx/vX.Y.Z
    git push origin adapters/pgx/vX.Y.Z
    ```
 4. **Consumers** then install each module at its tag, independently:
@@ -246,13 +381,16 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Pre-release verification**: Confirm `main` is green in CI, run local `go test ./...` and `make check`
 - [ ] **CHANGELOG updated**: Move `[Unreleased]` section to a dated version header (`## [vX.Y.Z] — YYYY-MM-DD`)
 - [ ] **go.mod retract block**: Add `retract` directive for any pre-release or yanked versions (if applicable)
+- [ ] **Root adapter pin verified**: Root go.mod requires a published `adapters/pgx` version (no placeholder); `go list -m all` and `go mod download all` pass via `bash scripts/consumer-smoke.sh`
 - [ ] **Changes committed**: Stage and commit CHANGELOG.md and go.mod with message "chore: prepare release vX.Y.Z"
 - [ ] **SBOM generated**: Run `syft` to generate SBOM in both JSON and XML format
-- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` (requires GPG setup)
+- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` using the identity model in Step 5 (gitsign keyless, or OpenPGP/SSH)
+- [ ] **Tag gate passed**: `bash scripts/verify-release-tag.sh vX.Y.Z` exits 0 against the local tag; do not push a tag the gate rejects
 - [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
-- [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes
+- [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes; record the signer's `--certificate-identity` and the `scripts/verify-release-tag.sh` output in the notes
 - [ ] **SBOM attached**: Upload SBOM JSON and XML files to the GitHub release
-- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the adapter tag after the core tag is published
+- [ ] **Artifacts attested**: Sign the SBOM bundles with keyless cosign (Step 7 Option A) or attest them via GitHub artifact attestations once public (Option B), and upload the bundles
+- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the signed adapter tag after the core tag is published and gate it with `bash scripts/verify-release-tag.sh adapters/pgx/vX.Y.Z`
 
 ### Vulnerability gate
 
@@ -276,3 +414,70 @@ libauth follows [Semantic Versioning](https://semver.org/):
 - **Minor** (vX.Y.Z → vX.Y+1.0): backwards-compatible new features or additions.
 - **Major** (vX.Y.Z → vX+1.0.0): breaking API changes; requires updating the module path
   (e.g. `github.com/JLugagne/egauth/v2`).
+
+The packages covered by the promise, and the ones that are explicitly experimental, are listed
+in [docs/adr/0001-v1-scope-and-stability-classes.md](docs/adr/0001-v1-scope-and-stability-classes.md).
+
+---
+
+## v1 API-freeze review checklist
+
+Run this before tagging v1.0.0, and re-run the relevant parts before any change to a
+`frozen-v1` package. The goal is that the SemVer promise covers a surface that is named
+deliberately, reviewed for security defaults, and able to grow without breaking implementers.
+
+### Naming and stability
+
+- [ ] Every exported identifier in a `frozen-v1` package is named for its final meaning; no
+      temporary, internal or placeholder names survive the freeze.
+- [ ] A `go doc -all` sweep per frozen package was reviewed against the stability table, and each
+      package doc carries its stability class.
+- [ ] New exported surface is either part of the frozen contract or explicitly marked
+      `// Experimental:`; nothing is added silently.
+- [ ] No `frozen-v1` exported signature exposes an experimental package's type in a way that
+      would freeze it transitively. If it does, promote the type or change the signature before
+      the tag.
+- [ ] Options follow the `WithX` convention, and every opt-out that weakens a security default is
+      named `WithInsecure*` or `Insecure*` and documented as a risk.
+
+### Security-relevant options
+
+- [ ] Every exported option and `Config` field was reviewed for security impact and defaults to
+      the safe behavior.
+- [ ] A test fails if a secure default flips silently (same-origin gate, cookie flags, token
+      length, lockout, OTP/TOTP attempt limits, challenge store, state signing key).
+- [ ] Secret-bearing types keep their `fmt`/`slog` redaction, and no exported type adds a secret
+      field without it.
+- [ ] Sensitive comparisons on the authentication path are constant-time or explicitly documented
+      as not requiring it.
+
+### Store interface growth
+
+- [ ] Each core `Store` interface is segmented into a stable core plus optional capability
+      interfaces; adding a capability in v1.x adds a new interface, never a method to a frozen
+      one.
+- [ ] Adding a method to a `frozen-v1` interface is treated as a breaking change: it is deferred
+      to the next major version or shipped as a new optional interface.
+- [ ] Every new optional interface has a conformance suite (`*/storetest` or the equivalent
+      exported contract helper), and every bundled backend passes it.
+- [ ] Concurrency-critical methods (single-use consumption, compare-and-set, atomic counters)
+      remain documented as such, and their contract tests still assert the atomic behavior.
+
+---
+
+## Deprecation policy
+
+- **Announce before removing.** An exported symbol in a `frozen-v1` package is marked
+  `// Deprecated: <reason>. Use <replacement> instead.`, documented in `CHANGELOG.md`, and left
+  working for at least one minor release before it is removed in the next major version.
+- **Removal only in a major.** Within v1.x, a deprecated symbol keeps compiling and working; its
+  removal requires a new module major (`.../v2`).
+- **Safety wins over the compatibility promise.** A symbol that cannot be made safe is the one
+  exception: it may be disabled or removed in a minor or patch release, with the reason recorded
+  in `CHANGELOG.md` and `SECURITY.md`.
+- **Retract unusable releases.** A published version that must not be used is handled with a
+  `retract` directive in `go.mod` (see "Step 2 — Update `retract` in go.mod").
+- **Experimental packages are exempt.** They may change or be removed in any release without a
+  major-version bump; the change is still called out in `CHANGELOG.md`.
+- **Update the stability docs.** When a package is deprecated or removed, update the stability
+  table in the ADR and the package's godoc in the same change.

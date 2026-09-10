@@ -42,4 +42,10 @@
 // rotation with overlapping validity, and secret-at-rest as SHA-256 hashes only. Credential-bearing
 // types (TokenPair, APIKey) and the signing config (jwt.Config, SigningKey, Service) redact their
 // secrets on fmt/slog. See SECURITY.md.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package tokens

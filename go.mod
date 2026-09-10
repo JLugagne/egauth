@@ -36,9 +36,10 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 )
 
-// The adapters/pgx sub-module is imported by e2e-security tests. The replace directive
-// resolves it from the local disk so tools that do not use go.work (LSP, CI typecheck)
-// can resolve the package without a published tag.
-require github.com/JLugagne/egauth/adapters/pgx v0.0.0-00010101000000-000000000000
+// The adapters/pgx sub-module is imported by e2e-security tests. The require pins the
+// newest published adapter release so consumers can resolve it from the module proxy; the
+// replace resolves it from this checkout for development (external consumers ignore
+// replace directives, so the require must always name a real published version).
+require github.com/JLugagne/egauth/adapters/pgx v0.11.0
 
 replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx

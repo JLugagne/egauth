@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/JLugagne/egauth/keystore"
+	"github.com/JLugagne/egauth/keystore/memory"
 )
 
 func TestJWTKeyStore_ProjectsRSASigner(t *testing.T) {
@@ -49,6 +50,36 @@ func TestJWTKeyStore_ProjectsHMACSigner(t *testing.T) {
 	}
 	if len(secret) != 32 {
 		t.Fatalf("HMAC secret is %d bytes, want 32", len(secret))
+	}
+}
+
+// TestJWTKeyStore_RejectsAllZeroHMACSecret pins the adapter's fail-closed behavior: a stored key
+// whose KEK-opened secret is all-zero must not be projected into a Signer, even though it is
+// exactly MinSecretKeyLength bytes.
+func TestJWTKeyStore_RejectsAllZeroHMACSecret(t *testing.T) {
+	ctx := context.Background()
+	kek := newKEK(t)
+	sealed, err := kek.Seal(make([]byte, 32), []byte("acme"))
+	if err != nil {
+		t.Fatalf("seal: %v", err)
+	}
+	store := memory.New()
+	if err := store.CreateTenant(ctx, "acme", keystore.SigningKey{
+		KeyID:    "k-zero",
+		TenantID: "acme",
+		Alg:      keystore.AlgHS256,
+		Secret:   sealed,
+	}); err != nil {
+		t.Fatalf("CreateTenant: %v", err)
+	}
+	mgr, err := keystore.NewManager(store, kek)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+
+	ks := keystore.NewJWTKeyStore(mgr)
+	if signer, err := ks.ActiveSigningKey(ctx, "acme"); err == nil {
+		t.Fatalf("ActiveSigningKey accepted an all-zero HMAC secret: %v", signer)
 	}
 }
 

@@ -125,7 +125,7 @@ func TestConfig_SignersUniqueNonEmptyKeyID(t *testing.T) {
 
 	// An empty KeyID inside a Signers set: an HMAC signer may legally have an empty key id,
 	// but it must not be placed in a Signers set.
-	emptyKid, err := jwt.NewHMACSigner("", make([]byte, jwt.MinSecretKeyLength))
+	emptyKid, err := jwt.NewHMACSigner("", []byte("0123456789abcdef0123456789abcdef"))
 	require.NoError(t, err)
 	emptyCfg := jwt.Config[struct{}]{
 		Store:          memory.NewStore[struct{}](),

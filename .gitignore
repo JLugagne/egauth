@@ -18,3 +18,5 @@ coverage*.out
 # Go workspace: go.work is committed (it wires the multi-module monorepo for local dev/CI);
 # go.work.sum is a derived lock file and is intentionally not tracked.
 go.work.sum
+
+/.tickets

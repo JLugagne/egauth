@@ -7,54 +7,80 @@ import (
 
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/sessions"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
-// JWTMinter creates token pairs using tokens.Issuer and writes auth cookies.
+// JWTMinter creates token pairs using tokens.Issuer and writes auth cookies. Minting goes
+// through the unified issuance pipeline, so the forced-change flag the engine accumulated over
+// the flow is enforced (never cleared) at issuance, and every flow-minted pair emits the same
+// audit event.
 type JWTMinter[C any] struct {
 	issuer         tokens.Issuer[C]
 	claimsOf       identity.ClaimsBuilder[C]
 	cookies        tokens.Cookies
 	persistRefresh bool
+	pipe           *issuance.Pipeline[C]
+	pipeErr        error
 }
 
 // NewJWTMinter creates a SessionMinter that mints JWT access/refresh token pairs and sets auth cookies.
+//
+// The engine re-checks the account lifecycle (WithAccountValidator) and resolves the
+// forced-password-change flag before it calls Mint, so the pipeline's state source is seeded
+// from the completed flow identity; the flow's must-change flag is OR-ed by the pipeline and can
+// no longer be dropped by a minter implementation.
 func NewJWTMinter[C any](
 	issuer tokens.Issuer[C],
 	claimsOf identity.ClaimsBuilder[C],
 	cookies tokens.Cookies,
 	persistRefresh bool,
 ) *JWTMinter[C] {
-	return &JWTMinter[C]{
+	m := &JWTMinter[C]{
 		issuer:         issuer,
 		claimsOf:       claimsOf,
 		cookies:        cookies,
 		persistRefresh: persistRefresh,
 	}
+	pipe, err := issuance.New(issuer, issuance.WithResolver(issuance.ResolverFunc(
+		func(_ context.Context, tenantID string, userID uuid.UUID) (issuance.State, error) {
+			return issuance.State{UserID: userID, TenantID: tenantID}, nil
+		},
+	)))
+	m.pipe, m.pipeErr = pipe, err
+	return m
 }
 
 // Mint issues a JWT token pair and writes the access and refresh cookies.
 func (m *JWTMinter[C]) Mint(ctx context.Context, w http.ResponseWriter, r *http.Request, flow *FlowContext) error {
+	if m.pipeErr != nil {
+		return m.pipeErr
+	}
 	user := &identity.User{
 		ID:       flow.UserID,
 		TenantID: flow.TenantID,
 		Email:    flow.UserEmail,
 	}
-	claims := m.claimsOf(user)
-	claims.TenantID = flow.TenantID
-	claims.Subject = flow.UserID
-	claims.AMR = append([]string{}, flow.AMR...)
-	claims.MustChangePassword = flow.MustChangePassword
-
-	pair, err := m.issuer.IssueTokenPair(ctx, claims)
+	res, err := m.pipe.Issue(ctx, issuance.Request[C]{
+		TenantID:           flow.TenantID,
+		UserID:             flow.UserID,
+		Claims:             m.claimsOf(user),
+		Method:             flow.PrimaryFactor,
+		AMR:                append([]string{}, flow.AMR...),
+		MustChangePassword: flow.MustChangePassword,
+		// The engine only reaches Mint after account validation and, when MFA is required,
+		// after ProcessStepUp completed the second factor; a completed flow is never gated again.
+		MFAVerified: true,
+	})
 	if err != nil {
 		return err
 	}
 
 	if w != nil {
-		m.cookies.SetAccess(w, pair.AccessToken)
-		m.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, m.persistRefresh || flow.RememberMe)
+		m.cookies.SetAccess(w, res.Pair.AccessToken)
+		m.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, m.persistRefresh || flow.RememberMe)
 	}
 	return nil
 }

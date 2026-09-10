@@ -94,8 +94,29 @@ func WithAccountValidator(v AccountValidator) Option {
 	return func(e *Engine) { e.validator = v }
 }
 
+// WithPasswordPolicyChecker configures the engine's own forced-password-change source. Its answer
+// is OR-ed with the caller-supplied authoritative flag (WithPrimaryMustChange), so a checker can
+// flag an additional credential but can never clear a flag the caller resolved from identity
+// state. A nil checker (the default) means the engine relies entirely on the caller's flag.
 func WithPasswordPolicyChecker(c PasswordPolicyChecker) Option {
 	return func(e *Engine) { e.pwChecker = c }
+}
+
+// PrimaryAuthOption configures a single ProcessPrimaryAuth invocation.
+type PrimaryAuthOption func(*primaryAuthConfig)
+
+type primaryAuthConfig struct {
+	mustChangePassword bool
+}
+
+// WithPrimaryMustChange records the caller's authoritative forced-password-change answer for the
+// credential being authenticated. Callers that own the identity lookup — the shipped identity and
+// oauth login handlers resolve it via PasswordChangeRequired — use it to keep the flag on the
+// session even when the engine was not wired with WithPasswordPolicyChecker. The engine ORs it
+// with its own checker result, so either source can flag the session and neither can silently
+// clear the other.
+func WithPrimaryMustChange(mustChange bool) PrimaryAuthOption {
+	return func(c *primaryAuthConfig) { c.mustChangePassword = c.mustChangePassword || mustChange }
 }
 
 func WithTokenTTL(ttl time.Duration) Option {
@@ -174,6 +195,12 @@ func NewEngine(secret []byte, opts ...Option) (*Engine, error) {
 }
 
 // ProcessPrimaryAuth evaluates an in-flight primary authentication (password, magic link, oauth, passkey).
+//
+// The forced-password-change flag on the resulting flow comes from two OR-ed sources: the caller's
+// authoritative answer (WithPrimaryMustChange), which the shipped identity/oauth handlers resolve
+// from identity state, and the engine's optional WithPasswordPolicyChecker. A caller that owns the
+// credential lookup SHOULD pass WithPrimaryMustChange so the flag cannot be dropped on an engine
+// wired without a checker; a configured checker can only add a flag, never clear the caller's.
 func (e *Engine) ProcessPrimaryAuth(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -182,7 +209,13 @@ func (e *Engine) ProcessPrimaryAuth(
 	method string,
 	initialAMR []string,
 	remember bool,
+	opts ...PrimaryAuthOption,
 ) (*FlowResult, error) {
+	var authCfg primaryAuthConfig
+	for _, opt := range opts {
+		opt(&authCfg)
+	}
+
 	e.warnIfInsecureMisuse(ctx, r)
 	if user == nil {
 		return nil, identity.ErrUserNotFound
@@ -212,14 +245,17 @@ func (e *Engine) ProcessPrimaryAuth(
 		}
 	}
 
-	// 2. Forced password change check
-	mustChange := false
+	// 2. Forced password change check. The caller-supplied answer is authoritative for the
+	// credential it just verified; the engine's own checker, when configured, is OR-ed in so it
+	// can only add a flag, never clear the caller's. Both sources are always consulted on every
+	// invocation — the flag is never silently defaulted to false when a source can speak.
+	mustChange := authCfg.mustChangePassword
 	if e.pwChecker != nil {
-		var err error
-		mustChange, err = e.pwChecker(ctx, user.TenantID, user.ID)
+		checked, err := e.pwChecker(ctx, user.TenantID, user.ID)
 		if err != nil {
 			return nil, fmt.Errorf("password policy check: %w", err)
 		}
+		mustChange = mustChange || checked
 	}
 
 	flow := &FlowContext{

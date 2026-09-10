@@ -377,6 +377,52 @@ func TestIssueHandler_UsesContextActorTenantWhenNoResolver(t *testing.T) {
 	assert.Error(t, errEmpty, "challenge must not be stored under empty tenant")
 }
 
+func TestHandlers_TenantResolverEmptyFailsClosed(t *testing.T) {
+	subject := uuid.Must(uuid.NewV7())
+	withSubject := otp.WithSubjectResolver(func(r *http.Request) (uuid.UUID, bool) { return subject, true })
+
+	t.Run("IssueHandler", func(t *testing.T) {
+		store := memory.NewStore()
+		svc := otp.NewService(store)
+		delivered := false
+		h := otp.IssueHandler(svc, func(context.Context, *otp.Challenge) error {
+			delivered = true
+			return nil
+		}, withSubject, otp.WithTenantResolver(func(*http.Request) string { return "" }))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, issuePost())
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+		assert.False(t, delivered, "delivery must not run for an unresolved tenant")
+		_, err := store.GetOTP(context.Background(), "", subject, "login")
+		assert.Error(t, err, "no challenge may be minted in the single-tenant partition")
+	})
+
+	t.Run("VerifyHandler", func(t *testing.T) {
+		svc := otp.NewService(memory.NewStore())
+		h := otp.VerifyHandler(svc, withSubject, otp.WithTenantResolver(func(*http.Request) string { return "" }))
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, codeForm("123456"))
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+	})
+
+	t.Run("empty resolver stays valid single-tenant", func(t *testing.T) {
+		svc := otp.NewService(memory.NewStore())
+		h := otp.VerifyHandler(svc, withSubject)
+		ch, err := svc.Issue(context.Background(), "", subject, "login")
+		require.NoError(t, err)
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, codeForm(ch.Code))
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+}
+
 func TestVerifyHandler_UsesContextActorTenantWhenNoResolver(t *testing.T) {
 	svc := otp.NewService(memory.NewStore())
 	subject := uuid.Must(uuid.NewV7())

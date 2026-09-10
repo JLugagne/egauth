@@ -18,6 +18,12 @@
 // The hook constructors (NewAccountRevocationHook, NewTenantRevocationHook) adapt the bus to the
 // narrow function signatures the producing modules already use for their post-mutation callbacks,
 // so wiring revocation into an existing service is a one-liner rather than a re-architecture.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package revocation
 
 import (

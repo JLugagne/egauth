@@ -23,3 +23,24 @@ func deniedSecretError(secret []byte) error {
 	}
 	return nil
 }
+
+// trivialSecretError reports a non-nil error when secret is trivially guessable: every byte is
+// zero, or the same byte value fills the whole key. Such a key is attacker-known at any length,
+// so the MinSecretKeyLength gate alone cannot reject it. newHMACSignerAllowWeak and
+// Config.Validate refuse these values unconditionally — InsecureAllowWeakKey suppresses only the
+// minimum-length check, never this one.
+func trivialSecretError(secret []byte) error {
+	if len(secret) == 0 {
+		return nil
+	}
+	first := secret[0]
+	for _, b := range secret[1:] {
+		if b != first {
+			return nil
+		}
+	}
+	if first == 0 {
+		return errors.New("secret is all zero bytes; generate a unique secret with crypto/rand or load one from a secret manager — an all-zero key lets anyone forge tokens")
+	}
+	return errors.New("repeated single-byte secret detected; generate a unique secret with crypto/rand or load one from a secret manager — a trivially known key lets anyone forge tokens")
+}

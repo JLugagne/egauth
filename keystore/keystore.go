@@ -12,6 +12,12 @@
 // Key material persisted by a Store backend is encrypted at rest with a deployment KEK
 // (envelope encryption); see KEK and NewManager. The KEK is required and fail-fast validated
 // at construction.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package keystore
 
 import (

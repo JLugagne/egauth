@@ -12,9 +12,10 @@ permissions:
 
 # Multi-module monorepo: the core flagship module (.) and the nested pgx adapter module
 # (./adapters/pgx). The committed go.work resolves the core module from local disk for the adapter
-# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to prove the
-# core module is self-contained — it builds and tests as the standalone module external consumers
-# get, with no Docker and no dependency on the workspace or the adapter.
+# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to resolve
+# from the root go.mod alone, as external consumers do (no Docker). The root go.mod pins the adapter
+# to a published version and keeps a local replace for development; the packaging job below proves a
+# consumer can resolve that graph through the proxy.
 
 jobs:
   test-core:
@@ -52,9 +53,33 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # The core module carries no pgx/testcontainers dependency, so it tests with NO Docker
-        # daemon. GOWORK=off (job env) confirms it resolves entirely from its own go.mod.
+        # The core suite imports the pgx adapter's passkey package but no testcontainers, so it
+        # tests with NO Docker daemon. GOWORK=off (job env) resolves the adapter from the local
+        # replace pinned in the root go.mod.
         run: go test -race -failfast ./...
+
+  consumer-smoke:
+    name: Packaging — consumer module graph (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # External consumers cannot see this repo's local `replace` directives. This job proves the
+    # root go.mod pins the adapter to a version the proxy can serve: the script warms the module
+    # cache from the public proxy with the repo root's and the adapter's full dependency graphs,
+    # then runs `go list -m all` + `go mod download all` in a throwaway consumer module with only
+    # a local file:// proxy. A cold runner cache is fine; the offline run is still the assertion,
+    # so a pin the proxy cannot serve fails here.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Consumer module smoke (warm-up + offline assertion)
+        run: bash scripts/consumer-smoke.sh
 
   test-adapters-pgx:
     name: adapters/pgx — Test & Vet (Docker/testcontainers)
@@ -104,7 +129,10 @@ jobs:
         working-directory: adapters/pgx
     services:
       postgres:
-        image: postgres:16-alpine
+        # Pinned by digest: the mutable tag is recorded here for readability, the digest is the
+        # immutable reference. To update, run `docker pull postgres:16-alpine` then
+        # `docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine` and replace the digest.
+        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
         env:
           POSTGRES_USER: testuser
           POSTGRES_PASSWORD: testpass
@@ -193,12 +221,12 @@ jobs:
   fuzz:
     name: Fuzz (short pass on untrusted-input parsers)
     runs-on: ubuntu-latest
-    # 6 targets x 30s fuzz budget + target compilation; capped well above that.
-    timeout-minutes: 20
+    # 7 targets x 60s fuzz budget + target compilation; capped well above that.
+    timeout-minutes: 25
     # The fuzz targets cover the highest-value attack surface of an auth SDK: the parsers fed
-    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, WebAuthn CBOR/base64).
-    # All live in the core module, so GOWORK=off. A short pass per target catches panics (DoS) and
-    # mis-parses on every push without a long-running fuzz budget.
+    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, authflow flow token,
+    # WebAuthn CBOR/base64). All live in the core module, so GOWORK=off. A short pass per target
+    # catches panics (DoS) and mis-parses on every push without a long-running fuzz budget.
     env:
       GOWORK: "off"
     steps:
@@ -214,12 +242,13 @@ jobs:
       - name: Short fuzz pass
         run: |
           set -euo pipefail
-          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=30s ./passwords/argon2
-          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=30s ./passwords/argon2
-          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=30s ./oauth
-          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=30s ./tokens/jwt
-          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=30s ./passkey
-          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=30s ./passkey
+          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=60s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=60s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=60s ./oauth
+          go test -run='^$' -fuzz=FuzzDecodeFlowToken                 -fuzztime=60s ./authflow
+          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=60s ./tokens/jwt
+          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=60s ./passkey
+          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=60s ./passkey
 
   coverage:
     name: Coverage (core security packages)

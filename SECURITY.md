@@ -10,6 +10,10 @@
 This document describes how `egauth` handles sensitive values (passwords, opaque
 tokens, hashes) and what the **consumer** of the library is responsible for.
 
+The per-module summary — what each package guarantees and what the consumer must do — lives in
+[docs/security-guarantees.md](docs/security-guarantees.md). This document remains the detailed
+model behind those statements.
+
 ## What egauth guarantees
 
 - **Hashing at rest.** Opaque tokens (refresh tokens, API keys, session tokens) are
@@ -99,7 +103,13 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   provider email the provider reports as unverified** (`WithAllowUnverifiedEmail` opts out), and it
   never auto-links an external identity onto a pre-existing account that merely shares the email —
   both are account-squatting / takeover defences. The token exchange runs server-side with the
-  client secret; the provider access token never leaves the exchange.
+  client secret; the provider access token never leaves the exchange. Both the token POST (which
+  carries `client_secret`) and the userinfo GET (which carries the access token) use
+  `oauth.SafeHTTPClient` by default: its dial-time guard refuses loopback/link-local/RFC1918/
+  RFC6598/multicast targets (DNS-rebinding safe) and 3xx responses are never followed, so a
+  hostile or tenant-controlled issuer cannot point those fetches at an internal address.
+  Injecting `oauth.WithHTTPClient` (or the dev-only `oauth.WithInsecureURLs`) replaces that client
+  with an unguarded one.
 - **NIST-aligned passphrases.** `passwords/policy.PassphrasePolicy` enforces length (counted in
   Unicode code points) with NO composition rules and screens secrets against a denylist plus an
   optional pluggable `passwords.BreachChecker` (e.g. a HIBP k-anonymity client — egauth ships
@@ -131,6 +141,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   `HttpOnly`/`Secure` cookie so the client cannot tamper with the challenge or downgrade user
   verification; the cookie is single-use and the ceremony has a server-enforced expiry. A
   regressed signature counter (possible cloned authenticator) is rejected (`ErrCredentialCloned`).
+  The non-ceremony `passkey.RenameCredentialHandler` mutation applies the library-wide strict
+  same-origin CSRF check — on by default, with `passkey.WithTrustedOrigins` /
+  `passkey.WithInsecureNoOriginCheck` — and requires `Content-Type: application/json` (415
+  otherwise) as defense in depth; see the CSRF section below.
   The module is **secure by default**: `passkey.NewService` fails fast on a misconfigured
   passwordless/step-up setup rather than degrading silently (mirroring `jwt.New`). See the
   hardening checklist below.
@@ -212,6 +226,21 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   is true the wrapped handler is bypassed and the request is redirected (`303`) to the configured
   reset URL (or `403 password_change_required` if none). The change-password and logout routes
   should be excluded from this middleware.
+
+  The flag is preserved structurally on **every** interactive login path by the unified session
+  issuance pipeline (`issuance.Pipeline.Issue`). Password login, registration, magic link, the
+  native OAuth callback, the `authflow` engine's minter and the MFA step-up handler all terminate
+  in that one function, which re-loads the account's authoritative state and computes
+  `Claims.MustChangePassword` as the OR of the caller's signal and the authoritative flag — a
+  caller (or a flow engine without a checker) can add the flag but never clear it. A lookup error
+  aborts issuance without minting anything. This is why `oauth.IdentityLinker` requires
+  `PasswordChangeRequired` alongside `LinkOrCreateIdentity`. On the `WithAuthFlow` path the
+  handler resolves `PasswordChangeRequired` and supplies it to the engine, which ORs it with its
+  own optional `authflow.WithPasswordPolicyChecker` result before the engine's minter enters the
+  same pipeline. The passkey login callback is application-owned and remains free to mint its own
+  session, but `passkey.WithLoginSuccessWithTenant` surfaces the resolved tenant so the callback
+  can route issuance through the same pipeline; wire `Config.AccountGate` so the passkey ceremony
+  itself still refuses suspended or deleted accounts.
 
   egauth never proactively re-queries the credential's state on refresh and never auto-revokes
   sessions to force a change: the flag is set at login and carried forward, and forcing a change on
@@ -329,12 +358,19 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
   `slog`): `tokens.TokenPair` (access + refresh token), `tokens.APIKey` (the clear-text `Token`),
-  and — because the HS256 signing key is the most catastrophic secret to leak — `tokens/jwt.Config`,
-  `tokens/jwt.SigningKey` and the running `tokens/jwt.Service` (its `SecretKey` / `SigningKeys[].Secret`
-  and the resolved key bytes). Non-secret identifiers (key IDs, issuer, expiry) stay visible to aid
-  debugging. This is a safety net, **not** a licence to log these values (see below). JSON
-  marshalling is intentionally **not** redacted, since returning a freshly issued token to its
-  owner in a response body is a legitimate use.
+  `tokens/jwt.Config`, `tokens/jwt.SigningKey` and the running `tokens/jwt.Service`
+  (`SecretKey` / `SigningKeys[].Secret` and the resolved key bytes), `webapp.Config.SigningKey`,
+  `passkey.Config.CookieKey`, the `oauth.Provider` client secret, `keystore.SigningKey` /
+  `keystore.Keyset` (`Secret`), and `mfa.TOTPEnrollment.Secret`. Non-secret identifiers (key IDs,
+  issuer, tenant, endpoints, expiry) stay visible to aid debugging. This is a safety net, **not**
+  a licence to log these values (see below). JSON marshalling is intentionally **not** redacted,
+  since returning a freshly issued token to its owner in a response body is a legitimate use.
+- **Trivially known signing keys are rejected at construction.** `tokens/jwt` (and therefore the
+  `keystore` JWT adapter, which projects each key through `jwt.NewHMACSigner`) refuses an HS256
+  secret that is all-zero or a single repeated byte in addition to one shorter than
+  `MinSecretKeyLength` or matching a published example key. `Config.InsecureAllowWeakKey`
+  suppresses only the minimum-length gate — the published-key denylist and the trivially-known-key
+  check are unconditional.
 - **Errors do not echo secrets.** Wrapped errors carry the underlying cause
   (`%w`) or non-sensitive metadata (e.g. a JWT `alg` header), never the plaintext
   password or token bytes.
@@ -350,18 +386,21 @@ as credentials:
   struct field — `sessions.Session` persists only `TokenHash`).
 - Any password passed into `Register` / `Authenticate`.
 
-The `tokens.*` structs above redact their secret fields on `fmt`/`slog` (see the redaction note
+The key-bearing structs above redact their secret fields on `fmt`/`slog` (see the redaction note
 above), but a session token / password is a bare string with **no** such safety net, and the
 redaction is in any case only a backstop. Therefore the consumer must:
 
 - **Never log them** (no `log`, `slog`, `fmt.Printf`, request/response dumps, etc.). The
   redaction stops an accidental struct dump; it does not make logging a token's *value* safe.
-- **Never serialize them by accident.** The `tokens.*` structs carry no `json` tags and JSON
+- **Never serialize them by accident.** The key-bearing structs carry no `json` tags and JSON
   marshalling is deliberately *not* redacted, so a consumer that JSON-encodes them will emit the
   plaintext. Send a token to the client deliberately (cookie/body) and nowhere else.
-- **Never log the JWT signing key.** Load `tokens/jwt.Config.SecretKey` / `SigningKeys` from a
-  secret store; `Config`, `SigningKey` and `Service` redact it on `fmt`/`slog`, but do not
-  serialize the config or persist the key in plaintext.
+- **Never log key material.** Load `tokens/jwt.Config.SecretKey` / `SigningKeys`,
+  `webapp.Config.SigningKey`, `passkey.Config.CookieKey`, `oauth.Provider`'s client secret and
+  `keystore.SigningKey.Secret` from a secret store; those types redact the secret on `fmt`/`slog`,
+  but do not serialize a key-bearing config or persist a signing key in plaintext.
+  `mfa.TOTPEnrollment.Secret` is deliberately recoverable so the server can recompute codes — it
+  too is redacted on `fmt`/`slog`, but must still be encrypted at rest and treated as a credential.
 - **Transmit only over TLS** and store client-side tokens in `HttpOnly`, `Secure`
   cookies (the HTTP handlers set these flags by default).
 - **Access-token tenant binding (fail-closed when multi-tenant).** When one `tokens/jwt.Service`
@@ -394,25 +433,28 @@ redaction is in any case only a backstop. Therefore the consumer must:
   hatch for deployments that genuinely cannot satisfy the `__Host-` requirements (e.g. a
   path-scoped cookie or local plain-HTTP development); overriding to a name without the prefix
   forfeits the host-lock hardening and is the consumer's explicit choice.
-- **OAuth state cookie carries secrets in plaintext.** The short-lived OAuth `state` cookie
-  (default name `oauth_state`) is a plain concatenation of the CSRF state, the **PKCE code
-  verifier**, the **OIDC nonce**, the provider name and the tenant — it is *not* signed or
-  encrypted. Its integrity model is "the attacker cannot read or write the cookie," resting on
-  `HttpOnly` + `Secure` + `SameSite=Lax` (set automatically) plus a constant-time `state`
-  comparison on callback — **not** on the cookie being tamper-evident. Two consequences for the
-  consumer:
+- **OAuth state cookie carries secrets in plaintext, but is authenticated and host-locked.**
+  The short-lived OAuth `state` cookie (default name `__Host-oauth_state`) is a plain
+  concatenation of the CSRF state, the **PKCE code verifier**, the **OIDC nonce**, the provider
+  name and the tenant — it is *not encrypted*, but it **is** HMAC-SHA-256 authenticated and
+  host-locked by the `__Host-` prefix. `WithStateSigningKey` is **required** and must supply at
+  least `oauth.MinStateSigningKeyLength` (32) bytes; the handlers fail closed with `500` when the
+  key is missing or too short, so a cookie an attacker can plant (sibling-subdomain tossing,
+  plaintext HTTP) cannot drive a forged login, and a short key cannot be brute-forced offline
+  from a captured cookie. On callback the `state` binding is additionally compared in constant
+  time. Two consequences for the consumer:
   - **Never log or mirror request cookies.** The verifier and nonce sit in the cookie in
     plaintext; any infra that logs cookies, ships them to an observability backend, or proxies
     them through something that persists headers is recording sensitive material.
   - **Do not move `state` out of the cookie without re-deriving the guarantee.** If you refactor
     it to a server-side handle, a header, or a differently-prefixed cookie, you can silently
-    lose the read/write protection the current scheme depends on.
-  Unlike the `tokens`/`sessions` cookies, the state cookie name is **not** `__Host-` prefixed by
-  default (it must survive the provider's top-level redirect, which `SameSite=Lax` already
-  handles; `__Host-` is independently compatible). For defence against subdomain cookie-tossing,
-  set a `__Host-`-prefixed name via `oauth.WithStateCookieName("__Host-oauth_state")` **when your
-  deployment serves OAuth over HTTPS with no cookie `Domain`** (the `__Host-` prefix requires
-  `Secure`, `Path=/`, and no `Domain`).
+    lose the authenticity/host-lock protection the current scheme depends on.
+  The state cookie stays `HttpOnly` + `Secure` + `SameSite=Lax`, and `__Host-` by default. A
+  deployment that must share the in-flight state cookie across subdomains opts out explicitly
+  with `oauth.WithCookieDomain` plus a non-`__Host-` `oauth.WithStateCookieName`, accepting the
+  cookie-tossing residual; `oauth.ValidateHandlerConfig` reports both misconfigurations at
+  startup. `WithInsecureCookies` (local HTTP development only) is likewise incompatible with the
+  default name — rename the cookie when serving plaintext HTTP.
 - **Session absolute lifetime.** `sessions.NewService` enforces a 30-day absolute session
   lifetime by default (OWASP session guidance: an absolute timeout must complement the idle
   timeout). Regardless of how recently `Touch` was called, a session is rejected once
@@ -428,11 +470,11 @@ redaction is in any case only a backstop. Therefore the consumer must:
 
 `LoginHandler`, `RegisterHandler`, the authenticated identity mutations
 (`ChangePasswordHandler`, change-email, delete-account, recovery, phone/email
-verification), `RefreshHandler`, `LogoutHandler`, the `mfa` handlers and the `otp`
-handlers are all state-changing endpoints driven by the request (form body / cookies).
-egauth does **not** ship a full CSRF-token system (per the PRD, that is left to the
-application layer), but it now applies a **strict same-origin check on every one of these
-handler families by default**:
+verification), `RefreshHandler`, `LogoutHandler`, `sessions.RequireSession`, the `mfa`
+handlers, the `otp` handlers and `passkey.RenameCredentialHandler` are all state-changing
+endpoints driven by the request (form body / cookies). egauth does **not** ship a full
+CSRF-token system (per the PRD, that is left to the application layer), but it now applies a
+**strict same-origin check on every one of these handler families by default**:
 
 - **Same-origin is enforced even with no configuration.** A state-changing POST is allowed
   only when its `Origin` (or `Referer` fallback) host equals the request's own `Host` or an
@@ -446,13 +488,19 @@ handler families by default**:
 - **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
   from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
   against classic CSRF on an existing session.
-- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`) **widens** the
-  same-origin allowlist to additional hosts — e.g. a front-end served from another subdomain.
-  Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
-- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`) is the explicit,
-  loudly-named opt-out: it disables the same-origin check entirely, restoring the pre-v1
-  accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g. a
-  synchronizer/double-submit token middleware) or in trusted test setups.
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
+  **widens** the same-origin allowlist to additional hosts — e.g. a front-end served from another
+  subdomain. Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
+  is the explicit, loudly-named opt-out: it disables the same-origin check entirely, restoring the
+  pre-v1 accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g.
+  a synchronizer/double-submit token middleware) or in trusted test setups.
+- **`sessions.RequireSession` gates only cookie authentication.** When the session token comes
+  from the ambient cookie, unsafe methods are subject to the same-origin check above; when it
+  comes from an `Authorization: Bearer` header the request is exempt, because a header
+  credential is non-ambient and a cross-site attacker cannot make the browser attach it. The
+  check runs before `ValidateSession`, so a forged request never reaches the store or the
+  protected handler.
 
 The **`webapp` v1 preset** (`webapp.NewWebApp`) carries this guarantee across both handler
 families it mounts: it **refuses to build** when `Config.TrustedOrigins` is empty unless you
@@ -473,6 +521,39 @@ hosts when the MFA endpoints are reachable from a browser session on another ori
 cross-subdomain or embedded app); supply hostnames without scheme, e.g.
 `mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
 `mfa.WithInsecureNoOriginCheck()` opt-out.
+
+The **`passkey.RenameCredentialHandler`** is the one passkey mutation outside the WebAuthn
+ceremony-cookie protection, and it enforces the same strict same-origin check **by default**: a
+cross-origin POST is rejected with `403 cross_site_blocked` (a request carrying neither `Origin`
+nor `Referer` is untrusted), before the body is decoded or the service is called. Widen with
+**`passkey.WithTrustedOrigins(...)`**; disable only via the explicit
+`passkey.WithInsecureNoOriginCheck()` opt-out. As defense in depth it also requires
+`Content-Type: application/json` (415 otherwise), so a CORS-simple `text/plain` form POST cannot
+smuggle the JSON body. The WebAuthn ceremony handlers (Begin/Finish registration/login) are not
+subject to this gate because they are already protected by the HMAC-sealed
+`__Host-passkey_ceremony` cookie and go-webauthn's own origin validation.
+
+## Rate limiting on authentication endpoints
+
+The à-la-carte handlers (`identity`, `mfa`, `otp`, `tokens`, `passkey`) are policy-free about
+throttling: egauth exposes the `ratelimit.Limiter` seam and the `ratelimit.Middleware` /
+`ratelimit.Wrap` helpers, and the consumer decides the policy. The **`webapp` v1 preset**
+(`webapp.NewWebApp`) is different: it applies a **per-client-IP throttle to every endpoint it
+mounts** (login, register, refresh, logout) by default, so the shipped preset cannot accidentally
+expose unthrottled credential guessing or a refresh/registration flood:
+
+- One process-local `ratelimit.TokenBucket` is shared across the mounted routes, keyed by
+  `ratelimit.ClientIP` (the request's `RemoteAddr`; `X-Forwarded-For` is **not** trusted), with a
+  burst of `DefaultRateLimitBurst` (20) and one request restored every `DefaultRateLimitRefill`
+  (6s) — about 10 requests/minute per IP sustained. A rejected request is answered
+  `429 Too Many Requests` with a `Retry-After` header before it reaches the handlers.
+- Tune the default with `Config.RateLimitBurst` / `Config.RateLimitRefill`, or replace it with a
+  shared-store implementation (e.g. Redis) via `Config.RateLimiter` for multi-instance
+  deployments. Behind a trusted proxy the default keys on the proxy's address; wrap the returned
+  handler with your own proxy-aware limiter if per-forwarded-client keys are required.
+- Opt out only with the explicit `Config.InsecureNoRateLimit`, and only when an upstream proxy,
+  WAF or middleware already throttles those routes. Supplying both `RateLimiter` and
+  `InsecureNoRateLimit` is rejected at construction.
 
 ## Observability and idempotency (consumer responsibility)
 
@@ -506,20 +587,27 @@ application layer's responsibility. egauth provides no idempotency-key layer; co
 applications that need it must implement or proxy one in front of the egauth handlers, mirroring
 how rate limiting and CSRF tokens are positioned.
 
-## Evicting in-memory stores in production (consumer responsibility)
+## In-memory stores are bounded by default
 
-The in-memory store backends (`sessions/memory`, `otp/memory`) and the `ratelimit.TokenBucket`
-accumulate entries until a caller explicitly invokes `DeleteExpired` / `Cleanup`. This is an
-intentional design choice (the in-memory stores are primarily for tests and single-process apps),
-but it is an **operational footgun** if overlooked:
+The in-memory backends (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`,
+`tokens/memory`) and `ratelimit.TokenBucket` are **bounded by default** so a flood of
+short-lived sessions, OTP/verification tokens, recovery attempts, refresh tokens, or unique
+rate-limit keys cannot exhaust heap memory:
 
-- A flood of short-lived sessions, OTP codes, or unique rate-limit keys will grow the internal
-  maps indefinitely, exhausting heap memory and creating a denial-of-service vector.
-- The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
-  it is O(1) on the hot path and is **not** a substitute for a full sweep.
+- `sessions/memory`, `otp/memory`, `identity/memory` and `tokens/memory` default to a cap of
+  `DefaultMaxEntries` (100,000). At the cap they evict expired records first and then the
+  soonest-expiring record; `sessions/memory` never evicts live sessions and instead fails the
+  insert with `sessions.ErrStoreCapacityExceeded`. Durable account records (users, identities,
+  MFA enrollments, recovery codes, API keys) are never evicted.
+- `mfa/memory` caps recovery-attempt records at `DefaultMaxEntries`, evicting the stalest first;
+  TOTP enrollments and recovery codes are durable.
+- `ratelimit.TokenBucket` caps tracked keys at `DefaultMaxKeys` (100,000) and evicts the
+  least-pressured bucket.
 
-**Mitigation (consumer responsibility):** schedule periodic eviction using the optional
-`janitor` helper shipped with egauth:
+The bounded defaults are deliberately generous; ordinary single-process use never reaches them.
+Callers that prefer to own eviction can opt into the unbounded model explicitly with
+`NewUnboundedStore()` (memory stores) or `WithMaxKeys(n)` (`ratelimit`), and must then schedule
+periodic eviction using the optional `janitor` helper shipped with egauth:
 
 ```go
 import "github.com/JLugagne/egauth/janitor"
@@ -530,7 +618,10 @@ j := janitor.Start(ctx, 5*time.Minute, func() {
 defer j.Stop()
 ```
 
-The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.TokenBucket.Cleanup`.
+The same pattern applies to `otp/memory.Store.DeleteExpired`,
+`identity/memory.Store.DeleteExpiredVerificationTokens` and `ratelimit.TokenBucket.Cleanup`.
+The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
+it is O(1) on the hot path and is **not** a substitute for a full sweep in the unbounded model.
 See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
 persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
 
@@ -644,6 +735,96 @@ OAuth-only account (no password to reset), and even a backend error — and it d
 delivery off the response path so the Mailer's latency is not a timing oracle. Account existence
 must not be inferable from this endpoint. (Residual in-process timing — one extra indexed DB
 read for an existing account — is left to the consumer's rate limiting, per the non-objectives.)
+
+## Constant-time strategy and evidence
+
+The library claims constant-time behaviour for secret-dependent comparisons (password
+verification, opaque-token equality, OAuth state/PKCE/nonce binding, ceremony-cookie and
+flow-token authentication, one-time-code checks). Those claims currently rest on two arguments,
+neither of which is a machine-checked proof:
+
+1. **Structural by construction.** Every secret-dependent comparison in the hand-written glue
+   reaches a constant-time primitive, and the code does not branch on the comparison outcome:
+   - password verification always reaches `crypto/subtle.ConstantTimeCompare`
+     (`passwords/argon2`), and the account-existence paths run a full decoy Argon2id pass
+     (`identity`) so an unknown user costs the same as a known one;
+   - signed-cookie and flow-token tags are compared with `hmac.Equal`
+     (`passkey.handlerConfig.open`, `authflow.decodeFlowToken`), and each HMAC is computed over
+     the full input regardless of where a mismatch occurs;
+   - OAuth `state`, provider and tenant bindings use `subtle.ConstantTimeCompare`
+     (`oauth.stateMatches`), as do password-reset/email-verification verifiers, OTP hashes and
+     TOTP codes;
+   - JWT verification selects the signer by `kid` and pins the algorithm before verifying, so
+     there is no algorithm-confusion branch, and delegates signature comparison to `golang-jwt`
+     (`hmac.Equal` for the HMAC signers).
+
+   This is reviewable by inspection and grep, but inspection can miss a branch.
+2. **Benchmark evidence.** Timing benchmarks compare correct vs wrong inputs and valid vs
+   unknown users (`BenchmarkCompare_CorrectPassword`/`_WrongPassword` in `passwords/argon2`;
+   `BenchmarkAuthenticate_*` in `identity`). These are manual evidence, not a CI gate; a
+   benchstat-significant gap signals a regression and should be investigated (see "Running the
+   timing-evidence benchmarks" above).
+
+**What would strengthen the argument.** A statistical timing analysis (for example a
+dudect-style test) on dedicated, low-noise hardware across several CPU families would detect
+microarchitectural leakage (cache and branch-predictor effects) that structural review and
+wall-clock benchmarks cannot. Gating such a test in CI is not proposed: shared runners are too
+noisy for a meaningful threshold, and a flaky gate invites ignoring real regressions.
+
+**Follow-up maintainer action.** An independent review of the HMAC constructions and the custom
+protocol glue by someone other than the author remains outstanding; since the evidence above is
+structural, consumers with a higher assurance requirement should pin a reviewed commit or
+commission their own review.
+
+## Verifying a release
+
+Release tags are signed — **keyless Sigstore/[gitsign](https://github.com/sigstore/gitsign) by
+default**, with OpenPGP or SSH as supported alternatives — and SBOM release assets can be
+attested. Verify both before trusting a build.
+
+**Tag signature (keyless Sigstore).**
+
+```sh
+go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
+git config --global gpg.x509.program gitsign
+git config --global gpg.format x509
+
+git verify-tag vX.Y.Z    # cryptographic integrity + Sigstore transparency-log inclusion
+gitsign verify \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  vX.Y.Z                 # also verifies *who* signed it
+```
+
+`git verify-tag` returns 0 for a cryptographically valid signature but does not check the
+certificate claims; `gitsign verify` performs the full identity check against the
+`--certificate-identity` recorded in the release notes. First-time keyless verification may
+need network access to refresh the local Sigstore trust root; afterwards it works offline.
+
+For **OpenPGP** or **SSH** signatures, import (or allow-list) the published public key and run
+`git verify-tag vX.Y.Z`; see [RELEASING.md](RELEASING.md) Step 5 for setup.
+
+**Release artifacts (SBOM).**
+
+```sh
+# GitHub artifact attestations (once the release workflow attests the artifacts):
+gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
+
+# or a keyless cosign bundle attached to the release:
+cosign verify-blob \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  libauth-vX.Y.Z.sbom.json
+```
+
+Maintainers run the same gate as consumers before pushing a tag:
+`bash scripts/verify-release-tag.sh <tag>` fails on a missing, lightweight or unsigned tag.
+
+> **Historical gap.** Tags up to and including `v0.11.0`, including all `adapters/pgx` tags,
+> predate signing and are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag) —
+> `git verify-tag` fails on them. They cannot be signed retroactively; treat them as unverified
+> and prefer the first signed release.
 
 ## Reporting a vulnerability
 

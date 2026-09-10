@@ -1,3 +1,17 @@
+// Package memory provides an in-memory tokens.Store, primarily for tests and single-process use.
+//
+// # Bounding memory growth
+//
+// [NewStore] is bounded by default: it retains at most [DefaultMaxEntries] refresh-token records
+// and evicts expired records first, then the record expiring soonest. Consumed refresh tokens are
+// retained until their expiry for reuse/theft detection, so a busy rotation family would otherwise
+// grow the map without limit.
+//
+// API keys are durable credentials belonging to an authenticated creator, so they are never
+// silently evicted; revoke them explicitly with [Store.RevokeAPIKey] /
+// [Store.RevokeAllAPIKeysForUser] instead. Use [NewBoundedStore] to pick a different refresh-token
+// cap or [NewUnboundedStore] for the previous unbounded behaviour, where
+// [Store.DeleteExpired] must be scheduled periodically.
 package memory
 
 import (
@@ -16,20 +30,67 @@ type tokenKey struct {
 }
 
 // Store is an in-memory implementation of tokens.Store.
+//
+// Stores created by [NewStore] cap refresh-token records at [DefaultMaxEntries];
+// API keys are durable and are never evicted.
 type Store[C any] struct {
 	mu sync.RWMutex
+	// maxRefreshTokens caps the refreshTokens map; 0 means unbounded.
+	maxRefreshTokens int
 	// refreshTokens stores full RefreshToken records keyed by (tenantID, hash).
 	// SECURITY: only the hash is ever stored, never the clear-text token.
 	refreshTokens map[tokenKey]*tokens.RefreshToken
 	apiKeys       map[tokenKey]*tokens.APIKey[C]
 }
 
-// NewStore creates a new in-memory tokens Store.
+// DefaultMaxEntries is the default hard cap on the number of refresh-token records an in-memory
+// Store created by [NewStore] retains. It is deliberately generous so ordinary single-process use
+// never hits it; it exists so a flood of logins or refreshes cannot exhaust memory. On insertion
+// at the cap the store evicts expired records first, then the record expiring soonest.
+const DefaultMaxEntries = 100_000
+
+// NewStore creates a new in-memory tokens Store whose refresh-token records are
+// bounded by [DefaultMaxEntries]. Callers that schedule periodic
+// [Store.DeleteExpired] eviction and want no hard cap can use
+// [NewUnboundedStore] instead.
 func NewStore[C any]() *Store[C] {
+	return NewBoundedStore[C](DefaultMaxEntries)
+}
+
+// NewBoundedStore creates a new in-memory tokens Store that retains at most
+// maxSize refresh-token records. When a new record is inserted at the cap the
+// store evicts expired records first, then the record expiring soonest. API keys
+// are durable credentials and are never evicted. maxSize must be >= 1; values
+// below 1 are floored to 1.
+func NewBoundedStore[C any](maxSize int) *Store[C] {
+	if maxSize < 1 {
+		maxSize = 1
+	}
+	return &Store[C]{
+		maxRefreshTokens: maxSize,
+		refreshTokens:    make(map[tokenKey]*tokens.RefreshToken),
+		apiKeys:          make(map[tokenKey]*tokens.APIKey[C]),
+	}
+}
+
+// NewUnboundedStore creates a new in-memory tokens Store with no cap on
+// refresh-token records. Growth is controlled entirely by periodic
+// [Store.DeleteExpired] calls; prefer [NewStore]'s bounded default unless the
+// caller guarantees that eviction runs.
+func NewUnboundedStore[C any]() *Store[C] {
 	return &Store[C]{
 		refreshTokens: make(map[tokenKey]*tokens.RefreshToken),
 		apiKeys:       make(map[tokenKey]*tokens.APIKey[C]),
 	}
+}
+
+// MaxEntries returns the configured hard cap on the number of refresh-token
+// records the store retains. Zero means the store is unbounded (see
+// [NewUnboundedStore]).
+func (s *Store[C]) MaxEntries() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxRefreshTokens
 }
 
 // DeleteExpired purges expired refresh tokens and expired API keys (API keys with no expiry are
@@ -80,9 +141,43 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 		revoked := *rtCopy.RevokedAt
 		rtCopy.RevokedAt = &revoked
 	}
-	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
+	k := tokenKey{tenantID: tenantID, hash: rtCopy.Hash}
+	if _, exists := s.refreshTokens[k]; !exists && s.maxRefreshTokens > 0 && len(s.refreshTokens) >= s.maxRefreshTokens {
+		s.evictRefreshTokenLocked()
+	}
+	s.refreshTokens[k] = &rtCopy
 
 	return nil
+}
+
+// evictRefreshTokenLocked removes one refresh-token record to make room for a new
+// one: the expired record with the earliest expiry first, otherwise the record
+// with the soonest ExpiresAt (which may be a consumed record retained for replay
+// detection). Must be called with the write lock held.
+func (s *Store[C]) evictRefreshTokenLocked() {
+	now := time.Now()
+	var (
+		victim   tokenKey
+		victimAt time.Time
+		found    bool
+	)
+	for k, rt := range s.refreshTokens {
+		if rt.ExpiresAt.Before(now) {
+			if !found || rt.ExpiresAt.Before(victimAt) {
+				victim, victimAt, found = k, rt.ExpiresAt, true
+			}
+		}
+	}
+	if !found {
+		for k, rt := range s.refreshTokens {
+			if !found || rt.ExpiresAt.Before(victimAt) {
+				victim, victimAt, found = k, rt.ExpiresAt, true
+			}
+		}
+	}
+	if found {
+		delete(s.refreshTokens, victim)
+	}
 }
 
 // FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
@@ -173,7 +268,11 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 		revoked := *rtCopy.RevokedAt
 		rtCopy.RevokedAt = &revoked
 	}
-	s.refreshTokens[tokenKey{tenantID: tenantID, hash: rtCopy.Hash}] = &rtCopy
+	newKey := tokenKey{tenantID: tenantID, hash: rtCopy.Hash}
+	if _, exists := s.refreshTokens[newKey]; !exists && s.maxRefreshTokens > 0 && len(s.refreshTokens) >= s.maxRefreshTokens {
+		s.evictRefreshTokenLocked()
+	}
+	s.refreshTokens[newKey] = &rtCopy
 
 	return nil
 }

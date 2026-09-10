@@ -13,6 +13,12 @@
 // handler's client-visible behavior, so emitting on a failed-login or unknown-account path is
 // safe and does not create an enumeration oracle. For the same reason events carry a short
 // machine Reason rather than secrets, tokens, passwords or raw attacker input.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package event
 
 import (
@@ -27,6 +33,7 @@ type Type string
 const (
 	LoginSucceeded          Type = "login.succeeded"
 	LoginFailed             Type = "login.failed"
+	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, amr, interim, must_change_password
 	AccountLocked           Type = "account.locked"
 	UserRegistered          Type = "user.registered"
 	PasswordReset           Type = "password.reset"   // completed via a reset token

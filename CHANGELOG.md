@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Signed release tags.** Release tags are now created with a verifiable signature
+  (keyless Sigstore/gitsign by default; OpenPGP or SSH supported) and must pass
+  `scripts/verify-release-tag.sh` before they are pushed. Tags up to and including
+  `v0.11.0`, including all `adapters/pgx` tags, were cut before this control and carry no
+  signature: `git verify-tag` rejects them. Treat those tags as unverified and prefer the
+  first signed release; see [SECURITY.md](SECURITY.md#verifying-a-release) for consumer
+  verification instructions.
+- **Release artifact provenance.** SBOM release assets can now be signed/attested so
+  consumers can verify them against the same identity as the tag; see
+  [RELEASING.md](RELEASING.md) Step 7 for the signing and verification commands.
+
 ## [v0.11.0] — 2026-09-09
 
 ### Security

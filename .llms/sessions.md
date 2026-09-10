@@ -83,7 +83,9 @@ func (s *SingleTenant) RevokeAllForUser(ctx, userID uuid.UUID, rc ...event.Reque
 func (s *SingleTenant) Service() Service  // escape hatch: returns underlying multi-tenant Service
 
 // memory store
-func memory.NewStore() *memory.Store  // implements sessions.Store; in-memory, O(1) hash lookup
+func memory.NewStore() *memory.Store           // implements sessions.Store; in-memory, bounded by DefaultMaxEntries, O(1) hash lookup
+func memory.NewBoundedStore(n int, opts ...Option) *memory.Store // pick the cap; WithEvictLiveOnFull opts into live eviction
+func memory.NewUnboundedStore() *memory.Store  // explicit opt-out: schedule DeleteExpired with janitor
 ```
 
 ## M9 — Logout audit events
@@ -145,7 +147,30 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 func WithTenantResolver(f func(*http.Request) string) HandlerOption
 // extracts tenantID from request (host header, path segment, JWT claim, etc.)
 // default: empty string (single-tenant partition)
+
+func WithTrustedOrigins(origins ...string) HandlerOption
+// widens the CSRF same-origin allowlist; supply hosts without scheme ("app.example.com")
+// default: empty allowlist — only the request's own Host is allowed
+
+func WithInsecureNoOriginCheck() HandlerOption
+// disables the CSRF origin gate entirely — explicit, insecure opt-out; prefer WithTrustedOrigins
 ```
+
+### CSRF origin gate (cookie auth only)
+
+`RequireSession` applies a strict same-origin check to cookie-authenticated state-changing
+requests (`POST`/`PUT`/`PATCH`/`DELETE`), ON BY DEFAULT via `httputil.OriginAllowed`:
+
+- allowed only when the request's `Origin` (or `Referer` fallback) host equals `r.Host` or a host
+  in `WithTrustedOrigins`;
+- a request with neither header is treated as untrusted;
+- cross-scheme `http` origins over HTTPS are rejected;
+- rejection is `403 cross_site_blocked` **before** `ValidateSession`, so the store and handler
+  never see a forged request.
+
+`Authorization: Bearer` authentication is **exempt**: the header is a non-ambient credential the
+browser does not attach automatically, so CSRF does not apply. `WithInsecureNoOriginCheck()`
+restores accept-all behavior and is named "Insecure" deliberately.
 
 No cookie is set by the middleware. The caller is responsible for writing the `Set-Cookie` header (using the plaintext token returned by `CreateSession` or `Rotate`). No `Secure`, `HttpOnly`, or `SameSite` flags are set by the library — cookie attributes are the caller's responsibility.
 
@@ -182,14 +207,14 @@ WithMaxLifetime(M):
 
 ## Eviction
 
-`Store.DeleteExpired` is NOT called automatically. For the memory store, expired sessions accumulate in the map until explicitly purged.
+`memory.NewStore()` is bounded by `DefaultMaxEntries` (100,000): on insertion at the cap it evicts already-expired sessions, then fails with `ErrStoreCapacityExceeded` rather than evicting live sessions (`NewBoundedStore(n, WithEvictLiveOnFull(true))` opts into soonest-expiring live eviction). No scheduler is required.
 
-`memory.Store.FindSessionByHash` does opportunistic eviction on hit (expired record found → evict + return `ErrSessionNotFound`), but rows that are never looked up after expiry remain until `DeleteExpired`.
+`Store.DeleteExpired` is only needed for the explicitly unbounded `memory.NewUnboundedStore()`, where expired sessions accumulate in the map until purged. `memory.Store.FindSessionByHash` does opportunistic eviction on hit (expired record found → evict + return `ErrSessionNotFound`), but rows that are never looked up after expiry remain until `DeleteExpired`.
 
-Schedule with janitor:
+Schedule with janitor for the unbounded opt-in:
 
 ```go
-store := memory.NewStore()
+store := memory.NewUnboundedStore()
 j := janitor.Start(ctx, 5*time.Minute, func() {
     store.DeleteExpired(context.Background(), tenantID)
 })

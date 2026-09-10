@@ -63,7 +63,9 @@ func WithEventSink(sink event.Sink) ServiceOption     // AccountBlocked event on
 func NewSingleTenant(svc Service) *SingleTenant
 
 // Memory store
-func memory.NewStore() *memory.Store
+func memory.NewStore() *memory.Store              // bounded by DefaultMaxEntries (100,000), self-evicting
+func memory.NewBoundedStore(n int) *memory.Store  // pick the cap
+func memory.NewUnboundedStore() *memory.Store     // explicit opt-out: schedule DeleteExpired with janitor
 ```
 
 ## Store contract
@@ -164,7 +166,7 @@ var ErrTenantMismatch  = errors.New("otp: tenant ID mismatch")
 
 **Purpose:** arbitrary string scoping the code (e.g. `"login"`, `"email-verify"`, `"step-up"`). One outstanding code per `subjectID+purpose`. `Issue` replaces any existing code for the same subject+purpose.
 
-**Eviction:** `DeleteExpired(ctx, tenantID)` is the GC reaper. Memory store grows without bound unless called periodically.
+**Eviction:** `DeleteExpired(ctx, tenantID)` is the GC reaper. The default memory store is bounded and self-evicting; `DeleteExpired` is required only for the explicit `NewUnboundedStore()` opt-in, where the map grows without bound unless called periodically.
 
 **Low-level helper:**
 ```go
@@ -174,20 +176,20 @@ func HashCode(code string) string  // hex-encoded SHA-256; only persisted form
 ## Wiring
 
 ```go
-store := memory.NewStore()
+store := memory.NewStore() // bounded by DefaultMaxEntries; no scheduler needed
 svc   := otp.NewService(store,
     otp.WithTTL(10*time.Minute),
     otp.WithMaxAttempts(5),
     otp.WithEventSink(mySink),
 )
 
-// Periodic eviction (mandatory for memory store in production)
-go func() {
-    t := time.NewTicker(5 * time.Minute)
-    for range t.C {
-        store.DeleteExpired(context.Background(), "")
-    }
-}()
+// For janitor-evicted growth control instead, opt into the unbounded model and
+// schedule DeleteExpired periodically:
+//   store := memory.NewUnboundedStore()
+//   j := janitor.Start(ctx, 5*time.Minute, func() {
+//       store.DeleteExpired(context.Background(), tenantID)
+//   })
+//   defer j.Stop()
 
 resolveSubject := func(r *http.Request) (uuid.UUID, bool) {
     // e.g. look up user by submitted email address
@@ -218,7 +220,7 @@ mux.Handle("/otp/verify", otp.VerifyHandler(svc,
 - `IssueHandler` always returns `204` — do NOT rely on its status to determine whether a code was issued or delivery succeeded.
 - All `VerifyHandler` failures are `401 invalid_code` — callers cannot distinguish a wrong guess from an expired/missing challenge. This is intentional (enumeration safety).
 - `Issue` replaces any outstanding code for the same `subjectID+purpose`. Old code is invalidated immediately.
-- Memory store MUST have `DeleteExpired` called periodically; skipping it is a denial-of-service vector (unbounded map growth).
+- Memory store is bounded by default (`NewStore()` caps at `DefaultMaxEntries`, self-evicting expired then soonest-expiring). The explicit `NewUnboundedStore()` opt-in MUST have `DeleteExpired` called periodically; skipping it is a denial-of-service vector (unbounded map growth).
 - `WithSubjectResolver` returning `ok=false` still produces a uniform `401 invalid_code` on `VerifyHandler` (not a different status).
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
 - `NewService` panics on nil store; invalid `digits`/`ttl`/`maxAttempts` values are silently clamped to defaults (not panics).

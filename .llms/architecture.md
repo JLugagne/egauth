@@ -59,6 +59,23 @@ methods in minor releases):
 - `tokens/issuertest`
 - `passwords/hashertest`
 
+### Cross-flow login invariants
+
+`internal/loginflowtest` is the conformance suite for login entry points, not for Store/Service
+implementations. It enumerates every exported login flow (identity password and magic link, the
+`authflow` engine and the identity handler wired with `WithAuthFlow`, the OAuth callback with and
+without `WithAuthFlow`, MFA step-up, OTP verify, passkey login and discoverable login, and the
+`webapp` preset) and runs the same post-authentication invariant assertions against each: disabled
+and deleted accounts are refused, tenant binding fails closed, `MustChangePassword` propagates and
+survives a caller trying to clear it, a configured MFA gate withholds the full renewable pair,
+claims are rebuilt at issuance, issuance is audited, and no rejection mints a session. Flows that
+genuinely cannot exercise an invariant record the reason in the table and the suite skips it
+visibly.
+
+A new or renamed login constructor must be added to the table (or recorded with a reason in
+`nonFlowConstructors`), or `TestAllLoginFlowsRegistered` fails. Treat a red suite as a release
+blocker: it means a flow stopped applying one of the shared controls.
+
 ## Cross-cutting seams (bring-your-own)
 
 - `identity.Mailer` / `identity.SMSSender` — delivery; egauth never sends mail/SMS itself.
@@ -73,6 +90,7 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 ## Composition graph (who pairs with whom)
 
 - **Credential verification** = `identity` (manages accounts; does NOT issue tokens/sessions).
+- **Interactive session issuance** = `issuance` (one chokepoint). Every login path — `identity` password/register/magic-link, `oauth` callback, `authflow` engine minter, `mfa` step-up (and the app-owned passkey/OTP callbacks, which can reuse it) — mints through `issuance.Pipeline.Issue`, which re-loads the authoritative account state (rejecting disabled/deleted), binds the tenant, OR-s `MustChangePassword` from authoritative state, applies the MFA gate once, and emits one uniform `session.issued` event. Handlers never call `tokens.Issuer.IssueTokenPair` for a login; `internal/securitydefaults` guards that mechanically. The pipeline depends only on `tokens` (plus `event`/`uuid`), and `identity.SessionStateReader` is the reference resolver.
 - **Issue auth state** = `tokens` (stateless JWT + refresh) OR `sessions` (server-side, revocable). Pick one.
 - **Social login** = `oauth` (+ `oauth/providers`) → `identity.LinkOrCreateIdentity` (JIT) → tokens/sessions.
 - **Second factor** = `mfa` (TOTP), `passkey` (WebAuthn, can also be a primary/passwordless factor),
@@ -82,36 +100,43 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 - **Account disable fan-out** = `identity.WithDisableRevokers(...)` runs cross-module revocation hooks on `DisableUser` to kill a suspended user's refresh tokens, API keys (`tokens.NewAccountRevoker`) and sessions — re-establishable credentials only, leaving MFA/passkey enrollment intact for `EnableUser`.
 - **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
   flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
-  `tokens.Claims.MustChangePassword=true`. The flag is recorded on the refresh-token family and `Rotate` replays it
-  onto every silent refresh, so `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the
-  reset page until the password is changed — a user cannot escape by waiting for the access token to expire. The
-  credential stays valid — never a lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B
-  discourages fixed-interval expiry). See [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the
-  full policy description.
+  `tokens.Claims.MustChangePassword=true`. The `issuance` pipeline computes the flag from the authoritative
+  credential state and OR-s the caller's signal, so no login path can issue an unflagged session. The flag is
+  recorded on the refresh-token family and `Rotate` replays it onto every silent refresh, so
+  `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the reset page until the password
+  is changed — a user cannot escape by waiting for the access token to expire. The credential stays valid — never a
+  lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B discourages fixed-interval expiry). See
+  [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the full policy description.
 
 See [recipes.md](recipes.md) for concrete wiring of each stack.
 
 ## Storage backends
 
-- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, self-bounding
-  or janitor-evicted — see below).
+- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory and
+  bounded by default; explicit unbounded opt-out for janitor-evicted deployments — see below).
 - `adapters/pgx` is a separate go.mod so core consumers never pull pgx/testcontainers/Docker.
   `Migrate(ctx, pool)` once at startup (forward-only, versioned, idempotent). [storage-pgx.md](storage-pgx.md).
 
 ### In-memory store growth control
 
-All three in-process stores that can grow without bound ship a **bounded variant** alongside the
-original unbounded constructor:
+Every in-process store a consumer can grow without authenticating is **bounded by default**.
+The unbounded model (self-managed eviction via `janitor`) is an explicit, clearly named opt-out:
 
-| Package | Unbounded (original) | Bounded (new) | Cap policy |
+| Package | Bounded default | Unbounded opt-out | Cap policy |
 |---|---|---|---|
-| `sessions/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
-| `otp/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `sessions/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first; at the cap, live sessions are never evicted — `CreateSession` fails with `ErrStoreCapacityExceeded` (or `WithEvictLiveOnFull(true)` opts into soonest-expiring) |
+| `otp/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first, then soonest-expiring |
+| `identity/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | pending verification tokens: expired first, then soonest-expiring; users/identities are durable |
+| `mfa/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | recovery-attempt records: stalest first; TOTP enrollments/recovery codes are durable |
+| `tokens/memory` | `NewStore[C]()`, `NewBoundedStore[C](n)` | `NewUnboundedStore[C]()` | refresh-token records: expired first, then soonest-expiring; API keys are durable |
 | `ratelimit` | `NewTokenBucket(…)` | `NewTokenBucket(…, WithMaxKeys(n))` | evicts most-refilled (least-pressure) bucket |
 
-The unbounded constructors remain available for callers that prefer to schedule periodic eviction
-via `janitor`. Both models are safe for concurrent use. The bounded variants require no external
-scheduler and are recommended for Internet-facing deployments where key cardinality is unbounded.
+Durable per-account records (users, identities, MFA enrollments, recovery codes, API keys) are
+never silently evicted; sized too small, the caps bound memory rather than drop credentials.
+`DefaultMaxEntries` is 100,000 for the memory stores and `DefaultMaxKeys` is 100,000 for
+`TokenBucket` — large enough that ordinary use never reaches them. Both models are safe for
+concurrent use; the bounded defaults require no external scheduler and are recommended for
+Internet-facing deployments where key cardinality is unbounded.
 
 ## Module placement decisions (v1 API freeze)
 
@@ -176,6 +201,8 @@ brute-force lockout, single-use selector/verifier tokens, refresh-token rotation
 theft detection, per-kid alg-pinned JWTs (symmetric HS256 or asymmetric RS256/ES256/EdDSA; reject `none`/alg-confusion), SHA-256-only storage of
 refresh/API/session/OTP secrets, secure-by-default cookies, pre-auth body caps against hashing-DoS,
 secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
+Per-handler and per-constructor defaults with their explicit opt-outs: [secure-defaults-matrix.md](secure-defaults-matrix.md)
+(mechanically guarded by `internal/securitydefaults`).
 
 **Forced-password-change for temporary credentials.** `identity.AdminCreateUser` and
 `identity.SetTemporaryPassword` provision a credential flagged for a forced change at next login
