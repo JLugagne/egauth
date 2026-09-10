@@ -54,6 +54,7 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	identitymem "github.com/JLugagne/egauth/identity/memory"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/mfa"
 	mfamem "github.com/JLugagne/egauth/mfa/memory"
 	"github.com/JLugagne/egauth/passkey"
@@ -260,19 +261,36 @@ func BuildServer() (http.Handler, error) {
 		// name/displayName would come from your user profile in production.
 		return a.UserID, a.TenantID, a.UserID.String(), a.UserID.String(), true
 	}
-	passkeyLoginSuccess := passkey.LoginSuccessFunc(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
-		// Issue a JWT pair for the passkey-authenticated user.
-		pair, err := issuer.IssueTokenPair(r.Context(), tokens.Claims[AppClaims]{
-			Subject:  userID,
-			TenantID: "",
-			Custom:   AppClaims{Role: "user"},
+	// The passkey login callback mints through the same issuance pipeline as every other login
+	// path, so the account state is re-loaded, the tenant is bound, and the forced-change flag
+	// and MFA gate are applied before the JWT pair is issued.
+	sessionResolver, ok := idSvc.(issuance.Resolver)
+	if !ok {
+		return nil, errors.New("identity service does not expose authoritative session state")
+	}
+	sessionPipe, err := issuance.New[AppClaims](issuer,
+		issuance.WithResolver(sessionResolver),
+		issuance.WithEventSink(audit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("issuance.New: %w", err)
+	}
+	passkeyLoginSuccess := passkey.LoginSuccessWithTenantFunc(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID, tenant string) {
+		res, err := sessionPipe.Issue(r.Context(), issuance.Request[AppClaims]{
+			TenantID: tenant,
+			UserID:   userID,
+			Claims:   claimsOf(&identity.User{ID: userID, TenantID: tenant}),
+			Method:   "passkey",
+			AMR:      []string{tokens.AMRWebAuthn},
 		})
 		if err != nil {
 			http.Error(w, "token issuance failed", http.StatusInternalServerError)
 			return
 		}
-		cookies.SetAccess(w, pair.AccessToken)
-		cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		cookies.SetAccess(w, res.Pair.AccessToken)
+		if !res.Interim {
+			cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, false)
+		}
 		w.WriteHeader(http.StatusNoContent)
 	})
 
@@ -305,7 +323,7 @@ func BuildServer() (http.Handler, error) {
 	)
 	mux.Handle("POST /passkey/login/finish",
 		passkey.FinishLoginHandler(pkSvc,
-			passkey.WithLoginSuccess(passkeyLoginSuccess),
+			passkey.WithLoginSuccessWithTenant(passkeyLoginSuccess),
 			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
 			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),

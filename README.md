@@ -35,6 +35,7 @@ and PostgreSQL (`pgx`) backends behind a shared cross-backend conformance suite.
 |--------------|------------------------------------------------------------------------------|
 | `identity`   | Accounts & credentials: register, login, password reset, email verification, magic link, change-password/email, account deletion, OAuth identity linking; forced-password-change for temporary credentials (`AdminCreateUser`, `SetTemporaryPassword`) |
 | `tokens`     | Stateless JWT access tokens (pluggable symmetric HS256 or asymmetric RS256/ES256/EdDSA signing, publishable JWKS) + single-use refresh tokens with rotation & theft detection; API keys (PAT & service tokens) with a full lifecycle — issue, list, revoke. Reference impl in `tokens/jwt` |
+| `issuance`   | The single post-authentication session-issuance pipeline every login path terminates in: authoritative account re-load, tenant binding, forced-change propagation, MFA gate and one uniform `session.issued` audit event |
 | `sessions`   | Server-side, revocable sessions with idle-timeout (`Touch`) and fixation defense (`Rotate`) |
 | `passwords`  | Hashing/policy/breach **seams** + references: `argon2`, `policy`, `breach/hibp`, `breach/offline` |
 | `mfa`        | TOTP (RFC 6238) with recovery codes                                          |
@@ -301,13 +302,15 @@ observability, idempotency).
 **Forced-password-change for temporary credentials.** Provision a one-time credential via
 `identity.AdminCreateUser` (admin-created account) or `identity.SetTemporaryPassword` (admin-issued
 temporary password); both flag the credential so the user must choose a new password at next login.
-A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`; the
-flag is recorded on the refresh-token family and carried onto every silent refresh, so mounting
-`tokens.WithPasswordChangeGate` on your protected routes keeps soft-redirecting to the reset page
-until the password is changed — a user cannot escape by waiting for the access token to expire. The
-credential stays valid throughout — never a lockout. egauth does NOT do periodic, age-based rotation
-(NIST SP 800-63B discourages fixed-interval expiry). See [SECURITY.md](SECURITY.md) for the full
-semantics.
+A flagged login issues a full, renewable pair carrying `tokens.Claims.MustChangePassword=true`. The
+flag is resolved from the authoritative credential state by the `issuance` pipeline at issuance time
+— every login path (password, magic link, OAuth, MFA step-up) funnels through it, and a caller can
+add the flag but never clear it. It is recorded on the refresh-token family and carried onto every
+silent refresh, so mounting `tokens.WithPasswordChangeGate` on your protected routes keeps
+soft-redirecting to the reset page until the password is changed — a user cannot escape by waiting
+for the access token to expire. The credential stays valid throughout — never a lockout. egauth does
+NOT do periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval expiry). See
+[SECURITY.md](SECURITY.md) for the full semantics.
 
 **Observability** — wire your metrics/audit pipeline to `event.Sink`. Use `event.NewSlogSink`
 for the common structured-logging case, or `github.com/JLugagne/egauth/adapters/otel` for

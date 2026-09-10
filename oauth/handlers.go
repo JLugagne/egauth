@@ -14,6 +14,7 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 )
@@ -40,11 +41,15 @@ const (
 // IdentityLinker resolves the local user behind an external identity. identity.Service
 // satisfies it; the callback handler depends only on these methods so it stays decoupled from
 // the rest of the identity service. PasswordChangeRequired supplies the authoritative
-// forced-password-change state of the linked credential: the callback stamps it onto the
-// claims it issues directly, and passes it to the unified flow engine (WithAuthFlow) so the
-// flag survives even when the engine has no password-policy checker of its own.
-// Implementations must answer from authoritative identity state
-// (identity.Service.PasswordChangeRequired does).
+// forced-password-change state of the linked credential: the callback passes it to the unified
+// flow engine (WithAuthFlow) or, on the native path, to the issuance pipeline, which OR-s it
+// with the account's live state so the flag survives even when a component has no
+// password-policy checker of its own. Implementations must answer from authoritative identity
+// state (identity.Service.PasswordChangeRequired does).
+//
+// The callback's native issuance pipeline additionally needs authoritative account state. When
+// the linker also implements issuance.Resolver (identity.Service does) it is used directly;
+// otherwise configure WithSessionStateResolver, or the native path fails closed.
 type IdentityLinker interface {
 	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
 	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
@@ -67,7 +72,10 @@ type handlerConfig struct {
 	persistRefresh  bool
 	// authFlow, when non-nil, delegates the post-callback pipeline (account state, MFA policy,
 	// issuance) of CallbackHandler to a unified flow engine (see AuthFlow / WithAuthFlow).
-	authFlow             AuthFlow
+	authFlow AuthFlow
+	// sessionResolver overrides the authoritative account-state resolver the native issuance
+	// pipeline consults when no flow engine is configured. See WithSessionStateResolver.
+	sessionResolver      issuance.Resolver
 	allowUnverifiedEmail bool
 	// redirectFallbackWarned rate-limits the WEB-02 fallback misuse event to once per handler.
 	redirectFallbackWarned *sync.Once
@@ -199,6 +207,16 @@ func WithPersistentRefresh() HandlerOption {
 	return func(h *handlerConfig) { h.persistRefresh = true }
 }
 
+// WithSessionStateResolver overrides the authoritative account-state resolver the callback's
+// native issuance pipeline consults. When unset, the pipeline uses the IdentityLinker itself if
+// it implements issuance.Resolver (identity.Service does); a linker that exposes neither makes
+// the callback fail closed with 500 on the native path rather than minting an unchecked session.
+// The option is not consulted when WithAuthFlow is configured, because the flow engine owns
+// issuance on that path.
+func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
+	return func(h *handlerConfig) { h.sessionResolver = r }
+}
+
 // WithTenantResolver derives the tenant from the request to scope identity store operations
 // in multi-tenant deployments. A configured resolver MUST return a non-empty tenant for any
 // request it can map; returning "" is treated as a resolution failure and the handler rejects
@@ -274,19 +292,21 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 
 // CallbackHandler builds an HTTP handler for the provider redirect. It validates the state
 // cookie (CSRF), exchanges the code (with PKCE), fetches the user info, links or
-// JIT-provisions the local account, then issues an access+refresh token pair and writes the
-// auth cookies. The state cookie is always cleared, and on any failure no auth cookie is set.
+// JIT-provisions the local account, then mints an access+refresh token pair through the
+// unified issuance pipeline and writes the auth cookies. The state cookie is always cleared,
+// and on any failure no auth cookie is set.
 //
-// The linked credential's forced-password-change state is resolved from the linker and stamped
-// onto the issued claims, so a flagged account cannot escape tokens.WithPasswordChangeGate by
-// signing in through the provider. A lookup failure aborts the callback (500) without issuing
-// any session.
+// The pipeline re-loads the linked account's authoritative state and OR-s the linked
+// credential's forced-password-change state (resolved from the linker) onto the pair, so a
+// flagged account cannot escape tokens.WithPasswordChangeGate by signing in through the
+// provider. A lookup or issuance failure aborts the callback without issuing any session.
 //
 // When WithAuthFlow is configured, issuance is delegated to the unified flow engine instead
 // (SEC-GLO-02): an MFA-enrolled user receives only the engine's flow-token cookie and must
 // complete the second factor before any access/refresh cookie is written.
 func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	pipe, pipeErr := newCallbackPipeline(cfg, linker, issuer)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.configErr != nil {
 			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
@@ -416,16 +436,70 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		claims := claimsOf(user)
-		claims.MustChangePassword = mustChange
-		pair, err := issuer.IssueTokenPair(r.Context(), claims)
-		if err != nil {
+		// Native path: mint through the unified issuance pipeline, which re-loads the linked
+		// account's authoritative state (rejecting a since-disabled/deleted account) and stamps
+		// the forced-change flag resolved above onto the pair (the caller signal is OR-ed with
+		// the authoritative state, never able to clear it).
+		if pipeErr != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
-		cfg.cookies.SetAccess(w, pair.AccessToken)
-		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID:           tenant,
+			UserID:             user.ID,
+			Claims:             claimsOf(user),
+			Method:             "oauth:" + p.Name(),
+			AMR:                []string{"oauth"},
+			MustChangePassword: mustChange,
+		})
+		if err != nil {
+			status, code := mapIssuanceError(err)
+			cfg.fail(w, r, status, code)
+			return
+		}
+		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
+		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
+	}
+}
+
+// newCallbackPipeline builds the native issuance pipeline used by CallbackHandler. It is only
+// needed when no flow engine is configured: with WithAuthFlow, the engine owns issuance. The
+// authoritative resolver is either explicitly configured (WithSessionStateResolver) or the
+// linker itself when it implements issuance.Resolver; otherwise construction records an error
+// and the handler fails closed with 500 on the native path instead of minting a session whose
+// account state was never re-checked.
+func newCallbackPipeline[C any](cfg handlerConfig, linker IdentityLinker, issuer tokens.Issuer[C]) (*issuance.Pipeline[C], error) {
+	if cfg.authFlow != nil {
+		return nil, nil
+	}
+	resolver := cfg.sessionResolver
+	if resolver == nil {
+		if r, ok := linker.(issuance.Resolver); ok {
+			resolver = r
+		}
+	}
+	if resolver == nil {
+		return nil, errors.New("oauth: CallbackHandler requires authoritative session state (an issuance.Resolver or identity.SessionStateReader); configure WithSessionStateResolver")
+	}
+	return issuance.New(issuer,
+		issuance.WithResolver(resolver),
+		issuance.WithEventSink(cfg.events),
+	)
+}
+
+// mapIssuanceError maps a rejected issuance to the callback's client-visible failure. A
+// disabled account is the post-authentication re-load refusing a credential that was suspended
+// between linking and issuance; the other lifecycle outcomes are collapsed into the same
+// failure the linker would have produced.
+func mapIssuanceError(err error) (int, string) {
+	switch {
+	case errors.Is(err, issuance.ErrAccountDisabled):
+		return http.StatusForbidden, "account_disabled"
+	case errors.Is(err, issuance.ErrAccountDeleted):
+		return http.StatusUnauthorized, "account_disabled"
+	default:
+		return http.StatusInternalServerError, "token_issuance_failed"
 	}
 }
 

@@ -223,16 +223,20 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   reset URL (or `403 password_change_required` if none). The change-password and logout routes
   should be excluded from this middleware.
 
-  The flag is preserved on the unified authflow path as well: when
-  `identity.MagicLinkLoginHandler` or `oauth.CallbackHandler` is wired with `WithAuthFlow`, the
-  handler resolves `PasswordChangeRequired` for the verified/linked credential and supplies it to
-  the engine, which ORs it with its own optional `authflow.WithPasswordPolicyChecker` result before
-  minting. A checker-less engine therefore cannot drop the flag, and a configured checker can only
-  add one. The plain `oauth.CallbackHandler` path (no `WithAuthFlow`) resolves the same value and
-  stamps `Claims.MustChangePassword` directly onto the pair it issues; a lookup error aborts the
-  callback without issuing a session. Both OAuth issuance paths therefore enforce the gate
-  identically. This is why `oauth.IdentityLinker` requires `PasswordChangeRequired` alongside
-  `LinkOrCreateIdentity`.
+  The flag is preserved structurally on **every** interactive login path by the unified session
+  issuance pipeline (`issuance.Pipeline.Issue`). Password login, registration, magic link, the
+  native OAuth callback, the `authflow` engine's minter and the MFA step-up handler all terminate
+  in that one function, which re-loads the account's authoritative state and computes
+  `Claims.MustChangePassword` as the OR of the caller's signal and the authoritative flag — a
+  caller (or a flow engine without a checker) can add the flag but never clear it. A lookup error
+  aborts issuance without minting anything. This is why `oauth.IdentityLinker` requires
+  `PasswordChangeRequired` alongside `LinkOrCreateIdentity`. On the `WithAuthFlow` path the
+  handler resolves `PasswordChangeRequired` and supplies it to the engine, which ORs it with its
+  own optional `authflow.WithPasswordPolicyChecker` result before the engine's minter enters the
+  same pipeline. The passkey login callback is application-owned and remains free to mint its own
+  session, but `passkey.WithLoginSuccessWithTenant` surfaces the resolved tenant so the callback
+  can route issuance through the same pipeline; wire `Config.AccountGate` so the passkey ceremony
+  itself still refuses suspended or deleted accounts.
 
   egauth never proactively re-queries the credential's state on refresh and never auto-revokes
   sessions to force a change: the flag is set at login and carried forward, and forcing a change on

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/issuance"
 
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -46,6 +47,11 @@ type handlerConfig struct {
 	mustChangeResolve func(r *http.Request) bool
 	stepUpRequired    bool
 	amrResolve        func(r *http.Request) []string
+	// sessionResolver, when set, is the authoritative account-state resolver the step-up
+	// issuance pipeline consults before re-issuing the full pair. When nil the pipeline uses the
+	// resolved user/tenant with no extra lifecycle lookup, because the handler has already
+	// verified the second factor against the interim session. See WithSessionStateResolver.
+	sessionResolver issuance.Resolver
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -146,6 +152,18 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 // unavailable to the handler.
 func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
+}
+
+// WithSessionStateResolver supplies the authoritative account-state resolver the step-up
+// issuance pipeline consults before re-issuing the full pair. Wire it whenever the application
+// keeps account lifecycle state outside the interim token (the usual case): the interim token
+// may outlive the account's disabled/deleted check by its TTL, so step-up must re-check the
+// live account before minting a renewable pair. The resolver's must-change answer is OR-ed with
+// the interim/must-change-resolver signal, so it can add the flag but never clear it. When nil,
+// the pipeline still enforces the tenant binding and the forced-change flag carried by the
+// ceremony.
+func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
+	return func(h *handlerConfig) { h.sessionResolver = r }
 }
 
 // WithoutStepUp disables step-up / AMR verification on DisableHandler.
@@ -438,7 +456,21 @@ type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tena
 // Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
 func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	resolver := cfg.sessionResolver
+	if resolver == nil {
+		// No lifecycle store is available to the MFA package; the interim ceremony has already
+		// proven the second factor, so the state source reports the resolved identity only. Wire
+		// WithSessionStateResolver to add the authoritative account-state re-check.
+		resolver = issuance.ResolverFunc(func(_ context.Context, tenantID string, userID uuid.UUID) (issuance.State, error) {
+			return issuance.State{UserID: userID, TenantID: tenantID}, nil
+		})
+	}
+	pipe, pipeErr := issuance.New(issuer, issuance.WithResolver(resolver))
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if pipeErr != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+			return
+		}
 		recCode := r.PostForm.Get("recovery_code")
 		code := r.PostForm.Get(cfg.codeField)
 
@@ -459,7 +491,6 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 			cfg.failErr(w, r, err)
 			return
 		}
-		claims := claimsOf(r.Context(), uid, tenant)
 		// The factor set is now the interim session's verified primary factor + a verified TOTP or
 		// recovery code, so the token reaches the MFA assurance level. AMR is set here (not by the
 		// builder) so it is authoritative. The primary factor is PRESERVED from the interim session
@@ -467,7 +498,7 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		// gated login presents [otp] — the stepped-up token must never claim a factor the ceremony
 		// did not verify (SEC-MFA-01). With no interim AMR resolvable, the historical password
 		// default applies.
-		claims.AMR = steppedUpAMR[C](cfg, r)
+		amr := steppedUpAMR[C](cfg, r)
 		// Carry the forced-change gate forward: the stepped-up full pair keeps the verified interim
 		// token's must-change flag. The session is fully renewable — the refresh family persists the
 		// flag and Rotate replays it onto every silent refresh — so an MFA-enrolled must-change user
@@ -475,26 +506,35 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		// flag clears only on a fresh login after the password is changed (or when an admin revokes
 		// the family). By default the flag is read from the interim claims in r.Context() (the entry
 		// tokens.ContextMiddleware injects), so default wiring is safe. WithMustChangeResolver
-		// overrides the interim flag per request — reporting true flags the pair unconditionally,
-		// reporting false clears it (a live re-check of identity.PasswordChangeRequired, e.g. after
-		// the user changed their password in the meantime). Custom StepUpClaimsBuilders that mint
-		// claims from the user record SHOULD still re-check identity.PasswordChangeRequired: the
-		// interim flag is advisory and may be stale within the interim token's TTL.
+		// overrides the interim flag per request — reporting true flags the pair, reporting false
+		// defers to the authoritative state (a live re-check of identity.PasswordChangeRequired,
+		// e.g. after the user changed their password in the meantime). The issuance pipeline ORs
+		// this signal with the configured authoritative resolver, so a stale interim flag can never
+		// be silently cleared while the account is still flagged.
+		mustChange := false
 		if cfg.mustChangeResolve != nil {
-			if cfg.mustChangeResolve(r) {
-				claims.MustChangePassword = true
-			}
+			mustChange = cfg.mustChangeResolve(r)
 		} else if interim, ok := tokens.ClaimsFromContext[C](r.Context()); ok {
-			claims.MustChangePassword = interim.MustChangePassword
+			mustChange = interim.MustChangePassword
 		}
-		pair, err := issuer.IssueTokenPair(r.Context(), claims)
+		// Re-issue the full pair through the unified issuance pipeline: it enforces the tenant
+		// binding, OR-s the authoritative must-change state and emits the uniform audit event.
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID:           tenant,
+			UserID:             uid,
+			Claims:             claimsOf(r.Context(), uid, tenant),
+			Method:             "mfa_step_up",
+			AMR:                amr,
+			MustChangePassword: mustChange,
+			MFAVerified:        true,
+		})
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
 		}
 		// Upgrade the interim access-only state to a full renewable pair, writing both cookies.
-		cfg.cookies.SetAccess(w, pair.AccessToken)
-		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, false)
+		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
+		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, false)
 		cfg.ok(w, r)
 	})
 }

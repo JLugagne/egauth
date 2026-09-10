@@ -5,6 +5,7 @@ import (
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/google/uuid"
 )
 
@@ -34,6 +35,26 @@ type MockService struct {
 	PasswordChangeRequiredFunc          func(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 	SetTemporaryPasswordFunc            func(ctx context.Context, tenantID string, userID uuid.UUID, tempPassword string) error
 	AdminCreateUserFunc                 func(ctx context.Context, tenantID string, email, tempPassword string) (*identity.User, error)
+	SessionStateFunc                    func(ctx context.Context, tenantID string, userID uuid.UUID) (issuance.State, error)
+}
+
+// ResolveSessionState implements identity.SessionStateReader for the mock used by the
+// session-issuing handler tests. Unless SessionStateFunc overrides it, the authoritative state
+// is derived from PasswordChangeRequiredFunc (absent means "not flagged") and reports a live
+// account, matching the mock's default of no account-lifecycle failure.
+func (m *MockService) ResolveSessionState(ctx context.Context, tenantID string, userID uuid.UUID) (issuance.State, error) {
+	if m.SessionStateFunc != nil {
+		return m.SessionStateFunc(ctx, tenantID, userID)
+	}
+	state := issuance.State{UserID: userID, TenantID: tenantID}
+	if m.PasswordChangeRequiredFunc != nil {
+		mustChange, err := m.PasswordChangeRequiredFunc(ctx, tenantID, userID)
+		if err != nil {
+			return issuance.State{}, err
+		}
+		state.MustChangePassword = mustChange
+	}
+	return state, nil
 }
 
 func (m *MockService) DeleteAccount(ctx context.Context, tenantID string, userID uuid.UUID) error {
@@ -79,6 +100,7 @@ func (m *MockService) LoginWithMagicLink(ctx context.Context, tenantID string, t
 }
 
 var _ identity.Service = (*MockService)(nil)
+var _ identity.SessionStateReader = (*MockService)(nil)
 
 func (m *MockService) RequestPasswordReset(ctx context.Context, tenantID string, email string) (string, *identity.User, error) {
 	if m.RequestPasswordResetFunc == nil {

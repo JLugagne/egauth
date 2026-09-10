@@ -27,6 +27,7 @@ type Type string
 const (
 	LoginSucceeded          Type = "login.succeeded"
 	LoginFailed             Type = "login.failed"
+	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, amr, interim, must_change_password
 	AccountLocked           Type = "account.locked"
 	UserRegistered          Type = "user.registered"
 	PasswordReset           Type = "password.reset"   // completed via a reset token

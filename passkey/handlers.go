@@ -55,20 +55,32 @@ type UserResolver func(r *http.Request) (userID uuid.UUID, name, displayName, te
 // LoginSuccessFunc is invoked after a passkey login ceremony verifies, so the application can
 // establish its own session (e.g. issue tokens and set cookies). If nil, the handler replies
 // 204.
+//
+// Issuance should go through the unified issuance pipeline (see the issuance package), which
+// re-loads the account's authoritative state, binds the tenant, applies the MFA gate and the
+// forced-change flag, and emits the uniform audit event. LoginSuccessWithTenantFunc is the
+// richer variant to prefer when the ceremony resolved a non-empty tenant.
 type LoginSuccessFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID)
 
+// LoginSuccessWithTenantFunc is the richer variant of LoginSuccessFunc: it also receives the
+// tenant the ceremony resolved (the user resolver's tenant for named login, the discoverable
+// tenant extractor for usernameless login). The tenant is what makes the issuance pipeline's
+// tenant binding possible, so prefer this hook when minting through the pipeline.
+type LoginSuccessWithTenantFunc func(w http.ResponseWriter, r *http.Request, userID uuid.UUID, tenant string)
+
 type handlerConfig struct {
-	resolve            UserResolver
-	onLoginSuccess     LoginSuccessFunc
-	sessionCookie      string
-	sessionTTL         time.Duration
-	cookieDomain       string
-	cookieSameSite     http.SameSite
-	insecureCookies    bool
-	cookieKey          []byte
-	challenges         ChallengeStore
-	discoverableTenant TenantExtractor
-	maxBodyBytes       int64
+	resolve              UserResolver
+	onLoginSuccess       LoginSuccessFunc
+	onLoginSuccessTenant LoginSuccessWithTenantFunc
+	sessionCookie        string
+	sessionTTL           time.Duration
+	cookieDomain         string
+	cookieSameSite       http.SameSite
+	insecureCookies      bool
+	cookieKey            []byte
+	challenges           ChallengeStore
+	discoverableTenant   TenantExtractor
+	maxBodyBytes         int64
 	// trustedOrigins widens the strict same-origin CSRF allowlist (see WithTrustedOrigins); the
 	// check remains on by default with an empty allowlist.
 	trustedOrigins map[string]bool
@@ -112,6 +124,26 @@ func WithUserResolver(r UserResolver) HandlerOption {
 // WithLoginSuccess registers a callback invoked after a successful login ceremony.
 func WithLoginSuccess(f LoginSuccessFunc) HandlerOption {
 	return func(h *handlerConfig) { h.onLoginSuccess = f }
+}
+
+// WithLoginSuccessWithTenant registers the richer login-success callback, which also receives
+// the resolved tenant. It takes precedence over WithLoginSuccess when both are configured.
+func WithLoginSuccessWithTenant(f LoginSuccessWithTenantFunc) HandlerOption {
+	return func(h *handlerConfig) { h.onLoginSuccessTenant = f }
+}
+
+// loginSuccess dispatches to the richest configured success callback. It reports whether a
+// callback handled the response; when none is configured the caller replies 204.
+func (cfg handlerConfig) loginSuccess(w http.ResponseWriter, r *http.Request, userID uuid.UUID, tenant string) bool {
+	if cfg.onLoginSuccessTenant != nil {
+		cfg.onLoginSuccessTenant(w, r, userID, tenant)
+		return true
+	}
+	if cfg.onLoginSuccess != nil {
+		cfg.onLoginSuccess(w, r, userID)
+		return true
+	}
+	return false
 }
 
 // WithSessionCookieName overrides the ceremony cookie name. The secure default is
@@ -282,8 +314,7 @@ func FinishLoginHandler(svc *Service, opts ...HandlerOption) http.HandlerFunc {
 			cfg.fail(w, err)
 			return
 		}
-		if cfg.onLoginSuccess != nil {
-			cfg.onLoginSuccess(w, r, uid)
+		if cfg.loginSuccess(w, r, uid, tenant) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -607,8 +638,7 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 			return
 		}
 		_ = cred
-		if cfg.onLoginSuccess != nil {
-			cfg.onLoginSuccess(w, r, uid)
+		if cfg.loginSuccess(w, r, uid, tenant) {
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)

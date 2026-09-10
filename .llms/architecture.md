@@ -73,6 +73,7 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 ## Composition graph (who pairs with whom)
 
 - **Credential verification** = `identity` (manages accounts; does NOT issue tokens/sessions).
+- **Interactive session issuance** = `issuance` (one chokepoint). Every login path — `identity` password/register/magic-link, `oauth` callback, `authflow` engine minter, `mfa` step-up (and the app-owned passkey/OTP callbacks, which can reuse it) — mints through `issuance.Pipeline.Issue`, which re-loads the authoritative account state (rejecting disabled/deleted), binds the tenant, OR-s `MustChangePassword` from authoritative state, applies the MFA gate once, and emits one uniform `session.issued` event. Handlers never call `tokens.Issuer.IssueTokenPair` for a login; `internal/securitydefaults` guards that mechanically. The pipeline depends only on `tokens` (plus `event`/`uuid`), and `identity.SessionStateReader` is the reference resolver.
 - **Issue auth state** = `tokens` (stateless JWT + refresh) OR `sessions` (server-side, revocable). Pick one.
 - **Social login** = `oauth` (+ `oauth/providers`) → `identity.LinkOrCreateIdentity` (JIT) → tokens/sessions.
 - **Second factor** = `mfa` (TOTP), `passkey` (WebAuthn, can also be a primary/passwordless factor),
@@ -82,12 +83,13 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 - **Account disable fan-out** = `identity.WithDisableRevokers(...)` runs cross-module revocation hooks on `DisableUser` to kill a suspended user's refresh tokens, API keys (`tokens.NewAccountRevoker`) and sessions — re-establishable credentials only, leaving MFA/passkey enrollment intact for `EnableUser`.
 - **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
   flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
-  `tokens.Claims.MustChangePassword=true`. The flag is recorded on the refresh-token family and `Rotate` replays it
-  onto every silent refresh, so `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the
-  reset page until the password is changed — a user cannot escape by waiting for the access token to expire. The
-  credential stays valid — never a lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B
-  discourages fixed-interval expiry). See [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the
-  full policy description.
+  `tokens.Claims.MustChangePassword=true`. The `issuance` pipeline computes the flag from the authoritative
+  credential state and OR-s the caller's signal, so no login path can issue an unflagged session. The flag is
+  recorded on the refresh-token family and `Rotate` replays it onto every silent refresh, so
+  `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the reset page until the password
+  is changed — a user cannot escape by waiting for the access token to expire. The credential stays valid — never a
+  lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B discourages fixed-interval expiry). See
+  [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the full policy description.
 
 See [recipes.md](recipes.md) for concrete wiring of each stack.
 

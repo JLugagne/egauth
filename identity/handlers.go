@@ -10,6 +10,7 @@ import (
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/passwords"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -87,6 +88,9 @@ type handlerConfig struct {
 	// uniformAuthErrors, when true, forces 401 "invalid_credentials" on lockout/disabled to prevent account enumeration (ENUM-01). True by default; WithVerboseLockoutStatus opts out.
 	uniformAuthErrors bool
 	amrResolver       func(*http.Request) []string
+	// sessionResolver overrides the authoritative account-state resolver the issuance pipeline
+	// consults; nil means "use the Service's SessionStateReader". See WithSessionStateResolver.
+	sessionResolver issuance.Resolver
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -329,6 +333,7 @@ func (cfg handlerConfig) parseLimitedForm(w http.ResponseWriter, r *http.Request
 // optional remember_me field; remember_me makes the refresh cookie persistent.
 func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	pipe := newSessionPipeline(svc, issuer, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -358,46 +363,25 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 			return
 		}
 
-		// Forced-change gate: consult whether the credential is flagged (admin-provisioned /
-		// temporary password). This is a soft gate — login still succeeds and the session is fully
-		// renewable — but the issued pair carries Claims.MustChangePassword so the middleware
-		// soft-redirects to the reset page. Fail closed on a policy error rather than silently
-		// issuing an unflagged pair, which would let a flagged user slip past the gate.
-		mustChange, err := svc.PasswordChangeRequired(r.Context(), tenant, user.ID)
+		// Mint through the unified issuance pipeline: it re-loads the authoritative account
+		// state (rejecting a since-disabled/deleted account), computes the forced-change flag
+		// from that state (a caller signal can only add it), applies the MFA gate once and, for
+		// an enrolled user, returns only a short-lived interim access token (AMR=[pwd], no
+		// refresh cookie) to be completed via mfa.StepUpHandler. Login itself is never a lockout:
+		// a flagged user still receives a fully renewable pair carrying Claims.MustChangePassword.
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID: tenant,
+			UserID:   user.ID,
+			Claims:   claimsOf(user),
+			Method:   "password",
+			AMR:      []string{tokens.AMRPassword},
+		})
 		if err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			status, code := mapIssuanceError(err)
+			cfg.fail(w, r, status, code)
 			return
 		}
-
-		// MFA gate: when configured, an enrolled user does NOT get a full refreshable session on
-		// the password alone. They receive a short-lived interim access token (AMR=[pwd], no
-		// refresh cookie) and must complete the second factor (see mfa.StepUpHandler) to obtain
-		// the full pair. Users without an enrolled factor fall through below. When the user is
-		// also must-change, the flag is carried onto the interim token so step-up preserves it.
-		if cfg.mfaGate != nil {
-			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
-			if err != nil {
-				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
-				return
-			}
-			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMRPassword, mustChange); err != nil {
-					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
-					return
-				}
-				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
-				return
-			}
-		}
-
-		// Not MFA-gated: issue the full, renewable pair. When mustChange is true the pair carries
-		// Claims.MustChangePassword and the refresh family persists it (Rotate replays it on every
-		// silent refresh), so WithPasswordChangeGate keeps soft-redirecting to the reset page while
-		// the session stays valid. Login is never a lockout.
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
-			return
-		}
+		setSessionCookies(cfg, w, res, remember)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -406,6 +390,7 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 // and, on success, auto-logs them in by issuing a token pair and writing the auth cookies.
 func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	pipe := newSessionPipeline(svc, issuer, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -435,33 +420,74 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 			return
 		}
 
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, false); err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+		// Auto-login through the same pipeline as every other login path: the freshly registered
+		// account is re-loaded authoritatively before the pair is minted.
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID: tenant,
+			UserID:   user.ID,
+			Claims:   claimsOf(user),
+			Method:   "register",
+			AMR:      []string{tokens.AMRPassword},
+		})
+		if err != nil {
+			status, code := mapIssuanceError(err)
+			cfg.fail(w, r, status, code)
 			return
 		}
+		setSessionCookies(cfg, w, res, remember)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
 
-// issuePairAndSetCookies builds the user's claims, issues a token pair and writes both auth
-// cookies. The refresh cookie is persistent when remember is true.
-//
-// When mustChange is true the credential is flagged for a forced password change: the pair still
-// authenticates and is fully renewable (login is never a lockout), but its access token carries
-// Claims.MustChangePassword and the refresh family persists the flag, so Rotate replays it onto
-// every silent refresh. WithPasswordChangeGate therefore keeps soft-redirecting to the reset page
-// until the password is actually changed — the user cannot escape by waiting for the access token
-// to expire.
-func issuePairAndSetCookies[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, remember bool, mustChange bool) error {
-	claims := claimsOf(user)
-	claims.MustChangePassword = mustChange
-	pair, err := issuer.IssueTokenPair(r.Context(), claims)
-	if err != nil {
-		return err
+// newSessionPipeline builds the issuance pipeline used by the identity login handlers. The
+// authoritative account-state resolver comes from the Service when it implements
+// SessionStateReader (the built-in service does) and from WithSessionStateResolver otherwise;
+// a Service that provides neither is a construction-time misconfiguration, so the handler fails
+// loudly here rather than minting a session whose account state was never re-loaded.
+func newSessionPipeline[C any](svc Service, issuer tokens.Issuer[C], cfg handlerConfig) *issuance.Pipeline[C] {
+	resolver := cfg.sessionResolver
+	if resolver == nil {
+		r, ok := svc.(SessionStateReader)
+		if !ok {
+			panic("identity: Service does not expose authoritative session state; implement identity.SessionStateReader or configure WithSessionStateResolver")
+		}
+		resolver = r
 	}
-	cfg.cookies.SetAccess(w, pair.AccessToken)
-	cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, remember)
-	return nil
+	pipe, err := issuance.New(issuer,
+		issuance.WithResolver(resolver),
+		issuance.WithMFAGate(cfg.mfaGate),
+		issuance.WithInterimTTL(cfg.interimTTL),
+		issuance.WithEventSink(cfg.events),
+	)
+	if err != nil {
+		panic("identity: session issuance pipeline: " + err.Error())
+	}
+	return pipe
+}
+
+// setSessionCookies writes the cookies for a pipeline result. An interim issuance (MFA-enrolled
+// user, second factor not yet verified) writes ONLY the access cookie: the refresh token is
+// withheld so the pre-step-up state is not an indefinitely renewable session. A full issuance
+// writes both, making the refresh cookie persistent when remember is true.
+func setSessionCookies[C any](cfg handlerConfig, w http.ResponseWriter, res *issuance.Result[C], remember bool) {
+	cfg.cookies.SetAccess(w, res.Pair.AccessToken)
+	if !res.Interim {
+		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, remember)
+	}
+}
+
+// mapIssuanceError maps a rejected issuance to the client-visible status and error code. The
+// disabled/deleted branches are the post-authentication re-load rejecting an account that
+// changed state between credential verification and issuance.
+func mapIssuanceError(err error) (int, string) {
+	switch {
+	case errors.Is(err, issuance.ErrAccountDisabled):
+		return http.StatusForbidden, "account_disabled"
+	case errors.Is(err, issuance.ErrAccountDeleted), errors.Is(err, ErrUserNotFound):
+		return http.StatusUnauthorized, "invalid_credentials"
+	default:
+		return http.StatusInternalServerError, "token_issuance_failed"
+	}
 }
 
 // tenant returns the tenant derived from the request's resolver, or "" when no resolver is
@@ -858,6 +884,7 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 // path too.
 func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	pipe := newSessionPipeline(svc, issuer, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -916,32 +943,26 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			return
 		}
 
-		// MFA gate (SEC-ID-03): a magic link is a single-factor ceremony (mailbox control) and
-		// must not bypass the second factor of an enrolled user. Exactly like LoginHandler, an
-		// enrolled user receives a short-lived INTERIM access token — stamped with the
-		// magic-link factor (AMR=[otp], never AMRMFA) and NO refresh cookie — and must complete
-		// mfa.StepUpHandler to obtain the full pair. The must-change flag rides on the interim
-		// token so step-up preserves it. Fail closed on a gate error.
-		if cfg.mfaGate != nil {
-			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
-			if err != nil {
-				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
-				return
-			}
-			if enrolled {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMROTP, mustChange); err != nil {
-					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
-					return
-				}
-				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
-				return
-			}
-		}
-
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, claimsOf, user, remember, mustChange); err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+		// Native path: mint through the unified issuance pipeline. A magic link is a
+		// single-factor ceremony (mailbox control), so an MFA-enrolled user receives only a
+		// short-lived interim access token (AMR=[otp], never AMRMFA, no refresh cookie) and must
+		// complete mfa.StepUpHandler to obtain the full pair. The must-change flag is OR-ed into
+		// the authoritative state by the pipeline, so it rides the interim token and step-up
+		// preserves it.
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID:           tenant,
+			UserID:             user.ID,
+			Claims:             claimsOf(user),
+			Method:             "magic_link",
+			AMR:                []string{tokens.AMROTP},
+			MustChangePassword: mustChange,
+		})
+		if err != nil {
+			status, code := mapIssuanceError(err)
+			cfg.fail(w, r, status, code)
 			return
 		}
+		setSessionCookies(cfg, w, res, remember)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -1022,6 +1043,7 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 // re-issued refresh cookie: a password change is not a "remember me" affirmation.
 func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
+	pipe := newSessionPipeline(svc, issuer, cfg)
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
@@ -1066,50 +1088,42 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 			return
 		}
 
-		// MFA gate: when configured, an enrolled user who has not already satisfied MFA
-		// must not receive a full refreshable pair. Issue an interim token so that the client
-		// must complete the second factor before getting full access.
-		if cfg.mfaGate != nil {
-			enrolled, err := cfg.mfaGate.IsEnrolled(r.Context(), tenant, user.ID)
-			if err != nil {
-				cfg.fail(w, r, http.StatusInternalServerError, "mfa_check_failed")
-				return
-			}
-			if enrolled && !isMFAVerified[C](r, cfg) {
-				if err := issueInterimAndSetCookie(w, r, cfg, issuer, claimsOf, user, tokens.AMRPassword, false); err != nil {
-					cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
-					return
+		// Re-issue through the unified pipeline. ChangePassword cleared the must-change flag in
+		// the store and prior refresh-token families were revoked by the AccountErasers, so the
+		// authoritative re-load yields an unflagged, full pair (or an interim token when an
+		// enrolled user has not yet satisfied MFA). The AMR carries the MFA marker only when the
+		// session already verified a second factor; otherwise it is the primary password factor,
+		// which is what an MFA-enrolled step-up must see on its interim token.
+		mfaVerified := isMFAVerified[C](r, cfg)
+		claims := claimsOf(user)
+		amr := []string{tokens.AMRPassword}
+		if mfaVerified {
+			hasMFA := false
+			for _, a := range claims.AMR {
+				if a == tokens.AMRMFA {
+					hasMFA = true
+					break
 				}
-				httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
-				return
 			}
+			if !hasMFA {
+				claims.AMR = append(append([]string{}, claims.AMR...), tokens.AMRMFA)
+			}
+			amr = append([]string{}, claims.AMR...)
 		}
-
-		// ChangePassword succeeded: the must-change flag is cleared in the store and prior
-		// refresh-token families have been revoked by the AccountErasers. Issue a fresh full pair
-		// now (mustChange=false) so the user is immediately re-authenticated, with a clean refresh
-		// family that no longer replays the gate, without an extra login round-trip.
-		effectiveClaimsOf := claimsOf
-		if isMFAVerified[C](r, cfg) {
-			effectiveClaimsOf = func(u *User) tokens.Claims[C] {
-				c := claimsOf(u)
-				hasMFA := false
-				for _, a := range c.AMR {
-					if a == tokens.AMRMFA {
-						hasMFA = true
-						break
-					}
-				}
-				if !hasMFA {
-					c.AMR = append(c.AMR, tokens.AMRMFA)
-				}
-				return c
-			}
-		}
-		if err := issuePairAndSetCookies(w, r, cfg, issuer, effectiveClaimsOf, user, false, false); err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
+		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
+			TenantID:    tenant,
+			UserID:      user.ID,
+			Claims:      claims,
+			Method:      "password_change",
+			AMR:         amr,
+			MFAVerified: mfaVerified,
+		})
+		if err != nil {
+			status, code := mapIssuanceError(err)
+			cfg.fail(w, r, status, code)
 			return
 		}
+		setSessionCookies(cfg, w, res, false)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -1704,41 +1718,19 @@ func WithInterimTokenTTL(d time.Duration) HandlerOption {
 	}
 }
 
+// WithSessionStateResolver overrides the authoritative account-state resolver the issuance
+// pipeline consults when minting a login session. The Service returned by NewService implements
+// SessionStateReader and is used by default, so this option is only needed when wrapping a
+// custom Service implementation that does not expose the live account state. Supplying one is
+// mandatory for such a Service: the login handlers refuse construction otherwise rather than
+// minting a session whose account state was never re-checked.
+func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
+	return func(h *handlerConfig) { h.sessionResolver = r }
+}
+
 // WithAMRResolver configures a custom function to extract AMR factors from the request.
 func WithAMRResolver(fn func(*http.Request) []string) HandlerOption {
 	return func(h *handlerConfig) { h.amrResolver = fn }
-}
-
-// issueInterimAndSetCookie issues the short-lived INTERIM access token for an MFA-enrolled user
-// who has passed the primary factor but not yet the second factor, and writes ONLY the access
-// cookie. The interim token carries AMR=[primaryAMR] — the factor actually verified (pwd for a
-// password login, otp for a magic link) — so tokens.WithRequiredAMR with the MFA marker rejects
-// it and the token never overstates the assurance level (SEC-MFA-01: no hardcoded factor). An
-// explicit short expiry is forced; no refresh cookie is written, so the pre-step-up state is not
-// a renewable session. The application completes the flow with mfa.StepUpHandler, which
-// re-issues the full pair with the MFA factor in AMR.
-func issueInterimAndSetCookie[C any](w http.ResponseWriter, r *http.Request, cfg handlerConfig, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], user *User, primaryAMR string, mustChange bool) error {
-	claims := claimsOf(user)
-	// Stamp the verified primary factor only and force a short explicit access-token expiry,
-	// overriding whatever AMR/ExpiresAt the consumer's builder produced for this pre-MFA token.
-	claims.AMR = []string{primaryAMR}
-	// When the credential is ALSO flagged for rotation, carry the advisory flag on the interim
-	// token so the step-up re-issuance (mfa.StepUpHandler, TASK-065) can preserve it: an
-	// MFA-enrolled must-change user must not escape the gate by completing the second factor.
-	claims.MustChangePassword = mustChange
-	ttl := cfg.interimTTL
-	if ttl <= 0 {
-		ttl = DefaultInterimTokenTTL
-	}
-	claims.ExpiresAt = time.Now().Add(ttl)
-	pair, err := issuer.IssueTokenPair(r.Context(), claims)
-	if err != nil {
-		return err
-	}
-	// Deliberately set ONLY the access cookie: the refresh token (minted by the issuer) is not
-	// surfaced to the client, so the interim state cannot be renewed via /refresh.
-	cfg.cookies.SetAccess(w, pair.AccessToken)
-	return nil
 }
 
 // WithInsecureNoOriginCheck disables the CSRF same-origin check on the identity form handlers
