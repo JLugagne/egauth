@@ -98,9 +98,12 @@ All handlers are `http.HandlerFunc` values — attach to any mux.
 func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc
 
 // Callback: validates state cookie (CSRF + provider/tenant binding), exchanges code (PKCE),
-// fetches/verifies UserInfo, links/JIT-provisions identity, issues access+refresh token pair
-// as auth cookies. On success: 204 No Content (or 303 if WithSuccessRedirect). State cookie
-// always cleared regardless of outcome.
+// fetches/verifies UserInfo, links/JIT-provisions identity, resolves the linked credential's
+// forced-password-change state and stamps Claims.MustChangePassword onto the issued pair (a
+// lookup error aborts the callback without a session), then issues access+refresh token pair
+// as auth cookies. With WithAuthFlow the same value is handed to the flow engine instead.
+// On success: 204 No Content (or 303 if WithSuccessRedirect). State cookie always cleared
+// regardless of outcome.
 func CallbackHandler[C any](
     p *Provider,
     linker IdentityLinker,

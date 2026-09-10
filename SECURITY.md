@@ -224,7 +224,10 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   handler resolves `PasswordChangeRequired` for the verified/linked credential and supplies it to
   the engine, which ORs it with its own optional `authflow.WithPasswordPolicyChecker` result before
   minting. A checker-less engine therefore cannot drop the flag, and a configured checker can only
-  add one. This is why `oauth.IdentityLinker` requires `PasswordChangeRequired` alongside
+  add one. The plain `oauth.CallbackHandler` path (no `WithAuthFlow`) resolves the same value and
+  stamps `Claims.MustChangePassword` directly onto the pair it issues; a lookup error aborts the
+  callback without issuing a session. Both OAuth issuance paths therefore enforce the gate
+  identically. This is why `oauth.IdentityLinker` requires `PasswordChangeRequired` alongside
   `LinkOrCreateIdentity`.
 
   egauth never proactively re-queries the credential's state on refresh and never auto-revokes

@@ -40,10 +40,11 @@ const (
 // IdentityLinker resolves the local user behind an external identity. identity.Service
 // satisfies it; the callback handler depends only on these methods so it stays decoupled from
 // the rest of the identity service. PasswordChangeRequired supplies the authoritative
-// forced-password-change state of the linked credential: the callback passes it to the unified
-// flow engine (WithAuthFlow) so the flag is stamped onto the issued session even when the
-// engine has no password-policy checker of its own. Implementations must answer from
-// authoritative identity state (identity.Service.PasswordChangeRequired does).
+// forced-password-change state of the linked credential: the callback stamps it onto the
+// claims it issues directly, and passes it to the unified flow engine (WithAuthFlow) so the
+// flag survives even when the engine has no password-policy checker of its own.
+// Implementations must answer from authoritative identity state
+// (identity.Service.PasswordChangeRequired does).
 type IdentityLinker interface {
 	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
 	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
@@ -267,6 +268,11 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 // JIT-provisions the local account, then issues an access+refresh token pair and writes the
 // auth cookies. The state cookie is always cleared, and on any failure no auth cookie is set.
 //
+// The linked credential's forced-password-change state is resolved from the linker and stamped
+// onto the issued claims, so a flagged account cannot escape tokens.WithPasswordChangeGate by
+// signing in through the provider. A lookup failure aborts the callback (500) without issuing
+// any session.
+//
 // When WithAuthFlow is configured, issuance is delegated to the unified flow engine instead
 // (SEC-GLO-02): an MFA-enrolled user receives only the engine's flow-token cookie and must
 // complete the second factor before any access/refresh cookie is written.
@@ -368,23 +374,26 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
+		// Forced-change gate: an admin-provisioned credential (temporary password) is flagged
+		// so the session it authenticates must carry Claims.MustChangePassword and the
+		// password-change middleware can divert it to the reset flow. Resolve the
+		// authoritative state from the linker and share it between the two issuance paths
+		// below. Fail closed on a policy error rather than minting an unflagged session from a
+		// transient store failure.
+		mustChange, err := linker.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+
 		// Unified flow engine (issue #71 / SEC-GLO-02): when configured, the engine owns the
 		// post-callback pipeline — account lifecycle re-validation, MFA policy enforcement and
 		// issuance. An MFA-enrolled user does NOT get a full pair here: the engine writes only
 		// its flow-token cookie and the ceremony completes through the engine's step-up
-		// endpoint. The linked credential's forced-change flag is resolved from the linker and
-		// passed into the flow so the engine stamps it onto whatever it issues. Fail closed: a
-		// rejected flow NEVER falls through to the direct issuance below.
+		// endpoint. The linked credential's forced-change flag resolved above is passed into
+		// the flow so the engine stamps it onto whatever it issues. Fail closed: a rejected
+		// flow NEVER falls through to the direct issuance below.
 		if cfg.authFlow != nil {
-			// Resolve the linked credential's forced-change state and hand it to the engine:
-			// the engine can only flag the session when its caller tells it (or when it has its
-			// own checker), and the callback owns the identity lookup. Fail closed on a policy
-			// error so a transient store failure cannot yield an unflagged session.
-			mustChange, err := linker.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
-			if err != nil {
-				cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
-				return
-			}
 			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "oauth:"+p.Name(), []string{"oauth"}, cfg.persistRefresh, mustChange); err != nil {
 				status, code := mapLinkError(err)
 				cfg.fail(w, r, status, code)
@@ -394,7 +403,9 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		pair, err := issuer.IssueTokenPair(r.Context(), claimsOf(user))
+		claims := claimsOf(user)
+		claims.MustChangePassword = mustChange
+		pair, err := issuer.IssueTokenPair(r.Context(), claims)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return

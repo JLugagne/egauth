@@ -26,6 +26,7 @@ type stubLinker struct {
 	user          *identity.User
 	err           error
 	mustChange    bool
+	mustChangeErr error
 	gotProvider   string
 	gotProviderID string
 	gotEmail      string
@@ -41,15 +42,17 @@ func (s *stubLinker) LinkOrCreateIdentity(_ context.Context, _ string, provider,
 }
 
 func (s *stubLinker) PasswordChangeRequired(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
-	return s.mustChange, nil
+	return s.mustChange, s.mustChangeErr
 }
 
 type stubIssuer struct {
-	pair *tokens.TokenPair[struct{}]
-	err  error
+	pair      *tokens.TokenPair[struct{}]
+	err       error
+	gotClaims tokens.Claims[struct{}]
 }
 
-func (s *stubIssuer) IssueTokenPair(_ context.Context, _ tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+func (s *stubIssuer) IssueTokenPair(_ context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
+	s.gotClaims = claims
 	return s.pair, s.err
 }
 
