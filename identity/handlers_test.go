@@ -502,6 +502,45 @@ func TestLoginHandler_TenantResolverPropagates(t *testing.T) {
 	assert.Equal(t, "tenant-42", capturedTenant, "tenant resolver must scope authentication")
 }
 
+func TestLoginHandler_TenantResolverEmptyFailsClosed(t *testing.T) {
+	// A configured resolver that cannot map the request must not fall back to the
+	// single-tenant "" partition: the handler rejects before touching tenant-scoped state.
+	called := false
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			called = true
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder(),
+		identity.WithTenantResolver(func(*http.Request) string { return "" }))
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+	assert.False(t, called, "an unresolved tenant must never reach the service")
+}
+
+func TestLoginHandler_NoTenantResolverUsesSingleTenantPartition(t *testing.T) {
+	// With no resolver configured, "" remains the valid single-tenant partition.
+	var capturedTenant string
+	svc := &servicetest.MockService{
+		AuthenticateFunc: func(ctx context.Context, tenantID string, provider, providerID, password string) (*identity.User, error) {
+			capturedTenant = tenantID
+			return &identity.User{ID: uuid.Must(uuid.NewV7())}, nil
+		},
+	}
+	h := identity.LoginHandler[struct{}](svc, okIssuer(), testClaimsBuilder())
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, loginForm(t, "/login", "user@example.com", "secret", ""))
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "", capturedTenant, "single-tenant default partition must remain reachable")
+}
+
 func TestLoginHandler_CSRFOriginBlocked(t *testing.T) {
 	// Authenticate must never run when the origin check rejects the request.
 	svc := &servicetest.MockService{}

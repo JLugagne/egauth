@@ -200,9 +200,14 @@ func WithPersistentRefresh() HandlerOption {
 }
 
 // WithTenantResolver derives the tenant from the request to scope identity store operations
-// in multi-tenant deployments. The resolver MUST be a pure, deterministic function of the
-// request: given the same *http.Request it must always return the same string. DynamicBeginHandler
-// and DynamicCallbackHandler resolve the tenant exactly once per request and thread that single
+// in multi-tenant deployments. A configured resolver MUST return a non-empty tenant for any
+// request it can map; returning "" is treated as a resolution failure and the handler rejects
+// the request with 401 instead of falling back to the single-tenant ("") partition. When no
+// resolver is configured at all, the empty string (single-tenant partition) is used.
+//
+// The resolver MUST also be a pure, deterministic function of the request: given the same
+// *http.Request it must always return the same string. DynamicBeginHandler and
+// DynamicCallbackHandler resolve the tenant exactly once per request and thread that single
 // value through all subsequent operations (provider lookup, CSRF gate, identity link), so a
 // resolver that consults mutable external state and returns different values on successive calls
 // would violate that guarantee and could cause the token-exchange, security gate, and identity
@@ -228,6 +233,10 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.configErr != nil {
 			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
+			return
+		}
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
 			return
 		}
 		redirectURI := cfg.resolveRedirectURL(r)
@@ -258,7 +267,7 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), cfg.tenant(r), cfg.stateSigningKey))
+		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), tenant, cfg.stateSigningKey))
 		http.Redirect(w, r, p.AuthCodeURL(state, redirectURI, challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -281,6 +290,10 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.configErr != nil {
 			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
+			return
+		}
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
 			return
 		}
 		redirectURI := cfg.resolveRedirectURL(r)
@@ -329,7 +342,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "provider_mismatch")
 			return
 		}
-		if !stateMatches(cookieTenant, cfg.tenant(r)) {
+		if !stateMatches(cookieTenant, tenant) {
 			cfg.fail(w, r, http.StatusForbidden, "tenant_mismatch")
 			return
 		}
@@ -367,7 +380,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 
-		user, err := linker.LinkOrCreateIdentity(r.Context(), cfg.tenant(r), p.Name(), info.ProviderID, info.Email, info.EmailVerified)
+		user, err := linker.LinkOrCreateIdentity(r.Context(), tenant, p.Name(), info.ProviderID, info.Email, info.EmailVerified)
 		if err != nil {
 			status, code := mapLinkError(err)
 			cfg.fail(w, r, status, code)
@@ -380,7 +393,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		// authoritative state from the linker and share it between the two issuance paths
 		// below. Fail closed on a policy error rather than minting an unflagged session from a
 		// transient store failure.
-		mustChange, err := linker.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		mustChange, err := linker.PasswordChangeRequired(r.Context(), tenant, user.ID)
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
@@ -559,13 +572,21 @@ func requestScheme(r *http.Request) string {
 	return "http"
 }
 
-// tenant returns the tenant derived from the request's resolver, or "" when no resolver is
-// configured (the single-tenant default partition).
-func (cfg handlerConfig) tenant(r *http.Request) string {
+// resolveTenant derives the tenant for the request. When no resolver is configured
+// (single-tenant deployment) it returns the empty default partition. When a resolver IS
+// configured it MUST yield a non-empty tenant: an empty result means the request could not be
+// mapped (an unknown host or issuer), and falling back to the "" partition would let it reach
+// single-tenant state, so the handler fails closed with 401 "unresolved_tenant".
+func (cfg handlerConfig) resolveTenant(w http.ResponseWriter, r *http.Request) (string, bool) {
 	if cfg.tenantResolver == nil {
-		return ""
+		return "", true
 	}
-	return cfg.tenantResolver(r)
+	tenant := cfg.tenantResolver(r)
+	if tenant == "" {
+		cfg.fail(w, r, http.StatusUnauthorized, "unresolved_tenant")
+		return "", false
+	}
+	return tenant, true
 }
 
 func mapLinkError(err error) (int, string) {
@@ -594,7 +615,10 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, r *http.Request, status int
 func DynamicBeginHandler(store ProviderStore, providerName string, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		tenant := cfg.tenant(r)
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
+			return
+		}
 		p, err := store.GetProvider(r.Context(), tenant, providerName)
 		if err != nil {
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")
@@ -619,7 +643,10 @@ func DynamicBeginHandler(store ProviderStore, providerName string, opts ...Handl
 func DynamicCallbackHandler[C any](store ProviderStore, providerName string, linker IdentityLinker, issuer tokens.Issuer[C], claimsOf identity.ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
-		tenant := cfg.tenant(r)
+		tenant, ok := cfg.resolveTenant(w, r)
+		if !ok {
+			return
+		}
 		p, err := store.GetProvider(r.Context(), tenant, providerName)
 		if err != nil {
 			cfg.fail(w, r, http.StatusNotFound, "provider_not_found")

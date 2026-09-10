@@ -27,6 +27,11 @@ type handlerConfig struct {
 	codeField    string
 	successURL   string
 	failureURL   string
+	// tenantResolver, when set, overrides the tenant returned by the user resolver and fails
+	// closed with 401 when it cannot resolve a non-empty tenant (see WithTenantResolver). When
+	// nil (the default) the tenant comes from WithUserResolver, which may be "" in a
+	// single-tenant deployment.
+	tenantResolver func(*http.Request) string
 	// cookies controls how StepUpHandler writes the re-issued access+refresh pair. The other
 	// handlers do not mint tokens and ignore it. It defaults to tokens.DefaultCookies().
 	cookies tokens.Cookies
@@ -63,6 +68,16 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 // WithUserResolver supplies the authenticated user to the handlers (required).
 func WithUserResolver(r UserResolver) HandlerOption {
 	return func(h *handlerConfig) { h.resolve = r }
+}
+
+// WithTenantResolver derives the tenant from the request, overriding the tenant returned by
+// WithUserResolver. A configured resolver MUST return a non-empty tenant for any request it can
+// map; returning "" is treated as a resolution failure and the handler rejects the request with
+// 401 instead of falling back to the single-tenant ("") partition. When no tenant resolver is
+// configured the tenant from WithUserResolver is used unchanged — which may legitimately be ""
+// in a single-tenant deployment.
+func WithTenantResolver(f func(*http.Request) string) HandlerOption {
+	return func(h *handlerConfig) { h.tenantResolver = f }
 }
 
 // WithAccountField sets the form field carrying the account label shown in the authenticator
@@ -296,8 +311,9 @@ func steppedUpAMR[C any](cfg handlerConfig, r *http.Request) []string {
 	return amr
 }
 
-// guarded wraps the common preamble: POST-only, origin check (when WithTrustedOrigins is set),
-// user resolution and tenant derivation, body-size cap (DefaultMaxBodyBytes, overridable via
+// guarded wraps the common preamble: POST-only, origin check (on by default), user resolution,
+// tenant derivation (from WithUserResolver, or from WithTenantResolver when configured — in which
+// case an empty tenant fails closed with 401), body-size cap (DefaultMaxBodyBytes, overridable via
 // WithMaxBodyBytes), then invokes fn with the resolved user ID and tenant string.
 func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uuid.UUID, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -318,6 +334,13 @@ func (cfg handlerConfig) guarded(fn func(http.ResponseWriter, *http.Request, uui
 		if !ok {
 			cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")
 			return
+		}
+		if cfg.tenantResolver != nil {
+			tenant = cfg.tenantResolver(r)
+			if tenant == "" {
+				cfg.fail(w, r, http.StatusUnauthorized, "unresolved_tenant")
+				return
+			}
 		}
 		if !cfg.parseLimitedForm(w, r) {
 			return

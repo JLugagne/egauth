@@ -176,6 +176,8 @@ brute-force lockout, single-use selector/verifier tokens, refresh-token rotation
 theft detection, per-kid alg-pinned JWTs (symmetric HS256 or asymmetric RS256/ES256/EdDSA; reject `none`/alg-confusion), SHA-256-only storage of
 refresh/API/session/OTP secrets, secure-by-default cookies, pre-auth body caps against hashing-DoS,
 secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
+Per-handler and per-constructor defaults with their explicit opt-outs: [secure-defaults-matrix.md](secure-defaults-matrix.md)
+(mechanically guarded by `internal/securitydefaults`).
 
 **Forced-password-change for temporary credentials.** `identity.AdminCreateUser` and
 `identity.SetTemporaryPassword` provision a credential flagged for a forced change at next login

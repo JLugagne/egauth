@@ -99,6 +99,34 @@ func TestHandlers_RequireResolvedUser(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
+func TestHandlers_TenantResolverFailsClosed(t *testing.T) {
+	store := memory.NewStore()
+	svc := mfa.NewService(store)
+	uid := uuid.Must(uuid.NewV7())
+	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "", true })
+
+	// Without a tenant resolver, the user resolver's "" is the valid single-tenant partition.
+	rec := httptest.NewRecorder()
+	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	// A configured tenant resolver that cannot map the request must fail closed instead of
+	// falling back to the "" partition.
+	h := mfa.EnrollHandler(svc, resolver, mfa.WithTenantResolver(func(*http.Request) string { return "" }))
+	rec = httptest.NewRecorder()
+	h(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+
+	// A resolver that maps the request scopes the operation to that tenant.
+	h = mfa.EnrollHandler(svc, resolver, mfa.WithTenantResolver(func(*http.Request) string { return "t1" }))
+	rec = httptest.NewRecorder()
+	h(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
+	require.Equal(t, http.StatusOK, rec.Code)
+	_, err := store.GetTOTP(context.Background(), "t1", uid)
+	assert.NoError(t, err, "enrollment must be written under the resolved tenant")
+}
+
 func TestHandlers_RejectGET(t *testing.T) {
 	svc := mfa.NewService(memory.NewStore())
 	rec := httptest.NewRecorder()
