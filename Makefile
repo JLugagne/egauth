@@ -3,6 +3,8 @@
 # Pinned tool versions — keep in sync with .github/workflows/ci.yml
 GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION   := v1.1.4
+# Keep in sync with RELEASING.md. Update deliberately after reviewing the upstream release.
+SYFT_VERSION          := v1.51.1
 
 # Multi-module monorepo: the core module (.) and the nested pgx adapter module (adapters/pgx).
 # Core checks run with GOWORK=off so they exercise the standalone module external consumers get
@@ -102,7 +104,7 @@ test-e2e:
 sbom:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1; fi
 	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$(VERSION)..."
-	go install github.com/anchore/syft@latest
+	go install github.com/anchore/syft@$(SYFT_VERSION)
 	syft -o cyclonedx-json github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.json
 	syft -o cyclonedx github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.xml
 	@echo "==> SBOM generated: libauth-$(VERSION).sbom.json and libauth-$(VERSION).sbom.xml"

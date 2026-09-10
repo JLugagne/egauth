@@ -77,13 +77,17 @@ Generate a Software Bill of Materials (SBOM) in CycloneDX format. This documents
 and their versions, critical for supply-chain transparency and vulnerability tracking:
 
 ```sh
-# Install syft if not already present (https://github.com/anchore/syft)
-go install github.com/anchore/syft@latest
+# Install syft if not already present (https://github.com/anchore/syft).
+# Pinned to an exact version — keep in sync with SYFT_VERSION in the Makefile.
+go install github.com/anchore/syft@v1.51.1
 
 # Generate SBOM from the module and save to the release directory
 syft -o cyclonedx-json github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.json
 syft -o cyclonedx github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.xml
 ```
+
+To update the pinned syft version, run `go list -m -versions github.com/anchore/syft`, review the
+upstream release notes, then bump `SYFT_VERSION` in the Makefile and the version above together.
 
 Verify the SBOM is generated and contains an entry for each direct and transitive dependency.
 Attach both JSON and XML versions to the GitHub Release (Step 6).
