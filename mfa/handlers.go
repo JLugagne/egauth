@@ -37,7 +37,7 @@ type handlerConfig struct {
 	insecureNoOriginCheck bool
 	// maxBodyBytes caps the request body before form parsing (default DefaultMaxBodyBytes). Non-positive disables the cap.
 	maxBodyBytes int64
-	// mustChangeResolve, when set, overrides the default must-change propagation: reporting true stamps Claims.MustChangePassword=true on the re-issued full pair, reporting false clears a stale interim flag (e.g. a live re-check of identity.PasswordChangeRequired). Nil (default) propagates the verified interim token's flag, so a flagged interim yields a flagged pair and the forced-change gate survives step-up on default wiring.
+	// mustChangeResolve, when set, overrides the default must-change propagation: reporting true stamps Claims.MustChangePassword=true on the re-issued full pair, reporting false leaves the pair unflagged (a live re-check of identity.PasswordChangeRequired, e.g. after the password was changed in the meantime). When nil (the default) the flag of the verified interim token's claims is propagated, so a flagged interim yields a flagged pair and the forced-change gate survives step-up. That default reads the interim claims from tokens.ClaimsFromContext, which is populated only when StepUpHandler is mounted behind tokens.ContextMiddleware; a custom WithUserResolver that does not inject them must pair itself with WithMustChangeResolver, otherwise the interim flag is not recoverable here.
 	mustChangeResolve func(r *http.Request) bool
 	stepUpRequired    bool
 	amrResolve        func(r *http.Request) []string
@@ -125,7 +125,10 @@ func WithMaxBodyBytes(n int64) HandlerOption {
 // flag and Rotate replays it onto every silent refresh, so a must-change user who is also
 // MFA-enrolled cannot drop the flag by completing a second factor and then refreshing. Wire it with
 // tokens.MustChangeResolverFromContext when StepUpHandler is mounted behind
-// tokens.ContextMiddleware. Nil (the default) leaves the flag unset.
+// tokens.ContextMiddleware. When nil (the default), the flag is read from the interim claims the
+// middleware injects; wire this resolver whenever the handler runs WITHOUT that middleware (e.g.
+// with a custom WithUserResolver), because the interim claims — and therefore the flag — are then
+// unavailable to the handler.
 func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 	return func(h *handlerConfig) { h.mustChangeResolve = fn }
 }

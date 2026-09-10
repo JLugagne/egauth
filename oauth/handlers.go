@@ -15,6 +15,7 @@ import (
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/google/uuid"
 )
 
 // Default state-cookie configuration. The state cookie carries the CSRF state, the PKCE
@@ -37,10 +38,15 @@ const (
 )
 
 // IdentityLinker resolves the local user behind an external identity. identity.Service
-// satisfies it; the callback handler depends only on this narrow method so it stays
-// decoupled from the rest of the identity service.
+// satisfies it; the callback handler depends only on these methods so it stays decoupled from
+// the rest of the identity service. PasswordChangeRequired supplies the authoritative
+// forced-password-change state of the linked credential: the callback passes it to the unified
+// flow engine (WithAuthFlow) so the flag is stamped onto the issued session even when the
+// engine has no password-policy checker of its own. Implementations must answer from
+// authoritative identity state (identity.Service.PasswordChangeRequired does).
 type IdentityLinker interface {
 	LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
+	PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
 // handlerConfig holds the configurable behavior of the OAuth handlers.
@@ -363,13 +369,23 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		}
 
 		// Unified flow engine (issue #71 / SEC-GLO-02): when configured, the engine owns the
-		// post-callback pipeline — account lifecycle re-validation, MFA policy enforcement,
-		// must-change gating and issuance. An MFA-enrolled user does NOT get a full pair here:
-		// the engine writes only its flow-token cookie and the ceremony completes through the
-		// engine's step-up endpoint. Fail closed: a rejected flow NEVER falls through to the
-		// direct issuance below.
+		// post-callback pipeline — account lifecycle re-validation, MFA policy enforcement and
+		// issuance. An MFA-enrolled user does NOT get a full pair here: the engine writes only
+		// its flow-token cookie and the ceremony completes through the engine's step-up
+		// endpoint. The linked credential's forced-change flag is resolved from the linker and
+		// passed into the flow so the engine stamps it onto whatever it issues. Fail closed: a
+		// rejected flow NEVER falls through to the direct issuance below.
 		if cfg.authFlow != nil {
-			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "oauth:"+p.Name(), []string{"oauth"}, cfg.persistRefresh); err != nil {
+			// Resolve the linked credential's forced-change state and hand it to the engine:
+			// the engine can only flag the session when its caller tells it (or when it has its
+			// own checker), and the callback owns the identity lookup. Fail closed on a policy
+			// error so a transient store failure cannot yield an unflagged session.
+			mustChange, err := linker.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+			if err != nil {
+				cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+				return
+			}
+			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "oauth:"+p.Name(), []string{"oauth"}, cfg.persistRefresh, mustChange); err != nil {
 				status, code := mapLinkError(err)
 				cfg.fail(w, r, status, code)
 				return

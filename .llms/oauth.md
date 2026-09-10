@@ -53,6 +53,7 @@ func (m *MemoryStore) GetProvider(ctx context.Context, tenantID, providerName st
 // IdentityLinker — narrow interface satisfied by identity.Service.
 type IdentityLinker interface {
     LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*identity.User, error)
+    PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error)
 }
 
 // FetchUserFunc — custom userinfo fetcher for oauth.New.

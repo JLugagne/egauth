@@ -129,3 +129,33 @@ func TestCallbackHandler_AuthFlow_NotEnrolledMintsViaEngine(t *testing.T) {
 			"the legacy issuance path must be bypassed when a flow engine is configured")
 	}
 }
+
+// TestCallbackHandler_AuthFlow_PreservesMustChangePassword proves the forced-password-change gate
+// survives the unified flow path even when the engine has no password-policy checker of its own:
+// the callback resolves the linked credential's flag and hands it to the engine, and the flow the
+// SessionMinter receives carries it so the gate cannot be bypassed via an OAuth login.
+func TestCallbackHandler_AuthFlow_PreservesMustChangePassword(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+	p, _ := stubProviderServer(t, &body)
+	stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+
+	uid := uuid.Must(uuid.NewV7())
+	linker := &stubLinker{user: &identity.User{ID: uid, Email: "u@example.com"}, mustChange: true}
+	issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+		AccessToken:           "access",
+		RefreshToken:          "refresh",
+		RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+	}}
+	minter := &flowRecordingMinter{}
+	engine := newFlowTestEngine(t, false, minter)
+
+	rec := runCallback(t, p, linker, issuer, stateCookie,
+		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),
+		WithRedirectURL(testRedirect),
+		WithAuthFlow(authflow.NewHandlerFlow(engine)))
+
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.Len(t, minter.flows, 1, "the engine minter must issue the final credentials")
+	assert.True(t, minter.flows[0].MustChangePassword,
+		"a flagged credential must yield a flagged session on the OAuth authflow path")
+}

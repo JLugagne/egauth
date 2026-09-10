@@ -127,7 +127,7 @@ Mount `CallbackHandler` to receive the redirect from the provider. It exchanges 
 
 `CallbackHandler` is generic over your custom claim type `C`. Rather than a bare callback, it takes three collaborators:
 
-- a `linker oauth.IdentityLinker` — resolves the local user behind the external identity. Its single method is `LinkOrCreateIdentity(ctx, tenantID, provider, providerID, email string, emailVerified bool) (*identity.User, error)`. The `identity.Service` satisfies this interface.
+- a `linker oauth.IdentityLinker` — resolves the local user behind the external identity and reports the linked credential's forced-password-change state. Its methods are `LinkOrCreateIdentity(ctx, tenantID, provider, providerID, email string, emailVerified bool) (*identity.User, error)` and `PasswordChangeRequired(ctx, tenantID, userID uuid.UUID) (bool, error)`. The `identity.Service` satisfies this interface.
 - an `issuer tokens.Issuer[C]` — mints the token pair for the resolved user.
 - a `claimsOf identity.ClaimsBuilder[C]` — `func(*identity.User) tokens.Claims[C]`, mapping the user to the claims embedded in the issued tokens.
 
@@ -135,7 +135,7 @@ Mount `CallbackHandler` to receive the redirect from the provider. It exchanges 
 // e.g. GET /auth/google/callback
 callback := oauth.CallbackHandler(
 	google,
-	identitySvc, // satisfies oauth.IdentityLinker via LinkOrCreateIdentity
+	identitySvc, // satisfies oauth.IdentityLinker via LinkOrCreateIdentity and PasswordChangeRequired
 	issuer,      // your tokens.Issuer[C]
 	func(u *identity.User) tokens.Claims[C] {
 		return tokens.Claims[C]{

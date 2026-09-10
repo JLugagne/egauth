@@ -799,9 +799,11 @@ func RequestMagicLinkHandler(svc Service, mailer Mailer, opts ...HandlerOption) 
 // MFA gating (SEC-ID-03): under WithMFAGate, an enrolled user does NOT receive the full pair —
 // the emailed link alone is a single factor. They get a short-lived interim access token
 // (AMR=[otp], no refresh cookie) and must complete mfa.StepUpHandler, mirroring LoginHandler.
-// Under WithAuthFlow the whole post-credential pipeline (account state, MFA policy, must-change
-// flag, issuance) is delegated to the unified flow engine, which either issues the final
-// credentials or parks the ceremony in the MFA-challenged state with a flow-token cookie.
+// Under WithAuthFlow the post-credential pipeline (account state, MFA policy, issuance) is
+// delegated to the unified flow engine, which either issues the final credentials or parks the
+// ceremony in the MFA-challenged state with a flow-token cookie; the handler still resolves the
+// credential's forced-change flag and passes it to the engine, so the gate is preserved on that
+// path too.
 func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -828,14 +830,25 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			return
 		}
 
+		// Forced-change gate: resolve the authoritative flag before either issuance path. The
+		// unified engine cannot know the credential's rotation state unless its caller tells it
+		// (or the engine has its own checker), so the handler supplies it on the flow path; on
+		// the native path it stamps the flag directly. Fail closed on a policy error.
+		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
+		if err != nil {
+			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
+			return
+		}
+
 		// Unified flow engine (issue #71): when configured, the engine owns the entire
-		// post-credential pipeline — account lifecycle, MFA policy, must-change flag and
-		// issuance — and writes the outcome directly to w: either the final credentials
-		// (flow completed via the engine's SessionMinter) or the flow-token cookie (MFA
-		// challenged; the client completes authflow.StepUpHandler). The handler-side issuer
-		// is bypassed. Fail closed: a rejected flow NEVER falls through to direct issuance.
+		// post-credential pipeline — account lifecycle, MFA policy and issuance — and writes
+		// the outcome directly to w: either the final credentials (flow completed via the
+		// engine's SessionMinter) or the flow-token cookie (MFA challenged; the client completes
+		// authflow.StepUpHandler). The forced-change flag resolved above is passed into the flow
+		// so the engine stamps it onto whatever it issues. The handler-side issuer is bypassed.
+		// Fail closed: a rejected flow NEVER falls through to direct issuance.
 		if cfg.authFlow != nil {
-			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "magic_link", []string{tokens.AMROTP}, remember); err != nil {
+			if err := cfg.authFlow.ProcessPrimaryAuth(r.Context(), w, r, user, "magic_link", []string{tokens.AMROTP}, remember, mustChange); err != nil {
 				status, code := http.StatusInternalServerError, "internal_error"
 				if errors.Is(err, ErrAccountDisabled) {
 					status, code = http.StatusForbidden, "account_disabled"
@@ -844,15 +857,6 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 				return
 			}
 			httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
-			return
-		}
-
-		// Forced-change gate: a magic-link login is still subject to the must-change flag. When the
-		// credential is flagged the renewable pair carries Claims.MustChangePassword (persisted across
-		// refresh), so the middleware soft-redirects to the reset page. Fail closed on a policy error.
-		mustChange, err := svc.PasswordChangeRequired(r.Context(), cfg.tenant(r), user.ID)
-		if err != nil {
-			cfg.fail(w, r, http.StatusInternalServerError, "password_rotation_check_failed")
 			return
 		}
 

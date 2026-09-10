@@ -219,6 +219,14 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   reset URL (or `403 password_change_required` if none). The change-password and logout routes
   should be excluded from this middleware.
 
+  The flag is preserved on the unified authflow path as well: when
+  `identity.MagicLinkLoginHandler` or `oauth.CallbackHandler` is wired with `WithAuthFlow`, the
+  handler resolves `PasswordChangeRequired` for the verified/linked credential and supplies it to
+  the engine, which ORs it with its own optional `authflow.WithPasswordPolicyChecker` result before
+  minting. A checker-less engine therefore cannot drop the flag, and a configured checker can only
+  add one. This is why `oauth.IdentityLinker` requires `PasswordChangeRequired` alongside
+  `LinkOrCreateIdentity`.
+
   egauth never proactively re-queries the credential's state on refresh and never auto-revokes
   sessions to force a change: the flag is set at login and carried forward, and forcing a change on
   live sessions is an explicit administrative action (family revocation). A flagged-but-not-yet-

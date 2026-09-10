@@ -34,7 +34,10 @@ func NewHandlerFlow(e *Engine) *HandlerFlow {
 	return &HandlerFlow{engine: e}
 }
 
-// ProcessPrimaryAuth implements the handler-package seam by delegating to the engine.
+// ProcessPrimaryAuth implements the handler-package seam by delegating to the engine. The
+// caller-resolved mustChange flag is authoritative for the credential that was just verified and
+// is OR-ed into the flow by the engine, so a handler that owns the identity lookup preserves the
+// forced-password-change gate even when the engine has no WithPasswordPolicyChecker.
 func (h *HandlerFlow) ProcessPrimaryAuth(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -43,8 +46,9 @@ func (h *HandlerFlow) ProcessPrimaryAuth(
 	method string,
 	initialAMR []string,
 	remember bool,
+	mustChange bool,
 ) error {
-	_, err := h.engine.ProcessPrimaryAuth(ctx, w, r, user, method, initialAMR, remember)
+	_, err := h.engine.ProcessPrimaryAuth(ctx, w, r, user, method, initialAMR, remember, WithPrimaryMustChange(mustChange))
 	return err
 }
 

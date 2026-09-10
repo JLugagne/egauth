@@ -329,3 +329,69 @@ func TestAuthFlow_ForcedPasswordChange_PropagatedToSession(t *testing.T) {
 	require.Len(t, minter.mintedFlows, 1)
 	assert.True(t, minter.mintedFlows[0].MustChangePassword)
 }
+
+// TestAuthFlow_PrimaryMustChange_OrsWithPolicyChecker proves the engine's forced-change flag
+// combines both sources: the caller's authoritative answer (WithPrimaryMustChange) and the
+// engine's configured checker. Either source can flag the ceremony and neither can clear the
+// other, so a handler that resolves the flag itself is safe on a checker-less engine, while a
+// checker stays authoritative on top of the caller's answer.
+func TestAuthFlow_PrimaryMustChange_OrsWithPolicyChecker(t *testing.T) {
+	ctx := context.Background()
+	secret := []byte("01234567890123456789012345678901")
+	user := &identity.User{ID: uuid.New(), TenantID: "tenant-1", Email: "user@example.com"}
+
+	newEngine := func(t *testing.T, checker authflow.PasswordPolicyChecker) *authflow.Engine {
+		t.Helper()
+		opts := []authflow.Option{authflow.WithMinter(&mockSessionMinter{})}
+		if checker != nil {
+			opts = append(opts, authflow.WithPasswordPolicyChecker(checker))
+		}
+		engine, err := authflow.NewEngine(secret, opts...)
+		require.NoError(t, err)
+		return engine
+	}
+
+	checker := func(value bool) authflow.PasswordPolicyChecker {
+		return func(context.Context, string, uuid.UUID) (bool, error) { return value, nil }
+	}
+
+	t.Run("caller flag alone is honoured without a checker", func(t *testing.T) {
+		engine := newEngine(t, nil)
+		result, err := engine.ProcessPrimaryAuth(ctx, httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil),
+			user, "magic_link", []string{tokens.AMROTP}, false, authflow.WithPrimaryMustChange(true))
+		require.NoError(t, err)
+		assert.True(t, result.Flow.MustChangePassword)
+	})
+
+	t.Run("no flag from either source stays unflagged", func(t *testing.T) {
+		engine := newEngine(t, nil)
+		result, err := engine.ProcessPrimaryAuth(ctx, httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil),
+			user, "magic_link", []string{tokens.AMROTP}, false, authflow.WithPrimaryMustChange(false))
+		require.NoError(t, err)
+		assert.False(t, result.Flow.MustChangePassword)
+	})
+
+	t.Run("caller flag survives a false checker", func(t *testing.T) {
+		engine := newEngine(t, checker(false))
+		result, err := engine.ProcessPrimaryAuth(ctx, httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil),
+			user, "magic_link", []string{tokens.AMROTP}, false, authflow.WithPrimaryMustChange(true))
+		require.NoError(t, err)
+		assert.True(t, result.Flow.MustChangePassword)
+	})
+
+	t.Run("a true checker flags an unflagged caller", func(t *testing.T) {
+		engine := newEngine(t, checker(true))
+		result, err := engine.ProcessPrimaryAuth(ctx, httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil),
+			user, "magic_link", []string{tokens.AMROTP}, false, authflow.WithPrimaryMustChange(false))
+		require.NoError(t, err)
+		assert.True(t, result.Flow.MustChangePassword)
+	})
+
+	t.Run("checker failure still fails the flow closed", func(t *testing.T) {
+		wantErr := assert.AnError
+		engine := newEngine(t, func(context.Context, string, uuid.UUID) (bool, error) { return false, wantErr })
+		_, err := engine.ProcessPrimaryAuth(ctx, httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/login", nil),
+			user, "magic_link", []string{tokens.AMROTP}, false, authflow.WithPrimaryMustChange(true))
+		assert.ErrorIs(t, err, wantErr)
+	})
+}

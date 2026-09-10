@@ -17,6 +17,12 @@ import (
 // everything the client needs directly to w — either the final credentials (flow completed) or
 // the short-lived flow-token cookie (MFA challenged, to be completed through the engine's
 // step-up endpoint). A non-nil error means the flow was rejected and nothing was written.
+//
+// mustChange is the authoritative forced-password-change answer for the verified credential,
+// resolved by the caller from identity state (Service.PasswordChangeRequired). The flow MUST
+// propagate it onto any issued credentials — including through an MFA challenge — so a
+// temporary-password user cannot obtain an unflagged session by authenticating through a flow
+// engine that has no password-policy checker of its own.
 type AuthFlow interface {
 	ProcessPrimaryAuth(
 		ctx context.Context,
@@ -26,14 +32,17 @@ type AuthFlow interface {
 		method string,
 		initialAMR []string,
 		remember bool,
+		mustChange bool,
 	) error
 }
 
 // WithAuthFlow wires a unified authentication flow engine into MagicLinkLoginHandler. When set,
-// the handler delegates every post-credential decision (account state, MFA policy, must-change
-// flag, credential issuance) to the flow and bypasses its own issuer/claims builder entirely —
-// the engine's SessionMinter owns issuance. Wrap an authflow.Engine with
-// authflow.NewHandlerFlow to obtain an AuthFlow.
+// the handler delegates every post-credential decision (account state, MFA policy, credential
+// issuance) to the flow and bypasses its own issuer/claims builder entirely — the engine's
+// SessionMinter owns issuance. The handler still resolves the credential's forced-password-change
+// state (Service.PasswordChangeRequired) and passes it to the flow, which ORs it into the issued
+// session, so the gate survives even when the engine has no WithPasswordPolicyChecker of its own.
+// Wrap an authflow.Engine with authflow.NewHandlerFlow to obtain an AuthFlow.
 //
 // Precedence: WithAuthFlow wins over WithMFAGate on the same handler — the engine has its own
 // MFA gate, account validator and password-policy checker, so the handler-level gate is not

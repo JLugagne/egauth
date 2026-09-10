@@ -25,6 +25,7 @@ import (
 type stubLinker struct {
 	user          *identity.User
 	err           error
+	mustChange    bool
 	gotProvider   string
 	gotProviderID string
 	gotEmail      string
@@ -37,6 +38,10 @@ func (s *stubLinker) LinkOrCreateIdentity(_ context.Context, _ string, provider,
 		return nil, s.err
 	}
 	return s.user, nil
+}
+
+func (s *stubLinker) PasswordChangeRequired(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+	return s.mustChange, nil
 }
 
 type stubIssuer struct {

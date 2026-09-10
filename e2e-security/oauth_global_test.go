@@ -534,6 +534,10 @@ func (m *mockIdentityLinker) LinkOrCreateIdentity(ctx context.Context, tenantID,
 	return &identity.User{ID: uuid.New()}, nil
 }
 
+func (m *mockIdentityLinker) PasswordChangeRequired(ctx context.Context, tenantID string, userID uuid.UUID) (bool, error) {
+	return false, nil
+}
+
 type mockTokenIssuer struct{}
 
 func (m *mockTokenIssuer) IssueTokenPair(ctx context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
