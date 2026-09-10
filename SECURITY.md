@@ -434,11 +434,11 @@ redaction is in any case only a backstop. Therefore the consumer must:
 
 `LoginHandler`, `RegisterHandler`, the authenticated identity mutations
 (`ChangePasswordHandler`, change-email, delete-account, recovery, phone/email
-verification), `RefreshHandler`, `LogoutHandler`, the `mfa` handlers and the `otp`
-handlers are all state-changing endpoints driven by the request (form body / cookies).
-egauth does **not** ship a full CSRF-token system (per the PRD, that is left to the
-application layer), but it now applies a **strict same-origin check on every one of these
-handler families by default**:
+verification), `RefreshHandler`, `LogoutHandler`, `sessions.RequireSession`, the `mfa`
+handlers and the `otp` handlers are all state-changing endpoints driven by the request
+(form body / cookies). egauth does **not** ship a full CSRF-token system (per the PRD,
+that is left to the application layer), but it now applies a **strict same-origin check on
+every one of these handler families by default**:
 
 - **Same-origin is enforced even with no configuration.** A state-changing POST is allowed
   only when its `Origin` (or `Referer` fallback) host equals the request's own `Host` or an
@@ -452,13 +452,19 @@ handler families by default**:
 - **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
   from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
   against classic CSRF on an existing session.
-- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`) **widens** the
-  same-origin allowlist to additional hosts — e.g. a front-end served from another subdomain.
-  Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
-- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`) is the explicit,
-  loudly-named opt-out: it disables the same-origin check entirely, restoring the pre-v1
-  accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g. a
-  synchronizer/double-submit token middleware) or in trusted test setups.
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`) **widens**
+  the same-origin allowlist to additional hosts — e.g. a front-end served from another
+  subdomain. Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+- **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`) is the
+  explicit, loudly-named opt-out: it disables the same-origin check entirely, restoring the
+  pre-v1 accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g.
+  a synchronizer/double-submit token middleware) or in trusted test setups.
+- **`sessions.RequireSession` gates only cookie authentication.** When the session token comes
+  from the ambient cookie, unsafe methods are subject to the same-origin check above; when it
+  comes from an `Authorization: Bearer` header the request is exempt, because a header
+  credential is non-ambient and a cross-site attacker cannot make the browser attach it. The
+  check runs before `ValidateSession`, so a forged request never reaches the store or the
+  protected handler.
 
 The **`webapp` v1 preset** (`webapp.NewWebApp`) carries this guarantee across both handler
 families it mounts: it **refuses to build** when `Config.TrustedOrigins` is empty unless you

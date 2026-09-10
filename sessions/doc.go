@@ -36,7 +36,12 @@
 // # HTTP middleware
 //
 // RequireSession validates the session cookie and hands the authenticated egauth.Actor and Session
-// to your handler.
+// to your handler. A cookie-authenticated state-changing request (POST/PUT/PATCH/DELETE) must pass
+// a strict same-origin check by default: its Origin — or, failing that, Referer — host must equal
+// the request's own Host or an origin added with WithTrustedOrigins; otherwise it is rejected with
+// 403. Requests with neither header are rejected. Authorization: Bearer requests are exempt,
+// because a header credential is not ambient and cross-site attackers cannot attach it. Use
+// WithInsecureNoOriginCheck only as an explicit, documented opt-out.
 //
 // # Security posture
 //

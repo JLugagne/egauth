@@ -145,7 +145,30 @@ func RequireSession(svc Service, handler AuthenticatedSessionHandlerFunc, opts .
 func WithTenantResolver(f func(*http.Request) string) HandlerOption
 // extracts tenantID from request (host header, path segment, JWT claim, etc.)
 // default: empty string (single-tenant partition)
+
+func WithTrustedOrigins(origins ...string) HandlerOption
+// widens the CSRF same-origin allowlist; supply hosts without scheme ("app.example.com")
+// default: empty allowlist — only the request's own Host is allowed
+
+func WithInsecureNoOriginCheck() HandlerOption
+// disables the CSRF origin gate entirely — explicit, insecure opt-out; prefer WithTrustedOrigins
 ```
+
+### CSRF origin gate (cookie auth only)
+
+`RequireSession` applies a strict same-origin check to cookie-authenticated state-changing
+requests (`POST`/`PUT`/`PATCH`/`DELETE`), ON BY DEFAULT via `httputil.OriginAllowed`:
+
+- allowed only when the request's `Origin` (or `Referer` fallback) host equals `r.Host` or a host
+  in `WithTrustedOrigins`;
+- a request with neither header is treated as untrusted;
+- cross-scheme `http` origins over HTTPS are rejected;
+- rejection is `403 cross_site_blocked` **before** `ValidateSession`, so the store and handler
+  never see a forged request.
+
+`Authorization: Bearer` authentication is **exempt**: the header is a non-ambient credential the
+browser does not attach automatically, so CSRF does not apply. `WithInsecureNoOriginCheck()`
+restores accept-all behavior and is named "Insecure" deliberately.
 
 No cookie is set by the middleware. The caller is responsible for writing the `Set-Cookie` header (using the plaintext token returned by `CreateSession` or `Rotate`). No `Secure`, `HttpOnly`, or `SameSite` flags are set by the library — cookie attributes are the caller's responsibility.
 
