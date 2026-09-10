@@ -31,6 +31,8 @@ type oidcSettings struct {
 // default is oauth.SafeHTTPClient() — the SSRF dial guard applies and 3xx responses are never
 // followed (issue #117); a plain 10s-timeout client is used only under WithInsecureDiscoveryURLs
 // (dev). Override it to supply a custom transport or, in tests, a client pointed at a stub server.
+// The Provider's own token and userinfo fetches independently default to oauth.SafeHTTPClient via
+// oauth.New (unless oauth.WithInsecureURLs or oauth.WithHTTPClient is passed).
 func WithDiscoveryHTTPClient(c *http.Client) OIDCOption {
 	return func(s *oidcSettings) { s.httpClient = c }
 }

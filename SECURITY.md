@@ -99,7 +99,13 @@ tokens, hashes) and what the **consumer** of the library is responsible for.
   provider email the provider reports as unverified** (`WithAllowUnverifiedEmail` opts out), and it
   never auto-links an external identity onto a pre-existing account that merely shares the email —
   both are account-squatting / takeover defences. The token exchange runs server-side with the
-  client secret; the provider access token never leaves the exchange.
+  client secret; the provider access token never leaves the exchange. Both the token POST (which
+  carries `client_secret`) and the userinfo GET (which carries the access token) use
+  `oauth.SafeHTTPClient` by default: its dial-time guard refuses loopback/link-local/RFC1918/
+  RFC6598/multicast targets (DNS-rebinding safe) and 3xx responses are never followed, so a
+  hostile or tenant-controlled issuer cannot point those fetches at an internal address.
+  Injecting `oauth.WithHTTPClient` (or the dev-only `oauth.WithInsecureURLs`) replaces that client
+  with an unguarded one.
 - **NIST-aligned passphrases.** `passwords/policy.PassphrasePolicy` enforces length (counted in
   Unicode code points) with NO composition rules and screens secrets against a denylist plus an
   optional pluggable `passwords.BreachChecker` (e.g. a HIBP k-anonymity client — egauth ships

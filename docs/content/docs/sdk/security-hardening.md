@@ -34,7 +34,7 @@ explicitly so you can decide deliberately rather than inherit a silent default.
 | OAuth/OIDC | HTTPS on provider URLs | **enforced** | Leave on; never `WithInsecureURLs` in prod |
 | OAuth/OIDC | JWKS bound to issuer (discovery) | enforced | Provide only the `Issuer` on the dynamic store |
 | OAuth/OIDC | Issuer allowlist (BYO-SSO) | **off** | `WithIssuerAllowlist` for untrusted tenants |
-| OAuth/OIDC | SSRF-safe HTTP client | on for the dynamic store | Use `SafeHTTPClient()` for any tenant-supplied URL |
+| OAuth/OIDC | SSRF-safe HTTP client | **on** (token, userinfo, discovery, JWKS) | Leave it on; opt out only for a controlled internal/dev IdP |
 | HTTP | Rate limiting on `Request*` | **off** | Wrap with the `ratelimit` middleware |
 
 ---

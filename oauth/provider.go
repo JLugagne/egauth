@@ -64,10 +64,16 @@ func WithScopes(scopes ...string) ProviderOption {
 	return func(p *Provider) { p.scopes = scopes }
 }
 
-// WithHTTPClient sets the HTTP client used for the token exchange and the user-info request
-// (default: a client with a 10s timeout and redirects disabled). Useful to inject a custom
-// transport or, in tests, a client pointed at a stub server. Automatic redirect following is
-// disabled to prevent client_secret leakage (SEC-OAU-07).
+// WithHTTPClient sets the HTTP client used for the token exchange and the user-info request.
+// Useful to inject a custom transport or, in tests, a client pointed at a stub server.
+// Automatic redirect following is disabled to prevent client_secret leakage (SEC-OAU-07).
+//
+// By default the provider uses the SSRF-hardened oauth.SafeHTTPClient: its dialer refuses
+// internal/loopback/link-local addresses (DNS-rebinding safe) and it never follows a 3xx, so a
+// hostile or tenant-controlled issuer cannot make the token POST (which carries client_secret) or
+// the userinfo GET (which carries the access token) reach an internal address. Injecting a custom
+// client bypasses that dial-time guard — only supply one you control, or use the dev-only
+// WithInsecureURLs opt-in for a loopback IdP.
 func WithHTTPClient(c *http.Client) ProviderOption {
 	return func(p *Provider) {
 		if c != nil {
@@ -129,16 +135,27 @@ func New(name, clientID, clientSecret, authURL, tokenURL string, scopes []string
 		authURL:      authURL,
 		tokenURL:     tokenURL,
 		scopes:       scopes,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
-		fetchUser: fetch,
+		fetchUser:    fetch,
 	}
 	for _, o := range opts {
 		o(p)
+	}
+	// The token exchange POST (carrying client_secret) and the userinfo GET (carrying the provider
+	// access token) fetch endpoints that may come from a tenant-supplied issuer or its discovery
+	// document. Default to the SSRF-hardened client — dial-time internal-IP guard (DNS-rebinding
+	// safe) plus 3xx rejection — mirroring newOIDCVerifier; the plain client is reserved for the
+	// explicit WithInsecureURLs dev opt-in. An explicitly injected WithHTTPClient always wins.
+	if p.httpClient == nil {
+		if p.allowInsecureURLs {
+			p.httpClient = &http.Client{
+				Timeout: 10 * time.Second,
+				CheckRedirect: func(req *http.Request, via []*http.Request) error {
+					return http.ErrUseLastResponse
+				},
+			}
+		} else {
+			p.httpClient = SafeHTTPClient()
+		}
 	}
 	// SEC-06: the authorization and token endpoints must be https by default. The dev-only
 	// WithInsecureURLs opt-in relaxes this. The check runs after options so the flag is honoured.
@@ -255,7 +272,10 @@ func WithExpectedNonce(nonce string) ExchangeOption {
 
 // Exchange swaps an authorization code (with its PKCE verifier, if any) for the provider's
 // normalized user info. The token endpoint is always called over the provider's configured
-// (HTTPS) URL with the client secret; the access token never leaves this method.
+// (HTTPS) URL with the client secret; the access token never leaves this method. Both the token
+// POST and the userinfo GET run over the provider's SSRF-hardened client by default (see
+// WithHTTPClient); injecting a custom client or setting WithInsecureURLs replaces it with an
+// unguarded client.
 //
 // For an OIDC-enabled provider (WithOIDC) the id_token from the token response is validated
 // (signature + iss/aud/exp/iat/nonce) and the UserInfo is derived from its verified claims; the
@@ -355,6 +375,11 @@ func GetJSON(ctx context.Context, c *http.Client, rawURL, accessToken string, ds
 // provider rejects non-https endpoints (SEC-06). It is the URL counterpart of the loud,
 // secure-by-default WithInsecureCookies. When set, an OIDC-enabled provider also needs the same
 // opt-in on its OIDCConfig (AllowInsecureURLs).
+//
+// It also swaps the provider's SSRF-hardened HTTP client for a plain 10s client, because the
+// dial-time guard would reject the loopback IdP. That client has no internal-IP protection, so
+// WithInsecureURLs must stay confined to local development; in production leave it unset (or
+// inject a client with WithHTTPClient when a custom transport is genuinely required).
 func WithInsecureURLs() ProviderOption {
 	return func(p *Provider) { p.allowInsecureURLs = true }
 }

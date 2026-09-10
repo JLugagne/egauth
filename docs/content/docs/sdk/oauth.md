@@ -104,7 +104,7 @@ p := providers.OIDC(ctx, issuer, "client-id", "client-secret",
 )
 ```
 
-If discovery fails, the error is deferred (like an invalid endpoint passed to `oauth.New`) and surfaces on the first `AuthCodeURL`/`Exchange` call rather than panicking. On an untrusted/dynamic path, pass `providers.WithDiscoveryHTTPClient(oauth.SafeHTTPClient())`.
+If discovery fails, the error is deferred (like an invalid endpoint passed to `oauth.New`) and surfaces on the first `AuthCodeURL`/`Exchange` call rather than panicking. Discovery, token and userinfo fetches all use the SSRF-safe `oauth.SafeHTTPClient` by default; override discovery with `providers.WithDiscoveryHTTPClient` only when you need a custom transport.
 
 ## The OAuth Flow
 
