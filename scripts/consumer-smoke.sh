@@ -8,10 +8,11 @@
 # succeed. It fails if the root go.mod requires a version no proxy can serve (for example a
 # placeholder pseudo-version that only resolves inside the repository's own workspace).
 #
-# Performs NO network access. Requires Go >= 1.26.7 and a module cache populated with the
-# root module's dependencies, including the adapter version pinned in go.mod. Warm the cache
-# first if needed with:
-#   go mod download github.com/JLugagne/egauth/adapters/pgx@<pinned-version>
+# The script first warms the module cache from the configured public proxy with the full
+# dependency graphs of the repo root and the pinned adapter, then runs the consumer commands
+# with only a local file:// proxy. The offline run is the assertion; the warm-up merely lets
+# the check run on a cold runner instead of requiring a pre-populated module cache. Requires
+# Go >= 1.26.7 and network access to GOPROXY for the warm-up.
 #
 # Usage: scripts/consumer-smoke.sh [path-to-repo]
 
@@ -43,6 +44,27 @@ fi
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# ---- warm the module cache for the graphs the offline consumer resolves ---------------------
+# The file:// proxy below can only serve modules already in the cache. Populate it from the
+# public proxy with the repo root's graph, the adapter module's graph, and the adapter module
+# itself (the root's local `replace` keeps the adapter out of the root's download set, but the
+# consumer has no such replace and must resolve it from the proxy). The `-modfile` copies keep
+# the go.sum entries this warm-up needs out of the checkout. The warm-up itself is not the
+# assertion: the consumer commands below stay offline and still fail if the pin is bad.
+echo
+echo "== warm-up: populate the module cache from the configured proxy =="
+cp "$REPO/go.mod" "$WORK/root.mod"
+cp "$REPO/adapters/pgx/go.mod" "$WORK/adapter.mod"
+( cd "$REPO" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download -modfile="$WORK/root.mod" all )
+( cd "$REPO/adapters/pgx" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download -modfile="$WORK/adapter.mod" all )
+mkdir -p "$WORK/adapter-download"
+cat > "$WORK/adapter-download/go.mod" <<EOF
+module consumer-smoke-adapter-download
+
+go 1.26.7
+EOF
+( cd "$WORK/adapter-download" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download "$ADAPTER@$ADAPTER_VERSION" )
 
 # ---- throwaway consumer that imports egauth exactly as a downstream user would ------------
 mkdir -p "$WORK/consumer"

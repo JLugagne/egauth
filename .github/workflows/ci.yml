@@ -63,10 +63,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     # External consumers cannot see this repo's local `replace` directives. This job proves the
-    # root go.mod pins the adapter to a version the proxy can serve: the script builds a throwaway
-    # consumer module and runs `go list -m all` + `go mod download all` with only a local file://
-    # proxy. The warm-up download populates the cache the script serves; the script itself makes no
-    # network access, so an unresolvable placeholder pseudo-version cannot slip through.
+    # root go.mod pins the adapter to a version the proxy can serve: the script warms the module
+    # cache from the public proxy with the repo root's and the adapter's full dependency graphs,
+    # then runs `go list -m all` + `go mod download all` in a throwaway consumer module with only
+    # a local file:// proxy. A cold runner cache is fine; the offline run is still the assertion,
+    # so a pin the proxy cannot serve fails here.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -77,15 +78,7 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Warm the pinned adapter into the module cache
-        env:
-          GOWORK: "off"
-        run: |
-          set -euo pipefail
-          adapter_version="$(go list -m -f '{{.Version}}' github.com/JLugagne/egauth/adapters/pgx)"
-          go mod download "github.com/JLugagne/egauth/adapters/pgx@${adapter_version}"
-
-      - name: Consumer module smoke (offline file:// proxy)
+      - name: Consumer module smoke (warm-up + offline assertion)
         run: bash scripts/consumer-smoke.sh
 
   test-adapters-pgx:
