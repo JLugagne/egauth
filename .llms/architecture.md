@@ -59,6 +59,23 @@ methods in minor releases):
 - `tokens/issuertest`
 - `passwords/hashertest`
 
+### Cross-flow login invariants
+
+`internal/loginflowtest` is the conformance suite for login entry points, not for Store/Service
+implementations. It enumerates every exported login flow (identity password and magic link, the
+`authflow` engine and the identity handler wired with `WithAuthFlow`, the OAuth callback with and
+without `WithAuthFlow`, MFA step-up, OTP verify, passkey login and discoverable login, and the
+`webapp` preset) and runs the same post-authentication invariant assertions against each: disabled
+and deleted accounts are refused, tenant binding fails closed, `MustChangePassword` propagates and
+survives a caller trying to clear it, a configured MFA gate withholds the full renewable pair,
+claims are rebuilt at issuance, issuance is audited, and no rejection mints a session. Flows that
+genuinely cannot exercise an invariant record the reason in the table and the suite skips it
+visibly.
+
+A new or renamed login constructor must be added to the table (or recorded with a reason in
+`nonFlowConstructors`), or `TestAllLoginFlowsRegistered` fails. Treat a red suite as a release
+blocker: it means a flow stopped applying one of the shared controls.
+
 ## Cross-cutting seams (bring-your-own)
 
 - `identity.Mailer` / `identity.SMSSender` — delivery; egauth never sends mail/SMS itself.
