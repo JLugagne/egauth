@@ -12,9 +12,10 @@ permissions:
 
 # Multi-module monorepo: the core flagship module (.) and the nested pgx adapter module
 # (./adapters/pgx). The committed go.work resolves the core module from local disk for the adapter
-# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to prove the
-# core module is self-contained — it builds and tests as the standalone module external consumers
-# get, with no Docker and no dependency on the workspace or the adapter.
+# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to resolve
+# from the root go.mod alone, as external consumers do (no Docker). The root go.mod pins the adapter
+# to a published version and keeps a local replace for development; the packaging job below proves a
+# consumer can resolve that graph through the proxy.
 
 jobs:
   test-core:
@@ -52,9 +53,40 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # The core module carries no pgx/testcontainers dependency, so it tests with NO Docker
-        # daemon. GOWORK=off (job env) confirms it resolves entirely from its own go.mod.
+        # The core suite imports the pgx adapter's passkey package but no testcontainers, so it
+        # tests with NO Docker daemon. GOWORK=off (job env) resolves the adapter from the local
+        # replace pinned in the root go.mod.
         run: go test -race -failfast ./...
+
+  consumer-smoke:
+    name: Packaging — consumer module graph (offline)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # External consumers cannot see this repo's local `replace` directives. This job proves the
+    # root go.mod pins the adapter to a version the proxy can serve: the script builds a throwaway
+    # consumer module and runs `go list -m all` + `go mod download all` with only a local file://
+    # proxy. The warm-up download populates the cache the script serves; the script itself makes no
+    # network access, so an unresolvable placeholder pseudo-version cannot slip through.
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Warm the pinned adapter into the module cache
+        env:
+          GOWORK: "off"
+        run: |
+          set -euo pipefail
+          adapter_version="$(go list -m -f '{{.Version}}' github.com/JLugagne/egauth/adapters/pgx)"
+          go mod download "github.com/JLugagne/egauth/adapters/pgx@${adapter_version}"
+
+      - name: Consumer module smoke (offline file:// proxy)
+        run: bash scripts/consumer-smoke.sh
 
   test-adapters-pgx:
     name: adapters/pgx — Test & Vet (Docker/testcontainers)

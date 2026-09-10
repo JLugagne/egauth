@@ -172,8 +172,36 @@ github.com/JLugagne/egauth => ../..` that resolves the (as-yet-unpublished, priv
 from this repo's root, so every go command — `build`, `test`, `vet`, `tidy`, `go work sync` — works
 offline without reaching the proxy for a core version that doesn't exist yet. A committed `go.work`
 also lists both modules so the workspace spans them. Both are **development-only**: `go.work` is
-never seen by external consumers, and the `replace` is dropped at release (and is ignored by
-importers even if it shipped). `go.work.sum` is a derived lock file and is not tracked.
+never seen by external consumers, and the adapter drops its `replace` at release. A shipped
+`replace` is ignored by importers, but that does **not** make it harmless: it can only be left in
+place while the matching `require` names a real published version, because consumers resolve that
+`require` themselves. The root module's adapter requirement is the critical case — see below.
+`go.work.sum` is a derived lock file and is not tracked.
+
+### Root module `adapters/pgx` requirement (verify before every core tag)
+
+The root `go.mod` requires the adapter because the `e2e-security` tests import
+`adapters/pgx/passkey`. External consumers cannot see the root module's local
+`replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx`, so the `require` must
+always name a version the module proxy can serve. A placeholder left over from local
+development (such as the zero pseudo-version `v0.0.0-00010101000000-000000000000`) makes
+`go list -m all`, `go mod download all`, and SBOM tooling fail for every consumer even
+though `go build` of imported packages still succeeds.
+
+Before tagging core, confirm the pinned adapter version is published and that the consumer
+module commands succeed offline against a local file proxy:
+
+```sh
+# The pinned version must be listed by the proxy.
+go list -m -versions github.com/JLugagne/egauth/adapters/pgx
+
+# Warm the module cache for the offline consumer check, then run it.
+go mod download github.com/JLugagne/egauth/adapters/pgx@vX.Y.Z
+bash scripts/consumer-smoke.sh   # asserts consumer `go list -m all` and `go mod download all`
+```
+
+The `replace` directive may stay in the repository for development; consumers ignore it,
+and the published `require` resolves on its own.
 
 ### Adapter granularity convention
 
@@ -185,8 +213,9 @@ consumer who picks pgx never inherits another backend's driver.
 
 ### The two-tag release dance (ordered, maintainer-manual)
 
-1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. The adapter's `require` can only point at
-   a published core version, so core must exist on the proxy before the adapter is tagged.
+1. **Cut the core tag first** (Steps 1–5 above): `vX.Y.Z`. First run the root module's adapter-pin
+   check (see "Root module `adapters/pgx` requirement" above). The adapter's `require` can only point
+   at a published core version, so core must exist on the proxy before the adapter is tagged.
 2. **Point the adapter at the published core version.** Pre-tag, `adapters/pgx/go.mod` pins the core
    `require` and carries the dev `replace github.com/JLugagne/egauth => ../..`. Now that core is
    published, drop the replace, pin the require to the freshly-cut version, and regenerate `go.sum`
@@ -201,8 +230,9 @@ consumer who picks pgx never inherits another backend's driver.
    git commit -m "chore: point adapters/pgx at egauth vX.Y.Z"
    ```
 
-   A `replace` left in the shipped go.mod is ignored by external importers (so it's harmless if
-   forgotten), but dropping it keeps the published module clean.
+   A `replace` left in the shipped go.mod is ignored by external importers, but it is only benign
+   while the matching `require` names a real published version — do not treat it as harmless by
+   default and do not leave a placeholder behind. Dropping it keeps the published module clean.
 3. **Cut the adapter tag**, which is path-prefixed because it is a nested module:
 
    ```sh
@@ -250,6 +280,7 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Pre-release verification**: Confirm `main` is green in CI, run local `go test ./...` and `make check`
 - [ ] **CHANGELOG updated**: Move `[Unreleased]` section to a dated version header (`## [vX.Y.Z] — YYYY-MM-DD`)
 - [ ] **go.mod retract block**: Add `retract` directive for any pre-release or yanked versions (if applicable)
+- [ ] **Root adapter pin verified**: Root go.mod requires a published `adapters/pgx` version (no placeholder); `go list -m all` and `go mod download all` pass via `bash scripts/consumer-smoke.sh`
 - [ ] **Changes committed**: Stage and commit CHANGELOG.md and go.mod with message "chore: prepare release vX.Y.Z"
 - [ ] **SBOM generated**: Run `syft` to generate SBOM in both JSON and XML format
 - [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` (requires GPG setup)
