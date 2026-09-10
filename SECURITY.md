@@ -522,6 +522,28 @@ smuggle the JSON body. The WebAuthn ceremony handlers (Begin/Finish registration
 subject to this gate because they are already protected by the HMAC-sealed
 `__Host-passkey_ceremony` cookie and go-webauthn's own origin validation.
 
+## Rate limiting on authentication endpoints
+
+The à-la-carte handlers (`identity`, `mfa`, `otp`, `tokens`, `passkey`) are policy-free about
+throttling: egauth exposes the `ratelimit.Limiter` seam and the `ratelimit.Middleware` /
+`ratelimit.Wrap` helpers, and the consumer decides the policy. The **`webapp` v1 preset**
+(`webapp.NewWebApp`) is different: it applies a **per-client-IP throttle to every endpoint it
+mounts** (login, register, refresh, logout) by default, so the shipped preset cannot accidentally
+expose unthrottled credential guessing or a refresh/registration flood:
+
+- One process-local `ratelimit.TokenBucket` is shared across the mounted routes, keyed by
+  `ratelimit.ClientIP` (the request's `RemoteAddr`; `X-Forwarded-For` is **not** trusted), with a
+  burst of `DefaultRateLimitBurst` (20) and one request restored every `DefaultRateLimitRefill`
+  (6s) — about 10 requests/minute per IP sustained. A rejected request is answered
+  `429 Too Many Requests` with a `Retry-After` header before it reaches the handlers.
+- Tune the default with `Config.RateLimitBurst` / `Config.RateLimitRefill`, or replace it with a
+  shared-store implementation (e.g. Redis) via `Config.RateLimiter` for multi-instance
+  deployments. Behind a trusted proxy the default keys on the proxy's address; wrap the returned
+  handler with your own proxy-aware limiter if per-forwarded-client keys are required.
+- Opt out only with the explicit `Config.InsecureNoRateLimit`, and only when an upstream proxy,
+  WAF or middleware already throttles those routes. Supplying both `RateLimiter` and
+  `InsecureNoRateLimit` is rejected at construction.
+
 ## Observability and idempotency (consumer responsibility)
 
 **Observability** — wire `event.Sink` to your metrics pipeline or audit log. The ready-made
@@ -554,20 +576,27 @@ application layer's responsibility. egauth provides no idempotency-key layer; co
 applications that need it must implement or proxy one in front of the egauth handlers, mirroring
 how rate limiting and CSRF tokens are positioned.
 
-## Evicting in-memory stores in production (consumer responsibility)
+## In-memory stores are bounded by default
 
-The in-memory store backends (`sessions/memory`, `otp/memory`) and the `ratelimit.TokenBucket`
-accumulate entries until a caller explicitly invokes `DeleteExpired` / `Cleanup`. This is an
-intentional design choice (the in-memory stores are primarily for tests and single-process apps),
-but it is an **operational footgun** if overlooked:
+The in-memory backends (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`,
+`tokens/memory`) and `ratelimit.TokenBucket` are **bounded by default** so a flood of
+short-lived sessions, OTP/verification tokens, recovery attempts, refresh tokens, or unique
+rate-limit keys cannot exhaust heap memory:
 
-- A flood of short-lived sessions, OTP codes, or unique rate-limit keys will grow the internal
-  maps indefinitely, exhausting heap memory and creating a denial-of-service vector.
-- The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
-  it is O(1) on the hot path and is **not** a substitute for a full sweep.
+- `sessions/memory`, `otp/memory`, `identity/memory` and `tokens/memory` default to a cap of
+  `DefaultMaxEntries` (100,000). At the cap they evict expired records first and then the
+  soonest-expiring record; `sessions/memory` never evicts live sessions and instead fails the
+  insert with `sessions.ErrStoreCapacityExceeded`. Durable account records (users, identities,
+  MFA enrollments, recovery codes, API keys) are never evicted.
+- `mfa/memory` caps recovery-attempt records at `DefaultMaxEntries`, evicting the stalest first;
+  TOTP enrollments and recovery codes are durable.
+- `ratelimit.TokenBucket` caps tracked keys at `DefaultMaxKeys` (100,000) and evicts the
+  least-pressured bucket.
 
-**Mitigation (consumer responsibility):** schedule periodic eviction using the optional
-`janitor` helper shipped with egauth:
+The bounded defaults are deliberately generous; ordinary single-process use never reaches them.
+Callers that prefer to own eviction can opt into the unbounded model explicitly with
+`NewUnboundedStore()` (memory stores) or `WithMaxKeys(n)` (`ratelimit`), and must then schedule
+periodic eviction using the optional `janitor` helper shipped with egauth:
 
 ```go
 import "github.com/JLugagne/egauth/janitor"
@@ -578,7 +607,10 @@ j := janitor.Start(ctx, 5*time.Minute, func() {
 defer j.Stop()
 ```
 
-The same pattern applies to `otp/memory.Store.DeleteExpired` and `ratelimit.TokenBucket.Cleanup`.
+The same pattern applies to `otp/memory.Store.DeleteExpired`,
+`identity/memory.Store.DeleteExpiredVerificationTokens` and `ratelimit.TokenBucket.Cleanup`.
+The per-read opportunistic eviction in `sessions/memory` only evicts the single looked-up entry;
+it is O(1) on the hot path and is **not** a substitute for a full sweep in the unbounded model.
 See package `janitor` for multi-tenant and multi-store usage examples. Deployments that need
 persistence or horizontal scaling should use the `pgx` backends instead of the in-memory stores.
 

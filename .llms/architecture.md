@@ -93,25 +93,31 @@ See [recipes.md](recipes.md) for concrete wiring of each stack.
 
 ## Storage backends
 
-- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory, self-bounding
-  or janitor-evicted — see below).
+- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory and
+  bounded by default; explicit unbounded opt-out for janitor-evicted deployments — see below).
 - `adapters/pgx` is a separate go.mod so core consumers never pull pgx/testcontainers/Docker.
   `Migrate(ctx, pool)` once at startup (forward-only, versioned, idempotent). [storage-pgx.md](storage-pgx.md).
 
 ### In-memory store growth control
 
-All three in-process stores that can grow without bound ship a **bounded variant** alongside the
-original unbounded constructor:
+Every in-process store a consumer can grow without authenticating is **bounded by default**.
+The unbounded model (self-managed eviction via `janitor`) is an explicit, clearly named opt-out:
 
-| Package | Unbounded (original) | Bounded (new) | Cap policy |
+| Package | Bounded default | Unbounded opt-out | Cap policy |
 |---|---|---|---|
-| `sessions/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
-| `otp/memory` | `NewStore()` | `NewBoundedStore(n)` | evicts expired first, then soonest-expiring |
+| `sessions/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first; at the cap, live sessions are never evicted — `CreateSession` fails with `ErrStoreCapacityExceeded` (or `WithEvictLiveOnFull(true)` opts into soonest-expiring) |
+| `otp/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first, then soonest-expiring |
+| `identity/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | pending verification tokens: expired first, then soonest-expiring; users/identities are durable |
+| `mfa/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | recovery-attempt records: stalest first; TOTP enrollments/recovery codes are durable |
+| `tokens/memory` | `NewStore[C]()`, `NewBoundedStore[C](n)` | `NewUnboundedStore[C]()` | refresh-token records: expired first, then soonest-expiring; API keys are durable |
 | `ratelimit` | `NewTokenBucket(…)` | `NewTokenBucket(…, WithMaxKeys(n))` | evicts most-refilled (least-pressure) bucket |
 
-The unbounded constructors remain available for callers that prefer to schedule periodic eviction
-via `janitor`. Both models are safe for concurrent use. The bounded variants require no external
-scheduler and are recommended for Internet-facing deployments where key cardinality is unbounded.
+Durable per-account records (users, identities, MFA enrollments, recovery codes, API keys) are
+never silently evicted; sized too small, the caps bound memory rather than drop credentials.
+`DefaultMaxEntries` is 100,000 for the memory stores and `DefaultMaxKeys` is 100,000 for
+`TokenBucket` — large enough that ordinary use never reaches them. Both models are safe for
+concurrent use; the bounded defaults require no external scheduler and are recommended for
+Internet-facing deployments where key cardinality is unbounded.
 
 ## Module placement decisions (v1 API freeze)
 

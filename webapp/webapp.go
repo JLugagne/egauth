@@ -29,6 +29,7 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/ratelimit"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/JLugagne/egauth/tokens/basic"
 )
@@ -37,6 +38,17 @@ import (
 // zero. Short-lived access tokens bound the window a leaked access token is usable; rotation
 // refreshes them transparently.
 const DefaultAccessTTL = 15 * time.Minute
+
+// DefaultRateLimitBurst is the number of authentication requests a single client IP may make as
+// a burst before the default limiter starts answering 429 Too Many Requests. It is deliberately
+// generous enough for ordinary use (a login, a refresh, a logout) while keeping a flood of
+// credential guesses from reaching the handlers at full speed.
+const DefaultRateLimitBurst = 20
+
+// DefaultRateLimitRefill is how often the default limiter restores one request to a client IP's
+// budget once the burst is exhausted: one request per interval per IP. Combined with
+// DefaultRateLimitBurst this allows a sustained 10 requests/minute per IP.
+const DefaultRateLimitRefill = 6 * time.Second
 
 // DefaultRefreshTTL is the refresh-token lifetime NewWebApp uses when Config.RefreshTTL is
 // left zero. It bounds how long a session can be kept alive by rotation before the user must
@@ -81,6 +93,23 @@ type Config struct {
 	// consistently insecure (every origin accepted), restoring the pre-v1 behavior. Only set this
 	// when CSRF is handled by a separate layer.
 	InsecureNoOriginCheck bool
+	// RateLimiter overrides the throttle applied to every mounted authentication endpoint. Nil
+	// selects a process-local ratelimit.TokenBucket keyed by client IP (see RateLimitBurst and
+	// RateLimitRefill). Supply a shared-store implementation (e.g. Redis) for multi-instance
+	// deployments. Cannot be combined with InsecureNoRateLimit.
+	RateLimiter ratelimit.Limiter
+	// RateLimitBurst overrides the default limiter's burst size (DefaultRateLimitBurst). Ignored
+	// when RateLimiter is set; non-positive selects the default.
+	RateLimitBurst int
+	// RateLimitRefill overrides the default limiter's refill interval (DefaultRateLimitRefill):
+	// how often one request is restored to a client IP's budget. Ignored when RateLimiter is set;
+	// non-positive selects the default.
+	RateLimitRefill time.Duration
+	// InsecureNoRateLimit disables the preset's rate-limiting-by-default guarantee on every
+	// mounted authentication endpoint, leaving login/register/refresh/logout unthrottled. Only set
+	// this when an outer proxy or middleware already throttles those routes; it restores the
+	// pre-v1 behavior. Cannot be combined with RateLimiter.
+	InsecureNoRateLimit bool
 	// EventSink receives security events (login, registration, refresh reuse, logout, ...).
 	// Nil selects event.NewSlogSink(nil), so events go to slog.Default() instead of being
 	// silently dropped — silent auth is un-auditable auth.
@@ -89,8 +118,9 @@ type Config struct {
 }
 
 // NewWebApp wires the identity and tokens packages into a single mounted http.Handler for
-// the 80% password web-app case, with secure-by-default cookies, CSRF and a non-nil event
-// sink. Every route it mounts is the same exported handler you would wire by hand:
+// the 80% password web-app case, with secure-by-default cookies, CSRF, per-client-IP rate
+// limiting and a non-nil event sink. Every route it mounts is the same exported handler you
+// would wire by hand:
 //
 //	POST /auth/register   identity.RegisterHandler
 //	POST /auth/login      identity.LoginHandler
@@ -130,6 +160,9 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 	}
 	if len(cfg.TrustedOrigins) > 0 && cfg.InsecureNoOriginCheck {
 		return nil, errors.New("webapp: cannot specify both TrustedOrigins and InsecureNoOriginCheck")
+	}
+	if cfg.RateLimiter != nil && cfg.InsecureNoRateLimit {
+		return nil, errors.New("webapp: cannot specify both RateLimiter and InsecureNoRateLimit")
 	}
 
 	accessTTL := cfg.AccessTTL
@@ -206,12 +239,42 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		tkOpts = append(tkOpts, tokens.WithTenantResolver(resolve))
 	}
 
+	register := http.Handler(identity.RegisterHandler(cfg.Identity, issuer, claimsOf, idOpts...))
+	login := http.Handler(identity.LoginHandler(cfg.Identity, issuer, claimsOf, idOpts...))
+	refresh := http.Handler(basic.RefreshHandler(issuer, tkOpts...))
+	logout := http.Handler(basic.LogoutHandler(cfg.TokenStore, tkOpts...))
+
+	// Throttle-by-default: every mounted authentication endpoint shares one limiter keyed by
+	// client IP, so an attacker cannot spread credential guessing across routes, and a flood is
+	// rejected with 429 before it reaches the argon2/stdlib handlers. One limiter per preset means
+	// the burst budget is per client, not per route. Config.RateLimiter (e.g. a Redis-backed
+	// implementation) replaces the process-local TokenBucket.
+	if !cfg.InsecureNoRateLimit {
+		limiter := cfg.RateLimiter
+		if limiter == nil {
+			burst := cfg.RateLimitBurst
+			if burst <= 0 {
+				burst = DefaultRateLimitBurst
+			}
+			refill := cfg.RateLimitRefill
+			if refill <= 0 {
+				refill = DefaultRateLimitRefill
+			}
+			limiter = ratelimit.NewTokenBucket(burst, refill)
+		}
+		throttle := ratelimit.Middleware(limiter, ratelimit.ClientIP)
+		register = throttle(register)
+		login = throttle(login)
+		refresh = throttle(refresh)
+		logout = throttle(logout)
+	}
+
 	routes := cfg.Routes.withDefaults()
 	mux := http.NewServeMux()
-	mux.Handle(routes.Register, identity.RegisterHandler(cfg.Identity, issuer, claimsOf, idOpts...))
-	mux.Handle(routes.Login, identity.LoginHandler(cfg.Identity, issuer, claimsOf, idOpts...))
-	mux.Handle(routes.Refresh, basic.RefreshHandler(issuer, tkOpts...))
-	mux.Handle(routes.Logout, basic.LogoutHandler(cfg.TokenStore, tkOpts...))
+	mux.Handle(routes.Register, register)
+	mux.Handle(routes.Login, login)
+	mux.Handle(routes.Refresh, refresh)
+	mux.Handle(routes.Logout, logout)
 
 	return mux, nil
 }

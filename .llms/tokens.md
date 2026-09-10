@@ -333,7 +333,10 @@ func NewMemoryStore() Store                     // wraps memory.NewStore[struct{
 
 ### memory package
 ```go
-func NewStore[C any]() *Store[C]
+func NewStore[C any]() *Store[C]              // bounded by DefaultMaxEntries (100,000) refresh-token records
+func NewBoundedStore[C any](maxSize int) *Store[C]
+func NewUnboundedStore[C any]() *Store[C]     // explicit opt-out; schedule DeleteExpired with janitor
+func (s *Store[C]) MaxEntries() int
 ```
 
 ### Cookie helpers
@@ -623,5 +626,5 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 - `Store` is **monolithic** in v0.x (no capability split before v1); external implementations must run `tokens/storetest` conformance suite on each upgrade.
 - `RefreshPath` on `Cookies` must remain `"/"` when using `WithAutoRefresh` middleware (the browser only sends the refresh cookie on matching paths).
 - Single-tenant shortcut: `jwt.NewSingleTenant(svc)` hard-wires `tenantID=""` on `Rotate`; do NOT mix with multi-tenant calls against the same `Service`.
-- Consumed refresh rows are retained until `ExpiresAt` for replay detection; run `Store.DeleteExpired` periodically (e.g. hourly) to prevent unbounded growth.
+- Consumed refresh rows are retained until `ExpiresAt` for replay detection. The default memory store is bounded (`DefaultMaxEntries`, evicting expired then soonest-expiring); `Store.DeleteExpired` is only needed for the explicit `NewUnboundedStore()` opt-in. API keys are durable and never evicted — revoke them explicitly.
 - `WithAutoRefresh`: on expired access token + valid refresh cookie the middleware rotates transparently and proceeds — no redirect. On rotation failure it clears cookies and returns `401`.

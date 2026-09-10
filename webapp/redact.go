@@ -26,11 +26,11 @@ func (cfg Config) String() string {
 	}
 	return fmt.Sprintf(
 		"Config{Issuer:%s Tenant:%s SigningKey:%s AccessTTL:%s RefreshTTL:%s CookieDomain:%s "+
-			"TrustedOrigins:%v InsecureNoOriginCheck:%t IdentitySet:%t TokenStoreSet:%t "+
-			"EventSinkSet:%t Routes:%v}",
+			"TrustedOrigins:%v InsecureNoOriginCheck:%t InsecureNoRateLimit:%t RateLimiterSet:%t "+
+			"IdentitySet:%t TokenStoreSet:%t EventSinkSet:%t Routes:%v}",
 		cfg.Issuer, cfg.Tenant, signingKey, cfg.AccessTTL, cfg.RefreshTTL, cfg.CookieDomain,
-		cfg.TrustedOrigins, cfg.InsecureNoOriginCheck, cfg.Identity != nil, cfg.TokenStore != nil,
-		cfg.EventSink != nil, cfg.Routes,
+		cfg.TrustedOrigins, cfg.InsecureNoOriginCheck, cfg.InsecureNoRateLimit, cfg.RateLimiter != nil,
+		cfg.Identity != nil, cfg.TokenStore != nil, cfg.EventSink != nil, cfg.Routes,
 	)
 }
 
@@ -52,5 +52,7 @@ func (cfg Config) LogValue() slog.Value {
 		slog.String("cookie_domain", cfg.CookieDomain),
 		slog.Any("trusted_origins", cfg.TrustedOrigins),
 		slog.Bool("insecure_no_origin_check", cfg.InsecureNoOriginCheck),
+		slog.Bool("insecure_no_rate_limit", cfg.InsecureNoRateLimit),
+		slog.Bool("rate_limiter_set", cfg.RateLimiter != nil),
 	)
 }

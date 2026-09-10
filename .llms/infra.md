@@ -89,11 +89,12 @@ func NewTokenBucket(burst int, refillInterval time.Duration, opts ...Option) *To
 func (tb *TokenBucket) Allow(ctx context.Context, key string) (bool, time.Duration)
 func (tb *TokenBucket) Cleanup() int  // returns number of buckets removed
 ```
-Per-key token-bucket. `burst` floored at 1, `refillInterval` floored at 1ns. `Cleanup` drops only fully-refilled buckets (no reset under pressure). **Periodic eviction mandatory** — see janitor.
+Per-key token-bucket. `burst` floored at 1, `refillInterval` floored at 1ns. **Bounded by default**: tracks at most `DefaultMaxKeys` (100,000) keys and evicts the least-pressured bucket (expired/fully-refilled first) when a new key arrives at the cap, so no external scheduler is required. `Cleanup` drops only fully-refilled buckets (no reset under pressure) and is optional for the default configuration — schedule it (janitor) only when using a larger `WithMaxKeys` cap or to reclaim idle keys sooner.
 
 ### Options
 ```go
 func WithClock(now func() time.Time) Option  // inject time source for deterministic tests
+func WithMaxKeys(n int) Option               // hard cap on tracked keys; <=0 selects DefaultMaxKeys
 ```
 
 ### Middleware / Wrap
@@ -240,16 +241,22 @@ func (j *Janitor) Stop()
 ```
 `Start` launches a background goroutine calling `fn` every `interval`. Stops on context cancellation or `Stop()`. `interval` floored at 1ns. `Stop` blocks until goroutine exits; idempotent.
 
-### Stores requiring eviction
-| store | eviction call |
-|---|---|
-| `sessions/memory.Store` | `DeleteExpired(ctx, tenantID)` |
-| `otp/memory.Store` | `DeleteExpired(ctx, tenantID)` |
-| `ratelimit.TokenBucket` | `Cleanup()` |
+### Stores requiring eviction (unbounded opt-in only)
+The memory stores and `TokenBucket` are bounded by default and need no scheduler. Janitor is
+required only when you explicitly opt into the unbounded model:
+
+| store | unbounded opt-in | eviction call |
+|---|---|---|
+| `sessions/memory.Store` | `NewUnboundedStore()` | `DeleteExpired(ctx, tenantID)` |
+| `otp/memory.Store` | `NewUnboundedStore()` | `DeleteExpired(ctx, tenantID)` |
+| `identity/memory.Store` | `NewUnboundedStore()` | `DeleteExpiredVerificationTokens(ctx, tenantID)` |
+| `mfa/memory.Store` | `NewUnboundedStore()` | `DeleteStaleRecoveryAttempts(ctx, tenantID, cutoff)` |
+| `tokens/memory.Store` | `NewUnboundedStore[C]()` | `DeleteExpired(ctx, tenantID)` |
+| `ratelimit.TokenBucket` | `WithMaxKeys(n)` (larger) | `Cleanup()` |
 
 ## Wiring
 ```go
-// Slog event sink + token-bucket middleware + janitor for eviction
+// Slog event sink + token-bucket middleware (bounded by default; janitor optional)
 ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
 
@@ -257,7 +264,7 @@ sink := event.NewSlogSink(nil) // nil → slog.Default()
 
 tb := ratelimit.NewTokenBucket(10, time.Second)
 j := janitor.Start(ctx, time.Minute, func() {
-    tb.Cleanup()
+    tb.Cleanup() // only needed to reclaim idle keys earlier than the hard cap
 })
 defer j.Stop()
 
@@ -266,7 +273,8 @@ mux.Handle("/login", ratelimit.Middleware(tb, ratelimit.ClientIP)(loginHandler))
 ```
 
 ## Gotchas
-- **Janitor is mandatory for all in-memory stores** (`sessions/memory`, `otp/memory`, `ratelimit.TokenBucket`). Without it, a flood of unique keys causes unbounded memory growth — a trivial DoS vector.
+- **In-memory stores are bounded by default** (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`, `tokens/memory`, `ratelimit.TokenBucket`); `NewUnboundedStore()` / a larger `WithMaxKeys` is an explicit opt-out that makes `janitor` mandatory again. Without eviction, a flood of unique keys causes unbounded memory growth — a trivial DoS vector.
+- `webapp.NewWebApp` wires a per-client-IP `TokenBucket` (shared across login/register/refresh/logout) by default; `Config.InsecureNoRateLimit` is the explicit opt-out, `Config.RateLimiter` replaces it.
 - `event.Sink` nil = no-op; services always call `event.Emit`, never check nil themselves.
 - `Actor` is never in `context.Context`; always passed as an explicit argument.
 - `health.Pinger` is pgx-only; in-memory stores never satisfy it.

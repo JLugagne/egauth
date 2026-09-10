@@ -48,12 +48,13 @@ func (s *Store) FindSessionByHash(ctx context.Context, tenantID string, tokenHas
 
 // Store is an in-memory implementation of sessions.Store.
 //
-// By default the store is unbounded; session growth is controlled by periodic
-// calls to DeleteExpired (e.g. via [github.com/JLugagne/egauth/janitor]).
-// Use [NewBoundedStore] for a store that enforces a hard cap: it removes
-// already-expired sessions on insertion, and returns
+// Stores created by [NewStore] are bounded by [DefaultMaxEntries]: on insertion
+// at the cap the store removes already-expired sessions, and returns
 // [sessions.ErrStoreCapacityExceeded] if no expired sessions exist, so active
-// live sessions are never evicted.
+// live sessions are never evicted. Use [NewBoundedStore] to pick a different cap
+// and [NewUnboundedStore] for the previous unbounded behaviour, where growth is
+// controlled by periodic calls to DeleteExpired (e.g. via
+// [github.com/JLugagne/egauth/janitor]).
 type Store struct {
 	mu              sync.RWMutex
 	maxSize         int // 0 means unbounded
@@ -77,8 +78,25 @@ func WithEvictLiveOnFull(evict bool) Option {
 	}
 }
 
-// NewStore creates a new in-memory sessions Store.
+// DefaultMaxEntries is the default hard cap on the number of sessions an in-memory Store created
+// by [NewStore] retains. It is deliberately generous so ordinary single-process use never hits it;
+// it exists so a flood of sessions cannot exhaust memory. When the cap is reached with no expired
+// sessions, CreateSession fails with [sessions.ErrStoreCapacityExceeded] rather than evicting an
+// active session. Use [NewBoundedStore] to pick a different cap or [NewUnboundedStore] to opt out.
+const DefaultMaxEntries = 100_000
+
+// NewStore creates a new in-memory sessions Store bounded by [DefaultMaxEntries].
+// Callers that schedule periodic [Store.DeleteExpired] eviction and want no hard
+// cap can use [NewUnboundedStore] instead.
 func NewStore() *Store {
+	return NewBoundedStore(DefaultMaxEntries)
+}
+
+// NewUnboundedStore creates a new in-memory sessions Store with no entry cap. Session
+// growth is controlled entirely by periodic [Store.DeleteExpired] calls (e.g. via
+// [github.com/JLugagne/egauth/janitor]); prefer [NewStore]'s bounded default unless the
+// caller guarantees that eviction runs. It is safe for concurrent use.
+func NewUnboundedStore() *Store {
 	return &Store{
 		sessions: make(map[uuid.UUID]*sessions.Session),
 		byHash:   make(map[string]uuid.UUID),
@@ -303,8 +321,9 @@ func (s *Store) evictOneLive(tenantID string) {
 // to prevent remote session termination DoS (SEC-SES-01). maxSize must be >= 1;
 // values below 1 are floored to 1.
 //
-// The existing [NewStore] constructor remains available for callers who prefer
-// the unbounded model and control growth via periodic [Store.DeleteExpired] calls.
+// [NewStore] uses this constructor with [DefaultMaxEntries]; [NewUnboundedStore]
+// remains available for callers who prefer the unbounded model and control growth
+// via periodic [Store.DeleteExpired] calls.
 func NewBoundedStore(maxSize int, opts ...Option) *Store {
 	if maxSize < 1 {
 		maxSize = 1
@@ -326,4 +345,12 @@ func (s *Store) Len() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return len(s.sessions)
+}
+
+// MaxEntries returns the configured hard cap on the number of sessions the store
+// retains. Zero means the store is unbounded (see [NewUnboundedStore]).
+func (s *Store) MaxEntries() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxSize
 }

@@ -1,3 +1,16 @@
+// Package memory provides an in-memory identity.Store, primarily for tests and single-process use.
+//
+// # Bounding memory growth
+//
+// [NewStore] is bounded by default: it retains at most [DefaultMaxEntries] pending verification
+// tokens (email/phone verification, password reset, magic links, email change) and evicts expired
+// tokens first, then the soonest-expiring token, so live tokens are preserved as long as possible.
+// User and identity records are durable account state and are never evicted; use the pgx backend
+// when account volume outgrows a single process.
+//
+// [NewBoundedStore](maxSize) picks a different token cap and [NewUnboundedStore] preserves the
+// previous unbounded behaviour, where [Store.DeleteExpiredVerificationTokens] must be called
+// periodically (e.g. via [github.com/JLugagne/egauth/janitor]) to control growth.
 package memory
 
 import (
@@ -20,16 +33,60 @@ func WithClock(clock func() time.Time) Option {
 }
 
 // Store is an in-memory implementation of identity.Store.
+//
+// Stores created by [NewStore] cap pending verification tokens at
+// [DefaultMaxEntries]; user and identity records are durable and are never
+// evicted.
 type Store struct {
 	mu                 sync.RWMutex
+	maxTokens          int // cap on verificationTokens; 0 means unbounded
 	users              map[uuid.UUID]*identity.User
 	identities         map[uuid.UUID]*identity.Identity
 	verificationTokens map[string]*identity.VerificationToken // keyed by selector
 	now                func() time.Time
 }
 
-// NewStore creates a new in-memory Store.
+// DefaultMaxEntries is the default hard cap on the number of pending verification tokens an
+// in-memory Store created by [NewStore] retains. It is deliberately generous so ordinary
+// single-process use never hits it; it exists so a flood of reset/verification requests cannot
+// exhaust memory. On insertion at the cap the store evicts expired tokens first, then the
+// soonest-expiring token.
+const DefaultMaxEntries = 100_000
+
+// NewStore creates a new in-memory Store bounded by [DefaultMaxEntries] pending
+// verification tokens. Callers that schedule periodic
+// [Store.DeleteExpiredVerificationTokens] eviction and want no hard cap can use
+// [NewUnboundedStore] instead.
 func NewStore(opts ...Option) *Store {
+	return NewBoundedStore(DefaultMaxEntries, opts...)
+}
+
+// NewBoundedStore creates a new in-memory Store that retains at most maxSize
+// pending verification tokens. When a new token is minted at the cap the store
+// evicts expired tokens first, then the soonest-expiring token. User and identity
+// records are never evicted. maxSize must be >= 1; values below 1 are floored to 1.
+func NewBoundedStore(maxSize int, opts ...Option) *Store {
+	if maxSize < 1 {
+		maxSize = 1
+	}
+	s := &Store{
+		maxTokens:          maxSize,
+		users:              make(map[uuid.UUID]*identity.User),
+		identities:         make(map[uuid.UUID]*identity.Identity),
+		verificationTokens: make(map[string]*identity.VerificationToken),
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// NewUnboundedStore creates a new in-memory Store with no cap on pending
+// verification tokens. Growth is controlled entirely by periodic
+// [Store.DeleteExpiredVerificationTokens] calls (e.g. via
+// [github.com/JLugagne/egauth/janitor]); prefer [NewStore]'s bounded default
+// unless the caller guarantees that eviction runs.
+func NewUnboundedStore(opts ...Option) *Store {
 	s := &Store{
 		users:              make(map[uuid.UUID]*identity.User),
 		identities:         make(map[uuid.UUID]*identity.Identity),
@@ -39,6 +96,15 @@ func NewStore(opts ...Option) *Store {
 		opt(s)
 	}
 	return s
+}
+
+// MaxEntries returns the configured hard cap on the number of pending
+// verification tokens the store retains. Zero means the store is unbounded (see
+// [NewUnboundedStore]).
+func (s *Store) MaxEntries() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.maxTokens
 }
 
 // SetClock configures the time source used by the store (useful in tests).
@@ -357,9 +423,47 @@ func (s *Store) CreateVerificationToken(ctx context.Context, tenantID string, us
 		ExpiresAt:    now.Add(ttl),
 		CreatedAt:    now,
 	}
+	if s.maxTokens > 0 && len(s.verificationTokens) >= s.maxTokens {
+		s.evictVerificationTokenLocked()
+	}
 	s.verificationTokens[selector] = vt
 
 	return token, nil
+}
+
+// evictVerificationTokenLocked removes one pending verification token to make
+// room for a new one: the expired token with the earliest expiry first, otherwise
+// the token with the soonest ExpiresAt. Must be called with the write lock held.
+func (s *Store) evictVerificationTokenLocked() {
+	now := s.timeNow()
+	var (
+		victimSelector string
+		victimAt       time.Time
+		found          bool
+	)
+	// First pass: an already-expired token.
+	for selector, vt := range s.verificationTokens {
+		if vt.ExpiresAt.Before(now) {
+			if !found || vt.ExpiresAt.Before(victimAt) {
+				victimSelector = selector
+				victimAt = vt.ExpiresAt
+				found = true
+			}
+		}
+	}
+	// Second pass: no expired token — evict the one expiring soonest.
+	if !found {
+		for selector, vt := range s.verificationTokens {
+			if !found || vt.ExpiresAt.Before(victimAt) {
+				victimSelector = selector
+				victimAt = vt.ExpiresAt
+				found = true
+			}
+		}
+	}
+	if found {
+		delete(s.verificationTokens, victimSelector)
+	}
 }
 
 // ConsumeVerificationToken validates and atomically consumes a verification token.

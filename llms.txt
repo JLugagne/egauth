@@ -47,7 +47,8 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 - Most apps: use `tokens/basic` (no custom claims). Custom claims → generic `tokens`/`tokens/jwt` with your type `C`.
 - `ClaimsProvider` is REQUIRED for refresh (`Rotate`); JWT `SecretKey` must be >= 32 bytes.
 - Tokens/codes passed to delivery callbacks are plaintext secrets — NEVER log them.
-- In-memory stores (`sessions/memory`, `otp/memory`, `ratelimit.TokenBucket`) grow unbounded — schedule eviction with `janitor`, or use the pgx stores.
+- In-memory stores are bounded by default (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`, `tokens/memory`, `ratelimit.TokenBucket`); `NewUnboundedStore()` / `WithMaxKeys` opt into the janitor-evicted model, and the pgx stores persist to Postgres.
+- `webapp.NewWebApp` throttles login/register/refresh/logout per client IP by default; opt out explicitly with `Config.InsecureNoRateLimit` or supply `Config.RateLimiter`.
 - Handlers are POST-only with a pre-auth body cap; `Request*`/OTP-issue handlers are enumeration-safe (always 204).
 - egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. CSRF origin check is opt-in via `WithTrustedOrigins`.
 - Implementing a custom Store/Service? Run the matching conformance suite (`<module>/storetest`, `servicetest`, `issuertest`, `hashertest`) — Store interfaces may gain methods in minor releases.

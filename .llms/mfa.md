@@ -74,7 +74,10 @@ func WithEventSink(sink event.Sink) ServiceOption     // optional security-event
 func NewSingleTenant(svc Service) *SingleTenant
 
 // Memory store
-func memory.NewStore() *memory.Store
+func memory.NewStore() *memory.Store              // bounded by DefaultMaxEntries recovery-attempt records
+func memory.NewBoundedStore(n int) *memory.Store  // pick the cap
+func memory.NewUnboundedStore() *memory.Store     // explicit opt-out; reap with DeleteStaleRecoveryAttempts
+func (s *memory.Store) DeleteStaleRecoveryAttempts(ctx, tenantID string, cutoff time.Time) (int64, error)
 ```
 
 ## Store contract

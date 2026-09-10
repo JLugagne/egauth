@@ -82,7 +82,7 @@ type Service interface {
 
 - `func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, opts ...ServiceOption) Service` — panics on nil store; hasher and policy may be nil for OAuth-only deployments (password ops return `ErrPasswordHasherRequired`/`ErrPasswordPolicyRequired` instead of panicking)
 - `func NewSingleTenant(svc Service) *SingleTenant` — facade that hard-wires `tenantID=""` on every call; `(*SingleTenant).Service()` returns the wrapped `Service`
-- memory: `func NewStore() *memory.Store` — in-memory implementation of `Store`
+- memory: `func NewStore() *memory.Store` — in-memory implementation of `Store`, bounded by `DefaultMaxEntries` (100,000) pending verification tokens; `NewBoundedStore(n)` picks the cap, `NewUnboundedStore()` opts out (schedule `DeleteExpiredVerificationTokens` with janitor). User/identity records are never evicted.
 
 ## Service options (`ServiceOption`)
 

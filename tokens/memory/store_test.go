@@ -2,6 +2,8 @@ package memory
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
@@ -255,4 +257,141 @@ func TestStore_RevokeFamily_PreservesAuditTrail(t *testing.T) {
 
 	require.True(t, exists, "revoked token family must remain in memory storage for auditability")
 	assert.NotNil(t, entry.RevokedAt, "RevokedAt timestamp must be stamped on revocation")
+}
+
+// TestNewStore_BoundedByDefault confirms NewStore caps refresh-token records by
+// DefaultMaxEntries and that NewUnboundedStore is the explicitly named opt-out.
+func TestNewStore_BoundedByDefault(t *testing.T) {
+	if got := NewStore[CustomClaims]().MaxEntries(); got != DefaultMaxEntries {
+		t.Fatalf("NewStore MaxEntries: got %d want %d (bounded default)", got, DefaultMaxEntries)
+	}
+	if got := NewUnboundedStore[CustomClaims]().MaxEntries(); got != 0 {
+		t.Fatalf("NewUnboundedStore MaxEntries: got %d want 0 (unbounded)", got)
+	}
+}
+
+// TestBoundedStore_NeverExceedsCap verifies a bounded store evicts the soonest-expiring
+// refresh-token record when a new one is inserted at the cap.
+func TestBoundedStore_NeverExceedsCap(t *testing.T) {
+	ctx := context.Background()
+	const tenantID = "tenant-1"
+	const capN = 2
+	store := NewBoundedStore[CustomClaims](capN)
+	future := time.Now().Add(time.Hour)
+
+	for i := range capN + 1 {
+		rt := &tokens.RefreshToken{
+			Hash:      "hash-" + strconv.Itoa(i),
+			TenantID:  tenantID,
+			UserID:    uuid.Must(uuid.NewV7()),
+			FamilyID:  uuid.Must(uuid.NewV7()),
+			ExpiresAt: future.Add(time.Duration(i) * time.Second),
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+	}
+	require.Len(t, store.refreshTokens, capN)
+
+	if _, err := store.FindRefreshToken(ctx, tenantID, "hash-0"); !errors.Is(err, tokens.ErrRefreshTokenNotFound) {
+		t.Fatalf("soonest-expiring record must be evicted: got %v", err)
+	}
+	if _, err := store.FindRefreshToken(ctx, tenantID, "hash-2"); err != nil {
+		t.Fatalf("newest record must be present: %v", err)
+	}
+}
+
+// TestBoundedStore_EvictsExpiredFirst verifies already-expired records are evicted before live
+// ones when the cap is reached.
+func TestBoundedStore_EvictsExpiredFirst(t *testing.T) {
+	ctx := context.Background()
+	const tenantID = "tenant-1"
+	const capN = 2
+	store := NewBoundedStore[CustomClaims](capN)
+	future := time.Now().Add(time.Hour)
+	past := time.Now().Add(-time.Minute)
+
+	for i, exp := range []time.Time{past, future} {
+		rt := &tokens.RefreshToken{
+			Hash:      "hash-" + strconv.Itoa(i),
+			TenantID:  tenantID,
+			UserID:    uuid.Must(uuid.NewV7()),
+			FamilyID:  uuid.Must(uuid.NewV7()),
+			ExpiresAt: exp,
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+	}
+	newRT := &tokens.RefreshToken{
+		Hash:      "hash-new",
+		TenantID:  tenantID,
+		UserID:    uuid.Must(uuid.NewV7()),
+		FamilyID:  uuid.Must(uuid.NewV7()),
+		ExpiresAt: future.Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.SaveRefreshToken(ctx, tenantID, newRT))
+
+	if _, err := store.FindRefreshToken(ctx, tenantID, "hash-0"); !errors.Is(err, tokens.ErrRefreshTokenNotFound) {
+		t.Fatalf("expired record must be evicted first: got %v", err)
+	}
+	if _, err := store.FindRefreshToken(ctx, tenantID, "hash-1"); err != nil {
+		t.Fatalf("live record must survive: %v", err)
+	}
+	if _, err := store.FindRefreshToken(ctx, tenantID, "hash-new"); err != nil {
+		t.Fatalf("new record must be present: %v", err)
+	}
+}
+
+// TestBoundedStore_RotateStaysAtCap verifies rotation at the cap does not grow the map beyond it.
+func TestBoundedStore_RotateStaysAtCap(t *testing.T) {
+	ctx := context.Background()
+	const tenantID = "tenant-1"
+	store := NewBoundedStore[CustomClaims](1)
+	future := time.Now().Add(time.Hour)
+
+	oldRT := &tokens.RefreshToken{
+		Hash:      "old-hash",
+		TenantID:  tenantID,
+		UserID:    uuid.Must(uuid.NewV7()),
+		FamilyID:  uuid.Must(uuid.NewV7()),
+		ExpiresAt: future,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.SaveRefreshToken(ctx, tenantID, oldRT))
+
+	newRT := &tokens.RefreshToken{
+		Hash:      "new-hash",
+		TenantID:  tenantID,
+		UserID:    oldRT.UserID,
+		FamilyID:  oldRT.FamilyID,
+		ExpiresAt: future,
+		CreatedAt: time.Now(),
+	}
+	require.NoError(t, store.RotateRefreshToken(ctx, tenantID, "old-hash", newRT))
+	require.Len(t, store.refreshTokens, 1)
+	if _, err := store.FindRefreshToken(ctx, tenantID, "new-hash"); err != nil {
+		t.Fatalf("rotated record must be present: %v", err)
+	}
+}
+
+// TestUnboundedStore_NotCapped proves an unbounded store keeps every refresh-token record,
+// including more than the default cap.
+func TestUnboundedStore_NotCapped(t *testing.T) {
+	ctx := context.Background()
+	const tenantID = "tenant-1"
+	store := NewUnboundedStore[CustomClaims]()
+	future := time.Now().Add(time.Hour)
+
+	for i := range DefaultMaxEntries + 1 {
+		rt := &tokens.RefreshToken{
+			Hash:      "hash-" + strconv.Itoa(i),
+			TenantID:  tenantID,
+			UserID:    uuid.Must(uuid.NewV7()),
+			FamilyID:  uuid.Must(uuid.NewV7()),
+			ExpiresAt: future,
+			CreatedAt: time.Now(),
+		}
+		require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+	}
+	require.Len(t, store.refreshTokens, DefaultMaxEntries+1)
 }

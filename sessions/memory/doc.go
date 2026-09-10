@@ -5,24 +5,25 @@ package memory
 //
 // # Bounding memory growth
 //
-// Two complementary strategies prevent unbounded map growth:
+// [NewStore] is bounded by default: a hard cap of [DefaultMaxEntries] sessions.
+// When a new session would exceed the cap the store first removes already-expired
+// sessions; if the cap is still reached with active live sessions, CreateSession
+// returns [sessions.ErrStoreCapacityExceeded] to protect active sessions from
+// eviction. No external scheduler is needed.
 //
-//  1. [NewBoundedStore](maxSize) — hard cap: when a new session would exceed
-//     maxSize the store first removes already-expired sessions; if the cap is
-//     still reached with active live sessions, CreateSession returns
-//     [sessions.ErrStoreCapacityExceeded] to protect active sessions from
-//     eviction (SEC-SES-01). No external scheduler needed.
+// Two alternative constructors cover the other deployment shapes:
 //
-//  2. [NewStore] + periodic [Store.DeleteExpired] via
+//   - [NewBoundedStore](maxSize) picks a different hard cap with the same policy.
+//
+//   - [NewUnboundedStore] preserves the unbounded model, where growth is
+//     controlled by periodic [Store.DeleteExpired] calls via
 //     [github.com/JLugagne/egauth/janitor]:
 //
-//		store := memory.NewStore()
+//		store := memory.NewUnboundedStore()
 //		j := janitor.Start(ctx, 5*time.Minute, func() {
 //		    store.DeleteExpired(context.Background(), tenantID)
 //		})
 //		defer j.Stop()
 //
-// Both approaches are safe for concurrent use. NewBoundedStore is recommended
-// for long-running processes where the session count is not otherwise capped.
-// For persistent or horizontally-scaled deployments, use the sessions/pgx
-// backend instead.
+// All constructors are safe for concurrent use. For persistent or
+// horizontally-scaled deployments, use the sessions/pgx backend instead.

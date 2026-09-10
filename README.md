@@ -335,23 +335,30 @@ Full API reference: [pkg.go.dev/github.com/JLugagne/egauth](https://pkg.go.dev/g
 Each module has a package overview (`go doc github.com/JLugagne/egauth/identity`) and the
 login-critical packages carry runnable examples.
 
-## Production: evict in-memory stores
+## Production: in-memory stores are bounded by default
 
-The `sessions/memory`, `otp/memory`, and `ratelimit.TokenBucket` backends grow without bound
-unless their eviction methods (`DeleteExpired` / `Cleanup`) are called periodically. In any
-non-trivial production deployment you **must** schedule this — a flood of unique keys, sessions,
-or OTP codes otherwise exhausts available memory. Use the optional `janitor` helper:
+The in-memory backends (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`,
+`tokens/memory`) and `ratelimit.TokenBucket` are **bounded by default**, so a flood of unique
+keys, sessions, OTP codes or refresh tokens cannot exhaust memory without an explicit opt-in.
+Eviction runs automatically at the cap (expired first, then soonest-expiring); `sessions/memory`
+never evicts live sessions and instead fails the insert.
+
+If you prefer caller-managed eviction, opt into the unbounded model with `NewUnboundedStore()`
+(memory stores) or a larger `ratelimit.WithMaxKeys(n)`, then **you must** schedule eviction with
+the optional `janitor` helper:
 
 ```go
 import "github.com/JLugagne/egauth/janitor"
 
+sessStore := memory.NewUnboundedStore()
 j := janitor.Start(ctx, 5*time.Minute, func() {
     sessStore.DeleteExpired(context.Background(), tenantID)
 })
 defer j.Stop()
 ```
 
-`janitor.Start` accepts any `func()`, so the same pattern covers `otpStore.DeleteExpired` and
+`janitor.Start` accepts any `func()`, so the same pattern covers `otpStore.DeleteExpired`,
+`identityStore.DeleteExpiredVerificationTokens`, `tokenStore.DeleteExpired` and
 `tokenBucket.Cleanup`. For production deployments beyond a single binary, swap the in-memory
 stores for their `pgx` counterparts (which rely on the database for eviction instead).
 

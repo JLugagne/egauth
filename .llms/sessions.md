@@ -83,7 +83,9 @@ func (s *SingleTenant) RevokeAllForUser(ctx, userID uuid.UUID, rc ...event.Reque
 func (s *SingleTenant) Service() Service  // escape hatch: returns underlying multi-tenant Service
 
 // memory store
-func memory.NewStore() *memory.Store  // implements sessions.Store; in-memory, O(1) hash lookup
+func memory.NewStore() *memory.Store           // implements sessions.Store; in-memory, bounded by DefaultMaxEntries, O(1) hash lookup
+func memory.NewBoundedStore(n int, opts ...Option) *memory.Store // pick the cap; WithEvictLiveOnFull opts into live eviction
+func memory.NewUnboundedStore() *memory.Store  // explicit opt-out: schedule DeleteExpired with janitor
 ```
 
 ## M9 — Logout audit events
@@ -205,14 +207,14 @@ WithMaxLifetime(M):
 
 ## Eviction
 
-`Store.DeleteExpired` is NOT called automatically. For the memory store, expired sessions accumulate in the map until explicitly purged.
+`memory.NewStore()` is bounded by `DefaultMaxEntries` (100,000): on insertion at the cap it evicts already-expired sessions, then fails with `ErrStoreCapacityExceeded` rather than evicting live sessions (`NewBoundedStore(n, WithEvictLiveOnFull(true))` opts into soonest-expiring live eviction). No scheduler is required.
 
-`memory.Store.FindSessionByHash` does opportunistic eviction on hit (expired record found → evict + return `ErrSessionNotFound`), but rows that are never looked up after expiry remain until `DeleteExpired`.
+`Store.DeleteExpired` is only needed for the explicitly unbounded `memory.NewUnboundedStore()`, where expired sessions accumulate in the map until purged. `memory.Store.FindSessionByHash` does opportunistic eviction on hit (expired record found → evict + return `ErrSessionNotFound`), but rows that are never looked up after expiry remain until `DeleteExpired`.
 
-Schedule with janitor:
+Schedule with janitor for the unbounded opt-in:
 
 ```go
-store := memory.NewStore()
+store := memory.NewUnboundedStore()
 j := janitor.Start(ctx, 5*time.Minute, func() {
     store.DeleteExpired(context.Background(), tenantID)
 })

@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -340,12 +341,51 @@ func TestBoundedStore_EvictsExpiredFirst(t *testing.T) {
 	}
 }
 
-// TestNewStore_Unbounded confirms the existing NewStore constructor
-// creates an unbounded store (zero maxSize = no cap).
-func TestNewStore_Unbounded(t *testing.T) {
-	store := NewStore()
-	if store.maxSize != 0 {
-		t.Fatalf("NewStore maxSize: got %d want 0 (unbounded)", store.maxSize)
+// TestNewStore_BoundedByDefault confirms NewStore is bounded by DefaultMaxEntries and that
+// NewUnboundedStore is the explicitly named opt-out.
+func TestNewStore_BoundedByDefault(t *testing.T) {
+	if got := NewStore().MaxEntries(); got != DefaultMaxEntries {
+		t.Fatalf("NewStore MaxEntries: got %d want %d (bounded default)", got, DefaultMaxEntries)
+	}
+	if got := NewUnboundedStore().MaxEntries(); got != 0 {
+		t.Fatalf("NewUnboundedStore MaxEntries: got %d want 0 (unbounded)", got)
+	}
+}
+
+// TestDefaultStoreCapEnforcedAndUnboundedNotCapped proves the bounded default refuses to exceed
+// its cap while NewUnboundedStore keeps every entry.
+func TestDefaultStoreCapEnforcedAndUnboundedNotCapped(t *testing.T) {
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour)
+
+	bounded := NewStore()
+	for i := range DefaultMaxEntries {
+		sess := newSession("t1", "hash-"+strconv.Itoa(i), future)
+		if err := bounded.CreateSession(ctx, "t1", sess); err != nil {
+			t.Fatalf("CreateSession %d: %v", i, err)
+		}
+	}
+	if got := bounded.Len(); got != DefaultMaxEntries {
+		t.Fatalf("bounded Len() at cap: got %d want %d", got, DefaultMaxEntries)
+	}
+	// A live-session overflow is refused rather than evicting an active session.
+	if err := bounded.CreateSession(ctx, "t1", newSession("t1", "overflow", future)); !errors.Is(err, sessions.ErrStoreCapacityExceeded) {
+		t.Fatalf("overflow CreateSession: got %v want ErrStoreCapacityExceeded", err)
+	}
+	if got := bounded.Len(); got != DefaultMaxEntries {
+		t.Fatalf("bounded Len() after overflow: got %d want %d", got, DefaultMaxEntries)
+	}
+
+	// The explicitly unbounded constructor accepts every entry without eviction.
+	unbounded := NewUnboundedStore()
+	for i := range DefaultMaxEntries + 1 {
+		sess := newSession("t1", "hash-"+strconv.Itoa(i), future)
+		if err := unbounded.CreateSession(ctx, "t1", sess); err != nil {
+			t.Fatalf("unbounded CreateSession %d: %v", i, err)
+		}
+	}
+	if got := unbounded.Len(); got != DefaultMaxEntries+1 {
+		t.Fatalf("unbounded Len(): got %d want %d", got, DefaultMaxEntries+1)
 	}
 }
 

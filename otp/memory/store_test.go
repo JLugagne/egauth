@@ -114,24 +114,72 @@ func TestBoundedOTPStore_EvictsExpiredFirst(t *testing.T) {
 	}
 }
 
-// TestNewOTPStore_Unbounded confirms the existing NewStore constructor is unbounded.
-func TestNewOTPStore_Unbounded(t *testing.T) {
-	store := memory.NewStore()
-	// Verify it accepts many entries without eviction.
+// TestNewOTPStore_BoundedByDefault confirms NewStore is bounded by DefaultMaxEntries and that
+// NewUnboundedStore is the explicitly named opt-out.
+func TestNewOTPStore_BoundedByDefault(t *testing.T) {
+	if got := memory.NewStore().MaxEntries(); got != memory.DefaultMaxEntries {
+		t.Fatalf("NewStore MaxEntries: got %d want %d (bounded default)", got, memory.DefaultMaxEntries)
+	}
+	if got := memory.NewUnboundedStore().MaxEntries(); got != 0 {
+		t.Fatalf("NewUnboundedStore MaxEntries: got %d want 0 (unbounded)", got)
+	}
+}
+
+// TestOTPStoreCapEnforcedAndUnboundedNotCapped proves the bounded default evicts to stay at its
+// cap while NewUnboundedStore keeps every entry.
+func TestOTPStoreCapEnforcedAndUnboundedNotCapped(t *testing.T) {
 	ctx := context.Background()
-	for i := range 100 {
+	future := time.Now().Add(time.Hour)
+
+	// The bounded default self-evicts rather than growing past DefaultMaxEntries.
+	bounded := memory.NewStore()
+	for i := range memory.DefaultMaxEntries {
 		o := &otp.OTP{
 			SubjectID: uuid.Must(uuid.NewV7()),
 			Purpose:   "p",
 			CodeHash:  "h" + strconv.Itoa(i),
-			ExpiresAt: time.Now().Add(time.Hour),
+			ExpiresAt: future.Add(time.Duration(i) * time.Nanosecond),
 			CreatedAt: time.Now(),
 		}
-		if err := store.SaveOTP(ctx, "t1", o); err != nil {
+		if err := bounded.SaveOTP(ctx, "t1", o); err != nil {
 			t.Fatalf("SaveOTP %d: %v", i, err)
 		}
 	}
-	if got := store.Len(); got != 100 {
-		t.Fatalf("Len() for unbounded store: got %d want 100", got)
+	if got := bounded.Len(); got != memory.DefaultMaxEntries {
+		t.Fatalf("bounded Len() at cap: got %d want %d", got, memory.DefaultMaxEntries)
+	}
+	extra := &otp.OTP{
+		SubjectID: uuid.Must(uuid.NewV7()),
+		Purpose:   "p",
+		CodeHash:  "h-extra",
+		ExpiresAt: future.Add(time.Hour),
+		CreatedAt: time.Now(),
+	}
+	if err := bounded.SaveOTP(ctx, "t1", extra); err != nil {
+		t.Fatalf("SaveOTP extra: %v", err)
+	}
+	if got := bounded.Len(); got != memory.DefaultMaxEntries {
+		t.Fatalf("bounded Len() after over-cap insert: got %d want %d", got, memory.DefaultMaxEntries)
+	}
+	if _, err := bounded.GetOTP(ctx, "t1", extra.SubjectID, extra.Purpose); err != nil {
+		t.Fatalf("newest code missing after eviction: %v", err)
+	}
+
+	// The explicitly unbounded constructor accepts every entry without eviction.
+	unbounded := memory.NewUnboundedStore()
+	for i := range memory.DefaultMaxEntries + 1 {
+		o := &otp.OTP{
+			SubjectID: uuid.Must(uuid.NewV7()),
+			Purpose:   "p",
+			CodeHash:  "h" + strconv.Itoa(i),
+			ExpiresAt: future,
+			CreatedAt: time.Now(),
+		}
+		if err := unbounded.SaveOTP(ctx, "t1", o); err != nil {
+			t.Fatalf("unbounded SaveOTP %d: %v", i, err)
+		}
+	}
+	if got := unbounded.Len(); got != memory.DefaultMaxEntries+1 {
+		t.Fatalf("unbounded Len(): got %d want %d", got, memory.DefaultMaxEntries+1)
 	}
 }
