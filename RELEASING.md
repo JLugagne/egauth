@@ -94,45 +94,92 @@ Attach both JSON and XML versions to the GitHub Release (Step 6).
 
 ---
 
-## Step 5 — Sign the release tag with GPG
+## Step 5 — Sign and verify the release tag
 
-Before creating the tag, ensure your GPG key is configured:
+The release identity model is **keyless Sigstore signing via
+[gitsign](https://github.com/sigstore/gitsign) (OIDC)**. OpenPGP and SSH signing are supported
+alternatives. Regardless of the mechanism, a release tag is accepted only when
+`scripts/verify-release-tag.sh <tag>` passes, which requires `git verify-tag <tag>` to succeed
+against the annotated tag object.
+
+### Primary: keyless Sigstore (gitsign)
+
+One-time setup (maintainer machine and, to verify, consumer machines):
 
 ```sh
-# List your GPG keys (choose the one you want to use for releases)
-gpg --list-keys
+# Install gitsign (pin a version you have reviewed; `latest` is shown for brevity).
+go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
 
-# Configure git to sign tags with your key (optional, if not already set)
-git config user.signingkey <KEY_ID>
+git config --global gpg.x509.program gitsign
+git config --global gpg.format x509
 ```
 
-Create a signed (GPG-annotated) tag. This adds cryptographic assurance that the tag was
-created by you:
+Create the signed, annotated tag. gitsign opens a browser for the OIDC flow:
 
 ```sh
 git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z    # release gate — must pass before pushing
 git push origin vX.Y.Z
 ```
 
-The `-s` flag signs the tag with your GPG key; `-a` makes it an annotated tag.
-
-**Verification:**
-Others can verify the tag signature with:
+Consumers verify the signature and, separately, the signer identity:
 
 ```sh
-git tag -v vX.Y.Z
+git verify-tag vX.Y.Z
+gitsign verify \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  vX.Y.Z
 ```
 
-If you are using ephemeral keys or do not have GPG set up, you may alternatively use
-[Sigstore/cosign](https://docs.sigstore.dev/):
+`git verify-tag` proves the tag content was signed by the certificate embedded in the tag and
+recorded in the Sigstore transparency log; it does not check *who* the signer is, hence the
+additional `gitsign verify` identity check. The exact `--certificate-identity` for a release is
+recorded in its GitHub release notes. Keyless verification uses the local Sigstore trust root;
+the first run may need network access to refresh it, after which verification works offline.
+
+### Alternative: OpenPGP or SSH
+
+OpenPGP:
 
 ```sh
-# Sign the tag with cosign (requires GITHUB_TOKEN)
-cosign sign-blob --key cosign.key vX.Y.Z
+gpg --list-secret-keys                       # find the release key fingerprint
+git config --global gpg.format openpgp
+git config --global user.signingkey <FINGERPRINT>
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Publish the armored public key in the release notes (`gpg --armor --export <FINGERPRINT>`).
+Consumers import it and run `git verify-tag vX.Y.Z`.
+
+SSH:
+
+```sh
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Consumers must allow the signing key before `git verify-tag` will trust the tag:
+
+```sh
+git config gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+echo '<identity> ssh-ed25519 AAAA...' >> ~/.config/git/allowed_signers
+git verify-tag vX.Y.Z
 ```
 
 Signed tags are recorded in the repository history and serve as a tamper-evident record
 of the release date, author, and message.
+
+> **Unsigned tags before the gate.** Release tags up to and including `v0.11.0`, including all
+> `adapters/pgx` tags, are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag):
+> `git verify-tag` fails on them. They predate this gate and cannot be signed retroactively.
+> Treat them as unverified and prefer the first signed release; verification instructions are
+> in [SECURITY.md](SECURITY.md#verifying-a-release).
 
 ---
 
@@ -156,6 +203,57 @@ Alternatively, create the release manually in the GitHub UI:
 3. Paste the relevant CHANGELOG section as the release notes
 4. Attach the SBOM files (JSON and XML) as release assets
 5. Publish the release
+
+---
+
+## Step 7 — Attest the release artifacts
+
+The SBOM files are release artifacts just like the source tag; sign or attest them so a
+consumer can verify they were published by the same identity. The choice is the maintainer's;
+both consumer verification commands are documented below.
+
+### Option A — keyless cosign (available today)
+
+```sh
+# Install cosign (pin a version you have reviewed; `latest` is shown for brevity).
+go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+
+cosign sign-blob --yes \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  libauth-vX.Y.Z.sbom.json
+cosign sign-blob --yes \
+  --bundle libauth-vX.Y.Z.sbom.xml.sigstore.json \
+  libauth-vX.Y.Z.sbom.xml
+
+# Attach the signature bundles next to the SBOMs.
+gh release upload vX.Y.Z \
+  libauth-vX.Y.Z.sbom.json.sigstore.json \
+  libauth-vX.Y.Z.sbom.xml.sigstore.json
+```
+
+Consumers verify an artifact against the signer identity:
+
+```sh
+cosign verify-blob \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  libauth-vX.Y.Z.sbom.json
+```
+
+### Option B — GitHub artifact attestations (recommended once the repository is public)
+
+GitHub serves artifact attestations for private repositories only on GitHub Enterprise Cloud,
+so this is a **maintainer step to enable when the repository goes public**, not a wired-in
+workflow today. Once public, add a workflow triggered on `release: [published]` with
+`id-token: write` and `attestations: write` that checks out the tag, regenerates the SBOM with
+the pinned syft version, and attests it with
+[`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
+(`subject-path: libauth-*.sbom.*`). Consumers then verify with the GitHub CLI:
+
+```sh
+gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
+```
 
 ---
 
@@ -233,10 +331,13 @@ consumer who picks pgx never inherits another backend's driver.
    A `replace` left in the shipped go.mod is ignored by external importers, but it is only benign
    while the matching `require` names a real published version — do not treat it as harmless by
    default and do not leave a placeholder behind. Dropping it keeps the published module clean.
-3. **Cut the adapter tag**, which is path-prefixed because it is a nested module:
+3. **Cut the adapter tag**, which is path-prefixed because it is a nested module. Like the
+   core tag it must be annotated and signed, and it must pass the release gate before it is
+   pushed:
 
    ```sh
-   git tag -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
+   git tag -s -a adapters/pgx/vX.Y.Z -m "adapters/pgx vX.Y.Z"
+   scripts/verify-release-tag.sh adapters/pgx/vX.Y.Z
    git push origin adapters/pgx/vX.Y.Z
    ```
 4. **Consumers** then install each module at its tag, independently:
@@ -283,11 +384,13 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Root adapter pin verified**: Root go.mod requires a published `adapters/pgx` version (no placeholder); `go list -m all` and `go mod download all` pass via `bash scripts/consumer-smoke.sh`
 - [ ] **Changes committed**: Stage and commit CHANGELOG.md and go.mod with message "chore: prepare release vX.Y.Z"
 - [ ] **SBOM generated**: Run `syft` to generate SBOM in both JSON and XML format
-- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` (requires GPG setup)
+- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` using the identity model in Step 5 (gitsign keyless, or OpenPGP/SSH)
+- [ ] **Tag gate passed**: `bash scripts/verify-release-tag.sh vX.Y.Z` exits 0 against the local tag; do not push a tag the gate rejects
 - [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
-- [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes
+- [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes; record the signer's `--certificate-identity` and the `scripts/verify-release-tag.sh` output in the notes
 - [ ] **SBOM attached**: Upload SBOM JSON and XML files to the GitHub release
-- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the adapter tag after the core tag is published
+- [ ] **Artifacts attested**: Sign the SBOM bundles with keyless cosign (Step 7 Option A) or attest them via GitHub artifact attestations once public (Option B), and upload the bundles
+- [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the signed adapter tag after the core tag is published and gate it with `bash scripts/verify-release-tag.sh adapters/pgx/vX.Y.Z`
 
 ### Vulnerability gate
 

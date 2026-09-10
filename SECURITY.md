@@ -776,6 +776,56 @@ protocol glue by someone other than the author remains outstanding; since the ev
 structural, consumers with a higher assurance requirement should pin a reviewed commit or
 commission their own review.
 
+## Verifying a release
+
+Release tags are signed — **keyless Sigstore/[gitsign](https://github.com/sigstore/gitsign) by
+default**, with OpenPGP or SSH as supported alternatives — and SBOM release assets can be
+attested. Verify both before trusting a build.
+
+**Tag signature (keyless Sigstore).**
+
+```sh
+go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
+git config --global gpg.x509.program gitsign
+git config --global gpg.format x509
+
+git verify-tag vX.Y.Z    # cryptographic integrity + Sigstore transparency-log inclusion
+gitsign verify \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  vX.Y.Z                 # also verifies *who* signed it
+```
+
+`git verify-tag` returns 0 for a cryptographically valid signature but does not check the
+certificate claims; `gitsign verify` performs the full identity check against the
+`--certificate-identity` recorded in the release notes. First-time keyless verification may
+need network access to refresh the local Sigstore trust root; afterwards it works offline.
+
+For **OpenPGP** or **SSH** signatures, import (or allow-list) the published public key and run
+`git verify-tag vX.Y.Z`; see [RELEASING.md](RELEASING.md) Step 5 for setup.
+
+**Release artifacts (SBOM).**
+
+```sh
+# GitHub artifact attestations (once the release workflow attests the artifacts):
+gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
+
+# or a keyless cosign bundle attached to the release:
+cosign verify-blob \
+  --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
+  --certificate-identity=<maintainer-identity> \
+  --certificate-oidc-issuer=https://github.com/login/oauth \
+  libauth-vX.Y.Z.sbom.json
+```
+
+Maintainers run the same gate as consumers before pushing a tag:
+`bash scripts/verify-release-tag.sh <tag>` fails on a missing, lightweight or unsigned tag.
+
+> **Historical gap.** Tags up to and including `v0.11.0`, including all `adapters/pgx` tags,
+> predate signing and are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag) —
+> `git verify-tag` fails on them. They cannot be signed retroactively; treat them as unverified
+> and prefer the first signed release.
+
 ## Reporting a vulnerability
 
 Please use **GitHub Private Vulnerability Reporting** — do **not** open a public issue for
