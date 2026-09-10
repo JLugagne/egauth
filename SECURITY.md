@@ -729,6 +729,46 @@ delivery off the response path so the Mailer's latency is not a timing oracle. A
 must not be inferable from this endpoint. (Residual in-process timing — one extra indexed DB
 read for an existing account — is left to the consumer's rate limiting, per the non-objectives.)
 
+## Constant-time strategy and evidence
+
+The library claims constant-time behaviour for secret-dependent comparisons (password
+verification, opaque-token equality, OAuth state/PKCE/nonce binding, ceremony-cookie and
+flow-token authentication, one-time-code checks). Those claims currently rest on two arguments,
+neither of which is a machine-checked proof:
+
+1. **Structural by construction.** Every secret-dependent comparison in the hand-written glue
+   reaches a constant-time primitive, and the code does not branch on the comparison outcome:
+   - password verification always reaches `crypto/subtle.ConstantTimeCompare`
+     (`passwords/argon2`), and the account-existence paths run a full decoy Argon2id pass
+     (`identity`) so an unknown user costs the same as a known one;
+   - signed-cookie and flow-token tags are compared with `hmac.Equal`
+     (`passkey.handlerConfig.open`, `authflow.decodeFlowToken`), and each HMAC is computed over
+     the full input regardless of where a mismatch occurs;
+   - OAuth `state`, provider and tenant bindings use `subtle.ConstantTimeCompare`
+     (`oauth.stateMatches`), as do password-reset/email-verification verifiers, OTP hashes and
+     TOTP codes;
+   - JWT verification selects the signer by `kid` and pins the algorithm before verifying, so
+     there is no algorithm-confusion branch, and delegates signature comparison to `golang-jwt`
+     (`hmac.Equal` for the HMAC signers).
+
+   This is reviewable by inspection and grep, but inspection can miss a branch.
+2. **Benchmark evidence.** Timing benchmarks compare correct vs wrong inputs and valid vs
+   unknown users (`BenchmarkCompare_CorrectPassword`/`_WrongPassword` in `passwords/argon2`;
+   `BenchmarkAuthenticate_*` in `identity`). These are manual evidence, not a CI gate; a
+   benchstat-significant gap signals a regression and should be investigated (see "Running the
+   timing-evidence benchmarks" above).
+
+**What would strengthen the argument.** A statistical timing analysis (for example a
+dudect-style test) on dedicated, low-noise hardware across several CPU families would detect
+microarchitectural leakage (cache and branch-predictor effects) that structural review and
+wall-clock benchmarks cannot. Gating such a test in CI is not proposed: shared runners are too
+noisy for a meaningful threshold, and a flaky gate invites ignoring real regressions.
+
+**Follow-up maintainer action.** An independent review of the HMAC constructions and the custom
+protocol glue by someone other than the author remains outstanding; since the evidence above is
+structural, consumers with a higher assurance requirement should pin a reviewed commit or
+commission their own review.
+
 ## Reporting a vulnerability
 
 Please use **GitHub Private Vulnerability Reporting** — do **not** open a public issue for

@@ -228,12 +228,12 @@ jobs:
   fuzz:
     name: Fuzz (short pass on untrusted-input parsers)
     runs-on: ubuntu-latest
-    # 6 targets x 30s fuzz budget + target compilation; capped well above that.
-    timeout-minutes: 20
+    # 7 targets x 60s fuzz budget + target compilation; capped well above that.
+    timeout-minutes: 25
     # The fuzz targets cover the highest-value attack surface of an auth SDK: the parsers fed
-    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, WebAuthn CBOR/base64).
-    # All live in the core module, so GOWORK=off. A short pass per target catches panics (DoS) and
-    # mis-parses on every push without a long-running fuzz budget.
+    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, authflow flow token,
+    # WebAuthn CBOR/base64). All live in the core module, so GOWORK=off. A short pass per target
+    # catches panics (DoS) and mis-parses on every push without a long-running fuzz budget.
     env:
       GOWORK: "off"
     steps:
@@ -249,12 +249,13 @@ jobs:
       - name: Short fuzz pass
         run: |
           set -euo pipefail
-          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=30s ./passwords/argon2
-          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=30s ./passwords/argon2
-          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=30s ./oauth
-          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=30s ./tokens/jwt
-          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=30s ./passkey
-          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=30s ./passkey
+          go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=60s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=60s ./passwords/argon2
+          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=60s ./oauth
+          go test -run='^$' -fuzz=FuzzDecodeFlowToken                 -fuzztime=60s ./authflow
+          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=60s ./tokens/jwt
+          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=60s ./passkey
+          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=60s ./passkey
 
   coverage:
     name: Coverage (core security packages)
