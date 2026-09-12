@@ -40,6 +40,6 @@ require (
 // newest published adapter release so consumers can resolve it from the module proxy; the
 // replace resolves it from this checkout for development (external consumers ignore
 // replace directives, so the require must always name a real published version).
-require github.com/JLugagne/egauth/adapters/pgx v0.11.0
+require github.com/JLugagne/egauth/adapters/pgx v0.13.0
 
 replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx

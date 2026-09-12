@@ -22,7 +22,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CORE='github.com/JLugagne/egauth'
 ADAPTER='github.com/JLugagne/egauth/adapters/pgx'
-CORE_VERSION='v0.11.0'
+CORE_VERSION='v0.13.0'
 PLACEHOLDER='v0.0.0-00010101000000-000000000000'
 
 # Pick a Go binary >= 1.26.7 without triggering a toolchain download.
