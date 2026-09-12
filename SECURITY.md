@@ -795,11 +795,27 @@ commission their own review.
 
 ## Verifying a release
 
-Release tags are signed — **keyless Sigstore/[gitsign](https://github.com/sigstore/gitsign) by
-default**, with OpenPGP or SSH as supported alternatives — and SBOM release assets can be
-attested. Verify both before trusting a build.
+Release tags **from `v0.13.0` are signed with a dedicated SSH (ed25519) key**; keyless
+Sigstore/[gitsign](https://github.com/sigstore/gitsign) and OpenPGP are supported alternatives.
+SBOM release assets can be attested. Verify the tag before trusting a build.
 
-**Tag signature (keyless Sigstore).**
+**Tag signature (SSH — current).** `v0.13.0` and its `adapters/*/v0.13.0` tags are signed with
+the maintainer signing key below (signing-only; it grants no repository access). Verification is
+fully offline:
+
+```sh
+# The allowed_signers principal is the tag's tagger identity — derive it from the tag itself.
+PRINCIPAL="$(git cat-file -p v0.13.0 | sed -n 's/^tagger .*<\(.*\)>.*/\1/p')"
+echo "$PRINCIPAL ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIB+o0uiapcumxvKKrbpTfvExxqeDSFzt8JGf3HdMYIZX egauth-release-signing" \
+  >> ~/.config/git/allowed_signers
+git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+
+git verify-tag v0.13.0   # prints the verified identity and key fingerprint
+```
+
+**Tag signature (keyless Sigstore).** [gitsign](https://github.com/sigstore/gitsign) is the
+supported model for releases that opt into keyless signing; when a release is keyless-signed,
+verify the certificate identity too:
 
 ```sh
 go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
@@ -818,8 +834,8 @@ certificate claims; `gitsign verify` performs the full identity check against th
 `--certificate-identity` recorded in the release notes. First-time keyless verification may
 need network access to refresh the local Sigstore trust root; afterwards it works offline.
 
-For **OpenPGP** or **SSH** signatures, import (or allow-list) the published public key and run
-`git verify-tag vX.Y.Z`; see [RELEASING.md](RELEASING.md) Step 5 for setup.
+For **OpenPGP** or a different **SSH** key, import (or allow-list) the published public key and
+run `git verify-tag vX.Y.Z`; see [RELEASING.md](RELEASING.md) Step 5 for setup.
 
 **Release artifacts (SBOM).**
 
@@ -838,10 +854,11 @@ cosign verify-blob \
 Maintainers run the same gate as consumers before pushing a tag:
 `bash scripts/verify-release-tag.sh <tag>` fails on a missing, lightweight or unsigned tag.
 
-> **Historical gap.** Tags up to and including `v0.11.0`, including all `adapters/pgx` tags,
-> predate signing and are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag) —
-> `git verify-tag` fails on them. They cannot be signed retroactively; treat them as unverified
-> and prefer the first signed release.
+> **Historical gap.** Tags up to and including `v0.12.0` are **unsigned**: `v0.12.0` is a
+> lightweight tag, the `adapters/*/v0.12.0` tags are annotated but unsigned, and earlier tags
+> (including every `adapters/pgx` tag; `adapters/pgx/v0.6.1` is also lightweight) predate
+> signing — `git verify-tag` fails on them. They cannot be signed retroactively; treat them as
+> unverified. The first signed release is `v0.13.0` (SSH/ed25519; verification above).
 
 ## Reporting a vulnerability
 

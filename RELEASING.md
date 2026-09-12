@@ -96,13 +96,50 @@ Attach both JSON and XML versions to the GitHub Release (Step 6).
 
 ## Step 5 — Sign and verify the release tag
 
-The release identity model is **keyless Sigstore signing via
-[gitsign](https://github.com/sigstore/gitsign) (OIDC)**. OpenPGP and SSH signing are supported
-alternatives. Regardless of the mechanism, a release tag is accepted only when
-`scripts/verify-release-tag.sh <tag>` passes, which requires `git verify-tag <tag>` to succeed
-against the annotated tag object.
+The **current (v0.13.0+) mechanism is SSH signing** with a dedicated signing-only key
+(ed25519); keyless Sigstore via [gitsign](https://github.com/sigstore/gitsign) (OIDC) and
+OpenPGP are supported alternatives. Regardless of the mechanism, a release tag is accepted only
+when `scripts/verify-release-tag.sh <tag>` passes, which requires `git verify-tag <tag>` to
+succeed against the annotated tag object.
 
-### Primary: keyless Sigstore (gitsign)
+### Current: SSH signing (v0.13.0+)
+
+Release tags are signed with a dedicated ed25519 key that is **never used for repository
+access**:
+
+- private key: `~/.ssh/egauth-release-signing`
+- public key: `~/.ssh/egauth-release-signing.pub` (key comment `egauth-release-signing`)
+- fingerprint: `SHA256:oK1EJt+R7t7JbG7TD03LKonWiyrZZ/giuN2ZjqevhL8`
+
+One-time setup (add a passphrase with `ssh-keygen -p -f ~/.ssh/egauth-release-signing`; the
+commands below assume the key is loaded, e.g. via `ssh-agent`):
+
+```sh
+ssh-keygen -t ed25519 -C "egauth-release-signing" -f ~/.ssh/egauth-release-signing -N ""
+git config gpg.format ssh
+git config user.signingkey ~/.ssh/egauth-release-signing.pub
+
+# Allow-list the key locally so `git verify-tag` (and the gate) accept it. The principal is the
+# tag's tagger identity, not the key comment.
+printf '%s %s\n' "<tagger-identity>" "$(cat ~/.ssh/egauth-release-signing.pub)" >> ~/.config/git/allowed_signers
+git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
+```
+
+Sign, gate and push:
+
+```sh
+git tag -s -a vX.Y.Z -m "Release vX.Y.Z"
+scripts/verify-release-tag.sh vX.Y.Z    # release gate — must pass before pushing
+git push origin vX.Y.Z
+```
+
+Publish the public key (the `.pub` contents) in the release notes and/or
+[SECURITY.md](SECURITY.md#verifying-a-release) so consumers can verify offline; the SSH
+signature itself embeds only the public key and its comment — no email address. To register the
+key with GitHub (for the "Verified" badge), add it as a **signing key** under Settings → SSH and
+GPG keys; the API equivalent is `POST /user/ssh_signing_keys`.
+
+### Alternative: keyless Sigstore (gitsign)
 
 One-time setup (maintainer machine and, to verify, consumer machines):
 
@@ -138,7 +175,7 @@ additional `gitsign verify` identity check. The exact `--certificate-identity` f
 recorded in its GitHub release notes. Keyless verification uses the local Sigstore trust root;
 the first run may need network access to refresh it, after which verification works offline.
 
-### Alternative: OpenPGP or SSH
+### Alternative: OpenPGP (or a different SSH key)
 
 OpenPGP:
 
@@ -175,10 +212,11 @@ git verify-tag vX.Y.Z
 Signed tags are recorded in the repository history and serve as a tamper-evident record
 of the release date, author, and message.
 
-> **Unsigned tags before the gate.** Release tags up to and including `v0.11.0`, including all
-> `adapters/pgx` tags, are **unsigned** (`adapters/pgx/v0.6.1` is even a lightweight tag):
-> `git verify-tag` fails on them. They predate this gate and cannot be signed retroactively.
-> Treat them as unverified and prefer the first signed release; verification instructions are
+> **Unsigned tags before the gate.** Tags up to and including `v0.12.0` are **unsigned**
+> (`v0.12.0` is a lightweight tag and the `adapters/*/v0.12.0` tags are annotated but unsigned;
+> earlier tags, including every `adapters/pgx` tag — `adapters/pgx/v0.6.1` is also lightweight —
+> predate this control): `git verify-tag` fails on them. They cannot be signed retroactively.
+> Treat them as unverified; the first signed release is `v0.13.0`. Verification instructions are
 > in [SECURITY.md](SECURITY.md#verifying-a-release).
 
 ---
@@ -384,7 +422,7 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Root adapter pin verified**: Root go.mod requires a published `adapters/pgx` version (no placeholder); `go list -m all` and `go mod download all` pass via `bash scripts/consumer-smoke.sh`
 - [ ] **Changes committed**: Stage and commit CHANGELOG.md and go.mod with message "chore: prepare release vX.Y.Z"
 - [ ] **SBOM generated**: Run `syft` to generate SBOM in both JSON and XML format
-- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` using the identity model in Step 5 (gitsign keyless, or OpenPGP/SSH)
+- [ ] **Tag signed**: Create a signed, annotated tag with `git tag -s -a vX.Y.Z -m "Release vX.Y.Z"` using the identity model in Step 5 (SSH is current; gitsign keyless or OpenPGP are alternatives)
 - [ ] **Tag gate passed**: `bash scripts/verify-release-tag.sh vX.Y.Z` exits 0 against the local tag; do not push a tag the gate rejects
 - [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
 - [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes; record the signer's `--certificate-identity` and the `scripts/verify-release-tag.sh` output in the notes
