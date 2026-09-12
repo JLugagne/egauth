@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.13.0] — 2026-09-13
+
+### Added
+
+- **Exported same-origin / CSRF primitive** (#127): new `origin` package with
+  `origin.Allowed`, `origin.NormalizeHosts`, `origin.TrustedSet` and
+  `origin.Middleware(...)` (plus `WithTrustedOrigins` / `WithInsecureNoOriginCheck`) so an
+  application can gate its **own** cookie-authenticated routes with the exact strict
+  same-origin check the built-in handlers apply, instead of hand-rolling a weaker one.
+- **Access-token revocation** (#126): `tokens.WithAccessTokenRevocation(checker)`,
+  `tokens.AccessTokenRevocationChecker` / `...Func` and `tokens.NewRevocationTracker(bus)`
+  let `RequireAuth` / `ContextMiddleware` reject an already-issued access token after a
+  logout, password change or account disable, before its `AccessTTL` elapses. The tracker
+  consumes the `revocation` bus, so one event can invalidate the refresh family and the
+  live access tokens together. Opt-in: no per-request lookup when unset.
+
+### Fixed
+
+- **`WithTrustedOrigins` now normalizes full origins** (#124): every option (`tokens`,
+  `identity`, `otp`, `mfa`, `authflow`, `sessions`, `passkey`) accepts both full origins
+  (`https://app.example.com`) and bare hosts (`app.example.com`) and normalizes them to the
+  bare host before matching. Previously a full-origin entry never matched and the legitimate
+  origin was rejected `403 cross_site_blocked`; matching stays exact, so lookalike hosts are
+  still rejected.
+- **OTP codes are redacted** (#125): `otp.Challenge` and `otp.OTP` implement
+  `String`/`GoString`/`LogValue`, so `%v`, `%+v`, `%#v` and `slog` render `Code` / `CodeHash`
+  as `REDACTED`. `Challenge.Code` remains available for delivery.
+
+### Changed
+
+- Documentation for every `WithTrustedOrigins` option now states that both full origins and
+  bare hosts are accepted; new `.llms/origin.md` and expanded `.llms/tokens.md`,
+  `.llms/recipes.md`, `.llms/secure-defaults-matrix.md` and `SECURITY.md` sections cover the
+  `origin` primitive and the access-token revocation window.
+
+## [v0.12.0] — 2026-09-10
+
 ### Security
 
 - **Signed release tags.** Release tags are now created with a verifiable signature
