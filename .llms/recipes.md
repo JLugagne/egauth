@@ -334,6 +334,68 @@ Details: [tokens.md](tokens.md).
 
 ---
 
+## 10. Revocation that reaches access tokens + CSRF for custom routes
+
+Logout and account disable revoke refresh families, but a stateless access JWT stays valid until
+its `AccessTTL` (commonly 15 min). Wire the `revocation` bus once, then let `RequireAuth` reject
+already-issued access tokens; `origin.Middleware` applies the same CSRF check the built-in
+handlers use to your own routes.
+
+```go
+import (
+    "context"
+
+    "github.com/JLugagne/egauth/identity"
+    "github.com/JLugagne/egauth/origin"
+    "github.com/JLugagne/egauth/revocation"
+    "github.com/JLugagne/egauth/tokens"
+    "github.com/google/uuid"
+)
+
+// One in-process bus, shared by producers and subscribers.
+bus := revocation.NewMemBus()
+
+// (1) Access tokens: a tracker that rejects tokens issued at or before an account cutoff.
+tracker := tokens.NewRevocationTracker(bus) // subscribes to TargetUser events
+
+// (2) Refresh tokens: subscribe the account revoker to the SAME event.
+revoker := tokens.NewAccountRevoker(tokenStore)
+bus.Subscribe(revocation.TargetUser, revocation.HandlerFunc(
+    func(ctx context.Context, rev revocation.Revocation) error {
+        uid, err := uuid.Parse(rev.TargetID)
+        if err != nil {
+            return err
+        }
+        return revoker(ctx, rev.TenantID, uid)
+    }))
+
+// Producer: identity disable/delete publishes the event (same for your own admin actions).
+svc := identity.NewService(store, hasher, policy,
+    identity.WithDisableRevokers(revocation.NewAccountRevocationHook(
+        bus, revocation.ReasonAccountDisabled, revocation.ScopeAll)))
+
+// RequireAuth now rejects live access tokens revoked before their expiry.
+mux.Handle("/api/data", tokens.RequireAuth[MyClaims](verifier, handler,
+    tokens.WithAccessTokenRevocation[MyClaims](tracker)))
+
+// Your own cookie-authenticated mutation routes get the built-in CSRF check.
+mux.Handle("/api/widgets", origin.Middleware(widgetHandler,
+    origin.WithTrustedOrigins("https://app.example.com")))
+```
+
+Notes:
+
+- Opt-in: with no `WithAccessTokenRevocation`, there is no per-request store lookup and the
+  residual window is up to `AccessTTL`.
+- `NewRevocationTracker` is in-process and non-durable — after a restart it is empty until the
+  next event; seed or persist cutoffs if you need the guarantee across restarts.
+- A checker error fails closed (`401`). Tokens issued at or before the cutoff are rejected;
+  tokens issued after it stay valid, so a fresh login works immediately.
+
+Details: [tokens.md](tokens.md), [origin.md](origin.md).
+
+---
+
 ## Single-tenant shorthand (any module)
 
 ```go

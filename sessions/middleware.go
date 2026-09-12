@@ -6,6 +6,7 @@ import (
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/origin"
 )
 
 // DefaultSessionCookieName is the secure-by-default cookie name RequireSession reads the
@@ -167,16 +168,15 @@ func WithCookieName(name string) HandlerOption {
 // cookie-authenticated unsafe request whose Origin — or, failing that, Referer — host is not
 // the request's own Host is rejected with 403 cross_site_blocked, and a request carrying
 // neither header is treated as untrusted. This option adds further allowed hosts (e.g. a
-// front-end served from another subdomain). Supply hosts WITHOUT scheme, e.g.
-// "app.example.com". Requests authenticated with an Authorization: Bearer header are
+// front-end served from another subdomain). Entries may be full origins
+// ("https://app.example.com") or bare hosts ("app.example.com"); both are normalized to the bare
+// host before matching, so the documented full-origin form works when the middleware is wired
+// directly. Requests authenticated with an Authorization: Bearer header are
 // non-ambient and are never subject to the check. To disable the check entirely use the
 // explicit WithInsecureNoOriginCheck opt-out.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(c *handlerConfig) {
-		c.trustedOrigins = make(map[string]bool, len(origins))
-		for _, o := range origins {
-			c.trustedOrigins[o] = true
-		}
+		c.trustedOrigins = origin.TrustedSet(origins...)
 	}
 }
 

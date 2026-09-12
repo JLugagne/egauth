@@ -223,7 +223,7 @@ Cross-module revocation hook that kills every credential a user holds: revokes a
 svc := identity.NewService(store, hasher, policy,
     identity.WithDisableRevokers(tokens.NewAccountRevoker(tokenStore)))
 ```
-Both revocations run even if the first errors (errors are joined). Idempotent — safe to retry, which matters because disable may be re-attempted. The signature also fits `identity.WithAccountErasers` if you want the same fan-out on `DeleteAccount`.
+Both revocations run even if the first errors (errors are joined). Idempotent — safe to retry, which matters because disable may be re-attempted. The signature also fits `identity.WithAccountErasers` if you want the same fan-out on `DeleteAccount`. It does NOT reject already-issued access JWTs; pair it with `WithAccessTokenRevocation` / `NewRevocationTracker` (see "Access-token revocation" above), ideally driving both from the same `revocation` event.
 
 ### `jwt.Config[C any]`
 ```go
@@ -487,6 +487,45 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `RequireMachine[C]()` | Convenience: `WithRequiredKind(egauth.Service)` — admits Service tokens only. |
 | `RequireHuman[C]()` | Convenience: `WithRequiredKind(egauth.User, egauth.PAT)` — admits User and PAT tokens only. |
 | `WithGate[C](fn func(egauth.Actor, C) error)` | Attach an application-supplied predicate that runs after all built-in gates (kind, scopes, AMR, auth-age, password-change). If it returns non-nil the request is rejected `403 Forbidden`; the error text is NOT echoed to the client. A nil fn is a no-op. |
+| `WithAccessTokenRevocation[C](checker AccessTokenRevocationChecker)` | Consult a checker after signature/expiry verification to reject an already-issued access token (logout, password change, account disable) before its `AccessTTL` elapses. A revoked token or a checker error is rejected `401` (fail-closed). Opt-in: no per-request lookup when unset, and the residual window up to `AccessTTL` applies. `AccessTokenRevocationCheckerFunc` adapts a func; `NewRevocationTracker(bus)` implements it from the `revocation` bus. |
+
+### Access-token revocation — closing the `AccessTTL` window
+
+Refresh-family revocation, logout and account disable cannot recall a stateless access JWT: it
+stays valid until `AccessTTL`. `WithAccessTokenRevocation` closes that window — the checker runs
+after signature/expiry verification and before the handler, and a revoked token (or a checker
+error, which fails closed) is rejected `401`.
+
+```go
+// Custom checker (denylist, DB cutoff, …):
+checker := tokens.AccessTokenRevocationCheckerFunc(
+    func(ctx context.Context, tenantID string, userID uuid.UUID, issuedAt time.Time) (bool, error) {
+        return revokedBefore(ctx, tenantID, userID, issuedAt)
+    })
+handler := tokens.RequireAuth[MyClaims](verifier, next,
+    tokens.WithAccessTokenRevocation[MyClaims](checker))
+
+// Bus-driven account cutoff, shared with refresh revocation:
+tracker := tokens.NewRevocationTracker(bus) // subscribes to revocation.TargetUser
+handler := tokens.RequireAuth[MyClaims](verifier, next,
+    tokens.WithAccessTokenRevocation[MyClaims](tracker))
+```
+
+```go
+type AccessTokenRevocationChecker interface {
+    IsAccessTokenRevoked(ctx context.Context, tenantID string, userID uuid.UUID, issuedAt time.Time) (bool, error)
+}
+type AccessTokenRevocationCheckerFunc func(ctx context.Context, tenantID string, userID uuid.UUID, issuedAt time.Time) (bool, error)
+func NewRevocationTracker(bus revocation.Bus) *RevocationTracker // implements the checker
+```
+
+- `NewRevocationTracker(bus)` records the max `CutoffTime` per `(tenant, user)`; a token issued
+  at or before the cutoff is revoked, one issued after it stays valid (a fresh login works
+  immediately).
+- One `revocation.Revocation` event can therefore kill the refresh family (subscriber) and the
+  live access tokens (tracker) together.
+- Opt-in: no checker = no per-request lookup, and the residual window is up to `AccessTTL`.
+- In-process / non-durable: the tracker is empty after a restart until the next event.
 
 ### `HandlerOption` — handler options
 | Option | Effect |
@@ -498,7 +537,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithSameSite(http.SameSite)` | Override SameSite |
 | `WithInsecureCookies()` | Disable Secure (dev only) |
 | `WithTenantResolver(func(*http.Request) string)` | Resolve tenantID for multi-tenant |
-| `WithTrustedOrigins(hosts ...string)` | Enable CSRF origin check (hosts without scheme) |
+| `WithTrustedOrigins(hosts ...string)` | Widen the default-on CSRF origin allowlist. Accepts bare hosts (`app.example.com`) and full origins (`https://app.example.com`); entries are normalized to the bare host, matching stays exact. |
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
 | `WithFailureRedirect(url)` | 303 to url?error=<code> on failure |
 | `WithPersistentRefresh()` | Re-issue persistent refresh cookie |
@@ -549,7 +588,8 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Trivially known keys rejected**: `jwt.New`/`Config.Validate`/`NewHMACSigner` (and therefore the `keystore` JWT adapter) refuse every-byte-zero and repeated-single-byte HMAC secrets, not only short or published-example ones. `InsecureAllowWeakKey` suppresses only the minimum-length gate, never the denylist or the trivially-known-key check.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
-- **CSRF**: `WithTrustedOrigins` checks `Origin`/`Referer` host on `RefreshHandler`/`LogoutHandler` POSTs. Without it, CSRF protection is the consumer's responsibility.
+- **CSRF**: the origin check is ON by default on `RefreshHandler`/`LogoutHandler` POSTs and every other handler family — a request whose `Origin`/`Referer` host is not the request `Host` or a trusted origin is rejected `403 cross_site_blocked`, and a POST with neither header is rejected. `WithTrustedOrigins` widens the allowlist (bare hosts and full origins both accepted, normalized then matched exactly); `WithInsecureNoOriginCheck` is the loud opt-out. Export the same check to your own routes with `origin.Middleware` / `origin.Allowed`.
+- **Access-token revocation window**: without `WithAccessTokenRevocation`, a logged-out or revoked account's access JWT is accepted until it expires (up to `AccessTTL`, commonly 15 min). Configure the option (e.g. `NewRevocationTracker(bus)`) to reject tokens issued at or before an account revocation cutoff. The tracker is in-process — seed or persist cutoffs if you need the guarantee across restarts.
 - **Cookie security**: always `HttpOnly`; `Secure` is opt-out (`Insecure bool`, defaults false = secure); `SameSite=Lax` by default.
 - **Forced-password-change gate** (`WithPasswordChangeGate`): after successful token verification,
   if `Claims.MustChangePassword` is `true`, the wrapped handler is bypassed and the request is

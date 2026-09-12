@@ -24,6 +24,7 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 
 - [identity](.llms/identity.md): accounts & credential verification — register, login, password reset, email/phone verification, magic link, change email/password, recovery channels, account deletion, OAuth JIT linking. Does NOT issue tokens/sessions. Source: `identity/`
 - [tokens](.llms/tokens.md): stateless JWT access + single-use refresh with rotation & family theft detection; API keys. Generic over custom claims `C`; `tokens/basic` = zero-type-arg facade. Reference impl `tokens/jwt`. Source: `tokens/`
+- [origin](.llms/origin.md): exported same-origin / CSRF primitive (`origin.Allowed`, `origin.Middleware`) to protect your own cookie-authenticated routes with the built-in handlers' exact semantics. Source: `origin/`
 - [sessions](.llms/sessions.md): server-side revocable sessions — idle timeout (`Touch`), fixation defense (`Rotate`), middleware. Source: `sessions/`
 - [passwords](.llms/passwords.md): hashing/policy/breach-check seams + references — `argon2` (Argon2id), `policy` (password + passphrase), `breach/hibp`, `breach/offline`. Source: `passwords/`
 - [mfa](.llms/mfa.md): TOTP (RFC 6238) + recovery codes. SMS intentionally excluded as a factor. Source: `mfa/`
@@ -50,6 +51,6 @@ a `SingleTenant` facade. Every tenant-scoped call takes an explicit `tenantID st
 - In-memory stores are bounded by default (`sessions/memory`, `otp/memory`, `identity/memory`, `mfa/memory`, `tokens/memory`, `ratelimit.TokenBucket`); `NewUnboundedStore()` / `WithMaxKeys` opt into the janitor-evicted model, and the pgx stores persist to Postgres.
 - `webapp.NewWebApp` throttles login/register/refresh/logout per client IP by default; opt out explicitly with `Config.InsecureNoRateLimit` or supply `Config.RateLimiter`.
 - Handlers are POST-only with a pre-auth body cap; `Request*`/OTP-issue handlers are enumeration-safe (always 204).
-- egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. CSRF origin check is opt-in via `WithTrustedOrigins`.
+- egauth provides no router, mailer, SMS, metrics, CSRF token, or idempotency layer — wire your own. The CSRF same-origin check is enforced by default; widen it via `WithTrustedOrigins` (bare hosts and full origins both accepted) or expose the same check to custom routes with `origin.Middleware`.
 - Implementing a custom Store/Service? Run the matching conformance suite (`<module>/storetest`, `servicetest`, `issuertest`, `hashertest`) — Store interfaces may gain methods in minor releases.
 - Authoritative API: `go doc -all github.com/JLugagne/egauth/<module>`. The `.llms/*.md` files mirror it but verify against `go doc` if in doubt.

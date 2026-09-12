@@ -31,6 +31,8 @@ type authConfig[C any] struct {
 	passwordChangeResetURL string
 	// gate is the application-supplied predicate invoked after all built-in gates. A nil gate is a no-op.
 	gate func(egauth.Actor, C) error
+	// accessTokenRevocation, when set, is consulted after token verification to reject tokens revoked before their expiry. Nil keeps the stateless, lookup-free path.
+	accessTokenRevocation AccessTokenRevocationChecker
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -219,6 +221,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			claims, err = verifier.VerifyAccessTokenForTenant(r.Context(), "", token)
 		}
 		if err == nil {
+			if cfg.accessTokenRevoked(r.Context(), claims) {
+				unauthorized(w)
+				return
+			}
 			if !cfg.stepUpSatisfied(claims) {
 				stepUpRequired(w)
 				return
@@ -273,6 +279,11 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			}
 			cfg.cookies.SetAccess(w, pair.AccessToken)
 			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+			if cfg.accessTokenRevoked(r.Context(), &pair.Claims) {
+				cfg.cookies.Clear(w)
+				unauthorized(w)
+				return
+			}
 			if !cfg.stepUpSatisfied(&pair.Claims) {
 				stepUpRequired(w)
 				return

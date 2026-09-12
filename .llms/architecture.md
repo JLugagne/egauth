@@ -84,6 +84,7 @@ blocker: it means a flow stopped applying one of the shared controls.
 - `health.Pinger` — readiness; pgx stores implement it.
 - `janitor.Start(ctx, interval, fn)` — periodic eviction loop for in-memory stores.
 - `passwords.Hasher` / `passwords.Policy` / `passwords.BreachChecker` — pluggable; argon2/policy/hibp references.
+- `origin` — exported same-origin / CSRF primitive (`origin.Allowed`, `origin.Middleware`) so apps can gate their own cookie-authenticated routes with the exact check the built-in handlers apply. See [origin.md](origin.md).
 
 See [infra.md](infra.md), [passwords.md](passwords.md).
 
@@ -98,6 +99,7 @@ See [infra.md](infra.md), [passwords.md](passwords.md).
 - **Step-up** = `tokens` carries `AuthTime`/`AMR`; `Claims.FreshAuth(maxAge)` gates sensitive ops.
 - **Account deletion fan-out** = `identity.WithAccountErasers(...)` runs cross-module revocation hooks before soft-delete.
 - **Account disable fan-out** = `identity.WithDisableRevokers(...)` runs cross-module revocation hooks on `DisableUser` to kill a suspended user's refresh tokens, API keys (`tokens.NewAccountRevoker`) and sessions — re-establishable credentials only, leaving MFA/passkey enrollment intact for `EnableUser`.
+- **Unified revocation bus** = `revocation.Bus` carries account/tenant/session/family revocations to subscribers. `tokens.NewRevocationTracker(bus)` subscribes to account-scoped events and lets `tokens.WithAccessTokenRevocation(checker)` reject already-issued access JWTs before their `AccessTTL`, so one event can kill the refresh family and the live access tokens together. See [tokens.md](tokens.md).
 - **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
   flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
   `tokens.Claims.MustChangePassword=true`. The `issuance` pipeline computes the flag from the authoritative
@@ -215,8 +217,9 @@ admin action (revoke their token families, e.g. via `SetTemporaryPassword`'s era
 deliberately does NOT force periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval
 expiry). Zero behavior change unless a credential is explicitly flagged.
 
-Consumer responsibilities (NOT provided by egauth): CSRF tokens (origin check available via
-`WithTrustedOrigins`), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.
+Consumer responsibilities (NOT provided by egauth): CSRF tokens (a strict same-origin check is
+on by default on every handler family, and `origin.Middleware` exposes the same check for your
+own routes), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.
 
 Full threat model + explicit trade-offs: `SECURITY.md`.
 NOTE: security review to date is an AI-driven audit, not an independent third-party human audit (pre-1.0).

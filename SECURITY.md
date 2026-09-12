@@ -488,9 +488,13 @@ CSRF-token system (per the PRD, that is left to the application layer), but it n
 - **`SameSite=Lax` cookies** (default) remain a second layer: they stop a cross-site request
   from *sending* the refresh/session cookie, protecting `RefreshHandler`/`LogoutHandler`
   against classic CSRF on an existing session.
-- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
+- **`WithTrustedOrigins(...)`** (on `identity`, `tokens`, `mfa`, `otp`, `authflow`, `sessions`,
+  `passkey`)
   **widens** the same-origin allowlist to additional hosts — e.g. a front-end served from another
-  subdomain. Supply hostnames without scheme, e.g. `identity.WithTrustedOrigins("app.example.com")`.
+  subdomain. Both bare hosts (`"app.example.com"`) and full origins (`"https://app.example.com"`)
+  are accepted and normalized to the bare host before matching; matching stays exact, so
+  lookalikes such as `app.example.com.evil.com` are still rejected. Export the same check to your
+  own routes with `origin.Middleware` / `origin.Allowed`.
 - **`WithInsecureNoOriginCheck()`** (on `identity`, `tokens`, `mfa`, `otp`, `sessions`, `passkey`)
   is the explicit, loudly-named opt-out: it disables the same-origin check entirely, restoring the
   pre-v1 accept-all behavior. Only reach for it when CSRF is handled by a separate layer (e.g.
@@ -518,9 +522,9 @@ factor (MFA downgrade via `DisableHandler`) or invalidate their recovery codes
 (`RegenerateRecoveryCodesHandler`) is rejected with `403 cross_site_blocked`. Use
 **`mfa.WithTrustedOrigins(...)`** to *widen* the `Origin`/`Referer` host allowlist to additional
 hosts when the MFA endpoints are reachable from a browser session on another origin (e.g. a
-cross-subdomain or embedded app); supply hostnames without scheme, e.g.
-`mfa.WithTrustedOrigins("app.example.com")`. The check is turned off only via the explicit
-`mfa.WithInsecureNoOriginCheck()` opt-out.
+cross-subdomain or embedded app); both bare hosts and full origins are accepted, e.g.
+`mfa.WithTrustedOrigins("app.example.com")` or `mfa.WithTrustedOrigins("https://app.example.com")`.
+The check is turned off only via the explicit `mfa.WithInsecureNoOriginCheck()` opt-out.
 
 The **`passkey.RenameCredentialHandler`** is the one passkey mutation outside the WebAuthn
 ceremony-cookie protection, and it enforces the same strict same-origin check **by default**: a
@@ -532,6 +536,19 @@ nor `Referer` is untrusted), before the body is decoded or the service is called
 smuggle the JSON body. The WebAuthn ceremony handlers (Begin/Finish registration/login) are not
 subject to this gate because they are already protected by the HMAC-sealed
 `__Host-passkey_ceremony` cookie and go-webauthn's own origin validation.
+
+## Access-token revocation window
+
+Revoking a refresh-token family (logout, reuse detection) or disabling/deleting an account stops
+the subject from obtaining new access tokens, but a stateless access JWT already issued stays
+valid until its `AccessTTL` (commonly 15 minutes). Configure
+`tokens.WithAccessTokenRevocation(checker)` to reject already-issued access tokens after an
+account revocation: the checker runs after signature/expiry verification and rejects revoked
+tokens (or fails closed on a checker error) with `401`. `tokens.NewRevocationTracker(bus)`
+consumes the `revocation` bus, so a single account revocation event can invalidate the refresh
+family and the live access tokens together. When the option is **not** configured there is no
+added per-request lookup, and the residual window is up to `AccessTTL`; the tracker itself is
+in-process and non-durable, so a restart clears cutoffs until the next revocation event.
 
 ## Rate limiting on authentication endpoints
 

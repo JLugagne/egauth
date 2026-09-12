@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/origin"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -651,9 +652,10 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
 // trusted origins configured, a POST whose Origin — or, failing that, Referer — host is not the
 // request's own Host is rejected with 403 cross_site_blocked. This option WIDENS that allowlist to
-// permit additional hosts (e.g. a separate front-end origin on another subdomain). Supply hosts
-// WITHOUT scheme, e.g. "app.example.com". To turn the check off entirely, use
-// WithInsecureNoOriginCheck.
+// permit additional hosts (e.g. a separate front-end origin on another subdomain). Entries may be
+// full origins ("https://app.example.com") or bare hosts ("app.example.com"); both are normalized
+// to the bare host before matching, so the documented full-origin form works when the handler is
+// wired directly. To turn the check off entirely, use WithInsecureNoOriginCheck.
 //
 // Renewing a credential nickname is a state-changing endpoint authenticated purely by the
 // consumer's session (ambient cookie), so SameSite=Lax alone does not prevent a forged same-site
@@ -662,10 +664,7 @@ func FinishDiscoverableLoginHandler(svc *Service, opts ...HandlerOption) http.Ha
 // HMAC-sealed __Host- ceremony cookie and go-webauthn's own origin validation.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
-		h.trustedOrigins = make(map[string]bool, len(origins))
-		for _, o := range origins {
-			h.trustedOrigins[o] = true
-		}
+		h.trustedOrigins = origin.TrustedSet(origins...)
 	}
 }
 

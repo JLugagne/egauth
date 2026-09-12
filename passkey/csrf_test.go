@@ -155,6 +155,23 @@ func TestRenameCredentialHandler_CSRFOriginGate(t *testing.T) {
 			wantNick:    "renamed",
 		},
 		{
+			name:        "full-origin trusted entry is admitted",
+			method:      http.MethodPost,
+			origin:      "https://trusted.example.com",
+			contentType: "application/json",
+			opts:        []passkey.HandlerOption{passkey.WithTrustedOrigins("https://trusted.example.com")},
+			wantStatus:  http.StatusNoContent,
+			wantNick:    "renamed",
+		},
+		{
+			name:        "full-origin lookalike is rejected",
+			method:      http.MethodPost,
+			origin:      "https://trusted.example.com.evil.com",
+			contentType: "application/json",
+			opts:        []passkey.HandlerOption{passkey.WithTrustedOrigins("https://trusted.example.com")},
+			wantStatus:  http.StatusForbidden,
+		},
+		{
 			name:        "foreign origin stays rejected when a trusted origin is configured",
 			method:      http.MethodPost,
 			origin:      "https://evil.example.com",

@@ -45,6 +45,10 @@ type OTP struct {
 }
 ```
 
+Both types implement `String()`, `GoString()` and `LogValue()` (slog), which render `Code` /
+`CodeHash` as `REDACTED`. `%v`, `%+v`, `%#v`, `%s` and `slog` therefore never leak the code;
+`Challenge.Code` remains the plaintext value returned for delivery.
+
 ## Constructors
 
 ```go
@@ -216,7 +220,7 @@ mux.Handle("/otp/verify", otp.VerifyHandler(svc,
 
 ## Gotchas
 
-- `Challenge.Code` is the plaintext — treat it as a credential; never log or store it. Only `CodeHash` is persisted.
+- `Challenge.Code` is the plaintext — treat it as a credential; never log or store it. Only `CodeHash` is persisted. `Challenge`/`OTP` self-redact the code/hash in `%v`/`%#v`/`slog` output, but that is a safety net, not permission to log them.
 - `IssueHandler` always returns `204` — do NOT rely on its status to determine whether a code was issued or delivery succeeded.
 - All `VerifyHandler` failures are `401 invalid_code` — callers cannot distinguish a wrong guess from an expired/missing challenge. This is intentional (enumeration safety).
 - `Issue` replaces any outstanding code for the same `subjectID+purpose`. Old code is invalidated immediately.
@@ -224,5 +228,5 @@ mux.Handle("/otp/verify", otp.VerifyHandler(svc,
 - `WithSubjectResolver` returning `ok=false` still produces a uniform `401 invalid_code` on `VerifyHandler` (not a different status).
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
 - `NewService` panics on nil store; invalid `digits`/`ttl`/`maxAttempts` values are silently clamped to defaults (not panics).
-- `WithTrustedOrigins` is disabled by default. When set, requests with an unrecognized or missing Origin/Referer are rejected `403`.
+- The strict same-origin CSRF check is ON by default (a request whose Origin/Referer host is not the request host or a trusted origin is rejected `403`, as is a POST carrying neither header). `WithTrustedOrigins` widens the allowlist (bare hosts or full origins); `WithInsecureNoOriginCheck` is the loud opt-out.
 - The `deliver` callback in `IssueHandler` runs in a goroutine; errors are silently discarded. Instrument delivery failures in the callback itself.

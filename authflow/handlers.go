@@ -7,6 +7,7 @@ import (
 
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/origin"
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
 )
@@ -122,19 +123,18 @@ func WithStepUpFailureRedirect(rawURL string) StepUpOption {
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with
 // no trusted origins configured, a POST whose Origin (or Referer fallback) host is not the
 // request's own Host is rejected with 403 "cross_site_blocked". This option WIDENS that
-// allowlist to permit additional hosts. Supply hosts WITHOUT scheme, e.g. "app.example.com".
-// Use it whenever the step-up endpoint is reachable from a browser session on another origin
-// (e.g. cross-subdomain or embedded apps), or when non-browser API clients complete the flow
-// from a different origin: the check is transport-agnostic and applies equally to the
+// allowlist to permit additional hosts. Entries may be full origins
+// ("https://app.example.com") or bare hosts ("app.example.com"); both are normalized to the bare
+// host before matching, so the documented full-origin form works when handlers are wired
+// directly. Use it whenever the step-up endpoint is reachable from a browser session on another
+// origin (e.g. cross-subdomain or embedded apps), or when non-browser API clients complete the
+// flow from a different origin: the check is transport-agnostic and applies equally to the
 // auth_flow_token cookie and the X-Auth-Flow-Token header path — the same fail-closed decision
 // the cookie-driven identity/tokens handlers make. To turn the check off entirely, use
 // WithInsecureNoOriginCheck.
 func WithTrustedOrigins(origins ...string) StepUpOption {
 	return func(c *stepUpConfig) {
-		c.trustedOrigins = make(map[string]bool, len(origins))
-		for _, o := range origins {
-			c.trustedOrigins[o] = true
-		}
+		c.trustedOrigins = origin.TrustedSet(origins...)
 	}
 }
 

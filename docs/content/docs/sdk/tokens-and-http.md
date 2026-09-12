@@ -205,5 +205,50 @@ Use `WithGate` when your access rule depends on both the actor identity and the 
 These endpoints are state-changing `POST`s authenticated purely by the refresh cookie, so `SameSite=Lax` alone does not fully prevent a forged cross-site refresh/logout. Both handlers therefore apply a **same-origin check by default**: a request whose `Origin` (or, failing that, `Referer`) host is neither the request's own `Host` nor an explicitly trusted origin is rejected with `403` and the code `cross_site_blocked`, and a `POST` carrying neither header is treated as untrusted.
 
 - For a single-origin app this is zero-config: a same-origin browser `POST` just works.
-- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")` — supply hosts without scheme.
+- To permit additional cross-origin hosts (e.g. a separate front-end domain), pass `tokens.WithTrustedOrigins("app.example.com")`. Every `WithTrustedOrigins` option accepts both bare hosts and full origins (`"https://app.example.com"`); entries are normalized to the bare host while matching stays exact, so lookalikes such as `app.example.com.evil.com` are still rejected.
 - To turn the check off entirely (restoring the pre-v1 accept-every-origin behavior), pass `tokens.WithInsecureNoOriginCheck()`. Only do this when CSRF is handled by a separate layer; the name is deliberately loud.
+
+### Protecting your own routes with the same-origin check
+
+`RequireAuth`/`ContextMiddleware` authenticate a token but do not apply the same-origin check to your **own** state-changing endpoints. The exported `origin` package exposes the exact predicate and middleware the built-in handlers use, so custom routes stay aligned instead of hand-rolling a weaker suffix check:
+
+```go
+import "github.com/JLugagne/egauth/origin"
+
+mux.Handle("/api/widgets", origin.Middleware(widgetHandler,
+	origin.WithTrustedOrigins("https://app.example.com")))
+```
+
+`origin.Middleware` checks every unsafe method (anything other than `GET`/`HEAD`/`OPTIONS`): the `Origin` (or `Referer`) host must equal the request's own `Host` or an allowlisted host, a request carrying neither header is rejected with `403`, an `http` Origin on an HTTPS request is rejected, and matching is exact after normalization. `origin.Allowed(r, trusted)` is the underlying predicate, `origin.NormalizeHosts`/`origin.TrustedSet` build the allowlist from full origins or bare hosts, and `origin.WithInsecureNoOriginCheck()` is the explicit opt-out.
+
+### Revoking access tokens before they expire
+
+Logout and account revocation kill refresh tokens, but a stateless access JWT stays valid until its `AccessTTL`. To reject already-issued access tokens (after logout, password change or account disable) before they expire, configure a checker:
+
+```go
+handler := tokens.RequireAuth[MyClaims](tokenService, myHandler,
+	tokens.WithAccessTokenRevocation[MyClaims](checker))
+```
+
+The checker is consulted after signature/expiry verification and before the handler; a revoked token — or a checker error, which fails closed — is rejected with `401`. The built-in `tokens.NewRevocationTracker(bus)` consumes the `revocation` bus and implements the checker:
+
+```go
+bus := revocation.NewMemBus()
+tracker := tokens.NewRevocationTracker(bus) // subscribes to account-scoped revocations
+
+revoker := tokens.NewAccountRevoker(tokenStore)
+bus.Subscribe(revocation.TargetUser, revocation.HandlerFunc(func(ctx context.Context, rev revocation.Revocation) error {
+	userID, err := uuid.Parse(rev.TargetID)
+	if err != nil {
+		return err
+	}
+	return revoker(ctx, rev.TenantID, userID)
+}))
+
+handler := tokens.RequireAuth[MyClaims](tokenService, myHandler,
+	tokens.WithAccessTokenRevocation[MyClaims](tracker))
+```
+
+A single `revocation.Revocation` (`TargetUser`, `CutoffTime`) then invalidates both the refresh family and the already-issued access tokens. Tokens issued at or before the cutoff are rejected; tokens issued after it stay valid, so a fresh login works immediately.
+
+The option is opt-in. When it is **not** configured there is no added per-request store lookup and the stateless path is untouched — but the residual window up to `AccessTTL` (commonly 15 minutes) remains, and `NewRevocationTracker` is in-process and non-durable (empty after a restart until the next revocation event).

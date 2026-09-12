@@ -8,6 +8,7 @@ import (
 
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/issuance"
+	"github.com/JLugagne/egauth/origin"
 
 	"github.com/JLugagne/egauth/tokens"
 	"github.com/google/uuid"
@@ -122,15 +123,14 @@ func WithCookies(c tokens.Cookies) HandlerOption {
 // The origin check is ON by default (see originAllowed / WithInsecureNoOriginCheck): even with no
 // trusted origins configured, a POST whose Origin (or Referer fallback) host is not the request's
 // own Host is rejected with 403 "cross_site_blocked". This option WIDENS that allowlist to permit
-// additional hosts. Supply hosts WITHOUT scheme, e.g. "app.example.com". Use it whenever the MFA
-// endpoints are reachable from a browser session on another origin (e.g. cross-subdomain or
-// embedded apps). To turn the check off entirely, use WithInsecureNoOriginCheck.
+// additional hosts. Entries may be full origins ("https://app.example.com") or bare hosts
+// ("app.example.com"); both are normalized to the bare host before matching, so the documented
+// full-origin form works when handlers are wired directly. Use it whenever the MFA endpoints are
+// reachable from a browser session on another origin (e.g. cross-subdomain or embedded apps). To
+// turn the check off entirely, use WithInsecureNoOriginCheck.
 func WithTrustedOrigins(origins ...string) HandlerOption {
 	return func(h *handlerConfig) {
-		h.trustedOrigins = make(map[string]bool, len(origins))
-		for _, o := range origins {
-			h.trustedOrigins[o] = true
-		}
+		h.trustedOrigins = origin.TrustedSet(origins...)
 	}
 }
 
