@@ -60,6 +60,17 @@ const (
 	MaxMemoryKiB uint32 = 524288
 	// MinTime is the minimum number of Argon2id iterations (the t parameter).
 	MinTime uint32 = 1
+	// MaxTime is the upper bound on the iteration count (t) accepted by Compare, the counterpart of
+	// MaxMemoryKiB for the CPU half of the same threat model.
+	//
+	// A stored PHC string is untrusted on the verify path: it may have been imported, migrated, or
+	// hand-edited, and the parser reads t into a uint32, so t=4294967295 is representable. argon2.IDKey
+	// takes no context and cannot be cancelled, so an unbounded t pins a core for as long as the value
+	// says — projected at years for one login attempt — and both Compare callers (login and password
+	// change) are reachable, meaning a single poisoned row locks the account out of its own
+	// remediation. Any legitimate cost is orders of magnitude below this ceiling; a hash that exceeds
+	// it is corrupt or tampered and is treated like any other mismatch.
+	MaxTime uint32 = 16
 	// MinThreads is the minimum Argon2id degree of parallelism (the p parameter).
 	MinThreads uint8 = 1
 )
@@ -280,6 +291,11 @@ func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
 	// throughout Compare so a corrupt or forged stored hash is indistinguishable from an
 	// ordinary password mismatch (no distinct signal to an attacker).
 	if time < 1 || threads < 1 || keyLen == 0 {
+		return passwords.ErrInvalidPassword
+	}
+	// Upper bound on the iteration count, mirroring the MaxMemoryKiB ceiling below: t is the one
+	// cost parameter the parser accepts without an upper limit, and argon2.IDKey is uninterruptible.
+	if time > MaxTime {
 		return passwords.ErrInvalidPassword
 	}
 	// deriveKey internally clamps memory up to a per-thread minimum of 8*threads KiB

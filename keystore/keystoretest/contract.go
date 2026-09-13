@@ -20,7 +20,9 @@ import (
 
 // testKEK is a fixed 32-byte AES-256 KEK used across the conformance suite. It is test-only
 // material — never reuse it in production.
-var testKEK = bytes.Repeat([]byte("k"), keystore.KEKKeyLength)
+// testKEK is a non-constant 32-byte key: a repeated-byte or all-zero value is refused by NewKEK,
+// because a trivially-known KEK would void the at-rest protection under test.
+var testKEK = []byte("kek-fixture-0123456789abcdefghij")
 
 // StoreFactory returns a fresh, empty store for each subtest, so tests never share state. The
 // store MUST use the supplied clock as its time source so its active/expired evaluation agrees

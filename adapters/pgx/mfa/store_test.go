@@ -54,7 +54,7 @@ func newStoreAndPool(t *testing.T) (*mfapgx.Store, *pgxpool.Pool) {
 	require.NoError(t, mfapgx.Migrate(ctx, pool))
 
 	// Provide a dummy KEK for testing
-	dummyKey := make([]byte, 32)
+	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
 	kek, err := keystore.NewKEK(dummyKey)
 	require.NoError(t, err)
 
@@ -200,7 +200,7 @@ func TestPgxStore_SEC_MFA_03_BackwardCompatibility_LegacySecretWithoutAAD(t *tes
 	store, pool := newStoreAndPool(t)
 	uid := uuid.Must(uuid.NewV7())
 
-	dummyKey := make([]byte, 32)
+	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
 	kek, err := keystore.NewKEK(dummyKey)
 	require.NoError(t, err)
 

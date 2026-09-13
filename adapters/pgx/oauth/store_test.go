@@ -145,7 +145,7 @@ func TestPgxStore_OAuthSecretEncryptedAtRest(t *testing.T) {
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
 	// Provide a real KEK for testing
-	dummyKey := make([]byte, 32)
+	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
 	k, err := keystore.NewKEK(dummyKey)
 	require.NoError(t, err)
 
@@ -204,7 +204,7 @@ func TestPgxStore_SEC_OAU_02_CrossTenantAAD(t *testing.T) {
 
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
-	dummyKey := make([]byte, 32)
+	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
 	k, err := keystore.NewKEK(dummyKey)
 	require.NoError(t, err)
 
@@ -274,7 +274,7 @@ func TestPgxStore_SEC_OAU_02_LegacyFallbackWithoutAAD(t *testing.T) {
 
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
-	dummyKey := make([]byte, 32)
+	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
 	k, err := keystore.NewKEK(dummyKey)
 	require.NoError(t, err)
 

@@ -25,6 +25,16 @@ const KEKKeyLength = 32
 // ErrInvalidKEK is returned by NewKEK when the supplied key is not exactly KEKKeyLength bytes.
 var ErrInvalidKEK = errors.New("keystore: KEK must be exactly 32 bytes (AES-256)")
 
+// ErrTrivialKEK is returned by NewKEK when the supplied key is trivially known: every byte zero, or
+// the same byte repeated. The KEK is the one secret that makes envelope encryption meaningful — its
+// entire purpose is to be unknown to whoever holds the sealed blobs — so a constant key silently
+// reduces the at-rest protection to nothing while everything still appears to work.
+//
+// The value this catches in practice is make([]byte, 32) from a forgotten, ignored or failed
+// crypto/rand read: the length check passes, encryption succeeds, and a database dump becomes
+// sufficient to recover every tenant's signing secret.
+var ErrTrivialKEK = errors.New("keystore: KEK is trivially known (all zero or a repeated byte); generate it with crypto/rand or load it from a secret manager")
+
 // ErrKEKRequired is returned by NewManager when no KEK is configured.
 var ErrKEKRequired = errors.New("keystore: a KEK is required (envelope encryption is mandatory)")
 
@@ -37,6 +47,9 @@ var ErrCiphertextCorrupt = errors.New("keystore: sealed secret is corrupt or was
 func NewKEK(key []byte) (*KEK, error) {
 	if len(key) != KEKKeyLength {
 		return nil, ErrInvalidKEK
+	}
+	if err := trivialKEKError(key); err != nil {
+		return nil, err
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -83,4 +96,24 @@ func (k *KEK) Open(sealed []byte, aad ...[]byte) ([]byte, error) {
 		return nil, ErrCiphertextCorrupt
 	}
 	return pt, nil
+}
+
+// trivialKEKError reports a non-nil error when key is attacker-guessable at any length: every byte
+// zero, or a single byte value repeated throughout. Such a key satisfies the length gate, so the
+// check cannot be expressed as a minimum-length rule.
+//
+// It mirrors tokens/jwt's trivialSecretError and the published-example denylist in passkey: every
+// other key-loading path in this module refuses an all-zero or published key, and the KEK — the one
+// secret whose compromise defeats all of them at once — was the exception.
+func trivialKEKError(key []byte) error {
+	if len(key) == 0 {
+		return nil // the length check above rejects this; keep the helper total
+	}
+	first := key[0]
+	for _, b := range key[1:] {
+		if b != first {
+			return nil
+		}
+	}
+	return ErrTrivialKEK
 }

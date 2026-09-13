@@ -15,7 +15,7 @@ import (
 
 func newKEK(t *testing.T) *keystore.KEK {
 	t.Helper()
-	k, err := keystore.NewKEK(bytes.Repeat([]byte("k"), keystore.KEKKeyLength))
+	k, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
 	if err != nil {
 		t.Fatalf("NewKEK: %v", err)
 	}
