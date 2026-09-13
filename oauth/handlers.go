@@ -16,6 +16,7 @@ import (
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
 	"github.com/google/uuid"
 )
 
@@ -747,6 +748,8 @@ func (cfg handlerConfig) validate() error {
 		errs = append(errs, errors.New("oauth: WithStateSigningKey is required: the OAuth state cookie must be HMAC-signed, otherwise a cookie an attacker can plant (sibling-subdomain tossing, plaintext HTTP) drives the callback into a forged login (STATE-01)"))
 	} else if len(cfg.stateSigningKey) < MinStateSigningKeyLength {
 		errs = append(errs, fmt.Errorf("oauth: WithStateSigningKey key must be at least %d bytes, got %d: a shorter HMAC-SHA-256 key is brute-forceable offline from a single captured state cookie, re-enabling forged logins (STATE-01)", MinStateSigningKeyLength, len(cfg.stateSigningKey)))
+	} else if jwt.DeniedSecrets[string(cfg.stateSigningKey)] {
+		errs = append(errs, errors.New("oauth: WithStateSigningKey is a key published in this project's examples or docs; generate a unique key with crypto/rand or load one from a secret manager — a copy-pasted published key lets anyone forge state cookies"))
 	}
 	if strings.HasPrefix(cfg.stateCookieName, hostPrefix) {
 		if cfg.cookies.Domain != "" {

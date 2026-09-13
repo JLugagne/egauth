@@ -24,6 +24,16 @@ var publishedKeys = []string{
 	"super-secret-32-byte-key-here!!!",
 	"a-high-entropy-secret-kept-out-of-source-control",
 	"super-secret-key-change-me-in-production",
+	// Published as the SecretKey in the identity and tokens/basic package examples, which
+	// go/doc renders on pkg.go.dev as those packages' usage documentation.
+	"a-32-byte-minimum-hs256-signing-secret!!",
+}
+
+// nearCopies are not byte-identical to a published example but contain a marker from one. An
+// exact-match denylist would miss them, so the issuer refuses them too.
+var nearCopies = []string{
+	"a-32-byte-minimum-hs256-signing-secret!!-rotated",
+	"prefix-a-32-byte-minimum-hs256-signing-secret!!",
 }
 
 func TestNew_PanicsOnPublishedExampleKey(t *testing.T) {
@@ -88,5 +98,34 @@ func TestConfig_ValidateRejectsPublishedExampleKey(t *testing.T) {
 		require.Error(t, err)
 		assert.True(t, strings.Contains(err.Error(), "published"),
 			"Validate should call out the published example key, got: %v", err)
+	}
+}
+
+func TestNew_RejectsNearCopyOfPublishedExampleKey(t *testing.T) {
+	for _, key := range nearCopies {
+		t.Run(key, func(t *testing.T) {
+			assert.Panics(t, func() {
+				jwt.New[struct{}](jwt.Config[struct{}]{
+					Store:      memory.NewStore[struct{}](),
+					SecretKey:  key,
+					Issuer:     "x",
+					AccessTTL:  time.Minute,
+					RefreshTTL: time.Hour,
+				})
+			}, "jwt.New must reject a near-copy of a published example key")
+
+			_, err := jwt.NewHMACSigner("k1", []byte(key))
+			require.Error(t, err, "NewHMACSigner must reject a near-copy of a published example key")
+		})
+	}
+}
+
+// TestDeniedSecretsIsExportedForOtherKeyLoaders guards the shared-list contract: the passkey
+// ceremony-cookie key and the OAuth state-signing key reject the same published material, so a
+// literal can never be safe in one key role and unsafe in another.
+func TestDeniedSecretsIsExportedForOtherKeyLoaders(t *testing.T) {
+	require.NotEmpty(t, jwt.DeniedSecrets, "DeniedSecrets must be populated for other key loaders")
+	for _, key := range publishedKeys {
+		assert.True(t, jwt.DeniedSecrets[key], "DeniedSecrets must contain %q", key)
 	}
 }

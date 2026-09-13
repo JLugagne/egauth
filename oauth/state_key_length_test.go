@@ -72,3 +72,37 @@ func TestStateSigningKey_UnderMinimumBruteforceRecoverable(t *testing.T) {
 	}
 	t.Fatal("1-byte HMAC key was not brute-forceable; the documented attack no longer reproduces")
 }
+
+// TestValidateHandlerConfig_RejectsPublishedStateSigningKey proves the state-key check consults
+// the shared published-key list. A key that appears in this project's examples or docs is public
+// the moment it is rendered by go/doc, so passing the length gate is not enough: a copy-pasted
+// deployment would HMAC its state cookie with a string anyone can read.
+func TestValidateHandlerConfig_RejectsPublishedStateSigningKey(t *testing.T) {
+	for _, key := range []string{
+		"a-32-byte-minimum-hs256-signing-secret!!",
+		"super-secret-32-byte-key-here!!!",
+		"a-high-entropy-secret-kept-out-of-source-control",
+		"replace-with-a-32-byte-minimum-secret-in-production!",
+	} {
+		t.Run(key, func(t *testing.T) {
+			err := ValidateHandlerConfig(WithStateSigningKey([]byte(key)))
+			require.Error(t, err, "a published example key must fail the startup check")
+			assert.Contains(t, err.Error(), "published")
+		})
+	}
+}
+
+func TestBeginHandler_PublishedStateSigningKeyFailsClosed(t *testing.T) {
+	body := `{"sub":"prov-1"}`
+	p, _ := stubProviderServer(t, &body)
+
+	rec := httptest.NewRecorder()
+	BeginHandler(p,
+		WithRedirectURL(testRedirect),
+		WithStateSigningKey([]byte("a-32-byte-minimum-hs256-signing-secret!!")),
+	)(rec, httptest.NewRequest(http.MethodGet, "/auth/test/login", nil))
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"begin must fail closed with a published state signing key")
+	assert.Contains(t, rec.Body.String(), "misconfigured",
+		"the misconfiguration error must be surfaced like the missing-key one")
+}

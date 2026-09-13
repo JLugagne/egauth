@@ -9,6 +9,7 @@ import (
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/identity"
+	"github.com/JLugagne/egauth/internal/examplekey"
 	identitymem "github.com/JLugagne/egauth/identity/memory"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
@@ -37,10 +38,12 @@ func Example() {
 		},
 	)
 	tokenStore := basic.NewMemoryStore() // or tokens/pgx.NewStore(pool)
+	// SecretKey is generated per run so this snippet never publishes a usable credential;
+	// a real application loads it from a secret manager or the environment instead.
 	issuer := basic.NewIssuer(basic.Config{
 		Store:          tokenStore,
 		Issuer:         "example-app",
-		SecretKey:      "a-32-byte-minimum-hs256-signing-secret!!",
+		SecretKey:      examplekey.New(),
 		AccessTTL:      15 * time.Minute,
 		RefreshTTL:     720 * time.Hour,
 		ClaimsProvider: claimsProvider, // required for Rotate (refresh)
