@@ -702,7 +702,12 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 	// WithTimeFunc routes the library's exp/nbf validation through the same injected clock the
 	// issuer stamps with, so the verify path is deterministic under a test clock (and honors a
 	// custom clock in production). Without it golang-jwt would validate exp against time.Now().
-	opts := []jwt.ParserOption{jwt.WithTimeFunc(s.now)}
+	// WithExpirationRequired makes exp mandatory: a bearer token with no expiry would otherwise be
+	// accepted as valid forever, and the claims mapping below dereferences the timestamp. Every
+	// token this issuer mints carries exp, so the requirement only affects tokens minted elsewhere
+	// (a custom issuer, or a system sharing the signing key) — where "never expires" is a defect to
+	// reject rather than a property to honour.
+	opts := []jwt.ParserOption{jwt.WithTimeFunc(s.now), jwt.WithExpirationRequired()}
 
 	// Gate the "iss" claim only when an issuer is configured. WithIssuer makes the claim
 	// mandatory and rejects a mismatch, so for issuer-less setups (legacy tokens carry no iss)
@@ -747,11 +752,17 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		return nil, tokens.ErrInvalidClaims
 	}
 
+	// Guard the timestamp mapping: WithExpirationRequired guarantees exp is present on the parse
+	// path, but iat is still optional, and a JSON decoder that leaves a field nil must produce a
+	// rejection rather than a nil dereference (the claims wrapper embeds jwt.RegisteredClaims,
+	// whose date fields are pointers).
+	if wrapper.ExpiresAt == nil {
+		return nil, tokens.ErrInvalidClaims
+	}
 	claims := tokens.Claims[C]{
 		Subject:            subject,
 		TenantID:           wrapper.TenantID,
 		Kind:               wrapper.Kind,
-		IssuedAt:           wrapper.IssuedAt.Time,
 		ExpiresAt:          wrapper.ExpiresAt.Time,
 		Audiences:          wrapper.Audience,
 		Scopes:             wrapper.Scopes,
@@ -761,6 +772,9 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		MustChangePassword: wrapper.MustChangePassword,
 		Interim:            wrapper.Interim,
 		Custom:             wrapper.Custom,
+	}
+	if wrapper.IssuedAt != nil {
+		claims.IssuedAt = wrapper.IssuedAt.Time
 	}
 	if wrapper.AuthTime > 0 {
 		claims.AuthTime = time.Unix(wrapper.AuthTime, 0).UTC()

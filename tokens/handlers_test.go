@@ -478,3 +478,65 @@ func TestRefreshHandler_PassesClientContext(t *testing.T) {
 	assert.Equal(t, "192.0.2.10", capturedCC.IP)
 	assert.Equal(t, "TestBrowser/2.0", capturedCC.UserAgent)
 }
+
+// TestLogoutAndRefresh_FailClosedOnUnresolvableTenant covers the tenant-resolution contract on the
+// session-mutating handlers. When a resolver is configured but returns "" for a request it cannot
+// map, treating that as the single-tenant partition makes the store lookup miss — which the logout
+// handler reads as "the token is already gone" and answers 204 for, leaving the real rotation family
+// alive and renewable. The middleware's own tenant-aware option and sessions.WithTenantResolver both
+// fail closed for exactly this input, so the refresh/logout pair must too.
+func TestLogoutAndRefresh_FailClosedOnUnresolvableTenant(t *testing.T) {
+	unresolvable := tokens.WithTenantResolver(func(*http.Request) string { return "" })
+
+	t.Run("logout reports failure instead of a false success", func(t *testing.T) {
+		store := memory.NewStore[struct{}]()
+		h := tokens.LogoutHandler(store, unresolvable)
+
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		req.Host = "unmapped.example.com"
+		req.Header.Set("Origin", "https://unmapped.example.com")
+		req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: "live-refresh-token"})
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code,
+			"an unmapped tenant must not be reported as a successful logout")
+		assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+		// The cookies are still cleared: the client's local session ends even though the server
+		// could not revoke it, so a retry does not present a confusing half-state.
+		assert.NotNil(t, findCookie(t, rec, tokens.DefaultRefreshCookieName))
+	})
+
+	t.Run("refresh reports failure instead of rotating into the wrong partition", func(t *testing.T) {
+		svc, _ := newRotator(t)
+		pair, err := svc.IssueTokenPair(context.Background(), tokens.Claims[struct{}]{Subject: uuid.Must(uuid.NewV7())})
+		require.NoError(t, err)
+
+		h := tokens.RefreshHandler[struct{}](svc, unresolvable)
+		req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+		req.Host = "unmapped.example.com"
+		req.Header.Set("Origin", "https://unmapped.example.com")
+		req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: pair.RefreshToken})
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+
+		assert.Equal(t, http.StatusUnauthorized, rec.Code)
+		assert.Contains(t, rec.Body.String(), "unresolved_tenant")
+	})
+
+	t.Run("a single-tenant deployment with no resolver is unaffected", func(t *testing.T) {
+		store := memory.NewStore[struct{}]()
+		h := tokens.LogoutHandler(store)
+
+		req := httptest.NewRequest(http.MethodPost, "/auth/logout", nil)
+		req.Host = "app.example.com"
+		req.Header.Set("Origin", "https://app.example.com")
+
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		assert.Equal(t, http.StatusNoContent, rec.Code,
+			"without a resolver the empty tenant is the correct partition, not a resolution failure")
+	})
+}

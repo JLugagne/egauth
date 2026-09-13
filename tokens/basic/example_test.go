@@ -9,8 +9,8 @@ import (
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/identity"
-	"github.com/JLugagne/egauth/internal/examplekey"
 	identitymem "github.com/JLugagne/egauth/identity/memory"
+	"github.com/JLugagne/egauth/internal/examplekey"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
 	"github.com/JLugagne/egauth/tokens/basic"
