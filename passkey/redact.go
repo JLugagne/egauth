@@ -56,3 +56,30 @@ func (a AttestationConfig) String() string {
 		a.MDS != nil,
 	)
 }
+
+// Service holds the ceremony-cookie signing key resolved from Config.CookieKey. fmt prints
+// unexported struct fields and renders a []byte as recoverable decimal byte values, so an
+// accidental %v/%+v/%#v or slog.Any on the running service would disclose the key — the same
+// hazard Config's own redaction exists to prevent. Redacting Config while leaving the Service
+// printable means a caller who follows the documented guidance ("do not log this config") and logs
+// the service instead leaks it anyway.
+func (s *Service) String() string {
+	return fmt.Sprintf(
+		"passkey.Service{CookieKey:%s StoreSet:%t ChallengeStoreSet:%t AccountGateSet:%t EventsSet:%t}",
+		redacted, s.store != nil, s.challenges != nil, s.accountGate != nil, s.events != nil,
+	)
+}
+
+// GoString redacts the %#v representation.
+func (s *Service) GoString() string { return s.String() }
+
+// LogValue redacts the Service for structured (slog) logging.
+func (s *Service) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("cookie_key", redacted),
+		slog.Bool("store_set", s.store != nil),
+		slog.Bool("challenge_store_set", s.challenges != nil),
+		slog.Bool("account_gate_set", s.accountGate != nil),
+		slog.Bool("events_set", s.events != nil),
+	)
+}
