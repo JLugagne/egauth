@@ -61,10 +61,10 @@ func TestCallbackHandler_ShortStateSigningKeyFailsClosed(t *testing.T) {
 // misconfiguration must be impossible.
 func TestStateSigningKey_UnderMinimumBruteforceRecoverable(t *testing.T) {
 	weakKey := []byte{0x9A}
-	packed := packState("state", "verifier", "nonce", "google", "tenant", weakKey)
+	packed := packState(stateBucket{State: "state", Verifier: "verifier", Nonce: "nonce", Provider: "google", Tenant: "tenant"}, weakKey)
 
 	for candidate := 0; candidate < 256; candidate++ {
-		if _, _, _, _, _, ok := unpackState(packed, []byte{byte(candidate)}); ok {
+		if _, ok := unpackState(packed, []byte{byte(candidate)}); ok {
 			assert.Equal(t, weakKey, []byte{byte(candidate)},
 				"the 1-byte signing key must be recoverable offline from a single captured cookie")
 			return

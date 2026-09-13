@@ -312,7 +312,15 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), tenant, cfg.stateSigningKey))
+		cfg.setStateCookie(w, packState(stateBucket{
+			State:       state,
+			Verifier:    verifier,
+			Nonce:       nonce,
+			Provider:    p.Name(),
+			Tenant:      tenant,
+			RedirectURI: redirectURI,
+			IssuedAt:    time.Now().Unix(),
+		}, cfg.stateSigningKey))
 		http.Redirect(w, r, p.AuthCodeURL(state, redirectURI, challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -367,10 +375,20 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, nonce, cookieProvider, cookieTenant, ok := unpackState(raw, cfg.stateSigningKey)
+		st, ok := unpackState(raw, cfg.stateSigningKey)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
+		}
+		// Enforce the flow's age on the server. The cookie's Max-Age is set from the same TTL, but
+		// a client-side lifetime is not a control: an out-of-band copy of the cookie never ages out,
+		// so the value the server trusts has to carry its own issue time.
+		if cfg.stateTTL > 0 {
+			issued := time.Unix(st.IssuedAt, 0)
+			if st.IssuedAt <= 0 || time.Since(issued) > cfg.stateTTL {
+				cfg.fail(w, r, http.StatusForbidden, "invalid_state")
+				return
+			}
 		}
 
 		if q.Get("error") != "" {
@@ -378,18 +396,18 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusUnauthorized, "access_denied")
 			return
 		}
-		if !stateMatches(q.Get("state"), cookieState) {
+		if !stateMatches(q.Get("state"), st.State) {
 			cfg.fail(w, r, http.StatusForbidden, "state_mismatch")
 			return
 		}
 		// Bind the in-flight attempt to the provider and tenant that started it, so a state
 		// cookie minted for provider/tenant A cannot be replayed against the callback of
 		// provider/tenant B (SEC-12: provider confusion / cross-tenant state reuse).
-		if !stateMatches(cookieProvider, p.Name()) {
+		if !stateMatches(st.Provider, p.Name()) {
 			cfg.fail(w, r, http.StatusForbidden, "provider_mismatch")
 			return
 		}
-		if !stateMatches(cookieTenant, tenant) {
+		if !stateMatches(st.Tenant, tenant) {
 			cfg.fail(w, r, http.StatusForbidden, "tenant_mismatch")
 			return
 		}
@@ -398,12 +416,20 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusBadRequest, "missing_code")
 			return
 		}
+		// Exchange against the redirect URI the provider was actually given, taken from the
+		// authenticated cookie rather than re-derived. Two derivations can disagree (Begin
+		// advertises the begin path, this handler would re-derive the callback path), and when the
+		// derived form depends on the request Host the whole binding rests on the provider's own
+		// check. Using the bound value removes both problems.
+		if st.RedirectURI != "" {
+			redirectURI = st.RedirectURI
+		}
 
 		var exchOpts []ExchangeOption
 		if p.oidcEnabled() {
-			exchOpts = append(exchOpts, WithExpectedNonce(nonce))
+			exchOpts = append(exchOpts, WithExpectedNonce(st.Nonce))
 		}
-		info, err := p.Exchange(r.Context(), code, redirectURI, verifier, exchOpts...)
+		info, err := p.Exchange(r.Context(), code, redirectURI, st.Verifier, exchOpts...)
 		if err != nil {
 			cfg.fail(w, r, http.StatusBadGateway, "exchange_failed")
 			return
@@ -589,19 +615,9 @@ func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 		return ""
 	}
 	if len(cfg.allowedHosts) > 0 {
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			reqHost = h
-		}
-		reqHost = strings.Trim(reqHost, "[]")
 		allowed := false
 		for _, ah := range cfg.allowedHosts {
-			target := ah
-			if h, _, err := net.SplitHostPort(ah); err == nil {
-				target = h
-			}
-			target = strings.Trim(target, "[]")
-			if strings.EqualFold(reqHost, target) || strings.EqualFold(r.Host, ah) {
+			if authorityAllowed(r.Host, ah) {
 				allowed = true
 				break
 			}
@@ -613,6 +629,38 @@ func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 	uri := requestScheme(r) + "://" + r.Host + r.URL.Path
 	cfg.warnIfRedirectFallbackMisuse(r)
 	return uri
+}
+
+// authorityAllowed reports whether the request's authority (Host header, host:port) matches an
+// allowlist entry.
+//
+// The comparison keeps the PORT when the entry names one. Reducing both sides to their hostname —
+// as folding them through net.SplitHostPort did — turns a precise entry such as
+// "app.example.com:8443" into "app.example.com" and admits "app.example.com:9999", which is a
+// different service on that host and may well be an attacker's own listener. An entry with no port
+// stays host-only, so deployments behind a default-port proxy keep working.
+func authorityAllowed(requestHost, entry string) bool {
+	entryHost, entryPort, entryHasPort := splitAuthority(entry)
+	if !entryHasPort {
+		reqHost, _, _ := splitAuthority(requestHost)
+		return strings.EqualFold(reqHost, entryHost)
+	}
+	reqHost, reqPort, reqHasPort := splitAuthority(requestHost)
+	if !reqHasPort {
+		// The request omitted the port: it means the scheme default, which cannot equal an explicit
+		// non-default port the allowlist named.
+		return false
+	}
+	return strings.EqualFold(reqHost, entryHost) && reqPort == entryPort
+}
+
+// splitAuthority splits host:port, tolerating a missing port and bracketed IPv6 literals. It reports
+// whether an explicit port was present.
+func splitAuthority(authority string) (host, port string, hasPort bool) {
+	if h, p, err := net.SplitHostPort(authority); err == nil {
+		return strings.Trim(h, "[]"), p, true
+	}
+	return strings.Trim(authority, "[]"), "", false
 }
 
 func isValidHost(rawHost string) bool {

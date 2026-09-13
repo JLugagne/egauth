@@ -60,13 +60,13 @@ func TestDynamicBeginHandler_ConcurrentDistinctTenantsNoAliasing(t *testing.T) {
 				errs <- fmt.Errorf("tenant %s: no state cookie", tenant)
 				return
 			}
-			_, _, _, _, cookieTenant, ok := unpackState(sc.Value, testStateKey)
+			bucket, ok := unpackState(sc.Value, testStateKey)
 			if !ok {
 				errs <- fmt.Errorf("tenant %s: state cookie did not unpack", tenant)
 				return
 			}
-			if cookieTenant != tenant {
-				errs <- fmt.Errorf("cross-tenant leak: request for %s got a state cookie bound to %s", tenant, cookieTenant)
+			if bucket.Tenant != tenant {
+				errs <- fmt.Errorf("cross-tenant leak: request for %s got a state cookie bound to %s", tenant, bucket.Tenant)
 			}
 		}(tenant)
 	}

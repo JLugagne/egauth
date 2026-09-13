@@ -22,11 +22,11 @@ func TestUnpackState_MissingKeyRejectsUnsigned(t *testing.T) {
 	forged := "attacker-state" + "." + "" + "." + "" + "." +
 		base64.RawURLEncoding.EncodeToString([]byte("test")) + "." +
 		base64.RawURLEncoding.EncodeToString([]byte(""))
-	_, _, _, _, _, ok := unpackState(forged, nil)
+	_, ok := unpackState(forged, nil)
 	assert.False(t, ok, "unsigned state cookie must be rejected when no signing key is set")
 
-	packed := packState("s", "v", "n", "test", "", nil)
-	_, _, _, _, _, ok = unpackState(packed, nil)
+	packed := packState(stateBucket{State: "s", Verifier: "v", Nonce: "n", Provider: "test"}, nil)
+	_, ok = unpackState(packed, nil)
 	assert.False(t, ok, "packState without a key must not produce an acceptable state value")
 }
 

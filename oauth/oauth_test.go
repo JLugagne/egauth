@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -90,12 +91,58 @@ func claimsOf(u *identity.User) tokens.Claims[struct{}] {
 	return tokens.Claims[struct{}]{Subject: u.ID}
 }
 
+// tokenEndpointRecorder captures what the token endpoint was sent, so a test can assert on the
+// exchange's parameters (notably redirect_uri) rather than only on the callback's response.
+type tokenEndpointRecorder struct {
+	mu    sync.Mutex
+	forms []url.Values
+}
+
+func (r *tokenEndpointRecorder) record(form url.Values) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forms = append(r.forms, form)
+}
+
+// lastFormValue returns the named value from the most recent token request.
+func (r *tokenEndpointRecorder) lastFormValue(key string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.forms) == 0 {
+		return "", false
+	}
+	v, ok := r.forms[len(r.forms)-1][key]
+	if !ok || len(v) == 0 {
+		return "", false
+	}
+	return v[0], true
+}
+
+// stubProviderServerWithRecorder is stubProviderServer plus a recorder over the token requests.
+func stubProviderServerWithRecorder(t *testing.T, body *string) (*Provider, *httptest.Server, *tokenEndpointRecorder) {
+	t.Helper()
+	rec := &tokenEndpointRecorder{}
+	p, srv := stubProviderServerWithHook(t, body, rec.record)
+	return p, srv, rec
+}
+
 // stubProviderServer returns an httptest server emulating a provider's token + userinfo
 // endpoints, plus a Provider wired to it. The userinfo body is taken from *body at call time.
 func stubProviderServer(t *testing.T, body *string) (*Provider, *httptest.Server) {
 	t.Helper()
+	p, srv := stubProviderServerWithHook(t, body, nil)
+	return p, srv
+}
+
+// stubProviderServerWithHook builds the stub server and calls onToken for every token request.
+func stubProviderServerWithHook(t *testing.T, body *string, onToken func(url.Values)) (*Provider, *httptest.Server) {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if onToken != nil {
+			_ = r.ParseForm()
+			onToken(r.PostForm)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"access_token":"at-123","token_type":"bearer"}`)
 	})

@@ -64,23 +64,30 @@ func TestOAuthStateProperty_SignUnpackRoundTrip(t *testing.T) {
 		provider := statePropText(rng, 24)
 		tenant := statePropText(rng, 24)
 
-		packed := packState(state, verifier, nonce, provider, tenant, key)
-		gotState, gotVerifier, gotNonce, gotProvider, gotTenant, ok := unpackState(packed, key)
+		redirectURI := "https://" + statePropText(rng, 12) + ".example/cb"
+		issuedAt := int64(1_700_000_000 + i)
+		packed := packState(stateBucket{
+			State: state, Verifier: verifier, Nonce: nonce, Provider: provider, Tenant: tenant,
+			RedirectURI: redirectURI, IssuedAt: issuedAt,
+		}, key)
+		got, ok := unpackState(packed, key)
 		require.True(t, ok, "iteration %d: signed state must unpack", i)
-		require.Equal(t, state, gotState)
-		require.Equal(t, verifier, gotVerifier)
-		require.Equal(t, nonce, gotNonce)
-		require.Equal(t, provider, gotProvider)
-		require.Equal(t, tenant, gotTenant)
+		require.Equal(t, state, got.State)
+		require.Equal(t, verifier, got.Verifier)
+		require.Equal(t, nonce, got.Nonce)
+		require.Equal(t, provider, got.Provider)
+		require.Equal(t, tenant, got.Tenant)
+		require.Equal(t, redirectURI, got.RedirectURI)
+		require.Equal(t, issuedAt, got.IssuedAt)
 
 		// A signed value must not be usable with any other key, and no key at all.
 		other := statePropBytes(rng, 16, 64)
 		for string(other) == string(key) {
 			other = statePropBytes(rng, 16, 64)
 		}
-		_, _, _, _, _, ok = unpackState(packed, other)
+		_, ok = unpackState(packed, other)
 		require.False(t, ok, "iteration %d: a foreign key must reject the state", i)
-		_, _, _, _, _, ok = unpackState(packed, nil)
+		_, ok = unpackState(packed, nil)
 		require.False(t, ok, "iteration %d: an unsigned decode must fail closed", i)
 
 		// Tampering: changing any single character except the very last (whose trailing bits
@@ -92,21 +99,21 @@ func TestOAuthStateProperty_SignUnpackRoundTrip(t *testing.T) {
 				replacement = statePropAlphabet[rng.Intn(len(statePropAlphabet))]
 			}
 			tampered := packed[:pos] + string(replacement) + packed[pos+1:]
-			_, _, _, _, _, ok = unpackState(tampered, key)
+			_, ok = unpackState(tampered, key)
 			require.False(t, ok, "iteration %d: tampered state must be rejected", i)
 		}
 
 		// Truncation must never yield a valid decode.
 		if len(packed) > 1 {
 			cut := rng.Intn(len(packed))
-			_, _, _, _, _, ok = unpackState(packed[:cut], key)
+			_, ok = unpackState(packed[:cut], key)
 			require.False(t, ok, "iteration %d: truncated state must be rejected", i)
 		}
 	}
 
 	// packState without a key is never acceptable to unpackState: there is no "unsigned mode".
-	unsigned := packState("state", "verifier", "nonce", "provider", "tenant", nil)
-	_, _, _, _, _, ok := unpackState(unsigned, statePropBytes(rng, 16, 64))
+	unsigned := packState(stateBucket{State: "state", Verifier: "verifier", Nonce: "nonce", Provider: "provider", Tenant: "tenant"}, nil)
+	_, ok := unpackState(unsigned, statePropBytes(rng, 16, 64))
 	require.False(t, ok, "a state packed without a key must never unpack")
 }
 
