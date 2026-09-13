@@ -21,6 +21,6 @@ go.work.sum
 
 /.tickets
 
-# transient build cache used during local verification
-/.gocache-audit/
+# transient build caches used during local verification
+/.gocache-local/
 /.golangci-cache/
