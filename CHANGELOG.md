@@ -76,6 +76,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   working cookies instead of a fatal configuration, and the configuration is checked once by
   each handler constructor and by `RequireAuth`/`ContextMiddleware`. `webapp.NewWebApp`
   returns the error rather than panicking. `tokens.DefaultCookies` is unchanged.
+- **A tag push is now verified.** A tag matched neither CI trigger, so publishing a release ran no
+  verification at all — no tests, no scan, no signature check — while the module proxy could already
+  be serving the tag. `.github/workflows/release-verify.yml` runs the signed-tag gate on every tag
+  push (and on demand against an existing tag) and reports the result; `RELEASING.md` now documents
+  the tag ruleset that is the actual publication control, and the required-check set by name.
+- **The release-signing tools are pinned** (`gitsign`, `cosign`) with their versions in the Makefile
+  alongside the other tool pins, and a guard fails the build if a `go install` line in the release
+  documentation uses `@latest`. Those tools run with the maintainer's OIDC identity, which is the
+  position that produces the signatures consumers verify.
+- **The secure-defaults registry guard covers `webapp` and middleware constructors**
+  (`func(http.Handler) http.Handler`), and the matrix's coverage claim now names the scanned
+  packages. `tokens.RequireAuth`/`ContextMiddleware` are also recorded as mutating, because with
+  `WithAutoRefresh` they rotate the refresh family and rewrite the auth cookies.
 - **Missing resource ceilings added:** Argon2 `MaxTime` bounds the iteration count on the
   verify path (the memory half already had a ceiling); `keystore.NewKEK` refuses an all-zero
   or repeated-byte KEK, which would have silently reduced envelope encryption to nothing; and
@@ -96,6 +109,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`identity.RecoveryChannels` gains `NotBefore` and `Usable(now)`**, and
+  `WithRecoveryChannelCooldown` (default off) sets how long a newly enrolled recovery channel must
+  exist before it may be used to reset a password. Gate a reset on `Usable` rather than `Any` to
+  require that window. The reset-via-recovery flow already enforces it internally.
+- **`event.EmailChanged` carries `previous_email` / `new_email`**, and the recovery and phone events
+  carry `recovery_channel`. Changing the account email or adding a recovery channel needs only a
+  live session, so the address that lost access is often the only party able to notice: a sink can
+  now warn it. Keys are documented in the event package, and no credential is ever carried.
+- **`Origin` parsing accepts only the canonical `scheme://host[:port]`** on the exported same-origin
+  primitive, so userinfo, scheme-relative and path/query/fragment forms are refused. A browser
+  request is unaffected.
 - **`logs` redaction contract**: the types listed above render their secret fields as
   `REDACTED` under `%v`/`%s`/`%+v`/`%#v` and `slog`. JSON marshalling remains unredacted by
   design, since returning a freshly issued token to its owner is a legitimate use.

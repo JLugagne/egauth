@@ -5,6 +5,11 @@ GOLANGCI_LINT_VERSION := v2.12.2
 GOVULNCHECK_VERSION   := v1.1.4
 # Keep in sync with RELEASING.md. Update deliberately after reviewing the upstream release.
 SYFT_VERSION          := v1.51.1
+# Release-signing tools. These produce the artifacts consumers verify releases against, so they run
+# with the maintainer's OIDC identity and full filesystem access: pin them, and review the upstream
+# release before bumping. Keep in sync with RELEASING.md.
+GITSIGN_VERSION       := v0.13.0
+COSIGN_VERSION        := v2.5.0
 
 # Multi-module monorepo: the core module (.) and the nested pgx adapter module (adapters/pgx).
 # Core checks run with GOWORK=off so they exercise the standalone module external consumers get

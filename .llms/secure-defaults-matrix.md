@@ -1,7 +1,11 @@
 # secure-defaults matrix — handler families & outbound HTTP
 
-Derived from the current source. Every exported HTTP handler constructor is
-enumerated mechanically by the guard in `internal/securitydefaults` (registry + go/parser scan);
+Derived from the current source. Every exported HTTP handler constructor — and every
+`func(http.Handler) http.Handler` middleware constructor — in these packages is
+enumerated mechanically by the guard in `internal/securitydefaults` (registry + go/parser
+scan):
+`authflow`, `identity`, `mfa`, `oauth`, `otp`, `passkey`, `sessions`, `tokens`,
+`tokens/basic`, `webapp`. A constructor in any other package is covered by review only;
 this matrix records the control each family applies *by default* and the option that opts out or
 widens it. Nothing here is opt-in: the safe value is the zero/absent value.
 

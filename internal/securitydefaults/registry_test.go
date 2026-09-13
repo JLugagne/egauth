@@ -25,6 +25,10 @@ var scannedPackages = []string{
 	"sessions",
 	"tokens",
 	"tokens/basic",
+	// webapp is the composition preset the quick-start hands a consumer, so it builds the
+	// endpoints most deployments actually expose. Its constructor returns (http.Handler, error),
+	// which returnsHTTPHandler matches once the multi-value result is unwrapped.
+	"webapp",
 }
 
 // handlerRecord documents one exported handler constructor: whether it builds a state-changing
@@ -95,10 +99,18 @@ var handlerRegistry = map[string]handlerRecord{
 	"sessions.RequireSession": {mutation: true, control: "cookie-auth unsafe-method same-origin gate (Bearer exempt); __Host- session cookie; tenant resolver fails closed"},
 
 	// tokens: cookie-driven handlers and the verification middleware.
-	"tokens.RefreshHandler":    {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
-	"tokens.LogoutHandler":     {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
-	"tokens.RequireAuth":       {mutation: false, control: "access-token verification; tenant resolver fails closed (401)"},
-	"tokens.ContextMiddleware": {mutation: false, control: "access-token verification; tenant resolver fails closed (401)"},
+	// webapp is a composition preset: it mounts the identity register/login handlers and the tokens
+	// refresh/logout handlers, so it inherits their controls and adds its own construction-time
+	// requirements. Refresh rotates the family and writes cookies, so the preset as a whole mutates.
+	"webapp.NewWebApp": {mutation: true, control: "refuses to build without TrustedOrigins (CSRF-by-default) and rejects TrustedOrigins+InsecureNoOriginCheck; per-client-IP rate limit ON (burst 20, refill 6s, InsecureNoRateLimit opt-out); cookie configuration validated at construction; non-nil slog event sink"},
+
+	"tokens.RefreshHandler": {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
+	"tokens.LogoutHandler":  {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
+	// mutation is true for both: with WithAutoRefresh they rotate the refresh family and rewrite
+	// the auth cookies on a request that arrived without a usable access token, so a route behind
+	// them can change server-side state. The gate matrix itself is non-mutating.
+	"tokens.RequireAuth":       {mutation: true, control: "access-token verification; tenant resolver fails closed (401); opt-in auto-refresh rotates the family and rewrites cookies"},
+	"tokens.ContextMiddleware": {mutation: true, control: "access-token verification; tenant resolver fails closed (401); opt-in auto-refresh rotates the family and rewrites cookies"},
 
 	// tokens/basic: the C=struct{} facade over the tokens constructors.
 	"basic.RefreshHandler":    {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
@@ -227,19 +239,41 @@ func returnsHTTPHandler(results *ast.FieldList) bool {
 		return false
 	}
 	for _, field := range results.List {
-		sel, ok := field.Type.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != "http" {
-			continue
-		}
-		if sel.Sel.Name == "Handler" || sel.Sel.Name == "HandlerFunc" {
+		if isHTTPHandlerType(field.Type) {
 			return true
 		}
 	}
 	return false
+}
+
+// isHTTPHandlerType reports whether a type expression is http.Handler or http.HandlerFunc, unwrapping
+// the parenthesised and generic forms that appear in real signatures.
+func isHTTPHandlerType(e ast.Expr) bool {
+	switch node := e.(type) {
+	case *ast.ParenExpr:
+		return isHTTPHandlerType(node.X)
+	case *ast.SelectorExpr:
+		ident, ok := node.X.(*ast.Ident)
+		if !ok || ident.Name != "http" {
+			return false
+		}
+		return node.Sel.Name == "Handler" || node.Sel.Name == "HandlerFunc"
+	}
+	return false
+}
+
+// isMiddlewareConstructor reports whether a function's signature is func(http.Handler) http.Handler —
+// the shape of the Origin/rate-limit middleware the module also exports. Those wrap a handler and
+// therefore decide a control for every route behind them, so they belong in the registry alongside
+// the handler factories.
+func isMiddlewareConstructor(fn *ast.FuncDecl) bool {
+	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
+		return false
+	}
+	if !isHTTPHandlerType(fn.Type.Params.List[0].Type) {
+		return false
+	}
+	return returnsHTTPHandler(fn.Type.Results)
 }
 
 // repoRoot returns the module root (the parent of internal/) from this test file's location.

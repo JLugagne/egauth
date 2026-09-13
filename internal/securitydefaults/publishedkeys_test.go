@@ -340,3 +340,60 @@ func relPath(t *testing.T, root, path string) string {
 	}
 	return filepath.ToSlash(rel)
 }
+
+// TestReleaseToolingInstallsArePinned guards the release runbook. `go install ...@latest` in a shell
+// fence compiles whatever upstream published at release time and runs it with the maintainer's OIDC
+// identity and filesystem access — which is exactly the position that produces the signatures
+// consumers verify. A floating version there undoes the pin-everything convention the Makefile and
+// ci.yml both follow, so a literal @latest on a go install line in the release documentation fails
+// the build.
+func TestReleaseToolingInstallsArePinned(t *testing.T) {
+	root := repoRoot(t)
+	docs := []string{
+		"RELEASING.md",
+		"SECURITY.md",
+		"CONTRIBUTING.md",
+	}
+	var checked int
+	for _, rel := range docs {
+		path := filepath.Join(root, rel)
+		if _, err := os.Stat(path); err != nil {
+			continue
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", rel, err)
+		}
+		for i, line := range strings.Split(string(raw), "\n") {
+			trimmed := strings.TrimSpace(line)
+			// Only shell invocations count. Prose that warns against @latest ("never install it at
+			// @latest") is the documentation doing its job.
+			if !strings.HasPrefix(trimmed, "go install ") && !strings.HasPrefix(trimmed, "brew install ") {
+				continue
+			}
+			checked++
+			if strings.Contains(trimmed, "@latest") {
+				t.Errorf("%s:%d installs a release tool at @latest: %q — pin the reviewed version and keep it in sync with the Makefile",
+					rel, i+1, trimmed)
+			}
+		}
+	}
+	if checked == 0 {
+		t.Fatal("guard found no tool-install lines; the docs it scans are wrong")
+	}
+}
+
+// TestReleaseToolingPinsHaveOneHome keeps the Makefile the single source of the release-tool
+// versions, so a bump cannot update one and miss the other.
+func TestReleaseToolingPinsHaveOneHome(t *testing.T) {
+	root := repoRoot(t)
+	mk, err := os.ReadFile(filepath.Join(root, "Makefile"))
+	if err != nil {
+		t.Fatalf("read Makefile: %v", err)
+	}
+	for _, name := range []string{"GITSIGN_VERSION", "COSIGN_VERSION"} {
+		if !strings.Contains(string(mk), name) {
+			t.Errorf("Makefile must pin %s: the release runbook refers to it by name", name)
+		}
+	}
+}

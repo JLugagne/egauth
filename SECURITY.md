@@ -830,7 +830,9 @@ supported model for releases that opt into keyless signing; when a release is ke
 verify the certificate identity too:
 
 ```sh
-go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
+# Pinned: the verifier must be a version you have reviewed. Keep in sync with GITSIGN_VERSION in
+# the Makefile.
+go install github.com/sigstore/gitsign@v0.13.0   # or: brew install gitsign
 git config --global gpg.x509.program gitsign
 git config --global gpg.format x509
 
