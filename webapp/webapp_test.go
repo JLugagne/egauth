@@ -3,6 +3,7 @@ package webapp_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/JLugagne/egauth/webapp"
@@ -62,19 +63,33 @@ func TestNewWebApp_CookieDomain_DoesNotPanicAndSetsScopedCookies(t *testing.T) {
 	cookies := resp.Cookies()
 	require.NotEmpty(t, cookies)
 
+	// A Domain cannot coexist with the __Host- prefix, so the names are demoted. They keep the
+	// __Secure- prefix — the cookie is still Secure with Path="/", so the weaker prefix is
+	// satisfiable and keeps the "never sent over plaintext" guarantee. Only a cookie that also
+	// lost Secure would fall back to the bare name.
 	var accessCookie, refreshCookie *http.Cookie
 	for _, c := range cookies {
-		if c.Name == "access_token" {
+		if c.Name == "__Secure-access_token" {
 			accessCookie = c
 		}
-		if c.Name == "refresh_token" {
+		if c.Name == "__Secure-refresh_token" {
 			refreshCookie = c
 		}
 	}
-	require.NotNil(t, accessCookie, "access_token cookie must be set without __Host- prefix when domain is configured")
+	require.NotNil(t, accessCookie, "a domain-scoped access cookie must be set under a demoted name")
 	assert.Equal(t, "example.com", accessCookie.Domain)
-	require.NotNil(t, refreshCookie, "refresh_token cookie must be set without __Host- prefix when domain is configured")
+	assert.True(t, accessCookie.Secure, "the demoted name keeps the Secure attribute")
+	assert.Equal(t, "/", accessCookie.Path)
+	require.NotNil(t, refreshCookie, "a domain-scoped refresh cookie must be set under a demoted name")
 	assert.Equal(t, "example.com", refreshCookie.Domain)
+	assert.True(t, refreshCookie.Secure)
+
+	// No cookie may still carry a __Host- name alongside a Domain: browsers would reject it and
+	// the deployment would silently lose every auth cookie.
+	for _, c := range cookies {
+		assert.False(t, strings.HasPrefix(c.Name, "__Host-") && c.Domain != "",
+			"cookie %q carries a __Host- name with a Domain attribute, which browsers reject", c.Name)
+	}
 }
 
 // TestNewWebApp_CookieDomain_RejectsInvalidDomain verifies that malformed cookie domains

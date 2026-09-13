@@ -302,8 +302,8 @@ func (s *Service[C]) PublicJWKS() JWKSet
 ### `Cookies`
 ```go
 type Cookies struct {
-    AccessName  string        // default: "access_token"
-    RefreshName string        // default: "refresh_token"
+    AccessName  string        // default: "__Host-access_token"
+    RefreshName string        // default: "__Host-refresh_token"
     Domain      string        // empty = host-only
     Path        string        // access cookie path, default "/"
     RefreshPath string        // refresh cookie path, default "/" (keep "/" for auto-refresh middleware)
@@ -312,6 +312,27 @@ type Cookies struct {
 }
 // Always HttpOnly; Secure is on unless Insecure=true.
 ```
+
+The default names carry the browser-enforced `__Host-` prefix, which requires `Secure`, no
+`Domain` and `Path="/"`. Derive variants with the demoting helpers instead of assigning those
+fields directly:
+
+```go
+func (c Cookies) WithDomain(domain string) Cookies      // __Host- -> __Secure- (or bare name)
+func (c Cookies) WithPath(path string) Cookies          // non-"/" path -> bare names
+func (c Cookies) WithRefreshPath(path string) Cookies   // demotes the refresh name only
+func (c Cookies) WithInsecure() Cookies                 // -> bare names (dev only)
+func (c Cookies) Validate() error                       // browser-rule check
+func (c Cookies) MustValidate()                         // panics on an invalid value
+```
+
+Each helper drops a prefix the new attributes can no longer satisfy, so the result is always
+valid: `__Host-` becomes `__Secure-` while the cookie stays Secure with `Path="/"`, otherwise the
+bare name; `__Secure-` becomes the bare name once `Insecure` is set. Custom names are never
+rewritten. Validation happens at CONSTRUCTION: every handler/middleware constructor that accepts a
+`Cookies` calls `MustValidate` (so a `__Host-` name kept next to a `Domain` panics at startup), and
+`webapp.NewWebApp` returns it as an error. Reading and writing cookies never panics at request
+time.
 
 ## Constructors
 
@@ -342,7 +363,7 @@ func (s *Store[C]) MaxEntries() int
 ### Cookie helpers
 ```go
 func DefaultCookies() Cookies
-// Returns: AccessName="access_token", RefreshName="refresh_token", Path="/", RefreshPath="/", SameSite=Lax, Secure=true
+// Returns: AccessName="__Host-access_token", RefreshName="__Host-refresh_token", Path="/", RefreshPath="/", SameSite=Lax, Secure=true
 ```
 
 ## Token operations
@@ -530,12 +551,12 @@ func NewRevocationTracker(bus revocation.Bus) *RevocationTracker // implements t
 ### `HandlerOption` — handler options
 | Option | Effect |
 |--------|--------|
-| `WithCookies(Cookies)` | Replace cookie config wholesale |
-| `WithCookieDomain(string)` | Set cookie Domain |
-| `WithCookiePath(string)` | Set Path on both cookies |
-| `WithRefreshCookiePath(string)` | Set Path on refresh cookie only |
+| `WithCookies(Cookies)` | Replace cookie config wholesale (validated at construction; an invalid value panics there) |
+| `WithCookieDomain(string)` | Set cookie Domain; DEMOTES `__Host-` names to `__Secure-` (host-lock opt-out) |
+| `WithCookiePath(string)` | Set Path on both cookies; a non-`"/"` path DEMOTES `__Host-` names to their bare form |
+| `WithRefreshCookiePath(string)` | Set Path on refresh cookie only; DEMOTES the refresh name the same way |
 | `WithSameSite(http.SameSite)` | Override SameSite |
-| `WithInsecureCookies()` | Disable Secure (dev only) |
+| `WithInsecureCookies()` | Disable Secure (dev only); DEMOTES both names to their bare form |
 | `WithTenantResolver(func(*http.Request) string)` | Resolve tenantID for multi-tenant |
 | `WithTrustedOrigins(hosts ...string)` | Widen the default-on CSRF origin allowlist. Accepts bare hosts (`app.example.com`) and full origins (`https://app.example.com`); entries are normalized to the bare host, matching stays exact. |
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
@@ -545,6 +566,12 @@ func NewRevocationTracker(bus revocation.Bus) *RevocationTracker // implements t
 
 ### Cookie helpers (on `Cookies`)
 ```go
+func (c Cookies) WithDomain(domain string) Cookies    // demoting derivations, see `Cookies` above
+func (c Cookies) WithPath(path string) Cookies
+func (c Cookies) WithRefreshPath(path string) Cookies
+func (c Cookies) WithInsecure() Cookies
+func (c Cookies) Validate() error
+func (c Cookies) MustValidate()                       // what the constructors call
 func (c Cookies) SetAccess(w http.ResponseWriter, accessToken string)
 func (c Cookies) SetRefresh(w http.ResponseWriter, refreshToken string, expiresAt time.Time, persistent bool)
 func (c Cookies) Access(r *http.Request) (string, bool)

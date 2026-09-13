@@ -104,8 +104,12 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
-	// STATE-01: validate the configuration eagerly and record the outcome; the handlers
-	// fail closed with 500 at request time when it is invalid, and the same check is
+	// Cookies are validated here, at construction: an option combination that cannot honour the
+	// cookie names it was given must not survive to the request path, where every request would
+	// fail instead of the deployment failing once at startup.
+	c.cookies.MustValidate()
+	// STATE-01: validate the remaining configuration eagerly too and record the outcome; the
+	// handlers fail closed with 500 at request time when it is invalid, and the same check is
 	// exposed by ValidateHandlerConfig for a server startup check.
 	c.configErr = c.validate()
 	return c
@@ -114,11 +118,14 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 // WithCookies replaces the auth-cookie configuration wholesale.
 func WithCookies(c tokens.Cookies) HandlerOption { return func(h *handlerConfig) { h.cookies = c } }
 
-// WithCookieDomain scopes the auth and state cookies to a domain. Incompatible with the
-// default __Host- state cookie name; pair it with WithStateCookieName to opt out of the
-// __Host- host-locking (and accept the login-CSRF residual of a tossable state cookie).
+// WithCookieDomain scopes the auth and state cookies to a domain.
+//
+// A Domain is incompatible with the __Host- prefix the default auth-cookie names carry, so a name
+// still carrying it is DEMOTED (to __Secure- while the cookie stays Secure with Path="/", otherwise
+// to the bare name): setting a Domain is an explicit opt-out of host-lock semantics. Note that this
+// forfeits the subdomain cookie-tossing protection __Host- provides.
 func WithCookieDomain(domain string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Domain = domain }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithDomain(domain) }
 }
 
 // WithSameSite overrides the SameSite attribute of the auth cookies set on success. (The
@@ -128,10 +135,11 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 }
 
 // WithInsecureCookies disables the Secure attribute on all cookies. Local HTTP dev only.
-// Incompatible with the default __Host- state cookie name: rename the state cookie via
-// WithStateCookieName when serving plaintext HTTP.
+//
+// Browsers reject a __Host- or __Secure- named cookie that is not Secure, so the auth-cookie names
+// are DEMOTED to their bare form ("access_token" / "refresh_token").
 func WithInsecureCookies() HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Insecure = true }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithInsecure() }
 }
 
 // WithRedirectURL sets the OAuth redirect_uri. It MUST equal the callback URL registered with

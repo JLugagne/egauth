@@ -79,6 +79,10 @@ type Config struct {
 	// RefreshTTL overrides the refresh-token lifetime. Zero selects DefaultRefreshTTL.
 	RefreshTTL time.Duration
 	// CookieDomain optionally scopes the auth cookies to a domain (empty = host-only).
+	// Setting it opts out of the __Host- cookie prefix (which forbids a Domain), so the cookie
+	// names are demoted to their __Secure- form and the subdomain cookie-tossing protection
+	// __Host- provides is forfeited. Leave it empty unless the deployment needs cross-subdomain
+	// cookies.
 	CookieDomain string
 	// TrustedOrigins, when non-empty, enables the CSRF origin check on every cookie-bearing
 	// POST endpoint (login, register, refresh, logout). Entries may be full origins
@@ -202,19 +206,29 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		return claimsForUser(u.ID, cfg.Tenant)
 	}
 
-	idOpts := []identity.HandlerOption{identity.WithHandlerEventSink(sink), identity.WithUniformAuthErrors()}
-	tkOpts := []tokens.HandlerOption{}
+	// Build the cookie configuration once and validate it here, at construction: a configuration a
+	// browser would reject must surface as a NewWebApp error, never as a per-request failure.
+	// WithDomain demotes the __Host- prefix the defaults carry (a Domain cannot coexist with it),
+	// so a domain-scoped deployment gets working cookies rather than a fatal configuration.
+	cookies := tokens.DefaultCookies()
 	if cfg.CookieDomain != "" {
+		// Reject a value that is not a bare domain before it reaches the cookie attributes: a scheme,
+		// port or path here would produce a Domain attribute browsers reject, silently dropping every
+		// auth cookie.
 		if strings.Contains(cfg.CookieDomain, "://") || strings.Contains(cfg.CookieDomain, "/") || strings.Contains(cfg.CookieDomain, ":") {
 			return nil, errors.New("webapp: Config.CookieDomain must not include scheme, port, or path")
 		}
-		cookies := tokens.DefaultCookies()
-		cookies.Domain = cfg.CookieDomain
-		cookies.AccessName = "access_token"
-		cookies.RefreshName = "refresh_token"
-		idOpts = append(idOpts, identity.WithCookies(cookies))
-		tkOpts = append(tkOpts, tokens.WithCookies(cookies))
+		cookies = cookies.WithDomain(cfg.CookieDomain)
 	}
+	if err := cookies.Validate(); err != nil {
+		return nil, errors.Join(errors.New("webapp: invalid cookie configuration"), err)
+	}
+
+	idOpts := []identity.HandlerOption{
+		identity.WithHandlerEventSink(sink),
+		identity.WithCookies(cookies),
+	}
+	tkOpts := []tokens.HandlerOption{tokens.WithCookies(cookies)}
 	if len(cfg.TrustedOrigins) > 0 {
 		// Accept both the documented full-origin format ("https://app.example.com") and the
 		// bare-host format the handlers expect; normalize loudly so a mistyped entry fails
