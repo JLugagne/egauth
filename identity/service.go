@@ -438,8 +438,16 @@ func (s *service) Register(ctx context.Context, tenantID string, email, password
 	}
 
 	// Check whether the email already exists before running the expensive password hasher,
-	// preventing unauthenticated pre-auth CPU/memory exhaustion DoS (SEC-ID-01).
+	// preventing unauthenticated pre-auth CPU/memory exhaustion DoS (SEC-ID-01). The cheap pre-check
+	// must stay FIRST: hashing before the uniqueness check would let an unauthenticated caller spend
+	// a full Argon2id pass per request against an address that is already taken.
 	if _, ferr := s.store.FindUserByEmail(ctx, tenantID, email); ferr == nil {
+		// Spend the same work the free-address path spends below, so the response TIME does not
+		// disclose whether the address is registered. Without it, the taken branch returns after a
+		// store lookup while the free branch runs a memory-hard KDF — a gap wide enough that one
+		// request classifies the account, which no rate limit can mitigate. The decoy is what lets
+		// the DoS guard and the anti-enumeration requirement coexist.
+		s.decoyHash(ctx, password)
 		return nil, ErrEmailAlreadyExists
 	} else if !errors.Is(ferr, ErrUserNotFound) {
 		return nil, ferr

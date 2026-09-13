@@ -695,10 +695,14 @@ not a bug:
   unknown-user / wrong-password paths) so the *response time* of those branches does not become
   a second, redundant enumeration oracle — keeping all in-process timing uniform and robust
   against a future refactor that collapses the 429 back to a generic 401.
-- **`email_taken` → 409** on registration: standard registration UX. If your threat model
-  requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
-  `400` (note that `Register` already hashes before the uniqueness check, so the timing
-  channel is already closed).
+- **`email_taken` → 409** on registration: standard registration UX, and the *response shape*
+  discloses account existence by design. The *response time* does not: `Register` checks
+  uniqueness before hashing (the cheap pre-check is what keeps an unauthenticated caller from
+  spending a full Argon2id pass per request on an address they cannot claim), and it spends an
+  equivalent decoy hash on the taken branch so both branches cost the same. If your threat model
+  requires closing the response-shape channel too, collapse `mapRegisterError` to a single generic
+  `400` — do **not** "fix" the timing by hashing first, which reintroduces the pre-auth hashing
+  DoS.
 - **`email_taken` → 409** on the authenticated change-email request
   (`RequestEmailChangeHandler`): the caller is told up front when the requested new address
   already belongs to another account, mirroring the registration disclosure. This is gated

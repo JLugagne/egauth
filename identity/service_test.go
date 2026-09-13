@@ -966,6 +966,7 @@ func TestRegister_DuplicateEmail_NoHashing(t *testing.T) {
 			return nil
 		},
 	}
+	createUserCalled := false
 	store := &storetest.MockStore{
 		FindUserByEmailFunc: func(ctx context.Context, tenantID string, e string) (*identity.User, error) {
 			if e == email {
@@ -974,6 +975,7 @@ func TestRegister_DuplicateEmail_NoHashing(t *testing.T) {
 			return nil, identity.ErrUserNotFound
 		},
 		CreateUserFunc: func(ctx context.Context, tenantID string, email string) (*identity.User, error) {
+			createUserCalled = true
 			return nil, identity.ErrEmailAlreadyExists
 		},
 	}
@@ -981,5 +983,54 @@ func TestRegister_DuplicateEmail_NoHashing(t *testing.T) {
 
 	_, err := svc.Register(ctx, "", email, "ValidPassword123!")
 	assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
-	assert.False(t, hashCalled, "hasher.Hash must not be called when registering an existing email")
+
+	// The taken branch deliberately spends one decoy hash so its response time matches the
+	// free-address branch, which is what keeps sign-up from being an account-existence timing
+	// oracle. What must NOT happen is the store write path running: the uniqueness check stays
+	// first, so an unauthenticated caller can never reach CreateUser/AddIdentity for an address
+	// they do not own.
+	assert.True(t, hashCalled, "the taken branch spends a decoy hash to equalize response time")
+	assert.False(t, createUserCalled, "the uniqueness check must short-circuit before any store write")
+}
+
+// TestRegister_ExistingEmailSpendsTheSameWorkAsAFreeOne is the anti-enumeration contract for sign-up.
+// The cheap uniqueness pre-check exists to stop an unauthenticated caller spending a full Argon2id
+// pass per request on an address they cannot claim; the decoy hash exists so that pre-check does not
+// become a timing oracle. Both properties are asserted together because either one alone is a defect.
+func TestRegister_ExistingEmailSpendsTheSameWorkAsAFreeOne(t *testing.T) {
+	const (
+		taken = "taken@example.com"
+		free  = "free@example.com"
+	)
+	hashesByEmail := map[string]int{}
+	hasher := &hashertest.MockHasher{
+		HashFunc: func(ctx context.Context, password string) (string, error) {
+			hashesByEmail[password]++
+			return "hash", nil
+		},
+	}
+	policy := &mockPolicy{VerifyFunc: func(context.Context, string) error { return nil }}
+	store := &storetest.MockStore{
+		FindUserByEmailFunc: func(_ context.Context, _ string, e string) (*identity.User, error) {
+			if e == taken {
+				return &identity.User{ID: uuid.Must(uuid.NewV7()), Email: taken}, nil
+			}
+			return nil, identity.ErrUserNotFound
+		},
+		CreateUserFunc: func(_ context.Context, _ string, e string) (*identity.User, error) {
+			return &identity.User{ID: uuid.Must(uuid.NewV7()), Email: e}, nil
+		},
+		AddIdentityFunc: func(context.Context, string, *identity.Identity) error { return nil },
+	}
+	svc := identity.NewService(store, hasher, policy)
+
+	_, err := svc.Register(context.Background(), "", taken, "password-for-taken")
+	require.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
+	_, err = svc.Register(context.Background(), "", free, "password-for-free")
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, hashesByEmail["password-for-taken"],
+		"the taken branch must spend exactly one decoy hash")
+	assert.Equal(t, 1, hashesByEmail["password-for-free"],
+		"the free branch must spend exactly one hash")
 }
