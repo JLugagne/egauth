@@ -72,7 +72,14 @@ type stubIssuer struct {
 
 func (s *stubIssuer) IssueTokenPair(_ context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
 	s.gotClaims = claims
-	return s.pair, s.err
+	if s.pair == nil {
+		return nil, s.err
+	}
+	// Mirror the interim marker onto the returned pair's claims, as a real issuer does, so a
+	// caller that inspects pair.Claims sees the same assurance level the token carries.
+	pair := *s.pair
+	pair.Claims = claims
+	return &pair, s.err
 }
 
 func (s *stubIssuer) IssueAPIKey(_ context.Context, _ string, _ tokens.KeyType, _ uuid.UUID, _ tokens.Claims[struct{}]) (*tokens.APIKey[struct{}], error) {
@@ -571,4 +578,71 @@ func TestCallbackHandler_SuccessRedirectSetsNoStore(t *testing.T) {
 	assert.True(t, gotAuthCookie, "callback redirect must carry the fresh auth cookies")
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), "303 Set-Cookie response must be uncacheable")
 	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}
+
+// stubMFAGate answers a fixed enrollment answer, standing in for identity.Service.
+type stubMFAGate struct{ enrolled bool }
+
+func (g stubMFAGate) IsEnrolled(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+	return g.enrolled, nil
+}
+
+// TestCallbackHandler_MFAGate covers the second factor on the native OAuth callback. Without a
+// gate the callback issues a full, renewable pair for every successful authorization, so an
+// MFA-enrolled account signing in through a provider receives a session its second factor never
+// gated. With the gate wired the callback must issue only the interim access token and withhold
+// the refresh cookie, leaving the subject to complete the ceremony through mfa.StepUpHandler.
+func TestCallbackHandler_MFAGate(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+
+	run := func(t *testing.T, opts ...HandlerOption) *httptest.ResponseRecorder {
+		t.Helper()
+		p, _ := stubProviderServer(t, &body)
+		stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+		linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+		issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+			AccessToken:           "access",
+			RefreshToken:          "refresh",
+			RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+		}}
+		all := append([]HandlerOption{WithRedirectURL(testRedirect)}, opts...)
+		return runCallback(t, p, linker, issuer, stateCookie,
+			url.Values{"state": {state}, "code": {"auth-code"}}.Encode(), all...)
+	}
+	cookiesOf := func(rec *httptest.ResponseRecorder) (access, refresh bool) {
+		for _, c := range rec.Result().Cookies() {
+			switch c.Name {
+			case tokens.DefaultAccessCookieName:
+				access = c.Value != ""
+			case tokens.DefaultRefreshCookieName:
+				refresh = c.Value != ""
+			}
+		}
+		return access, refresh
+	}
+
+	t.Run("without a gate a full renewable pair is issued", func(t *testing.T) {
+		rec := run(t)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access, "the access cookie must be set")
+		assert.True(t, refresh, "no gate configured: the refresh cookie is set as before")
+	})
+
+	t.Run("enrolled account with the gate set receives no refresh cookie", func(t *testing.T) {
+		rec := run(t, WithMFAGate(stubMFAGate{enrolled: true}))
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access, "the interim access cookie must be set so the client can step up")
+		assert.False(t, refresh,
+			"an MFA-enrolled subject must not receive a renewable session before the second factor")
+	})
+
+	t.Run("account without an enrolled factor is unaffected by the gate", func(t *testing.T) {
+		rec := run(t, WithMFAGate(stubMFAGate{enrolled: false}))
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access)
+		assert.True(t, refresh, "a non-enrolled account keeps getting a full pair")
+	})
 }

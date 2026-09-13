@@ -76,7 +76,12 @@ type handlerConfig struct {
 	authFlow AuthFlow
 	// sessionResolver overrides the authoritative account-state resolver the native issuance
 	// pipeline consults when no flow engine is configured. See WithSessionStateResolver.
-	sessionResolver      issuance.Resolver
+	sessionResolver issuance.Resolver
+	// mfaGate reports whether a user has a confirmed second factor enrolled. When set, the native
+	// callback issues only a short-lived interim access token for such a user instead of a full
+	// renewable pair, so the second factor is enforced on this login path the same way it is on the
+	// password path. See WithMFAGate.
+	mfaGate              issuance.MFAGate
 	allowUnverifiedEmail bool
 	// redirectFallbackWarned rate-limits the WEB-02 fallback misuse event to once per handler.
 	redirectFallbackWarned *sync.Once
@@ -216,6 +221,27 @@ func WithPersistentRefresh() HandlerOption {
 // issuance on that path.
 func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
 	return func(h *handlerConfig) { h.sessionResolver = r }
+}
+
+// WithMFAGate enforces the second factor on the native OAuth callback. When the gate reports the
+// linked account has a confirmed second factor enrolled, the callback issues only a short-lived
+// interim access token — the refresh cookie is withheld, so the pre-step-up state is not a
+// renewable session — and the client completes the ceremony through mfa.StepUpHandler, exactly as
+// it would after a password login.
+//
+// Without a gate the native callback issues a full, renewable pair for every successful
+// authorization, so an MFA-enrolled account that signs in through a provider receives a session
+// its second factor never gated. identity.Service satisfies issuance.MFAGate, so wiring is
+// normally WithMFAGate(identitySvc).
+//
+// The option is not consulted when WithAuthFlow is configured: the flow engine owns MFA policy on
+// that path. It is also NOT the same as requiring MFA to use the provider at all; it decides only
+// what the callback may issue.
+func WithMFAGate(g issuance.MFAGate) HandlerOption {
+	if g == nil {
+		panic("oauth: WithMFAGate requires a non-nil gate")
+	}
+	return func(h *handlerConfig) { h.mfaGate = g }
 }
 
 // WithTenantResolver derives the tenant from the request to scope identity store operations
@@ -459,7 +485,12 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
-		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		if !res.Interim {
+			cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		}
+		// An interim result stops here on purpose: the subject has the first factor only, so the
+		// refresh token is deliberately not delivered. The access cookie carries the short-lived
+		// interim credential, and the client completes the second factor through mfa.StepUpHandler.
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -483,10 +514,14 @@ func newCallbackPipeline[C any](cfg handlerConfig, linker IdentityLinker, issuer
 	if resolver == nil {
 		return nil, errors.New("oauth: CallbackHandler requires authoritative session state (an issuance.Resolver or identity.SessionStateReader); configure WithSessionStateResolver")
 	}
-	return issuance.New(issuer,
+	opts := []issuance.Option{
 		issuance.WithResolver(resolver),
 		issuance.WithEventSink(cfg.events),
-	)
+	}
+	if cfg.mfaGate != nil {
+		opts = append(opts, issuance.WithMFAGate(cfg.mfaGate))
+	}
+	return issuance.New(issuer, opts...)
 }
 
 // mapIssuanceError maps a rejected issuance to the callback's client-visible failure. A
