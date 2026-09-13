@@ -481,6 +481,10 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 	case errors.As(err, &protoErr):
 		// A WebAuthn protocol error is a bad/invalid attestation or assertion from the client.
 		http.Error(w, "verification_failed", http.StatusBadRequest)
+	case errors.Is(err, ErrStoreCapacityReached):
+		// A store resource bound was reached. Surfaced as 503 rather than the default 5xx
+		// internal_error so the caller knows the request was well formed and a retry after the
+		// ceremony window (or freeing an authenticator) can succeed — while still failing closed.
 	default:
 		// Anything else is a store/infrastructure failure: surface it as 5xx so it is not
 		// mislabeled as a client verification failure (and operators keep the error signal).

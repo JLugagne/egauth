@@ -44,3 +44,12 @@ var (
 	// 403 "account_deleted".
 	ErrAccountDeleted = errors.New("passkey: account is deleted")
 )
+
+// ErrStoreCapacityReached reports that a bounded Store or ChallengeStore refused a write because a
+// configured cap was reached. It is a fail-closed signal rather than a client error: the request was
+// well formed, nothing was evicted to make room, and the caller can retry once capacity frees up
+// (an expired challenge, or an authenticator removed from the account).
+//
+// Store implementations wrap it, so errors.Is(err, passkey.ErrStoreCapacityReached) is true for the
+// concrete per-implementation sentinels.
+var ErrStoreCapacityReached = errors.New("passkey: store capacity reached")
