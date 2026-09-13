@@ -55,17 +55,58 @@ func RequestOriginURL(r *http.Request) *url.URL {
 		if o == "null" {
 			return nil
 		}
-		if u, err := url.Parse(o); err == nil && u.Host != "" {
-			return u
-		}
-		return nil
+		return parseOriginHeader(o)
 	}
+	// Referer is a full URL, so it is parsed as one; only its host:port is ever consulted.
 	if ref := r.Header.Get("Referer"); ref != "" {
 		if u, err := url.Parse(ref); err == nil && u.Host != "" {
 			return u
 		}
 	}
 	return nil
+}
+
+// parseOriginHeader parses an Origin header value, accepting ONLY the canonical serialization a
+// browser produces: scheme "://" host [":" port], with nothing else.
+//
+// The permissive form — url.Parse and a non-empty Host — also accepted shapes no browser emits:
+// "https://evil.example.com@app.example.com" (userinfo), "//app.example.com" (scheme-relative),
+// "https://app.example.com/" (a path) and "https://app.example.com#frag" (a fragment). Each of those
+// carries the allowed host in the URL's Host field while meaning something else to a reader, and
+// this predicate is exported as origin.Allowed / origin.Middleware — THE same-origin primitive
+// applications are told to protect their own routes with. Requiring the canonical form costs nothing
+// for a real browser request and removes the gap between what the parser sees and what the header
+// says.
+func parseOriginHeader(raw string) *url.URL {
+	// Reject anything with a byte that cannot appear in a canonical origin, before parsing: control
+	// characters, whitespace, and the delimiter bytes that only appear in the non-canonical shapes.
+	for i := 0; i < len(raw); i++ {
+		if raw[i] <= ' ' || raw[i] == 0x7f {
+			return nil
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil
+	}
+	// No userinfo, no path beyond the implicit empty one, no query, no fragment.
+	if u.User != nil || (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return nil
+	}
+	// The authority must be exactly what followed "scheme://": this rejects "//host" (which
+	// url.Parse reads with an empty scheme) and any authority smuggling through the opaque or
+	// path forms.
+	if u.Host != raw[len(u.Scheme)+3:] {
+		return nil
+	}
+	// A canonical origin never ends in "/" unless the path check above already rejected it.
+	if strings.HasSuffix(raw, "/") {
+		return nil
+	}
+	return u
 }
 
 // RequestOriginHost returns the hostname (host:port) from the request's Origin header, or

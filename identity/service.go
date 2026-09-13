@@ -266,6 +266,7 @@ type service struct {
 	emailChangeTTL       time.Duration
 	phoneVerificationTTL time.Duration
 	recoveryEmailTTL     time.Duration
+	recoveryCooldown     time.Duration
 	erasers              []AccountEraser
 	disableRevokers      []AccountRevoker
 	events               event.Sink
@@ -322,6 +323,21 @@ func WithEmailChangeTTL(d time.Duration) ServiceOption {
 // WithPhoneVerificationTTL overrides how long a phone-verification token stays valid.
 func WithPhoneVerificationTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.phoneVerificationTTL = d }
+}
+
+// WithRecoveryChannelCooldown sets how long a newly enrolled recovery channel must exist before it
+// may be used to reset a password. The default is zero (no window).
+//
+// A recovery channel is a credential: whoever enrols one can receive a password-reset token on it,
+// and enrolment needs only a live session — not a fresh factor. A non-zero window means an attacker
+// who enrols a channel cannot immediately monetise it through the recovery reset flow, which gives
+// the legitimate owner time to notice the change and act. Enforce it by gating a reset on
+// RecoveryChannels(...).Usable(now) rather than on Any().
+func WithRecoveryChannelCooldown(d time.Duration) ServiceOption {
+	if d < 0 {
+		d = 0
+	}
+	return func(s *service) { s.recoveryCooldown = d }
 }
 
 // WithRecoveryEmailTTL overrides how long a recovery-email enrollment token stays valid.
@@ -922,11 +938,23 @@ func (s *service) ConfirmEmailChange(ctx context.Context, tenantID string, token
 	if err := s.store.UpdateUserEmail(ctx, tenantID, user.ID, newEmail, now); err != nil {
 		return nil, err
 	}
+	// The address that just lost access. Captured before the swap below overwrites it, because the
+	// alert that matters goes to the OLD address: an attacker who holds a session can move the
+	// account's email, and the previous owner otherwise learns nothing. The event carries it so the
+	// application's sink can send that alert; the library does not send mail itself.
+	previousEmail := user.Email
+
 	// Reflect the post-swap state on the returned user (it was loaded pre-swap).
 	user.Email = newEmail
 	user.EmailVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.EmailChanged, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.EmailChanged, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{
+			event.AttrPreviousEmail: previousEmail,
+			event.AttrNewEmail:      newEmail,
+		},
+	})
 	return user, nil
 }
 
@@ -1229,7 +1257,10 @@ func (s *service) ConfirmPhoneVerification(ctx context.Context, tenantID string,
 	user.Phone = &phone
 	user.PhoneVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{event.AttrRecoveryChannel: phone},
+	})
 	return user, nil
 }
 
@@ -1241,11 +1272,33 @@ type RecoveryChannels struct {
 	RecoveryEmail bool
 	// Phone is true when a verified phone number is enrolled.
 	Phone bool
+	// NotBefore is the earliest instant at which these channels may be used to reset a password.
+	// It is zero when no cooling-off window is configured (the default), or when every enrolled
+	// channel has already passed it.
+	//
+	// The window exists because a recovery channel is a credential the account holder may not have
+	// asked for: whoever adds one can then receive a password-reset token on it. A consumer that
+	// gates a reset (or any sensitive change) on this predicate should also require
+	// !NotBefore.After(now), which turns "add a channel, immediately use it" into a two-step
+	// operation the legitimate owner has time to notice. Set the length with
+	// WithRecoveryChannelCooldown; the default is zero so existing deployments do not change
+	// behaviour.
+	NotBefore time.Time
 }
 
 // Any reports whether the account has at least one verified independent recovery channel.
 func (rc RecoveryChannels) Any() bool {
 	return rc.RecoveryEmail || rc.Phone
+}
+
+// Usable reports whether the account has a verified independent recovery channel that is past its
+// cooling-off window as of now. It is the predicate a reset flow should gate on: Any answers "is a
+// channel enrolled", Usable answers "may it be relied on yet".
+func (rc RecoveryChannels) Usable(now time.Time) bool {
+	if !rc.Any() {
+		return false
+	}
+	return !rc.NotBefore.After(now)
 }
 
 // RequestRecoveryEmail mints a token that, once confirmed, enrolls userID's recovery email.
@@ -1297,7 +1350,10 @@ func (s *service) ConfirmRecoveryEmail(ctx context.Context, tenantID string, tok
 	user.RecoveryEmail = &recoveryEmail
 	user.RecoveryEmailVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.RecoveryChannelEnrolled, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.RecoveryChannelEnrolled, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{event.AttrRecoveryChannel: recoveryEmail},
+	})
 	return user, nil
 }
 
@@ -1310,15 +1366,32 @@ func (s *service) RecoveryChannels(ctx context.Context, tenantID string, userID 
 	if user.DeletedAt != nil {
 		return RecoveryChannels{}, ErrUserNotFound
 	}
-	return recoveryChannelsOf(user), nil
+	return s.recoveryChannelsOf(user), nil
 }
 
 // recoveryChannelsOf derives the verified-channel inventory from a loaded user.
-func recoveryChannelsOf(user *User) RecoveryChannels {
-	return RecoveryChannels{
+func (s *service) recoveryChannelsOf(user *User) RecoveryChannels {
+	verified := RecoveryChannels{
 		RecoveryEmail: user.RecoveryEmail != nil && *user.RecoveryEmail != "" && user.RecoveryEmailVerifiedAt != nil,
 		Phone:         user.Phone != nil && *user.Phone != "" && user.PhoneVerifiedAt != nil,
 	}
+	if s.recoveryCooldown <= 0 || !verified.Any() {
+		return verified
+	}
+	// Report the LATER of the two channels' windows: a reset may go to either channel, so both must
+	// clear the cooldown before the account is usable for recovery.
+	var earliest time.Time
+	for _, at := range []*time.Time{user.RecoveryEmailVerifiedAt, user.PhoneVerifiedAt} {
+		if at == nil {
+			continue
+		}
+		ready := at.Add(s.recoveryCooldown)
+		if ready.After(earliest) {
+			earliest = ready
+		}
+	}
+	verified.NotBefore = earliest
+	return verified
 }
 
 // assertRecoveryChannelDistinct rejects a candidate recovery address that equals the account's
@@ -1393,8 +1466,10 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 	// The whole point of this variant is to NOT trust the primary inbox: require a verified
 	// independent recovery channel. Without one, stay enumeration-uniform (no token, no error) —
 	// the caller cannot distinguish "no such account" from "no recovery channel".
-	channels := recoveryChannelsOf(user)
-	if !channels.Any() {
+	channels := s.recoveryChannelsOf(user)
+	// Usable, not Any: a channel still inside its cooling-off window is enrolled but must not be
+	// relied on yet, so the flow stays enumeration-uniform rather than minting a token to it.
+	if !channels.Usable(s.now()) {
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}

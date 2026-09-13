@@ -223,6 +223,21 @@ const (
 	AttrUserAgent = "user_agent"
 )
 
+// Attr keys describing a change to the account's contact or recovery surface. They exist so a
+// consumer's sink can alert the address that LOST access, not only report the new state: changing
+// the account email or adding a recovery channel needs only a live session, so the outgoing
+// address is often the only party still able to notice and object. The values are contact
+// identifiers, never credentials — a token or code is never carried on an event.
+const (
+	// AttrPreviousEmail is the account email before an EmailChanged event.
+	AttrPreviousEmail = "previous_email"
+	// AttrNewEmail is the account email after an EmailChanged event.
+	AttrNewEmail = "new_email"
+	// AttrRecoveryChannel is the address or number added by a RecoveryChannelEnrolled or
+	// PhoneVerified event.
+	AttrRecoveryChannel = "recovery_channel"
+)
+
 // RequestContextFrom collapses a variadic RequestContext option into a single value. Auth entry
 // points accept the context as a trailing variadic argument so it is optional and existing callers
 // keep compiling; this helper gives them one uniform way to interpret it. When several are passed
