@@ -1199,6 +1199,11 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 				cfg.fail(w, r, http.StatusBadRequest, "invalid_email")
 			case errors.Is(err, ErrEmailAlreadyExists):
 				cfg.fail(w, r, http.StatusConflict, "email_taken")
+			case errors.Is(err, ErrRecoveryEmailIsPrimary):
+				// The requested address is the account's enrolled recovery channel. Collapsing the
+				// two into one mailbox is what the recovery-channel independence rule forbids, so
+				// this is a conflict on the address rather than a bad request.
+				cfg.fail(w, r, http.StatusConflict, "recovery_channel_conflict")
 			case errors.Is(err, ErrUserNotFound):
 				// The session resolved to an account that is no longer live; treat as unauthorized.
 				cfg.fail(w, r, http.StatusUnauthorized, "unauthorized")

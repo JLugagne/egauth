@@ -598,6 +598,28 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, us
 	return nil
 }
 
+// ClearRecoveryChannels removes a live user's recovery email and phone and their verification
+// timestamps in one statement. Clearing an account with no channels enrolled is a no-op that
+// succeeds; a soft-deleted or cross-tenant user is reported as not found.
+func (s *Store) ClearRecoveryChannels(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	now := time.Now().UTC()
+	const query = `
+		UPDATE users
+		SET recovery_email = NULL, recovery_email_verified_at = NULL,
+		    phone = NULL, phone_verified_at = NULL,
+		    updated_at = $1
+		WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+	`
+	tag, err := s.db.Exec(ctx, query, now, userID, tenantID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return identity.ErrUserNotFound
+	}
+	return nil
+}
+
 // DisableUser marks a live user as administratively disabled by setting disabled_at. It is a
 // reversible suspension (the row and email slot are retained, unlike DeleteUser). It is gated on
 // the user being live (deleted_at IS NULL); re-disabling an already-disabled live user simply

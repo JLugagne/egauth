@@ -748,6 +748,16 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
 	// intact. Collect every eraser error so one failure does not mask another.
 	var errs []error
+
+	// Recovery channels are credentials, not contact metadata: the reset-via-recovery flow
+	// delivers a token to whatever address is enrolled, so a channel the attacker added is a way
+	// straight back in. They are identity-owned rather than cross-module, so no AccountEraser can
+	// reach them and the store call has to happen here. Without it, a victim who resets their
+	// password after a compromise finds the attacker waiting on the channel that survived.
+	if err := s.store.ClearRecoveryChannels(ctx, tenantID, user.ID); err != nil {
+		errs = append(errs, err)
+	}
+
 	for _, erase := range s.erasers {
 		if erase == nil {
 			continue
@@ -857,6 +867,19 @@ func (s *service) RequestEmailChange(ctx context.Context, tenantID string, userI
 		}
 	} else if !errors.Is(ferr, ErrUserNotFound) {
 		return "", ferr
+	}
+
+	// Refuse a new address that is already the enrolled recovery address. Moving the primary email
+	// onto the recovery channel collapses the two into one mailbox, which is the end state
+	// RequestRecoveryEmail exists to prevent; leaving this route open would let the invariant be
+	// reached the other way round and make RecoveryChannels.Any() report a channel that is not
+	// independent. Gate on the live user, which also rejects a soft-deleted account up front.
+	if user, uerr := s.store.FindUserByID(ctx, tenantID, userID); uerr == nil {
+		if err := s.assertRecoveryChannelDistinct(user, newEmail); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(uerr, ErrUserNotFound) {
+		return "", uerr
 	}
 
 	// Bind the requested address to the token as metadata. CreateVerificationToken also gates
@@ -1234,17 +1257,8 @@ func (s *service) RequestRecoveryEmail(ctx context.Context, tenantID string, use
 	if user.DeletedAt != nil {
 		return "", ErrUserNotFound
 	}
-	// Compare against the primary in the SAME fully-canonicalized form (NFC + IDN A-label)
-	// that normalizeEmail produced for the candidate. The stored primary may not have been
-	// normalized (e.g. an externally provisioned account), so a byte-exact comparison would
-	// let a Unicode/IDN-equivalent of the primary slip past as an "independent" channel.
-	// If the stored primary cannot be canonicalized, fall back to the raw stored value.
-	primary := user.Email
-	if canonical, normErr := normalizeEmail(primary); normErr == nil {
-		primary = canonical
-	}
-	if recoveryEmail == primary {
-		return "", ErrRecoveryEmailIsPrimary
+	if err := s.assertRecoveryChannelDistinct(user, recoveryEmail); err != nil {
+		return "", err
 	}
 
 	// Bind the requested address to the token as metadata. CreateVerificationToken also re-checks
@@ -1297,6 +1311,40 @@ func recoveryChannelsOf(user *User) RecoveryChannels {
 		RecoveryEmail: user.RecoveryEmail != nil && *user.RecoveryEmail != "" && user.RecoveryEmailVerifiedAt != nil,
 		Phone:         user.Phone != nil && *user.Phone != "" && user.PhoneVerifiedAt != nil,
 	}
+}
+
+// assertRecoveryChannelDistinct rejects a candidate recovery address that equals the account's
+// primary email.
+//
+// The check runs in BOTH directions. RequestRecoveryEmail refused to enrol the primary address,
+// but nothing stopped RequestEmailChange from moving the primary address ONTO an already-enrolled
+// recovery address — which produces the same end state by the other route and makes
+// RecoveryChannels.Any() report a channel that is not independent at all. Since that predicate is
+// the documented way for an application to answer "does this account have a second way in?", the
+// invariant it relies on has to hold however the addresses arrived.
+//
+// Comparisons use the same fully-canonicalized form (NFC + IDN A-label) that normalizeEmail
+// produces, because the stored primary may not have been normalized (an externally provisioned
+// account, for instance) and a byte-exact comparison would let a Unicode/IDN-equivalent slip past
+// as "independent". A primary that cannot be canonicalized falls back to its raw stored value.
+func (s *service) assertRecoveryChannelDistinct(user *User, candidate string) error {
+	if user == nil || candidate == "" {
+		return nil
+	}
+	canonical := func(v string) string {
+		if c, err := normalizeEmail(v); err == nil {
+			return c
+		}
+		return v
+	}
+	if canonical(candidate) == canonical(user.Email) {
+		return ErrRecoveryEmailIsPrimary
+	}
+	if user.RecoveryEmail != nil && *user.RecoveryEmail != "" &&
+		canonical(candidate) == canonical(*user.RecoveryEmail) {
+		return ErrRecoveryEmailIsPrimary
+	}
+	return nil
 }
 
 // RequestPasswordResetViaRecovery mints a reset token directed at a verified recovery channel.

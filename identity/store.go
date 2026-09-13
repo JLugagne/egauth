@@ -72,6 +72,21 @@ type UserStore interface {
 	// when no live user matches.
 	UpdateUserRecoveryEmail(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
 
+	// ClearRecoveryChannels removes a live user's recovery email and phone together with their
+	// verification timestamps, returning the account to "no independent recovery channel".
+	//
+	// It exists for the compromise-recovery path. A recovery channel is a credential: the
+	// password-reset-via-recovery flow delivers a reset token to whatever address is enrolled, so
+	// a channel an attacker added is a way back in. ResetPassword clears sessions, refresh
+	// families, API keys, MFA enrollments and passkeys; without this method it could not clear the
+	// recovery channels, because that state is identity-owned rather than cross-module and no
+	// AccountEraser can reach it.
+	//
+	// Both channels are cleared in one call so the account never passes through a state with a
+	// half-cleared recovery surface. It returns ErrUserNotFound when no live, same-tenant user
+	// matches; clearing an account that has no channels enrolled is a no-op that succeeds.
+	ClearRecoveryChannels(ctx context.Context, tenantID string, id uuid.UUID) error
+
 	DeleteUser(ctx context.Context, tenantID string, id uuid.UUID) error
 
 	// DisableUser marks a live user as administratively disabled by setting disabled_at to

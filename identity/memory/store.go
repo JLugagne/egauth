@@ -633,6 +633,26 @@ func (s *Store) UpdateUserRecoveryEmail(ctx context.Context, tenantID string, us
 	return nil
 }
 
+// ClearRecoveryChannels removes a live user's recovery email and phone and their verification
+// timestamps. Clearing an account with no channels enrolled is a no-op that succeeds.
+func (s *Store) ClearRecoveryChannels(ctx context.Context, tenantID string, id uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	user, exists := s.users[id]
+	if !exists || user.TenantID != tenantID || user.DeletedAt != nil {
+		return identity.ErrUserNotFound
+	}
+
+	user.RecoveryEmail = nil
+	user.RecoveryEmailVerifiedAt = nil
+	user.Phone = nil
+	user.PhoneVerifiedAt = nil
+	user.UpdatedAt = s.timeNow()
+
+	return nil
+}
+
 // DisableUser marks a live user as administratively disabled (reversible suspension). It is a
 // no-op-success when the user is already disabled.
 func (s *Store) DisableUser(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error {
