@@ -166,12 +166,25 @@ func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
 	return func(h *handlerConfig) { h.sessionResolver = r }
 }
 
-// WithoutStepUp disables step-up / AMR verification on DisableHandler.
+// WithoutStepUp disables step-up / AMR verification on the handlers that change the factor's
+// secrets (DisableHandler, RegenerateRecoveryCodesHandler).
+//
+// Prefer WithStepUpRequired(false) when you want that visible at the call site; the two are
+// equivalent. Turning the check off lets any authenticated session — including the short-lived
+// interim access token issued before a second factor is presented — replace the account's
+// second-factor secrets, so only do it when an outer layer enforces the same assurance.
 func WithoutStepUp() HandlerOption {
 	return func(h *handlerConfig) { h.stepUpRequired = false }
 }
 
-// WithStepUpRequired explicitly configures whether DisableHandler requires step-up elevation.
+// WithStepUpRequired explicitly configures whether the handlers that change the factor's secrets
+// (DisableHandler, RegenerateRecoveryCodesHandler) require step-up elevation. Step-up is ON by
+// default: those handlers accept only a session whose AMR contains tokens.AMRMFA.
+//
+// Enrollment (EnrollHandler / ConfirmHandler) is deliberately NOT gated: it is the path by which a
+// user who has not yet enrolled establishes the factor, so requiring an MFA-elevated session there
+// would make first-time enrollment impossible. VerifyHandler / VerifyRecoveryHandler present the
+// second factor and so complete the elevation rather than requiring it.
 func WithStepUpRequired(required bool) HandlerOption {
 	return func(h *handlerConfig) { h.stepUpRequired = required }
 }
@@ -245,9 +258,21 @@ func VerifyRecoveryHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 
 // RegenerateRecoveryCodesHandler issues a fresh set of recovery codes (invalidating the old)
 // and returns them as JSON.
+//
+// By default it enforces step-up elevation (requiring tokens.AMRMFA in the session's AMR), like
+// DisableHandler. Recovery codes are a second factor in their own right — one of them completes
+// step-up — so a session that has not presented a factor must not be able to replace them.
+// Without the gate, the short-lived interim access token issued between the password and the
+// second factor could rotate the codes and then spend one to obtain a fully elevated session,
+// which both bypasses the second factor and locks the legitimate user out of it. Opt out with
+// WithStepUpRequired(false) only when an outer layer enforces the same assurance.
 func RegenerateRecoveryCodesHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if cfg.stepUpRequired && !cfg.isSteppedUp(r) {
+			cfg.fail(w, r, http.StatusForbidden, "step_up_required")
+			return
+		}
 		codes, err := svc.RegenerateRecoveryCodes(r.Context(), tenant, uid)
 		if err != nil {
 			cfg.failErr(w, r, err)

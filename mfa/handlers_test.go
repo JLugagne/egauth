@@ -168,7 +168,9 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyHandler", mfa.VerifyHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver, trusted), url.Values{"code": {"abc"}}},
-		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted), url.Values{}},
+		// Both secret-changing handlers opt out of step-up here: this test asserts the origin
+		// check, and the step-up gate (on by default) would answer 403 for its own reason.
+		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver, trusted, mfa.WithoutStepUp()), url.Values{}},
 		{"DisableHandler", mfa.DisableHandler(svc, resolver, trusted, mfa.WithoutStepUp()), url.Values{}},
 	}
 
@@ -304,5 +306,70 @@ func TestDisableHandler_StepUp(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer token-mfa")
 		tokens.ContextMiddleware[struct{}](mockVerifier([]string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}), handler).ServeHTTP(rec, req)
 		assert.Equal(t, http.StatusNoContent, rec.Code)
+	})
+}
+
+// TestRegenerateRecoveryCodes_RequiresStepUp is the regression test for the elevation gate on
+// recovery-code rotation. One recovery code completes step-up, so a session that has not presented
+// a factor must not be able to replace the codes: without the gate, the interim access token issued
+// between the password and the second factor could rotate the victim's codes, spend one to reach a
+// fully elevated session, and leave the legitimate user locked out of their own second factor.
+func TestRegenerateRecoveryCodes_RequiresStepUp(t *testing.T) {
+	setupEnrolledUser := func(t *testing.T) (mfa.Service, uuid.UUID) {
+		t.Helper()
+		clk := &clock{t: time.Unix(1_700_000_000, 0)}
+		svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clk.now), mfa.WithIssuer("Acme"))
+		uid := uuid.Must(uuid.NewV7())
+		enroll, err := svc.EnrollTOTP(context.Background(), "t1", uid, "user@example.com")
+		require.NoError(t, err)
+		_, err = svc.ConfirmTOTP(context.Background(), "t1", uid, clk.code(t, enroll.Secret))
+		require.NoError(t, err)
+		return svc, uid
+	}
+	resolverFor := func(uid uuid.UUID) mfa.HandlerOption {
+		return mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
+	}
+
+	t.Run("default requires step-up and rejects unelevated caller with 403", func(t *testing.T) {
+		svc, uid := setupEnrolledUser(t)
+		rec := httptest.NewRecorder()
+		mfa.RegenerateRecoveryCodesHandler(svc, resolverFor(uid))(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "step_up_required")
+	})
+
+	t.Run("interim session AMR [pwd] is rejected and discloses no codes", func(t *testing.T) {
+		svc, uid := setupEnrolledUser(t)
+		amrOpt := mfa.WithAMRResolver(func(*http.Request) []string { return []string{tokens.AMRPassword} })
+
+		rec := httptest.NewRecorder()
+		mfa.RegenerateRecoveryCodesHandler(svc, resolverFor(uid), amrOpt)(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusForbidden, rec.Code)
+		assert.Contains(t, rec.Body.String(), "step_up_required")
+		assert.NotContains(t, rec.Body.String(), "recovery_codes",
+			"a rejected request must not disclose freshly minted codes")
+	})
+
+	t.Run("elevated session with AMRMFA may rotate", func(t *testing.T) {
+		svc, uid := setupEnrolledUser(t)
+		amrOpt := mfa.WithAMRResolver(func(*http.Request) []string {
+			return []string{tokens.AMRPassword, tokens.AMRMFA}
+		})
+
+		rec := httptest.NewRecorder()
+		mfa.RegenerateRecoveryCodesHandler(svc, resolverFor(uid), amrOpt)(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Body.String(), "recovery_codes")
+	})
+
+	t.Run("WithStepUpRequired(false) defers to an outer layer", func(t *testing.T) {
+		svc, uid := setupEnrolledUser(t)
+		rec := httptest.NewRecorder()
+		mfa.RegenerateRecoveryCodesHandler(svc, resolverFor(uid), mfa.WithStepUpRequired(false))(rec, mfaPost(url.Values{}))
+
+		assert.Equal(t, http.StatusOK, rec.Code)
 	})
 }

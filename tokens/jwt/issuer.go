@@ -30,7 +30,10 @@ type claimsWrapper[C any] struct {
 	Roles              []string             `json:"roles,omitempty"`
 	AMR                []string             `json:"amr,omitempty"`
 	MustChangePassword bool                 `json:"must_change_password,omitempty"`
-	Custom             C                    `json:"custom"`
+	// Interim marks an access token minted before a second factor was presented. It is omitted for
+	// ordinary sessions so the wire format of a normal login is unchanged.
+	Interim bool `json:"interim,omitempty"`
+	Custom  C    `json:"custom"`
 }
 
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
@@ -484,6 +487,7 @@ func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], fami
 		Roles:              claims.Roles,
 		AMR:                claims.AMR,
 		MustChangePassword: claims.MustChangePassword,
+		Interim:            claims.Interim,
 		Custom:             claims.Custom,
 	}
 
@@ -755,6 +759,7 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		Roles:              wrapper.Roles,
 		AMR:                wrapper.AMR,
 		MustChangePassword: wrapper.MustChangePassword,
+		Interim:            wrapper.Interim,
 		Custom:             wrapper.Custom,
 	}
 	if wrapper.AuthTime > 0 {
