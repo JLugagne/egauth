@@ -71,28 +71,6 @@ var nat64Prefixes = []netip.Prefix{
 	netip.MustParsePrefix("64:ff9b:1::/48"),
 }
 
-// isBlockedIP reports whether ip falls in a range that must never be reached by a server-side fetch
-// of a tenant-supplied URL. It classifies the address itself and, for a NAT64-embedded address, the
-// IPv4 address it carries.
-func isBlockedIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	addr, ok := netip.AddrFromSlice(ip)
-	if !ok {
-		// An address shape netip cannot represent is not one to connect to.
-		return true
-	}
-	addr = addr.Unmap()
-	if isBlockedAddr(addr) {
-		return true
-	}
-	if embedded, ok := embeddedIPv4(addr); ok {
-		return isBlockedAddr(embedded)
-	}
-	return false
-}
-
 // isBlockedAddr reports whether a single address is in a blocked prefix.
 func isBlockedAddr(addr netip.Addr) bool {
 	for i := range blockedPrefixes {

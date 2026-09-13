@@ -104,11 +104,3 @@ func isBlockedIP(ip net.IP) bool { return safehttp.IsBlockedIP(ip) }
 func safeDialControl(network, address string, _ syscall.RawConn) error {
 	return safehttp.DialControlForTest(network, address)
 }
-
-func mustCIDR(s string) net.IPNet {
-	_, n, err := net.ParseCIDR(s)
-	if err != nil {
-		panic("oauth: invalid CIDR " + s + ": " + err.Error())
-	}
-	return *n
-}
