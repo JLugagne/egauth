@@ -166,7 +166,12 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 
 		refreshToken, ok := cfg.cookies.Refresh(r)
 		if !ok {
-			cfg.cookies.Clear(w)
+			// No refresh cookie at all: there is nothing to rotate and nothing to invalidate, so
+			// this request clears NO cookie. Clearing the pair here (or even just the access
+			// cookie) would destroy a live interim session — the state an MFA-gated login
+			// deliberately leaves the client in, holding an access cookie and no refresh cookie —
+			// and the subject could then never complete the second factor. Clearing is reserved for
+			// the cases below, where a presented refresh token actually failed.
 			cfg.fail(w, r, http.StatusUnauthorized, "missing_refresh_token")
 			return
 		}

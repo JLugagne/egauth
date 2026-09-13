@@ -94,6 +94,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or repeated-byte KEK, which would have silently reduced envelope encryption to nothing; and
   `mfa.WithLockoutDuration(0)` now means the permanent lockout its documentation describes
   rather than being rewritten to the 15-minute default.
+- **A failed `/auth/refresh` with no refresh cookie no longer clears the access cookie.** That is
+  exactly the state an MFA-gated login leaves the client in — an access cookie and deliberately no
+  refresh cookie — so an eager client, a retry or a background tab hitting the refresh route first
+  destroyed the interim session and the subject could never present the second factor. With no
+  refresh cookie there is nothing to rotate or invalidate, so the route now clears nothing; a
+  rotation that actually failed still clears both cookies.
 - **`passkey` ceremony stores are bounded.** An unauthenticated begin recorded a challenge in
   an uncapped map that was fully rescanned on every insert; the store now reaps from an
   expiry index and refuses a tenant that holds its cap. The credential store indexes

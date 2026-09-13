@@ -540,3 +540,64 @@ func TestLogoutAndRefresh_FailClosedOnUnresolvableTenant(t *testing.T) {
 			"without a resolver the empty tenant is the correct partition, not a resolution failure")
 	})
 }
+
+// TestRefreshHandler_MissingRefreshCookieKeepsTheAccessCookie covers the interaction between the
+// refresh route and an MFA-gated login. That login deliberately leaves the client holding an access
+// cookie and NO refresh cookie, so the interim session can present the second factor but cannot
+// renew itself. The refresh route used to clear BOTH cookies when no refresh cookie was presented —
+// which is exactly that state — so a browser that hit /auth/refresh (an eager client, a retry, a
+// background tab) lost the interim access token and could never complete the second factor, locking
+// the account out of its own step-up.
+//
+// With no refresh cookie there is nothing to rotate and nothing to invalidate, so the route must
+// clear nothing.
+func TestRefreshHandler_MissingRefreshCookieKeepsTheAccessCookie(t *testing.T) {
+	svc, _ := newRotator(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+	// The interim session's cookie: a live access token, no refresh token.
+	req.AddCookie(&http.Cookie{Name: tokens.DefaultAccessCookieName, Value: "interim-access-token"})
+
+	rec := httptest.NewRecorder()
+	tokens.RefreshHandler[struct{}](svc).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "missing_refresh_token")
+
+	for _, c := range rec.Result().Cookies() {
+		assert.False(t, c.Name == tokens.DefaultAccessCookieName && c.MaxAge < 0,
+			"the interim access cookie must survive a refresh attempt: without it the subject "+
+				"cannot present the second factor")
+	}
+}
+
+// TestRefreshHandler_FailedRotationStillClearsBothCookies is the counterpart: when a refresh token
+// WAS presented and the rotation failed, the client's cookies are cleared so a poisoned family
+// cannot keep retrying. The fix for the interim case must not weaken that.
+func TestRefreshHandler_FailedRotationStillClearsBothCookies(t *testing.T) {
+	svc, _ := newRotator(t)
+
+	req := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
+	req.Host = "app.example.com"
+	req.Header.Set("Origin", "https://app.example.com")
+	req.AddCookie(&http.Cookie{Name: tokens.DefaultRefreshCookieName, Value: "not-a-known-token"})
+
+	rec := httptest.NewRecorder()
+	tokens.RefreshHandler[struct{}](svc).ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	var clearedAccess, clearedRefresh bool
+	for _, c := range rec.Result().Cookies() {
+		switch c.Name {
+		case tokens.DefaultAccessCookieName:
+			clearedAccess = c.MaxAge < 0
+		case tokens.DefaultRefreshCookieName:
+			clearedRefresh = c.MaxAge < 0
+		}
+	}
+	assert.True(t, clearedAccess, "a failed rotation must still drop the access cookie")
+	assert.True(t, clearedRefresh, "a failed rotation must still drop the refresh cookie")
+}
