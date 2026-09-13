@@ -433,7 +433,7 @@ GitHub → Settings → Rules → New ruleset, targeting `refs/tags/v*` and
 
 `.github/workflows/release-verify.yml` runs `scripts/verify-release-tag.sh` on every tag push as a
 **detector**: it reports an unsigned or lightweight tag immediately instead of letting it pass
-unnoticed, and `workflow_dispatch` lets you audit an existing tag. It cannot prevent publication —
+unnoticed, and `workflow_dispatch` lets you verify an existing tag. It cannot prevent publication —
 by the time it runs, the tag may already be resolvable.
 
 Set the repository secret **`RELEASE_SIGNING_PUBKEY`** to the `allowed_signers` line for the release

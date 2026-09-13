@@ -14,7 +14,7 @@ on:
     tags:
       - 'v*'
       - 'adapters/*/v*'
-  # Allow a manual run against an existing tag (e.g. to audit a release after the fact).
+  # Allow a manual run against an existing tag (e.g. to verify a release after the fact).
   workflow_dispatch:
     inputs:
       tag:

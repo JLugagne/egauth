@@ -29,6 +29,10 @@ var scannedPackages = []string{
 	// endpoints most deployments actually expose. Its constructor returns (http.Handler, error),
 	// which returnsHTTPHandler matches once the multi-value result is unwrapped.
 	"webapp",
+	// origin and ratelimit export middleware constructors: they wrap an application's own routes,
+	// so the control they apply (or decline to apply) is a default every route behind them inherits.
+	"origin",
+	"ratelimit",
 }
 
 // handlerRecord documents one exported handler constructor: whether it builds a state-changing
@@ -103,6 +107,12 @@ var handlerRegistry = map[string]handlerRecord{
 	// refresh/logout handlers, so it inherits their controls and adds its own construction-time
 	// requirements. Refresh rotates the family and writes cookies, so the preset as a whole mutates.
 	"webapp.NewWebApp": {mutation: true, control: "refuses to build without TrustedOrigins (CSRF-by-default) and rejects TrustedOrigins+InsecureNoOriginCheck; per-client-IP rate limit ON (burst 20, refill 6s, InsecureNoRateLimit opt-out); cookie configuration validated at construction; non-nil slog event sink"},
+
+	// Middleware constructors: they wrap an application's OWN routes, so the control they apply — or
+	// decline to apply — is a default every route behind them inherits.
+	"origin.Middleware":    {mutation: true, control: "strict same-origin check ON for every unsafe method by default (empty allowlist = same-host only; a request with neither Origin nor Referer is rejected); InsecureNoOriginCheck is the explicit opt-out"},
+	"ratelimit.Middleware": {mutation: false, control: "denies by default once the limiter refuses; KeyFunc defaults to ratelimit.ClientIP, which does NOT trust X-Forwarded-For; widen by passing a permissive limiter"},
+	"ratelimit.Wrap":       {mutation: false, control: "same policy as ratelimit.Middleware, for a single http.HandlerFunc"},
 
 	"tokens.RefreshHandler": {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
 	"tokens.LogoutHandler":  {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
@@ -234,16 +244,32 @@ func scanHandlerConstructors(t *testing.T, root, pkg string) []string {
 
 // returnsHTTPHandler reports whether a function result list contains a selector of the form
 // http.Handler or http.HandlerFunc.
+// returnsHTTPHandler reports whether a function returns an http.Handler/http.HandlerFunc, either
+// directly or as the result of a curried middleware: origin.Middleware returns
+// func(http.Handler) http.Handler, and a consumer calls the inner function to wrap a route. Both
+// shapes decide a control for every route they touch, so both belong in the registry.
 func returnsHTTPHandler(results *ast.FieldList) bool {
 	if results == nil {
 		return false
 	}
 	for _, field := range results.List {
-		if isHTTPHandlerType(field.Type) {
+		if isHTTPHandlerType(field.Type) || isHandlerMiddlewareType(field.Type) {
 			return true
 		}
 	}
 	return false
+}
+
+// isHandlerMiddlewareType reports whether a type expression is func(http.Handler) http.Handler.
+func isHandlerMiddlewareType(e ast.Expr) bool {
+	fn, ok := e.(*ast.FuncType)
+	if !ok {
+		return false
+	}
+	if fn.Params == nil || len(fn.Params.List) != 1 || !isHTTPHandlerType(fn.Params.List[0].Type) {
+		return false
+	}
+	return fn.Results != nil && len(fn.Results.List) == 1 && isHTTPHandlerType(fn.Results.List[0].Type)
 }
 
 // isHTTPHandlerType reports whether a type expression is http.Handler or http.HandlerFunc, unwrapping
@@ -260,20 +286,6 @@ func isHTTPHandlerType(e ast.Expr) bool {
 		return node.Sel.Name == "Handler" || node.Sel.Name == "HandlerFunc"
 	}
 	return false
-}
-
-// isMiddlewareConstructor reports whether a function's signature is func(http.Handler) http.Handler —
-// the shape of the Origin/rate-limit middleware the module also exports. Those wrap a handler and
-// therefore decide a control for every route behind them, so they belong in the registry alongside
-// the handler factories.
-func isMiddlewareConstructor(fn *ast.FuncDecl) bool {
-	if fn.Type.Params == nil || len(fn.Type.Params.List) != 1 {
-		return false
-	}
-	if !isHTTPHandlerType(fn.Type.Params.List[0].Type) {
-		return false
-	}
-	return returnsHTTPHandler(fn.Type.Results)
 }
 
 // repoRoot returns the module root (the parent of internal/) from this test file's location.
