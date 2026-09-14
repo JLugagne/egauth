@@ -189,6 +189,29 @@ model behind those statements.
     access+refresh pair with `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the
     interim access cookie. Users with no enrolled factor are unaffected and receive the full pair.
 
+  **Whether a factor is required is your policy, not egauth's.** Every point that could demand one
+  is off until you turn it on: the gate on the password login (`identity.WithMFAGate`), on the OAuth
+  callback (`oauth.WithMFAGate`), and on your own routes (`tokens.WithRequiredAMR(tokens.AMRMFA)`)
+  are all absent by default. Both products are supported and the choice is deliberate:
+
+  - *MFA required.* Wire `WithMFAGate` on every login path you expose. An enrolled account then
+    receives only the interim token and must complete `mfa.StepUpHandler`, whichever provider it
+    signed in through. Gate sensitive routes on `AMRMFA` as well, so a half-authenticated session
+    cannot reach them.
+  - *MFA optional.* Wire nothing: users may enrol and confirm an authenticator as a security
+    setting, and a password login still yields a full pair. `identity.Service` and `mfa.Service`
+    both satisfy the gate interface, so switching between the two is one option per login path.
+
+  Mounting the `mfa` handlers alone changes no login outcome — enrolment and confirmation succeed
+  while logins stay password-only. That is a legitimate configuration for "optional MFA", and a
+  wiring mistake for "required MFA", so decide which one you are shipping and check it.
+
+  The one thing that is not left to policy: `DisableHandler` and `RegenerateRecoveryCodesHandler`
+  require an elevated session by default (`mfa.WithStepUpRequired(false)` opts out). That is not
+  "does this user need MFA" — it is "may a session that has not presented the factor destroy it",
+  and without it the factor could be removed or its recovery codes rotated by whoever holds the
+  password.
+
   Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
   application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
   pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the

@@ -113,6 +113,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `SECURITY.md` and `identity/doc.go` previously claimed the opposite and would have led an
   operator to keep the oracle while believing it was closed.
 
+### Documentation
+
+- **MFA enforcement is documented as a deployment policy you set, not a library decision.** Every
+  point that could require a second factor is off until you turn it on — the password login
+  (`identity.WithMFAGate`), the OAuth callback (`oauth.WithMFAGate`) and your own routes
+  (`tokens.WithRequiredAMR(tokens.AMRMFA)`). Both "MFA required" and "MFA offered as an optional
+  security setting" are supported; mounting the `mfa` handlers alone changes no login outcome, so the
+  distinction is worth being explicit about. `SECURITY.md`, `.llms/mfa.md`,
+  `.llms/secure-defaults-matrix.md` and `identity/doc.go` now say so, and the full-stack example
+  labels its gate as a choice it made rather than a requirement. The one default that stays ON is
+  the step-up requirement on `DisableHandler` / `RegenerateRecoveryCodesHandler`, which answers a
+  different question: whether a session that has not presented the factor may destroy it.
+
 ### Changed
 
 - **`identity.RecoveryChannels` gains `NotBefore` and `Usable(now)`**, and

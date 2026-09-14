@@ -11,6 +11,38 @@ recovery codes. Plugs into egauth via a `Store` interface (memory + pgx
 implementations). Stateless service, stateful store; à-la-carte HTTP handlers.
 SMS/phone factors are intentionally NOT supported.
 
+## Whether MFA is required is YOUR decision, not the library's
+
+The library supplies the second factor and the machinery to enforce it. It never decides on its own
+that an account must present one: every point that could require MFA is off unless you turn it on.
+That is deliberate — a library that silently demanded a second factor would break every application
+whose users have not enrolled, and one that silently accepted a password when a factor exists would
+make the factor decorative.
+
+There are four decisions, all yours:
+
+| Decision | Where you make it | Default if you do nothing |
+|---|---|---|
+| Require a second factor at password login | `identity.WithMFAGate(checker)` on `LoginHandler` / `MagicLinkLoginHandler` | no gate: a password yields a full pair |
+| Require one at the OAuth callback | `oauth.WithMFAGate(checker)` on `CallbackHandler` | no gate: a provider login yields a full pair |
+| Require one on a specific route of yours | `tokens.WithRequiredAMR(tokens.AMRMFA)` on `RequireAuth` / `ContextMiddleware` | no gate: any verified token passes |
+| Require a fresh factor before a factor secret changes | `mfa.WithStepUpRequired(false)` to opt OUT | ON: `DisableHandler` and `RegenerateRecoveryCodesHandler` demand an elevated session |
+
+`mfa.Service` (and `identity.Service`) satisfy the gate interface, so wiring is
+`identity.WithMFAGate(mfaSvc)`.
+
+The last row is the one default that is ON, and it is a different question from the other three.
+Rows 1–3 are "must this user have MFA?" — your product policy. Row 4 is "may a session that has not
+presented a factor destroy the factor?" — that is not a policy choice but the difference between a
+factor and a decoration, so it is closed by default and opened explicitly with
+`mfa.WithStepUpRequired(false)` (or `WithoutStepUp()`) when an outer layer enforces the same thing.
+
+What follows from rows 1–3 being off: **enrolling and confirming a factor enforces nothing.** If you
+mount `EnrollHandler` / `ConfirmHandler` / `VerifyHandler` without wiring a gate, users can enrol an
+authenticator and confirm it, and the next password login still issues a full session. That is not a
+defect — the library cannot know your policy — but it is a wiring mistake that looks like a working
+setup, so check it deliberately when you enable MFA.
+
 ## Service interface
 
 ```go

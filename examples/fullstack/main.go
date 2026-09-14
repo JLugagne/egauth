@@ -218,11 +218,15 @@ func BuildServer() (http.Handler, error) {
 		idSvc, issuer, claimsOf,
 		identity.WithInsecureNoOriginCheck(),
 		identity.WithCookies(cookies),
-		// Gate the session on the second factor. Without this the enroll/confirm/verify routes
-		// below are decorative: a user could enrol a TOTP factor, confirm it, and then sign in with
-		// the password alone. With it, an enrolled account receives only the short-lived interim
-		// access token — no refresh cookie — and must complete /mfa/step-up for a full pair.
-		// mfa.Service satisfies identity.MFAEnrollmentChecker directly.
+		// MFA IS A DEPLOYMENT DECISION. This example turns it ON, because a sample that mounts
+		// the second-factor handlers without requiring the factor would show a working-looking
+		// setup in which nobody is actually protected: a user could enrol a TOTP factor, confirm
+		// it, and still sign in with the password alone.
+		//
+		// Requiring it is a policy only you can set, so the library never chooses for you — drop
+		// this one option and the same handlers give users an OPTIONAL factor instead: they may
+		// enrol and confirm one, and a password login still yields a full pair. Both are supported;
+		// pick deliberately. mfa.Service satisfies identity.MFAEnrollmentChecker directly.
 		identity.WithMFAGate(mfaSvc),
 	))
 	mux.Handle("POST /auth/refresh", tokens.RefreshHandler[AppClaims](

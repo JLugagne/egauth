@@ -7,14 +7,17 @@ scan):
 `authflow`, `identity`, `mfa`, `oauth`, `otp`, `passkey`, `sessions`, `tokens`,
 `tokens/basic`, `webapp`. A constructor in any other package is covered by review only;
 this matrix records the control each family applies *by default* and the option that opts out or
-widens it. Nothing here is opt-in: the safe value is the zero/absent value.
+widens it. For a control the library can judge on its own — an origin check, a body cap, a cookie
+attribute, a signature — the safe value is the zero/absent value and nothing is opt-in. The one
+exception is a **product policy** the library cannot judge for you: whether an account must present a
+second factor. See "Policy gates (opt-in by design)" below.
 
 ## Handler families
 
 | Package | Exported constructors | Default security controls | Opt-outs / wideners |
 |---|---|---|---|
 | `identity` | `LoginHandler`, `RegisterHandler`, `RequestPasswordResetHandler`, `ResetPasswordHandler`, `RequestEmailVerificationHandler`, `VerifyEmailHandler`, `RequestMagicLinkHandler`, `MagicLinkLoginHandler`, `ChangePasswordHandler`, `ChangePasswordWithReissueHandler`, `RequestEmailChangeHandler`, `ConfirmEmailChangeHandler`, `DeleteAccountHandler`, `RequestPhoneVerificationHandler`, `ConfirmPhoneVerificationHandler`, `RequestRecoveryEmailHandler`, `ConfirmRecoveryEmailHandler`, `RequestPasswordResetViaRecoveryHandler` | POST-only; strict same-origin gate on every request (browser POST without Origin/Referer is rejected 403 `cross_site_blocked`); 4 KiB pre-auth body cap before the argon2 path; bounded off-path delivery fan-out (64 concurrent, 30s timeout); configured tenant resolver returning `""` fails closed 401 `unresolved_tenant` | `WithInsecureNoOriginCheck`; `WithTrustedOrigins` (widen only); `WithMaxBodyBytes(<=0)`; `WithDeliveryConcurrency(<=0)`; `WithDeliveryTimeout(<=0)` |
-| `mfa` | `EnrollHandler`, `ConfirmHandler`, `VerifyHandler`, `VerifyRecoveryHandler`, `RegenerateRecoveryCodesHandler`, `DisableHandler`, `StepUpHandler` | POST-only; strict same-origin gate; 4 KiB body cap; `DisableHandler` requires AMR `mfa` step-up; `WithTenantResolver` returning `""` fails closed 401 (otherwise the user resolver's tenant, `""` in single-tenant, is used) | `WithInsecureNoOriginCheck`; `WithTrustedOrigins`; `WithMaxBodyBytes(<=0)`; `WithoutStepUp` / `WithStepUpRequired(false)`; `WithTenantResolver` |
+| `mfa` | `EnrollHandler`, `ConfirmHandler`, `VerifyHandler`, `VerifyRecoveryHandler`, `RegenerateRecoveryCodesHandler`, `DisableHandler`, `StepUpHandler` | POST-only; strict same-origin gate; 4 KiB body cap; `DisableHandler` and `RegenerateRecoveryCodesHandler` require AMR `mfa` step-up (enrolment and the second-factor presentation itself are deliberately not gated, or first-time enrolment would be impossible); `WithTenantResolver` returning `""` fails closed 401 (otherwise the user resolver's tenant, `""` in single-tenant, is used) | `WithInsecureNoOriginCheck`; `WithTrustedOrigins`; `WithMaxBodyBytes(<=0)`; `WithoutStepUp` / `WithStepUpRequired(false)`; `WithTenantResolver` |
 | `otp` | `IssueHandler`, `VerifyHandler` | POST-only; strict same-origin gate; 4 KiB body cap; bounded delivery (100 concurrent, 30s timeout); `WithTenantResolver` returning `""` fails closed 401 | `WithInsecureNoOriginCheck`; `WithTrustedOrigins`; `WithMaxBodyBytes(<=0)`; `WithMaxConcurrentDeliveries(<=0)`; `WithDeliveryTimeout(<=0)` |
 | `oauth` | `BeginHandler`, `CallbackHandler`, `DynamicBeginHandler`, `DynamicCallbackHandler` | GET redirect flow — protected by the HMAC-signed `__Host-oauth_state` cookie (no origin gate by design); `WithStateSigningKey` required and >= 32 bytes (500 otherwise); PKCE S256 on; state bound to provider + tenant; unverified provider email refused; tenant resolver returning `""` fails closed 401 | `WithStateCookieName` + `WithCookieDomain`/`WithInsecureCookies` (drops the `__Host-` host-lock); `WithoutPKCE`; `WithAllowUnverifiedEmail`; provider fetches opt out via `WithHTTPClient`/`WithInsecureURLs` (see below) |
 | `passkey` | `BeginRegistrationHandler`, `FinishRegistrationHandler`, `BeginLoginHandler`, `FinishLoginHandler`, `BeginDiscoverableLoginHandler`, `FinishDiscoverableLoginHandler`, `RenameCredentialHandler` | Ceremony handlers: HMAC-sealed `__Host-passkey_ceremony` cookie + single-use challenge store; Finish body cap 64 KiB. `RenameCredentialHandler`: strict same-origin gate, `application/json` required, body cap | `WithSessionCookieName` + `WithCookieDomain`/`WithInsecureCookies`; `WithInsecureNoOriginCheck` (rename only); `WithMaxBodyBytes(<=0)`; `Config.InsecureNoChallengeStore` |
@@ -39,3 +42,24 @@ widens it. Nothing here is opt-in: the safe value is the zero/absent value.
 Registration-time URL validators (not constructors): `oauth.ValidateExternalURL`,
 `oauth.ValidateOIDCEndpointURL` — coarse https/internal-IP checks used before a tenant-supplied
 URL is stored or fetched; the dial-time guard in `SafeHTTPClient` remains authoritative.
+
+## Policy gates (opt-in by design)
+
+These are not defaults the library can pick for you: they encode *your* product's rule about when a
+second factor is required. Absent, they do nothing.
+
+| Gate | Where | Absent means |
+|---|---|---|
+| `identity.WithMFAGate(checker)` | `identity.LoginHandler`, `identity.MagicLinkLoginHandler` | a correct password yields a full access+refresh pair, whether or not the account has an enrolled factor |
+| `oauth.WithMFAGate(checker)` | `oauth.CallbackHandler`, `oauth.DynamicCallbackHandler` | a successful provider authorization yields a full pair, whether or not the account has an enrolled factor |
+| `tokens.WithRequiredAMR(tokens.AMRMFA)` | any route behind `tokens.RequireAuth` / `ContextMiddleware` | any verified token reaches the route, at any assurance level |
+| `tokens.WithDenyInterim()` | any route behind `RequireAuth` / `ContextMiddleware` | an interim (pre-second-factor) token reaches the route |
+
+Wired, the first two make an enrolled account receive only the short-lived interim access token —
+no refresh cookie — and the client completes the factor through `mfa.StepUpHandler`. `mfa.Service`
+and `identity.Service` satisfy the gate interface, so wiring is `identity.WithMFAGate(mfaSvc)`.
+
+Wiring none of them is a valid configuration: an application that hands MFA to its users as an
+optional extra (a security setting they may enable) wants exactly that. It is worth being explicit
+about which of the two you are shipping, because mounting the `mfa` handlers alone changes no login
+outcome: users can enrol and confirm an authenticator and still sign in with the password alone.

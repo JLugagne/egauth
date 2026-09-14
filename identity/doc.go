@@ -45,6 +45,11 @@
 // brute-force lockout, single-use selector/verifier tokens, email normalization, and a pre-auth body
 // cap against hashing-DoS. See SECURITY.md for the full model.
 //
+// Whether an account must present a second factor is the APPLICATION's policy, not this package's:
+// nothing here requires MFA unless you pass WithMFAGate, so an application that offers MFA as an
+// optional security setting keeps a password-only login working, and one that requires it wires the
+// gate. Mounting the mfa handlers alone changes no login outcome. See .llms/mfa.md.
+//
 // # Stability
 //
 // Stability class: frozen-v1 candidate. The exported API is intended to remain
