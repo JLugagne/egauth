@@ -112,6 +112,7 @@ sbom:
 	go install github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
 	@dir=""; \
 	for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+	  GOWORK=off go mod download github.com/JLugagne/egauth@$(VERSION) >/dev/null 2>&1; \
 	  dir=$$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@$(VERSION) 2>/dev/null); \
 	  if [ -n "$$dir" ] && [ -d "$$dir" ]; then break; fi; \
 	  echo "==> module $(VERSION) not resolvable yet (attempt $$attempt/10); retrying in 15s..."; \
