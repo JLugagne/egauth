@@ -292,8 +292,8 @@ cosign verify-blob \
 GitHub serves artifact attestations for private repositories only on GitHub Enterprise Cloud,
 so this is only available once the repository is public. It is **wired in** as
 [`.github/workflows/attest-release.yml`](.github/workflows/attest-release.yml): triggered on
-`release: [published]` with `id-token: write` and `attestations: write`, it checks out the tag,
-regenerates the SBOM with the pinned syft version, attests it with
+`release: [published]` with `id-token: write` and `attestations: write`, it regenerates the SBOM
+for the tagged module (resolved from the proxy) with the pinned syft version, attests it with
 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
 (`subject-path: libauth-*.sbom.*`), and re-uploads the SBOMs so the attested bytes are the ones
 a consumer downloads. Use `workflow_dispatch` with a `tag` input to (re)attest an existing
