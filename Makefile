@@ -110,7 +110,13 @@ sbom:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1; fi
 	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$(VERSION)..."
 	go install github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
-	@dir=$$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@$(VERSION)); \
+	@dir=""; \
+	for attempt in 1 2 3 4 5 6 7 8 9 10; do \
+	  dir=$$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@$(VERSION) 2>/dev/null); \
+	  if [ -n "$$dir" ] && [ -d "$$dir" ]; then break; fi; \
+	  echo "==> module $(VERSION) not resolvable yet (attempt $$attempt/10); retrying in 15s..."; \
+	  sleep 15; \
+	done; \
 	if [ -z "$$dir" ] || [ ! -d "$$dir" ]; then echo "FAIL: could not resolve module source for $(VERSION) (is the tag published?)"; exit 1; fi; \
 	MODULE=$$(GOWORK=off go list -m -f '{{.Path}}' github.com/JLugagne/egauth@$(VERSION)); \
 	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$(VERSION)" -o cyclonedx-json > libauth-$(VERSION).sbom.json; \
