@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.14.1] — 2026-09-14
+
+### Fixed
+
+- **`make sbom` now installs and runs syft correctly.** The target installed
+  `github.com/anchore/syft` (which has no package at the module root) and handed the module path
+  to a syft version that scans directories, so SBOM generation failed. It now installs
+  `.../cmd/syft` at the pinned version and scans the resolved module directory with
+  `--source-name`/`--source-version`. `RELEASING.md` Step 4 documents the same invocation.
+
+### Added
+
+- **`.github/workflows/attest-release.yml`** generates and attests the release SBOMs on
+  `release: [published]` (Step 7 Option B), so a published SBOM can be verified with
+  `gh attestation verify`.
+
 ## [v0.14.0] — 2026-09-14
 
 ### Security
