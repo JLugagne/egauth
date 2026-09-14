@@ -37,9 +37,18 @@
 //
 // # Security posture
 //
-// Enumeration-safe by default (uniform responses and decoy hashing on unknown accounts),
-// brute-force lockout, single-use selector/verifier tokens, email normalization, and a pre-auth
-// body cap against hashing-DoS. See SECURITY.md for the full model.
+// Uniform responses and decoy hashing make the credential-verification and account-recovery flows
+// enumeration-safe: an unknown account takes the same path, and the same work, as a known one. The
+// one deliberate exception is sign-up, which answers 409 email_taken for an address already in use —
+// a response-shape disclosure that is standard registration UX and that applications needing
+// anti-enumeration on sign-up can close by collapsing the error (see SECURITY.md). Also included:
+// brute-force lockout, single-use selector/verifier tokens, email normalization, and a pre-auth body
+// cap against hashing-DoS. See SECURITY.md for the full model.
+//
+// Whether an account must present a second factor is the APPLICATION's policy, not this package's:
+// nothing here requires MFA unless you pass WithMFAGate, so an application that offers MFA as an
+// optional security setting keeps a password-only login working, and one that requires it wires the
+// gate. Mounting the mfa handlers alone changes no login outcome. See .llms/mfa.md.
 //
 // # Stability
 //

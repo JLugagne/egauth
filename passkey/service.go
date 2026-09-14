@@ -216,6 +216,13 @@ func NewService(store Store, cfg Config) (*Service, error) {
 // BeginRegistration starts adding a passkey for the user, returning the creation options to
 // hand to navigator.credentials.create() and the SessionData to carry to FinishRegistration.
 func (s *Service) BeginRegistration(ctx context.Context, tenantID string, userID uuid.UUID, name, displayName string) (*protocol.CredentialCreation, *webauthn.SessionData, error) {
+	// Lifecycle gate, matching BeginLogin: a suspended or soft-deleted account must not be able to
+	// start enrolling an authenticator. The gate is checked here AND at Finish, because a ceremony
+	// can outlive an administrative change and the enrollment is what persists.
+	if err := s.checkAccountGate(ctx, tenantID, userID); err != nil {
+		s.emitLifecycleBlocked(ctx, tenantID, userID, err)
+		return nil, nil, err
+	}
 	u, err := s.loadUser(ctx, tenantID, userID, name, displayName)
 	if err != nil {
 		return nil, nil, err
@@ -230,6 +237,13 @@ func (s *Service) BeginRegistration(ctx context.Context, tenantID string, userID
 
 // FinishRegistration verifies the attestation response and persists the new credential.
 func (s *Service) FinishRegistration(ctx context.Context, tenantID string, userID uuid.UUID, name, displayName string, session webauthn.SessionData, r *http.Request) (*Credential, error) {
+	// Lifecycle gate, matching FinishLogin: checked after the ceremony's cryptographic work and
+	// before the credential is stored, so an account suspended mid-ceremony cannot complete an
+	// enrollment it started while live.
+	if err := s.checkAccountGate(ctx, tenantID, userID); err != nil {
+		s.emitLifecycleBlocked(ctx, tenantID, userID, err)
+		return nil, err
+	}
 	u, err := s.loadUser(ctx, tenantID, userID, name, displayName)
 	if err != nil {
 		return nil, err

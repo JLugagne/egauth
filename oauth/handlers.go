@@ -16,6 +16,7 @@ import (
 	"github.com/JLugagne/egauth/internal/httputil"
 	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/tokens"
+	"github.com/JLugagne/egauth/tokens/jwt"
 	"github.com/google/uuid"
 )
 
@@ -75,7 +76,12 @@ type handlerConfig struct {
 	authFlow AuthFlow
 	// sessionResolver overrides the authoritative account-state resolver the native issuance
 	// pipeline consults when no flow engine is configured. See WithSessionStateResolver.
-	sessionResolver      issuance.Resolver
+	sessionResolver issuance.Resolver
+	// mfaGate reports whether a user has a confirmed second factor enrolled. When set, the native
+	// callback issues only a short-lived interim access token for such a user instead of a full
+	// renewable pair, so the second factor is enforced on this login path the same way it is on the
+	// password path. See WithMFAGate.
+	mfaGate              issuance.MFAGate
 	allowUnverifiedEmail bool
 	// redirectFallbackWarned rate-limits the WEB-02 fallback misuse event to once per handler.
 	redirectFallbackWarned *sync.Once
@@ -98,8 +104,12 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
-	// STATE-01: validate the configuration eagerly and record the outcome; the handlers
-	// fail closed with 500 at request time when it is invalid, and the same check is
+	// Cookies are validated here, at construction: an option combination that cannot honour the
+	// cookie names it was given must not survive to the request path, where every request would
+	// fail instead of the deployment failing once at startup.
+	c.cookies.MustValidate()
+	// STATE-01: validate the remaining configuration eagerly too and record the outcome; the
+	// handlers fail closed with 500 at request time when it is invalid, and the same check is
 	// exposed by ValidateHandlerConfig for a server startup check.
 	c.configErr = c.validate()
 	return c
@@ -108,11 +118,14 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 // WithCookies replaces the auth-cookie configuration wholesale.
 func WithCookies(c tokens.Cookies) HandlerOption { return func(h *handlerConfig) { h.cookies = c } }
 
-// WithCookieDomain scopes the auth and state cookies to a domain. Incompatible with the
-// default __Host- state cookie name; pair it with WithStateCookieName to opt out of the
-// __Host- host-locking (and accept the login-CSRF residual of a tossable state cookie).
+// WithCookieDomain scopes the auth and state cookies to a domain.
+//
+// A Domain is incompatible with the __Host- prefix the default auth-cookie names carry, so a name
+// still carrying it is DEMOTED (to __Secure- while the cookie stays Secure with Path="/", otherwise
+// to the bare name): setting a Domain is an explicit opt-out of host-lock semantics. Note that this
+// forfeits the subdomain cookie-tossing protection __Host- provides.
 func WithCookieDomain(domain string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Domain = domain }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithDomain(domain) }
 }
 
 // WithSameSite overrides the SameSite attribute of the auth cookies set on success. (The
@@ -122,10 +135,11 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 }
 
 // WithInsecureCookies disables the Secure attribute on all cookies. Local HTTP dev only.
-// Incompatible with the default __Host- state cookie name: rename the state cookie via
-// WithStateCookieName when serving plaintext HTTP.
+//
+// Browsers reject a __Host- or __Secure- named cookie that is not Secure, so the auth-cookie names
+// are DEMOTED to their bare form ("access_token" / "refresh_token").
 func WithInsecureCookies() HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Insecure = true }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithInsecure() }
 }
 
 // WithRedirectURL sets the OAuth redirect_uri. It MUST equal the callback URL registered with
@@ -217,6 +231,27 @@ func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
 	return func(h *handlerConfig) { h.sessionResolver = r }
 }
 
+// WithMFAGate enforces the second factor on the native OAuth callback. When the gate reports the
+// linked account has a confirmed second factor enrolled, the callback issues only a short-lived
+// interim access token — the refresh cookie is withheld, so the pre-step-up state is not a
+// renewable session — and the client completes the ceremony through mfa.StepUpHandler, exactly as
+// it would after a password login.
+//
+// Without a gate the native callback issues a full, renewable pair for every successful
+// authorization, so an MFA-enrolled account that signs in through a provider receives a session
+// its second factor never gated. identity.Service satisfies issuance.MFAGate, so wiring is
+// normally WithMFAGate(identitySvc).
+//
+// The option is not consulted when WithAuthFlow is configured: the flow engine owns MFA policy on
+// that path. It is also NOT the same as requiring MFA to use the provider at all; it decides only
+// what the callback may issue.
+func WithMFAGate(g issuance.MFAGate) HandlerOption {
+	if g == nil {
+		panic("oauth: WithMFAGate requires a non-nil gate")
+	}
+	return func(h *handlerConfig) { h.mfaGate = g }
+}
+
 // WithTenantResolver derives the tenant from the request to scope identity store operations
 // in multi-tenant deployments. A configured resolver MUST return a non-empty tenant for any
 // request it can map; returning "" is treated as a resolution failure and the handler rejects
@@ -285,7 +320,15 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 			}
 			authOpts = append(authOpts, WithAuthNonce(nonce))
 		}
-		cfg.setStateCookie(w, packState(state, verifier, nonce, p.Name(), tenant, cfg.stateSigningKey))
+		cfg.setStateCookie(w, packState(stateBucket{
+			State:       state,
+			Verifier:    verifier,
+			Nonce:       nonce,
+			Provider:    p.Name(),
+			Tenant:      tenant,
+			RedirectURI: redirectURI,
+			IssuedAt:    time.Now().Unix(),
+		}, cfg.stateSigningKey))
 		http.Redirect(w, r, p.AuthCodeURL(state, redirectURI, challenge, authOpts...), http.StatusFound)
 	}
 }
@@ -340,10 +383,20 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
 		}
-		cookieState, verifier, nonce, cookieProvider, cookieTenant, ok := unpackState(raw, cfg.stateSigningKey)
+		st, ok := unpackState(raw, cfg.stateSigningKey)
 		if !ok {
 			cfg.fail(w, r, http.StatusForbidden, "invalid_state")
 			return
+		}
+		// Enforce the flow's age on the server. The cookie's Max-Age is set from the same TTL, but
+		// a client-side lifetime is not a control: an out-of-band copy of the cookie never ages out,
+		// so the value the server trusts has to carry its own issue time.
+		if cfg.stateTTL > 0 {
+			issued := time.Unix(st.IssuedAt, 0)
+			if st.IssuedAt <= 0 || time.Since(issued) > cfg.stateTTL {
+				cfg.fail(w, r, http.StatusForbidden, "invalid_state")
+				return
+			}
 		}
 
 		if q.Get("error") != "" {
@@ -351,18 +404,18 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusUnauthorized, "access_denied")
 			return
 		}
-		if !stateMatches(q.Get("state"), cookieState) {
+		if !stateMatches(q.Get("state"), st.State) {
 			cfg.fail(w, r, http.StatusForbidden, "state_mismatch")
 			return
 		}
 		// Bind the in-flight attempt to the provider and tenant that started it, so a state
 		// cookie minted for provider/tenant A cannot be replayed against the callback of
 		// provider/tenant B (SEC-12: provider confusion / cross-tenant state reuse).
-		if !stateMatches(cookieProvider, p.Name()) {
+		if !stateMatches(st.Provider, p.Name()) {
 			cfg.fail(w, r, http.StatusForbidden, "provider_mismatch")
 			return
 		}
-		if !stateMatches(cookieTenant, tenant) {
+		if !stateMatches(st.Tenant, tenant) {
 			cfg.fail(w, r, http.StatusForbidden, "tenant_mismatch")
 			return
 		}
@@ -371,12 +424,20 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			cfg.fail(w, r, http.StatusBadRequest, "missing_code")
 			return
 		}
+		// Exchange against the redirect URI the provider was actually given, taken from the
+		// authenticated cookie rather than re-derived. Two derivations can disagree (Begin
+		// advertises the begin path, this handler would re-derive the callback path), and when the
+		// derived form depends on the request Host the whole binding rests on the provider's own
+		// check. Using the bound value removes both problems.
+		if st.RedirectURI != "" {
+			redirectURI = st.RedirectURI
+		}
 
 		var exchOpts []ExchangeOption
 		if p.oidcEnabled() {
-			exchOpts = append(exchOpts, WithExpectedNonce(nonce))
+			exchOpts = append(exchOpts, WithExpectedNonce(st.Nonce))
 		}
-		info, err := p.Exchange(r.Context(), code, redirectURI, verifier, exchOpts...)
+		info, err := p.Exchange(r.Context(), code, redirectURI, st.Verifier, exchOpts...)
 		if err != nil {
 			cfg.fail(w, r, http.StatusBadGateway, "exchange_failed")
 			return
@@ -458,7 +519,12 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			return
 		}
 		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
-		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		if !res.Interim {
+			cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		}
+		// An interim result stops here on purpose: the subject has the first factor only, so the
+		// refresh token is deliberately not delivered. The access cookie carries the short-lived
+		// interim credential, and the client completes the second factor through mfa.StepUpHandler.
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -482,10 +548,14 @@ func newCallbackPipeline[C any](cfg handlerConfig, linker IdentityLinker, issuer
 	if resolver == nil {
 		return nil, errors.New("oauth: CallbackHandler requires authoritative session state (an issuance.Resolver or identity.SessionStateReader); configure WithSessionStateResolver")
 	}
-	return issuance.New(issuer,
+	opts := []issuance.Option{
 		issuance.WithResolver(resolver),
 		issuance.WithEventSink(cfg.events),
-	)
+	}
+	if cfg.mfaGate != nil {
+		opts = append(opts, issuance.WithMFAGate(cfg.mfaGate))
+	}
+	return issuance.New(issuer, opts...)
 }
 
 // mapIssuanceError maps a rejected issuance to the callback's client-visible failure. A
@@ -553,19 +623,9 @@ func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 		return ""
 	}
 	if len(cfg.allowedHosts) > 0 {
-		reqHost := r.Host
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			reqHost = h
-		}
-		reqHost = strings.Trim(reqHost, "[]")
 		allowed := false
 		for _, ah := range cfg.allowedHosts {
-			target := ah
-			if h, _, err := net.SplitHostPort(ah); err == nil {
-				target = h
-			}
-			target = strings.Trim(target, "[]")
-			if strings.EqualFold(reqHost, target) || strings.EqualFold(r.Host, ah) {
+			if authorityAllowed(r.Host, ah) {
 				allowed = true
 				break
 			}
@@ -577,6 +637,38 @@ func (cfg handlerConfig) resolveRedirectURL(r *http.Request) string {
 	uri := requestScheme(r) + "://" + r.Host + r.URL.Path
 	cfg.warnIfRedirectFallbackMisuse(r)
 	return uri
+}
+
+// authorityAllowed reports whether the request's authority (Host header, host:port) matches an
+// allowlist entry.
+//
+// The comparison keeps the PORT when the entry names one. Reducing both sides to their hostname —
+// as folding them through net.SplitHostPort did — turns a precise entry such as
+// "app.example.com:8443" into "app.example.com" and admits "app.example.com:9999", which is a
+// different service on that host and may well be an attacker's own listener. An entry with no port
+// stays host-only, so deployments behind a default-port proxy keep working.
+func authorityAllowed(requestHost, entry string) bool {
+	entryHost, entryPort, entryHasPort := splitAuthority(entry)
+	if !entryHasPort {
+		reqHost, _, _ := splitAuthority(requestHost)
+		return strings.EqualFold(reqHost, entryHost)
+	}
+	reqHost, reqPort, reqHasPort := splitAuthority(requestHost)
+	if !reqHasPort {
+		// The request omitted the port: it means the scheme default, which cannot equal an explicit
+		// non-default port the allowlist named.
+		return false
+	}
+	return strings.EqualFold(reqHost, entryHost) && reqPort == entryPort
+}
+
+// splitAuthority splits host:port, tolerating a missing port and bracketed IPv6 literals. It reports
+// whether an explicit port was present.
+func splitAuthority(authority string) (host, port string, hasPort bool) {
+	if h, p, err := net.SplitHostPort(authority); err == nil {
+		return strings.Trim(h, "[]"), p, true
+	}
+	return strings.Trim(authority, "[]"), "", false
 }
 
 func isValidHost(rawHost string) bool {
@@ -747,6 +839,8 @@ func (cfg handlerConfig) validate() error {
 		errs = append(errs, errors.New("oauth: WithStateSigningKey is required: the OAuth state cookie must be HMAC-signed, otherwise a cookie an attacker can plant (sibling-subdomain tossing, plaintext HTTP) drives the callback into a forged login (STATE-01)"))
 	} else if len(cfg.stateSigningKey) < MinStateSigningKeyLength {
 		errs = append(errs, fmt.Errorf("oauth: WithStateSigningKey key must be at least %d bytes, got %d: a shorter HMAC-SHA-256 key is brute-forceable offline from a single captured state cookie, re-enabling forged logins (STATE-01)", MinStateSigningKeyLength, len(cfg.stateSigningKey)))
+	} else if jwt.DeniedSecrets[string(cfg.stateSigningKey)] {
+		errs = append(errs, errors.New("oauth: WithStateSigningKey is a key published in this project's examples or docs; generate a unique key with crypto/rand or load one from a secret manager — a copy-pasted published key lets anyone forge state cookies"))
 	}
 	if strings.HasPrefix(cfg.stateCookieName, hostPrefix) {
 		if cfg.cookies.Domain != "" {

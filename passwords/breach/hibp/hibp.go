@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/JLugagne/egauth/internal/safehttp"
 	"github.com/JLugagne/egauth/passwords"
 )
 
@@ -51,18 +52,23 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithHTTPClient sets the HTTP client (e.g. to tune timeouts, proxies or transport). The default
-// client has a 10s timeout.
+// WithHTTPClient sets the HTTP client (e.g. to tune timeouts or transport). The default client is
+// the hardened one (see New): a custom client is cloned with redirect following disabled, because a
+// 3xx from the endpoint would otherwise choose the next hop and a hostile or compromised mirror
+// could walk this process into an internal address.
 func WithHTTPClient(c *http.Client) Option {
 	return func(cl *Client) {
 		if c != nil {
-			cl.httpClient = c
+			cl.httpClient = safehttp.NoRedirect(c)
 		}
 	}
 }
 
 // WithBaseURL overrides the API base URL (default https://api.pwnedpasswords.com). Mainly for
 // testing or pointing at a self-hosted mirror.
+//
+// A mirror is a network peer, not a trust anchor: the request still goes through the hardened client
+// (see New), so pointing this at an internal host does not make that host reachable.
 func WithBaseURL(u string) Option {
 	return func(cl *Client) { cl.baseURL = strings.TrimRight(u, "/") }
 }
@@ -104,7 +110,11 @@ func WithFailOpen() Option {
 // New builds a HIBP breach-check Client.
 func New(opts ...Option) *Client {
 	c := &Client{
-		httpClient: &http.Client{Timeout: defaultTimeout},
+		// Hardened client: a dial-time guard refuses internal addresses (evaluated after DNS
+		// resolution, so it is DNS-rebinding safe) and redirects are never followed. The breach
+		// endpoint is whatever WithBaseURL names — commonly a self-hosted mirror — and this request
+		// carries a hash prefix derived from the user's password, so it must not be steerable.
+		httpClient: safehttp.Client(defaultTimeout),
 		baseURL:    defaultBaseURL,
 		userAgent:  defaultUserAgent,
 		threshold:  1,

@@ -7,6 +7,147 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Second-factor enrollment is no longer reachable with a first-factor credential.**
+  `mfa.RegenerateRecoveryCodesHandler` now enforces step-up like its `DisableHandler`
+  sibling. Recovery codes are a second factor in their own right — one of them completes
+  step-up — so a session that had not presented a factor could previously rotate them and
+  then spend one to obtain a fully elevated session, bypassing the second factor and locking
+  the legitimate user out of it in the same move. `EnrollHandler` / `ConfirmHandler` are
+  deliberately NOT gated: they are how a user who has not enrolled yet establishes the
+  factor, so gating them would make first-time enrollment impossible.
+- **The native OAuth callback enforces the second factor** via the new `oauth.WithMFAGate`.
+  Without it the callback issued a full, renewable pair for an MFA-enrolled account, so
+  signing in through a provider bypassed the second factor enforced on every other login
+  path. Wired, an enrolled user receives only the interim access token and completes the
+  ceremony through `mfa.StepUpHandler`. Opt-in, so existing wiring is unchanged.
+- **`tokens.Claims.Interim` and `tokens.WithDenyInterim`** make assurance a property of the
+  credential rather than of each handler's policy. `WithRequiredAMR` asks whether a
+  credential carries the factor a route wants; `WithDenyInterim` asks whether the credential
+  is known to be incomplete, so a route stays safe when a new factor or login path is added.
+- **Password reset now evicts recovery channels** (`identity.Store.ClearRecoveryChannels`,
+  called from `ResetPassword`). A recovery channel is where the reset-via-recovery flow
+  delivers its token, so a channel added by someone else was a way back in — and the
+  documented remediation only changed a password the attacker could change again. Clearing
+  an account with no channel enrolled stays a no-op.
+- **The recovery channel must be independent of the primary email in both directions.**
+  `RequestEmailChange` no longer accepts the enrolled recovery address, which previously
+  collapsed the two into one mailbox and made `RecoveryChannels.Any()` report a channel that
+  was not independent — the predicate applications use to ask "does this account have a
+  second way in?".
+- **All published example keys are rejected, and a guard keeps it that way.** The HS256
+  literal published in the `identity` and `tokens/basic` godoc examples was missing from the
+  denylist; the examples now generate a key at run time, the denylist is exported as
+  `tokens/jwt.DeniedSecrets` and consulted by the passkey cookie-key and OAuth state-key
+  checks, near-copies containing a published marker are refused, and a repository-wide test
+  fails when a key literal in an Example or a docs code fence is not denied.
+- **Credential-bearing types are redacted on the paths that hand them back.**
+  `mfa.Enrollment` (the returned TOTP seed), `*passkey.Service` (the ceremony-cookie key),
+  `*authflow.Engine` (the flow-token key), the six `identity` delivery payloads (reset,
+  verification and magic-link tokens) and `identity.Identity` (the stored password hash) now
+  implement `String`/`GoString`/`LogValue`. Each previously printed its secret in full while
+  the type that stores the same secret was carefully redacted. A new guard walks every
+  exported type in the module and fails when a credential-shaped field lacks the methods.
+- **`tokens` fails closed on an unresolvable tenant.** `RefreshHandler` and `LogoutHandler`
+  treated a resolver's empty result as the single-tenant partition, so the lookup missed, the
+  logout handler read that as "already gone", and it answered 204 while the rotation family
+  stayed live and renewable. Both now answer 401 `unresolved_tenant`, matching
+  `WithAuthTenantResolver` and `sessions.WithTenantResolver`.
+- **`exp` is required on access tokens.** A signature-valid token with no expiry was
+  accepted as valid forever, and mapping its claims dereferenced the absent timestamp — so
+  the same input was both a permanent credential and a panic on the verification path.
+- **`oauth` binds the flow to the signed state.** The advertised `redirect_uri` is carried in
+  the state and reused on exchange rather than re-derived from the callback path; the flow's
+  issue time is signed in and enforced server-side, so `WithStateTTL` is no longer a
+  client-side-only control; and `WithAllowedHosts` keeps the port when an entry names one,
+  instead of admitting any port on the allowed host.
+- **SSRF classification is an explicit prefix list** covering the IPv4-embedded IPv6 layouts
+  that `To4` does not normalise — IPv4-compatible, IPv4-translated and RFC 6052 NAT64,
+  including NAT64-embedded cloud metadata — and the hardened transport now lives in
+  `internal/safehttp` so the breach-check client, which had no dial guard and followed up to
+  ten redirects, uses it too.
+- **Cookie configuration is validated at construction, never per request.**
+  `WithCookieDomain`, `WithCookiePath`, `WithRefreshCookiePath` and `WithInsecureCookies` left
+  the default `__Host-` names unsatisfiable, and the check ran inside `withDefaults` on the
+  request path — so an affected endpoint panicked on every request, including
+  unauthenticated ones. The names are now DEMOTED (`__Host-` → `__Secure-` while the cookie
+  is still Secure with `Path="/"`, then the bare name), so a domain-scoped deployment gets
+  working cookies instead of a fatal configuration, and the configuration is checked once by
+  each handler constructor and by `RequireAuth`/`ContextMiddleware`. `webapp.NewWebApp`
+  returns the error rather than panicking. `tokens.DefaultCookies` is unchanged.
+- **A tag push is now verified.** A tag matched neither CI trigger, so publishing a release ran no
+  verification at all — no tests, no scan, no signature check — while the module proxy could already
+  be serving the tag. `.github/workflows/release-verify.yml` runs the signed-tag gate on every tag
+  push (and on demand against an existing tag) and reports the result; `RELEASING.md` now documents
+  the tag ruleset that is the actual publication control, and the required-check set by name.
+- **The release-signing tools are pinned** (`gitsign`, `cosign`) with their versions in the Makefile
+  alongside the other tool pins, and a guard fails the build if a `go install` line in the release
+  documentation uses `@latest`. Those tools run with the maintainer's OIDC identity, which is the
+  position that produces the signatures consumers verify.
+- **The secure-defaults registry guard covers `webapp` and middleware constructors**
+  (`func(http.Handler) http.Handler`), and the matrix's coverage claim now names the scanned
+  packages. `tokens.RequireAuth`/`ContextMiddleware` are also recorded as mutating, because with
+  `WithAutoRefresh` they rotate the refresh family and rewrite the auth cookies.
+- **Missing resource ceilings added:** Argon2 `MaxTime` bounds the iteration count on the
+  verify path (the memory half already had a ceiling); `keystore.NewKEK` refuses an all-zero
+  or repeated-byte KEK, which would have silently reduced envelope encryption to nothing; and
+  `mfa.WithLockoutDuration(0)` now means the permanent lockout its documentation describes
+  rather than being rewritten to the 15-minute default.
+- **A failed `/auth/refresh` with no refresh cookie no longer clears the access cookie.** That is
+  exactly the state an MFA-gated login leaves the client in — an access cookie and deliberately no
+  refresh cookie — so an eager client, a retry or a background tab hitting the refresh route first
+  destroyed the interim session and the subject could never present the second factor. With no
+  refresh cookie there is nothing to rotate or invalidate, so the route now clears nothing; a
+  rotation that actually failed still clears both cookies.
+- **`passkey` ceremony stores are bounded.** An unauthenticated begin recorded a challenge in
+  an uncapped map that was fully rescanned on every insert; the store now reaps from an
+  expiry index and refuses a tenant that holds its cap. The credential store indexes
+  credential IDs tenant-wide instead of scanning every credential in the tenant on each save
+  (flat cost from 1k to 20k credentials, where the scan grew 13x), caps per user and per
+  tenant, and registration now consults `Config.AccountGate` like the login ceremonies do.
+- **Sign-up no longer leaks account existence through response time.** `Register` keeps its
+  cheap uniqueness pre-check (which is what stops an unauthenticated caller spending a full
+  Argon2id pass per request on an address they cannot claim) and now spends an equal-cost
+  decoy hash on the taken branch, so the two branches are indistinguishable by timing.
+  `SECURITY.md` and `identity/doc.go` previously claimed the opposite and would have led an
+  operator to keep the oracle while believing it was closed.
+
+### Documentation
+
+- **MFA enforcement is documented as a deployment policy you set, not a library decision.** Every
+  point that could require a second factor is off until you turn it on — the password login
+  (`identity.WithMFAGate`), the OAuth callback (`oauth.WithMFAGate`) and your own routes
+  (`tokens.WithRequiredAMR(tokens.AMRMFA)`). Both "MFA required" and "MFA offered as an optional
+  security setting" are supported; mounting the `mfa` handlers alone changes no login outcome, so the
+  distinction is worth being explicit about. `SECURITY.md`, `.llms/mfa.md`,
+  `.llms/secure-defaults-matrix.md` and `identity/doc.go` now say so, and the full-stack example
+  labels its gate as a choice it made rather than a requirement. The one default that stays ON is
+  the step-up requirement on `DisableHandler` / `RegenerateRecoveryCodesHandler`, which answers a
+  different question: whether a session that has not presented the factor may destroy it.
+
+### Changed
+
+- **`identity.RecoveryChannels` gains `NotBefore` and `Usable(now)`**, and
+  `WithRecoveryChannelCooldown` (default off) sets how long a newly enrolled recovery channel must
+  exist before it may be used to reset a password. Gate a reset on `Usable` rather than `Any` to
+  require that window. The reset-via-recovery flow already enforces it internally.
+- **`event.EmailChanged` carries `previous_email` / `new_email`**, and the recovery and phone events
+  carry `recovery_channel`. Changing the account email or adding a recovery channel needs only a
+  live session, so the address that lost access is often the only party able to notice: a sink can
+  now warn it. Keys are documented in the event package, and no credential is ever carried.
+- **`Origin` parsing accepts only the canonical `scheme://host[:port]`** on the exported same-origin
+  primitive, so userinfo, scheme-relative and path/query/fragment forms are refused. A browser
+  request is unaffected.
+- **`logs` redaction contract**: the types listed above render their secret fields as
+  `REDACTED` under `%v`/`%s`/`%+v`/`%#v` and `slog`. JSON marshalling remains unredacted by
+  design, since returning a freshly issued token to its owner is a legitimate use.
+
+### Fixed
+
+- `oauth`'s state cookie payload is now an explicit struct rather than six positional fields;
+  cookies minted by the previous format fail closed and the subject restarts the flow.
+
 ## [v0.13.0] — 2026-09-13
 
 ### Added
@@ -214,6 +355,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `must_change_password` (boolean, default false) to the `tokens` table so the gate survives refresh.
 
   Zero behavior change unless a credential is explicitly flagged via admin provisioning.
+
+### Fixed
+
+- **Cookie configuration no longer panics at request time** (`tokens`, `identity`, `oauth`, `mfa`,
+  `webapp`). `tokens.Cookies.withDefaults` panicked whenever a `__Host-` cookie name was paired with
+  a `Domain`, a `Path != "/"` or `Insecure`, and it ran on the request path — including inside the
+  pure read helpers `Cookies.Access` / `Cookies.Refresh`. Consequences: `webapp.Config.CookieDomain`
+  broke every cookie-writing endpoint while `NewWebApp` reported no error; `WithCookieDomain`,
+  `WithCookiePath`, `WithRefreshCookiePath` and `WithInsecureCookies` each produced an unusable
+  handler; and `tokens.RequireAuth` with domain-scoped cookies panicked on EVERY request to a
+  protected route, even an unauthenticated `GET` carrying no cookie at all.
+
+  Those options are now self-consistent: they DEMOTE a cookie name that still carries the `__Host-`
+  prefix to `__Secure-` (while the cookie stays `Secure` with `Path="/"`) or to its bare form,
+  because setting a `Domain`, a path scope or `Insecure` is already an opt-out of host-lock
+  semantics. New demoting derivations on `tokens.Cookies` — `WithDomain`, `WithPath`,
+  `WithRefreshPath`, `WithInsecure` — plus `MustValidate`, expose the same behavior for hand-built
+  values. `Validate` additionally rejects a `__Secure-` name on a non-`Secure` cookie.
+
+  Validation moved to CONSTRUCTION: `tokens`/`identity`/`oauth`/`mfa` handler constructors and
+  `tokens.RequireAuth` / `tokens.ContextMiddleware` call `MustValidate` (a startup panic on a
+  genuinely invalid hand-built value), and `webapp.NewWebApp` returns it as an error. `DefaultCookies`
+  is unchanged — `__Host-` remains the default.
 
 ### Security / disclosure (v1.0.0)
 

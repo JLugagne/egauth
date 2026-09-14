@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -72,7 +73,14 @@ type stubIssuer struct {
 
 func (s *stubIssuer) IssueTokenPair(_ context.Context, claims tokens.Claims[struct{}]) (*tokens.TokenPair[struct{}], error) {
 	s.gotClaims = claims
-	return s.pair, s.err
+	if s.pair == nil {
+		return nil, s.err
+	}
+	// Mirror the interim marker onto the returned pair's claims, as a real issuer does, so a
+	// caller that inspects pair.Claims sees the same assurance level the token carries.
+	pair := *s.pair
+	pair.Claims = claims
+	return &pair, s.err
 }
 
 func (s *stubIssuer) IssueAPIKey(_ context.Context, _ string, _ tokens.KeyType, _ uuid.UUID, _ tokens.Claims[struct{}]) (*tokens.APIKey[struct{}], error) {
@@ -83,12 +91,58 @@ func claimsOf(u *identity.User) tokens.Claims[struct{}] {
 	return tokens.Claims[struct{}]{Subject: u.ID}
 }
 
+// tokenEndpointRecorder captures what the token endpoint was sent, so a test can assert on the
+// exchange's parameters (notably redirect_uri) rather than only on the callback's response.
+type tokenEndpointRecorder struct {
+	mu    sync.Mutex
+	forms []url.Values
+}
+
+func (r *tokenEndpointRecorder) record(form url.Values) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.forms = append(r.forms, form)
+}
+
+// lastFormValue returns the named value from the most recent token request.
+func (r *tokenEndpointRecorder) lastFormValue(key string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.forms) == 0 {
+		return "", false
+	}
+	v, ok := r.forms[len(r.forms)-1][key]
+	if !ok || len(v) == 0 {
+		return "", false
+	}
+	return v[0], true
+}
+
+// stubProviderServerWithRecorder is stubProviderServer plus a recorder over the token requests.
+func stubProviderServerWithRecorder(t *testing.T, body *string) (*Provider, *httptest.Server, *tokenEndpointRecorder) {
+	t.Helper()
+	rec := &tokenEndpointRecorder{}
+	p, srv := stubProviderServerWithHook(t, body, rec.record)
+	return p, srv, rec
+}
+
 // stubProviderServer returns an httptest server emulating a provider's token + userinfo
 // endpoints, plus a Provider wired to it. The userinfo body is taken from *body at call time.
 func stubProviderServer(t *testing.T, body *string) (*Provider, *httptest.Server) {
 	t.Helper()
+	p, srv := stubProviderServerWithHook(t, body, nil)
+	return p, srv
+}
+
+// stubProviderServerWithHook builds the stub server and calls onToken for every token request.
+func stubProviderServerWithHook(t *testing.T, body *string, onToken func(url.Values)) (*Provider, *httptest.Server) {
+	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
+		if onToken != nil {
+			_ = r.ParseForm()
+			onToken(r.PostForm)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"access_token":"at-123","token_type":"bearer"}`)
 	})
@@ -571,4 +625,71 @@ func TestCallbackHandler_SuccessRedirectSetsNoStore(t *testing.T) {
 	assert.True(t, gotAuthCookie, "callback redirect must carry the fresh auth cookies")
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"), "303 Set-Cookie response must be uncacheable")
 	assert.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+}
+
+// stubMFAGate answers a fixed enrollment answer, standing in for identity.Service.
+type stubMFAGate struct{ enrolled bool }
+
+func (g stubMFAGate) IsEnrolled(_ context.Context, _ string, _ uuid.UUID) (bool, error) {
+	return g.enrolled, nil
+}
+
+// TestCallbackHandler_MFAGate covers the second factor on the native OAuth callback. Without a
+// gate the callback issues a full, renewable pair for every successful authorization, so an
+// MFA-enrolled account signing in through a provider receives a session its second factor never
+// gated. With the gate wired the callback must issue only the interim access token and withhold
+// the refresh cookie, leaving the subject to complete the ceremony through mfa.StepUpHandler.
+func TestCallbackHandler_MFAGate(t *testing.T) {
+	body := `{"sub":"prov-1","email":"u@example.com","email_verified":true,"name":"U"}`
+
+	run := func(t *testing.T, opts ...HandlerOption) *httptest.ResponseRecorder {
+		t.Helper()
+		p, _ := stubProviderServer(t, &body)
+		stateCookie, state := runBegin(t, p, WithRedirectURL(testRedirect))
+		linker := &stubLinker{user: &identity.User{ID: uuid.Must(uuid.NewV7()), Email: "u@example.com"}}
+		issuer := &stubIssuer{pair: &tokens.TokenPair[struct{}]{
+			AccessToken:           "access",
+			RefreshToken:          "refresh",
+			RefreshTokenExpiresAt: time.Now().Add(time.Hour),
+		}}
+		all := append([]HandlerOption{WithRedirectURL(testRedirect)}, opts...)
+		return runCallback(t, p, linker, issuer, stateCookie,
+			url.Values{"state": {state}, "code": {"auth-code"}}.Encode(), all...)
+	}
+	cookiesOf := func(rec *httptest.ResponseRecorder) (access, refresh bool) {
+		for _, c := range rec.Result().Cookies() {
+			switch c.Name {
+			case tokens.DefaultAccessCookieName:
+				access = c.Value != ""
+			case tokens.DefaultRefreshCookieName:
+				refresh = c.Value != ""
+			}
+		}
+		return access, refresh
+	}
+
+	t.Run("without a gate a full renewable pair is issued", func(t *testing.T) {
+		rec := run(t)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access, "the access cookie must be set")
+		assert.True(t, refresh, "no gate configured: the refresh cookie is set as before")
+	})
+
+	t.Run("enrolled account with the gate set receives no refresh cookie", func(t *testing.T) {
+		rec := run(t, WithMFAGate(stubMFAGate{enrolled: true}))
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access, "the interim access cookie must be set so the client can step up")
+		assert.False(t, refresh,
+			"an MFA-enrolled subject must not receive a renewable session before the second factor")
+	})
+
+	t.Run("account without an enrolled factor is unaffected by the gate", func(t *testing.T) {
+		rec := run(t, WithMFAGate(stubMFAGate{enrolled: false}))
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		access, refresh := cookiesOf(rec)
+		assert.True(t, access)
+		assert.True(t, refresh, "a non-enrolled account keeps getting a full pair")
+	})
 }

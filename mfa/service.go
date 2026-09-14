@@ -100,8 +100,12 @@ func WithNoAttemptLimit() ServiceOption { return func(s *service) { s.maxAttempt
 // WithLockoutDuration sets the time window after which a locked-out second factor
 // automatically resets its attempt counter. The window is measured from the last failed
 // attempt (TOTPEnrollment.LastAttemptAt). Once the window elapses, the next attempt is
-// treated as a fresh budget. 0 disables time-based decay — the lockout is permanent until
-// UnlockMFA is called or the factor is disabled. Default: DefaultLockoutDuration (15 min).
+// treated as a fresh budget.
+//
+// 0 disables time-based decay — the lockout is permanent until UnlockMFA is called or the
+// factor is disabled — which is the strictest available policy and is honoured verbatim.
+// A negative duration is treated the same way, since it has no meaning as a window.
+// Default: DefaultLockoutDuration (15 min).
 func WithLockoutDuration(d time.Duration) ServiceOption {
 	return func(s *service) { s.lockoutDuration = d }
 }
@@ -132,7 +136,12 @@ func NewService(store Store, opts ...ServiceOption) Service {
 		period:            DefaultPeriod,
 		skew:              DefaultSkew,
 		recoveryCodeCount: DefaultRecoveryCodeCount,
-		now:               time.Now,
+		// Seed the default window rather than normalising a zero value after the options run:
+		// "the caller did not set it" and "the caller asked for a permanent lockout" both arrive
+		// here as a zero duration, and collapsing them silently downgraded the strictest documented
+		// configuration to the default. Seeding keeps an explicit 0 intact.
+		lockoutDuration: DefaultLockoutDuration,
+		now:             time.Now,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -161,10 +170,10 @@ func NewService(store Store, opts ...ServiceOption) Service {
 	case s.maxAttempts < 0:
 		s.maxAttempts = 0 // explicitly disabled via WithNoAttemptLimit
 	}
-	// Lockout decay is on by default: an untouched (zero) value means "use the default window".
-	// WithLockoutDuration(0) explicitly disables decay (permanent lockout until admin action).
-	if s.lockoutDuration == 0 {
-		s.lockoutDuration = DefaultLockoutDuration
+	// A negative window has no meaning as a duration, so it is treated as the strictest form: no
+	// decay. Zero already means that (see WithLockoutDuration) and is left untouched.
+	if s.lockoutDuration < 0 {
+		s.lockoutDuration = 0
 	}
 	return s
 }

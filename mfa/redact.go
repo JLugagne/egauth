@@ -47,3 +47,34 @@ func (e TOTPEnrollment) LogValue() slog.Value {
 		slog.Time("created_at", e.CreatedAt),
 	)
 }
+
+// Enrollment is what Service.EnrollTOTP returns: the shared secret and the otpauth URI to show the
+// user once, during enrollment. It carries the same live secret TOTPEnrollment stores, so it needs
+// the same treatment — the type that hands the secret to the caller was left unredacted while the
+// type that stores it was redacted, which is exactly the wrong way round.
+//
+// Value receivers are deliberate: the leak paths include both Enrollment and *Enrollment, and a
+// pointer-receiver method set would leave the value form printable.
+func (e Enrollment) String() string {
+	secret := redacted
+	if e.Secret == "" {
+		secret = "" // distinguish "unset" from "set-but-hidden" without leaking
+	}
+	uri := redacted
+	if e.URI == "" {
+		uri = ""
+	}
+	return fmt.Sprintf("Enrollment{Secret:%s URI:%s}", secret, uri)
+}
+
+// GoString redacts the %#v representation.
+func (e Enrollment) GoString() string { return e.String() }
+
+// LogValue redacts the Enrollment for structured (slog) logging.
+func (e Enrollment) LogValue() slog.Value {
+	secret := redacted
+	if e.Secret == "" {
+		secret = ""
+	}
+	return slog.GroupValue(slog.String("secret", secret), slog.String("uri", redacted))
+}

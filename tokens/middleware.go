@@ -33,6 +33,9 @@ type authConfig[C any] struct {
 	gate func(egauth.Actor, C) error
 	// accessTokenRevocation, when set, is consulted after token verification to reject tokens revoked before their expiry. Nil keeps the stateless, lookup-free path.
 	accessTokenRevocation AccessTokenRevocationChecker
+	// denyInterim, when set, rejects a verified token minted before a second factor was
+	// presented (Claims.Interim). See WithDenyInterim.
+	denyInterim bool
 }
 
 // AuthOption configures the RequireAuth middleware.
@@ -40,6 +43,11 @@ type AuthOption[C any] func(*authConfig[C])
 
 // WithCookieAuth reads the access token from the given cookie configuration instead of
 // (or in addition to) the Authorization header.
+//
+// The configuration is validated when the middleware is built: a value a browser would reject
+// (e.g. a __Host- name kept alongside a Domain) panics there, never while serving a request.
+// Derive such variants with Cookies.WithDomain / WithPath / WithRefreshPath / WithInsecure, which
+// demote the prefix instead.
 func WithCookieAuth[C any](c Cookies) AuthOption[C] {
 	return func(a *authConfig[C]) {
 		cc := c
@@ -50,6 +58,8 @@ func WithCookieAuth[C any](c Cookies) AuthOption[C] {
 // WithAutoRefresh enables opt-in transparent rotation: when the access token is missing or
 // expired but a valid refresh cookie is present, the middleware rotates the pair, rewrites
 // both cookies and proceeds with the freshly issued claims. It implies cookie-based reads.
+//
+// The cookie configuration is validated when the middleware is built (see WithCookieAuth).
 func WithAutoRefresh[C any](rotator Rotator[C], cookies Cookies) AuthOption[C] {
 	return func(a *authConfig[C]) {
 		cc := cookies
@@ -102,6 +112,22 @@ func WithPersistentAutoRefresh[C any]() AuthOption[C] {
 // AMRMFA) so this gate can enforce, for example, WithRequiredAMR(AMRMFA) on sensitive routes.
 func WithRequiredAMR[C any](values ...string) AuthOption[C] {
 	return func(a *authConfig[C]) { a.requiredAMR = values }
+}
+
+// WithDenyInterim refuses a verified token that was minted before a second factor was presented
+// (Claims.Interim), answering 403 "step_up_required". Use it on any route whose action should not
+// be reachable by a half-authenticated session.
+//
+// This is the structural half of the step-up contract. WithRequiredAMR(AMRMFA) asks "does this
+// credential carry the factor I want?"; WithDenyInterim asks "is this credential known to be
+// incomplete?" — and unlike the AMR check it needs no knowledge of which factor values count as
+// complete, so a route stays safe when a new factor or a new login path is added.
+//
+// Interim tokens are minted for an account enrolled in a second factor, between the first factor
+// and the second (see issuance.WithMFAGate). They are short-lived and their refresh token is
+// withheld, so a denied request costs the subject one step-up round trip.
+func WithDenyInterim[C any]() AuthOption[C] {
+	return func(a *authConfig[C]) { a.denyInterim = true }
 }
 
 // WithRequiredScopes gates the route on token scopes: the verified token's Scopes claim must
@@ -174,6 +200,9 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if cfg.cookies != nil {
+		cfg.cookies.MustValidate()
+	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
 		serveAuthenticated(w, r, verifier, &cfg, func(w http.ResponseWriter, r *http.Request, claims *Claims[C]) {
@@ -223,6 +252,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 		if err == nil {
 			if cfg.accessTokenRevoked(r.Context(), claims) {
 				unauthorized(w)
+				return
+			}
+			if cfg.interimDenied(claims) {
+				stepUpRequired(w)
 				return
 			}
 			if !cfg.stepUpSatisfied(claims) {
@@ -282,6 +315,10 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 			if cfg.accessTokenRevoked(r.Context(), &pair.Claims) {
 				cfg.cookies.Clear(w)
 				unauthorized(w)
+				return
+			}
+			if cfg.interimDenied(&pair.Claims) {
+				stepUpRequired(w)
 				return
 			}
 			if !cfg.stepUpSatisfied(&pair.Claims) {
@@ -354,6 +391,13 @@ func actorFromClaims[C any](claims *Claims[C]) egauth.Actor {
 		actor.UserID = claims.Subject
 	}
 	return actor
+}
+
+// interimDenied reports whether the route refuses pre-second-factor sessions (WithDenyInterim) and
+// the verified claims are exactly that. It is a no-op unless the option is set, so the default
+// remains the lookup-free stateless path.
+func (cfg *authConfig[C]) interimDenied(claims *Claims[C]) bool {
+	return cfg.denyInterim && claims.IsInterim()
 }
 
 // stepUpSatisfied reports whether the claims clear BOTH step-up gates: the required AMR factors

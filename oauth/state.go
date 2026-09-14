@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
+	"strconv"
 	"strings"
 )
 
@@ -48,46 +49,107 @@ func newPKCE() (verifier, challenge string, err error) {
 	return verifier, challenge, nil
 }
 
-// packState encodes the state, PKCE verifier, OIDC nonce, provider name and tenant into a
-// single opaque cookie value. If a signing key is provided, an HMAC-SHA256 signature is appended
-// as the sixth field to guarantee cookie authenticity and integrity (SEC-OAU-03).
-func packState(state, verifier, nonce, provider, tenant string, key []byte) string {
-	payload := state + stateSeparator + verifier + stateSeparator + nonce +
-		stateSeparator + base64.RawURLEncoding.EncodeToString([]byte(provider)) +
-		stateSeparator + base64.RawURLEncoding.EncodeToString([]byte(tenant))
-	if len(key) > 0 {
-		return payload + stateSeparator + computeStateHMAC(payload, key)
-	}
-	return payload
+// stateBucket is the set of values carried through the authorization round trip inside the signed
+// state cookie. Every field is authenticated by the HMAC, so the callback can trust them.
+type stateBucket struct {
+	State string
+	// Verifier is the PKCE code verifier.
+	Verifier string
+	// Nonce is the OIDC nonce bound to this attempt.
+	Nonce string
+	// Provider is the provider name that started the flow, so a cookie minted for one provider
+	// cannot be replayed against another's callback.
+	Provider string
+	// Tenant is the tenant that started the flow, for the same reason across tenants.
+	Tenant string
+	// RedirectURI is the redirect target ADVERTISED on the authorization request. Binding it means
+	// the token exchange uses the exact value the provider was given, instead of re-deriving one:
+	// two derivations can disagree (and both can depend on the request Host), and the binding would
+	// otherwise rest entirely on the provider's own check.
+	RedirectURI string
+	// IssuedAt is when the flow started. It is signed so it cannot be back-dated, which is what
+	// makes WithStateTTL a server-side property rather than a client-side cookie lifetime.
+	IssuedAt int64
 }
 
-// unpackState splits a cookie value back into its state, verifier, nonce, provider and tenant
-// parts. If a signing key is provided, the cookie must have a valid HMAC-SHA256 signature;
-// unsigned, tampered, or forged cookies fail closed with ok=false (SEC-OAU-03).
-func unpackState(raw string, key []byte) (state, verifier, nonce, provider, tenant string, ok bool) {
+// stateFieldCount is the number of base64url-encoded fields in a packed state, excluding the
+// trailing signature.
+const stateFieldCount = 7
+
+// packState encodes a stateBucket plus an HMAC-SHA256 signature over the encoded fields.
+//
+// The signed payload is the concatenation of the encoded fields; the signature is the last field.
+// Signing the encoded form (rather than a re-serialization) means a decoder cannot be tricked by
+// differing encodings of the same logical value.
+func packState(b stateBucket, key []byte) string {
+	fields := []string{
+		enc(b.State),
+		enc(b.Verifier),
+		enc(b.Nonce),
+		enc(b.Provider),
+		enc(b.Tenant),
+		enc(b.RedirectURI),
+		enc(strconv.FormatInt(b.IssuedAt, 10)),
+	}
+	payload := strings.Join(fields, stateSeparator)
+	if len(key) == 0 {
+		// No key: the caller's validate() rejects this configuration. Returning the unsigned payload
+		// keeps the failure at the configuration check rather than here.
+		return payload
+	}
+	return payload + stateSeparator + computeStateHMAC(payload, key)
+}
+
+// unpackState verifies the signature and decodes the bucket. It fails closed with ok=false when no
+// key is configured, when the shape is wrong, or when the signature does not verify (SEC-OAU-03).
+func unpackState(raw string, key []byte) (stateBucket, bool) {
 	if len(key) == 0 {
 		// STATE-01 fail closed: a state cookie with no verification key can never be trusted.
-		return "", "", "", "", "", false
+		return stateBucket{}, false
 	}
 	parts := strings.Split(raw, stateSeparator)
-	if len(parts) != 6 || parts[0] == "" {
-		return "", "", "", "", "", false
+	if len(parts) != stateFieldCount+1 || parts[0] == "" {
+		return stateBucket{}, false
 	}
-	payload := strings.Join(parts[:5], stateSeparator)
-	expectedSig := computeStateHMAC(payload, key)
-	if !stateMatches(parts[5], expectedSig) {
-		return "", "", "", "", "", false
+	payload := strings.Join(parts[:stateFieldCount], stateSeparator)
+	if !stateMatches(parts[stateFieldCount], computeStateHMAC(payload, key)) {
+		return stateBucket{}, false
 	}
-	state, verifier, nonce = parts[0], parts[1], parts[2]
-	rawProvider, err := base64.RawURLEncoding.DecodeString(parts[3])
+	decode := func(i int) (string, bool) {
+		// The empty string is a legitimate value for optional fields (no nonce, single tenant,
+		// an empty redirect URI); a malformed encoding is not.
+		if parts[i] == "" {
+			return "", true
+		}
+		v, err := base64.RawURLEncoding.DecodeString(parts[i])
+		if err != nil {
+			return "", false
+		}
+		return string(v), true
+	}
+	var b stateBucket
+	for i, dst := range []*string{&b.State, &b.Verifier, &b.Nonce, &b.Provider, &b.Tenant, &b.RedirectURI} {
+		v, ok := decode(i)
+		if !ok {
+			return stateBucket{}, false
+		}
+		*dst = v
+	}
+	rawIssued, ok := decode(stateFieldCount - 1)
+	if !ok {
+		return stateBucket{}, false
+	}
+	issuedAt, err := strconv.ParseInt(rawIssued, 10, 64)
 	if err != nil {
-		return "", "", "", "", "", false
+		return stateBucket{}, false
 	}
-	rawTenant, err := base64.RawURLEncoding.DecodeString(parts[4])
-	if err != nil {
-		return "", "", "", "", "", false
-	}
-	return state, verifier, nonce, string(rawProvider), string(rawTenant), true
+	b.IssuedAt = issuedAt
+	return b, true
+}
+
+// enc base64url-encodes one field. RawURLEncoding output never contains the separator.
+func enc(v string) string {
+	return base64.RawURLEncoding.EncodeToString([]byte(v))
 }
 
 func computeStateHMAC(payload string, key []byte) string {

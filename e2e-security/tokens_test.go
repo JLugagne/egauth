@@ -1,7 +1,6 @@
 package e2esecurity_test
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"reflect"
@@ -649,7 +648,7 @@ func TestVulnerability_SECTOK05_DestructiveKeyDeletionOnRetireExpiredKeys(t *tes
 	currTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return currTime }
 
-	kek, err := keystore.NewKEK(bytes.Repeat([]byte("k"), keystore.KEKKeyLength))
+	kek, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
 	require.NoError(t, err)
 
 	// Memory store with soft-retire enabled

@@ -27,6 +27,7 @@ type MockStore struct {
 	UpdateUserPhoneFunc                 func(ctx context.Context, tenantID string, userID uuid.UUID, newPhone string, verifiedAt time.Time) error
 	UpdateUserRecoveryEmailFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, recoveryEmail string, verifiedAt time.Time) error
 	DeleteUserFunc                      func(ctx context.Context, tenantID string, id uuid.UUID) error
+	ClearRecoveryChannelsFunc           func(ctx context.Context, tenantID string, id uuid.UUID) error
 	DisableUserFunc                     func(ctx context.Context, tenantID string, id uuid.UUID, disabledAt time.Time) error
 	EnableUserFunc                      func(ctx context.Context, tenantID string, id uuid.UUID) error
 	AddIdentityFunc                     func(ctx context.Context, tenantID string, ident *identity.Identity) error
@@ -124,6 +125,13 @@ func (m *MockStore) DeleteUser(ctx context.Context, tenantID string, id uuid.UUI
 		panic("called not defined DeleteUserFunc")
 	}
 	return m.DeleteUserFunc(ctx, tenantID, id)
+}
+
+func (m *MockStore) ClearRecoveryChannels(ctx context.Context, tenantID string, id uuid.UUID) error {
+	if m.ClearRecoveryChannelsFunc == nil {
+		panic("called not defined ClearRecoveryChannelsFunc")
+	}
+	return m.ClearRecoveryChannelsFunc(ctx, tenantID, id)
 }
 
 func (m *MockStore) AddIdentity(ctx context.Context, tenantID string, ident *identity.Identity) error {
@@ -665,6 +673,46 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		// An unknown user is reported as not found.
 		err = store.UpdateUserRecoveryEmail(ctx, tenantA, uuid.Must(uuid.NewV7()), "x@elsewhere.example", time.Now())
 		assert.ErrorIs(t, err, identity.ErrUserNotFound)
+	})
+
+	t.Run("Contract: ClearRecoveryChannels", func(t *testing.T) {
+		user, err := store.CreateUser(ctx, tenantA, "clear_channels@example.com")
+		require.NoError(t, err)
+
+		// Clearing an account that never enrolled a channel is a no-op that succeeds: the
+		// password-reset path calls it unconditionally.
+		require.NoError(t, store.ClearRecoveryChannels(ctx, tenantA, user.ID))
+
+		verifiedAt := time.Now()
+		require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenantA, user.ID, "backup@elsewhere.example", verifiedAt))
+		require.NoError(t, store.UpdateUserPhone(ctx, tenantA, user.ID, "+15550001111", verifiedAt))
+
+		before, err := store.FindUserByID(ctx, tenantA, user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, before.RecoveryEmail, "precondition: the recovery email is enrolled")
+		require.NotNil(t, before.Phone, "precondition: the phone is enrolled")
+
+		require.NoError(t, store.ClearRecoveryChannels(ctx, tenantA, user.ID))
+
+		after, err := store.FindUserByID(ctx, tenantA, user.ID)
+		require.NoError(t, err)
+		assert.Nil(t, after.RecoveryEmail, "the recovery email must be removed")
+		assert.Nil(t, after.RecoveryEmailVerifiedAt, "its verification stamp must be removed with it")
+		assert.Nil(t, after.Phone, "the phone must be removed")
+		assert.Nil(t, after.PhoneVerifiedAt, "its verification stamp must be removed with it")
+		// The primary email is a login key and must survive: this clears recovery channels only.
+		assert.Equal(t, "clear_channels@example.com", after.Email)
+
+		// Scoping: another tenant cannot clear the channel, and an unknown user is not found.
+		require.NoError(t, store.UpdateUserRecoveryEmail(ctx, tenantA, user.ID, "backup2@elsewhere.example", time.Now()))
+		err = store.ClearRecoveryChannels(ctx, tenantB, user.ID)
+		assert.ErrorIs(t, err, identity.ErrUserNotFound, "a cross-tenant clear must not match")
+		stillThere, err := store.FindUserByID(ctx, tenantA, user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stillThere.RecoveryEmail, "the channel must survive a cross-tenant clear attempt")
+
+		err = store.ClearRecoveryChannels(ctx, tenantA, uuid.Must(uuid.NewV7()))
+		assert.ErrorIs(t, err, identity.ErrUserNotFound, "an unknown user must be reported as not found")
 	})
 
 	t.Run("Contract: Verification Tokens", func(t *testing.T) {

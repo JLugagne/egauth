@@ -28,14 +28,18 @@ func TestPackUnpackState_RoundTripWithProviderTenant(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			packed := packState(tc.state, tc.verifier, tc.nonce, tc.provider, tc.tenant, testStateKey)
-			state, verifier, nonce, provider, tenant, ok := unpackState(packed, testStateKey)
+			packed := packState(stateBucket{
+				State: tc.state, Verifier: tc.verifier, Nonce: tc.nonce,
+				Provider: tc.provider, Tenant: tc.tenant, IssuedAt: 1_700_000_000,
+			}, testStateKey)
+			got, ok := unpackState(packed, testStateKey)
 			require.True(t, ok, "well-formed packed state must unpack")
-			assert.Equal(t, tc.state, state)
-			assert.Equal(t, tc.verifier, verifier)
-			assert.Equal(t, tc.nonce, nonce)
-			assert.Equal(t, tc.provider, provider)
-			assert.Equal(t, tc.tenant, tenant)
+			assert.Equal(t, tc.state, got.State)
+			assert.Equal(t, tc.verifier, got.Verifier)
+			assert.Equal(t, tc.nonce, got.Nonce)
+			assert.Equal(t, tc.provider, got.Provider)
+			assert.Equal(t, tc.tenant, got.Tenant)
+			assert.Equal(t, int64(1_700_000_000), got.IssuedAt)
 		})
 	}
 }
@@ -43,15 +47,15 @@ func TestPackUnpackState_RoundTripWithProviderTenant(t *testing.T) {
 func TestUnpackState_RejectsWrongFieldCount(t *testing.T) {
 	// A legacy / forged 3-field cookie must fail closed.
 	legacy := "st" + stateSeparator + "vf" + stateSeparator + "nc"
-	_, _, _, _, _, ok := unpackState(legacy, testStateKey)
+	_, ok := unpackState(legacy, testStateKey)
 	assert.False(t, ok, "old 3-field cookie must be rejected")
 
-	// Too many fields.
-	_, _, _, _, _, ok = unpackState("a.b.c.d.e.f", testStateKey)
-	assert.False(t, ok, "6-field cookie must be rejected")
+	// A cookie with too few fields (the previous format) must be rejected rather than misread.
+	_, ok = unpackState("a.b.c.d.e.f", testStateKey)
+	assert.False(t, ok, "the superseded 6-field cookie must be rejected")
 
 	// Empty state.
-	_, _, _, _, _, ok = unpackState("", testStateKey)
+	_, ok = unpackState("", testStateKey)
 	assert.False(t, ok, "empty cookie must be rejected")
 }
 
@@ -120,33 +124,49 @@ func TestPackUnpackState_HMAC(t *testing.T) {
 	provider := "google"
 	tenant := "acme"
 
-	packed := packState(state, verifier, nonce, provider, tenant, key)
-	gotState, gotVerifier, gotNonce, gotProvider, gotTenant, ok := unpackState(packed, key)
+	packed := packState(stateBucket{
+		State: state, Verifier: verifier, Nonce: nonce, Provider: provider, Tenant: tenant,
+		RedirectURI: "https://app.example.com/cb", IssuedAt: 1_700_000_000,
+	}, key)
+	got, ok := unpackState(packed, key)
 	require.True(t, ok, "valid signed state must unpack successfully")
-	assert.Equal(t, state, gotState)
-	assert.Equal(t, verifier, gotVerifier)
-	assert.Equal(t, nonce, gotNonce)
-	assert.Equal(t, provider, gotProvider)
-	assert.Equal(t, tenant, gotTenant)
+	assert.Equal(t, state, got.State)
+	assert.Equal(t, verifier, got.Verifier)
+	assert.Equal(t, nonce, got.Nonce)
+	assert.Equal(t, provider, got.Provider)
+	assert.Equal(t, tenant, got.Tenant)
+	assert.Equal(t, "https://app.example.com/cb", got.RedirectURI)
+	assert.Equal(t, int64(1_700_000_000), got.IssuedAt)
 
-	// Tampered payload must fail
-	tamperedPayload := "other-state" + packed[len(state):]
-	_, _, _, _, _, ok = unpackState(tamperedPayload, key)
+	// Tampered payload must fail. The payload is the encoded fields, so flipping any field's
+	// encoding must break the signature.
+	tamperedPayload := "b3RoZXItc3RhdGU" + packed[len(enc(state)):]
+	_, ok = unpackState(tamperedPayload, key)
 	assert.False(t, ok, "tampered state payload must fail unpackState")
 
 	// Tampered signature must fail
 	tamperedSig := packed[:len(packed)-3] + "xyz"
-	_, _, _, _, _, ok = unpackState(tamperedSig, key)
+	_, ok = unpackState(tamperedSig, key)
 	assert.False(t, ok, "tampered signature must fail unpackState")
 
-	// Unsigned (legacy 5-part) cookie must fail when key is required
-	unsigned := packState(state, verifier, nonce, provider, tenant, nil)
-	_, _, _, _, _, ok = unpackState(unsigned, key)
+	// Unsigned cookie must fail when a key is required
+	unsigned := packState(stateBucket{State: state, Verifier: verifier, Nonce: nonce, Provider: provider, Tenant: tenant}, nil)
+	_, ok = unpackState(unsigned, key)
 	assert.False(t, ok, "unsigned state cookie must fail when signing key is provided")
+
+	// Back-dating the issue time must break the signature, which is what makes the server-side TTL
+	// enforceable: an attacker holding the cookie cannot make an old flow look fresh.
+	backdated := packState(stateBucket{
+		State: state, Verifier: verifier, Nonce: nonce, Provider: provider, Tenant: tenant,
+		RedirectURI: "https://app.example.com/cb", IssuedAt: 1,
+	}, key)
+	assert.NotEqual(t, packed, backdated)
+	_, ok = unpackState(backdated[:len(backdated)-3]+packed[len(packed)-3:], key)
+	assert.False(t, ok, "a state whose issue time was altered must fail the signature check")
 
 	// Wrong key must fail
 	wrongKey := []byte("wrongwrongwrongwrongwrongwrong12")
-	_, _, _, _, _, ok = unpackState(packed, wrongKey)
+	_, ok = unpackState(packed, wrongKey)
 	assert.False(t, ok, "state cookie verified with wrong key must fail")
 }
 
@@ -171,7 +191,7 @@ func TestCallbackHandler_StateHMAC_TamperedAndUnauthenticatedRejected(t *testing
 	// 2. Unsigned / unauthenticated cookie rejected with 403 invalid_state
 	unsignedCookie := &http.Cookie{
 		Name:  stateCookie.Name,
-		Value: packState(state, "vf", "nc", p.Name(), "", nil),
+		Value: packState(stateBucket{State: state, Verifier: "vf", Nonce: "nc", Provider: p.Name()}, nil),
 	}
 	recUnsigned := runCallback(t, p, &stubLinker{}, &stubIssuer{}, unsignedCookie,
 		url.Values{"state": {state}, "code": {"auth-code"}}.Encode(),

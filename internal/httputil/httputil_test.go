@@ -181,3 +181,77 @@ func TestClientIP(t *testing.T) {
 	r3.RemoteAddr = "[2001:db8::1]:8080"
 	assert.Equal(t, "2001:db8::1", httputil.ClientIP(r3))
 }
+
+// TestOriginAllowed_RejectsNonCanonicalSerializations pins the parser to the shape a browser emits.
+// The predicate is exported as the same-origin primitive applications protect their own routes
+// with, so a lenient parse is a lenient CSRF check for every consumer. These four shapes all carry
+// the allowed host in the URL's Host field while meaning something else — a hostile one for userinfo
+// and for the scheme-relative form — and none of them is reachable from a browser.
+func TestOriginAllowed_RejectsNonCanonicalSerializations(t *testing.T) {
+	for _, tc := range []struct {
+		origin string
+		why    string
+	}{
+		{"https://evil.example.com@app.example.com", "userinfo: the real host is evil.example.com"},
+		{"//app.example.com", "scheme-relative: no scheme asserted"},
+		{"https://app.example.com/", "trailing slash: not a canonical origin"},
+		{"https://app.example.com#frag", "fragment"},
+		{"https://app.example.com?x=1", "query"},
+		{"https://app.example.com/path", "path"},
+		{"ftp://app.example.com", "non-http(s) scheme"},
+		{"app.example.com", "no scheme"},
+		{"https://app.example.com ", "trailing whitespace"},
+		{"\thttps://app.example.com", "leading control character"},
+		{"https://app.example.com\n", "embedded newline"},
+		{"null", "opaque origin"},
+		// An empty Origin value is not modelled here: net/http drops a header with an empty value
+		// during parsing, so a request cannot present "Origin: " — it presents no Origin at all,
+		// which the Referer fallback (and OriginAllowed's fail-closed default) already covers.
+	} {
+		t.Run(tc.origin, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			req.Host = "app.example.com"
+			req.Header.Set("Origin", tc.origin)
+			// A Referer that WOULD be acceptable must not rescue a rejected Origin: a present
+			// Origin is authoritative.
+			req.Header.Set("Referer", "https://app.example.com/page")
+
+			assert.False(t, httputil.OriginAllowed(req, nil),
+				"%s must not be treated as same-origin (%s)", tc.origin, tc.why)
+		})
+	}
+}
+
+// TestOriginAllowed_AcceptsCanonicalSerializations is the control: the tightening must be invisible
+// to a real browser, which sends exactly scheme://host[:port].
+func TestOriginAllowed_AcceptsCanonicalSerializations(t *testing.T) {
+	for _, origin := range []string{
+		"https://app.example.com",
+		"http://app.example.com",
+		"https://app.example.com:8443",
+		"http://127.0.0.1:3000",
+		"https://[::1]:8443",
+	} {
+		t.Run(origin, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/", nil)
+			// The request's own host must match the origin's, including the port.
+			req.Host = strings.TrimPrefix(strings.TrimPrefix(origin, "https://"), "http://")
+			req.Header.Set("Origin", origin)
+
+			assert.True(t, httputil.OriginAllowed(req, nil),
+				"a canonical same-origin request must pass")
+		})
+	}
+}
+
+// TestOriginAllowed_TrustedOriginHostStillMatches covers the allowlist path, which compares the
+// origin host against configured entries rather than against r.Host.
+func TestOriginAllowed_TrustedOriginHostStillMatches(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/", nil)
+	req.Host = "api.internal"
+	req.Header.Set("Origin", "https://app.example.com")
+
+	assert.True(t, httputil.OriginAllowed(req, map[string]bool{"app.example.com": true}),
+		"a canonical origin on the allowlist must pass even when it differs from the request host")
+	assert.False(t, httputil.OriginAllowed(req, map[string]bool{"other.example.com": true}))
+}

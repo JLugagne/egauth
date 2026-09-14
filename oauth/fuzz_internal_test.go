@@ -7,8 +7,11 @@ import "testing"
 // closed (ok=false) on any malformed shape and never panic. It is unexported, so this fuzz target
 // lives in the oauth package.
 func FuzzUnpackState(f *testing.F) {
-	f.Add(packState("state", "verifier", "nonce", "google", "tenant-a", testStateKey))
-	f.Add(packState("", "", "", "", "", nil))
+	f.Add(packState(stateBucket{
+		State: "state", Verifier: "verifier", Nonce: "nonce",
+		Provider: "google", Tenant: "tenant-a", IssuedAt: 1_700_000_000,
+	}, testStateKey))
+	f.Add(packState(stateBucket{}, nil))
 	f.Add("")
 	f.Add("only-one-field")
 	f.Add("a.b.c.d.e")
@@ -16,6 +19,6 @@ func FuzzUnpackState(f *testing.F) {
 
 	f.Fuzz(func(_ *testing.T, raw string) {
 		// Must not panic; the boolean/parts are validated by unit tests elsewhere.
-		_, _, _, _, _, _ = unpackState(raw, testStateKey)
+		_, _ = unpackState(raw, testStateKey)
 	})
 }

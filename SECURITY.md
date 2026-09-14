@@ -189,6 +189,29 @@ model behind those statements.
     access+refresh pair with `AMR=[AMRPassword, AMROTP, AMRMFA]` and sets both cookies, replacing the
     interim access cookie. Users with no enrolled factor are unaffected and receive the full pair.
 
+  **Whether a factor is required is your policy, not egauth's.** Every point that could demand one
+  is off until you turn it on: the gate on the password login (`identity.WithMFAGate`), on the OAuth
+  callback (`oauth.WithMFAGate`), and on your own routes (`tokens.WithRequiredAMR(tokens.AMRMFA)`)
+  are all absent by default. Both products are supported and the choice is deliberate:
+
+  - *MFA required.* Wire `WithMFAGate` on every login path you expose. An enrolled account then
+    receives only the interim token and must complete `mfa.StepUpHandler`, whichever provider it
+    signed in through. Gate sensitive routes on `AMRMFA` as well, so a half-authenticated session
+    cannot reach them.
+  - *MFA optional.* Wire nothing: users may enrol and confirm an authenticator as a security
+    setting, and a password login still yields a full pair. `identity.Service` and `mfa.Service`
+    both satisfy the gate interface, so switching between the two is one option per login path.
+
+  Mounting the `mfa` handlers alone changes no login outcome — enrolment and confirmation succeed
+  while logins stay password-only. That is a legitimate configuration for "optional MFA", and a
+  wiring mistake for "required MFA", so decide which one you are shipping and check it.
+
+  The one thing that is not left to policy: `DisableHandler` and `RegenerateRecoveryCodesHandler`
+  require an elevated session by default (`mfa.WithStepUpRequired(false)` opts out). That is not
+  "does this user need MFA" — it is "may a session that has not presented the factor destroy it",
+  and without it the factor could be removed or its recovery codes rotated by whoever holds the
+  password.
+
   Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
   application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
   pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the
@@ -425,8 +448,16 @@ redaction is in any case only a backstop. Therefore the consumer must:
   containing the attacker's own token — the victim's auto-refresh then rotates the attacker's
   family and silently signs the victim into the attacker's session. `tokens.Cookies.Validate()`
   rejects any configuration that pairs a `__Host-` cookie name with `Domain != ""`, `Path != "/"`,
-  or `Insecure == true`; `withDefaults` (called by every Set*/Clear*/Access/Refresh method)
-  panics on such a mismatch, surfacing the programmer error at development time.
+  or `Insecure == true` (and a `__Secure-` name with `Insecure == true`). That check runs at
+  CONSTRUCTION: every handler and middleware constructor that takes a `Cookies` calls
+  `MustValidate` (a startup panic), and `webapp.NewWebApp` returns it as an error. Writing or
+  reading a cookie never panics at request time.
+  Opting out is explicit and self-consistent rather than fatal: `WithCookieDomain`,
+  `WithCookiePath`, `WithRefreshCookiePath` and `WithInsecureCookies` (and the underlying
+  `Cookies.WithDomain` / `WithPath` / `WithRefreshPath` / `WithInsecure`) **demote** a `__Host-`
+  name to `__Secure-` when the cookie is still `Secure` with `Path="/"`, and to the bare name
+  otherwise. Demotion forfeits the host-lock hardening above — that is the price of the Domain,
+  path scope or plain-HTTP development the option asked for, so reach for them deliberately.
   For the `sessions` package: `sessions.RequireSession` now reads the session token from
   `sessions.DefaultSessionCookieName` (`"__Host-session_token"`) **by default** — the hardened
   host-locked name is automatic and you no longer opt in. `sessions.WithCookieName` is an escape
@@ -695,10 +726,14 @@ not a bug:
   unknown-user / wrong-password paths) so the *response time* of those branches does not become
   a second, redundant enumeration oracle — keeping all in-process timing uniform and robust
   against a future refactor that collapses the 429 back to a generic 401.
-- **`email_taken` → 409** on registration: standard registration UX. If your threat model
-  requires anti-enumeration on sign-up, collapse `mapRegisterError` to a single generic
-  `400` (note that `Register` already hashes before the uniqueness check, so the timing
-  channel is already closed).
+- **`email_taken` → 409** on registration: standard registration UX, and the *response shape*
+  discloses account existence by design. The *response time* does not: `Register` checks
+  uniqueness before hashing (the cheap pre-check is what keeps an unauthenticated caller from
+  spending a full Argon2id pass per request on an address they cannot claim), and it spends an
+  equivalent decoy hash on the taken branch so both branches cost the same. If your threat model
+  requires closing the response-shape channel too, collapse `mapRegisterError` to a single generic
+  `400` — do **not** "fix" the timing by hashing first, which reintroduces the pre-auth hashing
+  DoS.
 - **`email_taken` → 409** on the authenticated change-email request
   (`RequestEmailChangeHandler`): the caller is told up front when the requested new address
   already belongs to another account, mirroring the registration disclosure. This is gated
@@ -818,7 +853,9 @@ supported model for releases that opt into keyless signing; when a release is ke
 verify the certificate identity too:
 
 ```sh
-go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
+# Pinned: the verifier must be a version you have reviewed. Keep in sync with GITSIGN_VERSION in
+# the Makefile.
+go install github.com/sigstore/gitsign@v0.13.0   # or: brew install gitsign
 git config --global gpg.x509.program gitsign
 git config --global gpg.format x509
 

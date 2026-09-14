@@ -84,7 +84,28 @@ type Claims[C any] struct {
 	// token to expire. Living here rather than inside Custom lets the middleware enforce it
 	// generically.
 	MustChangePassword bool
-	Custom             C
+	// Interim marks a token minted for a subject who has passed only the first factor of a
+	// multi-factor login, because the account is enrolled for a second factor that this request
+	// has not yet presented (see issuance.Pipeline and WithMFAGate). An interim token is a
+	// deliberately limited credential: it is short-lived and the caller withholds its refresh
+	// token, so it cannot become a renewable session.
+	//
+	// It exists so that assurance is a property of the credential rather than of each handler's
+	// policy. A route that mutates the account or its factors should either require elevation
+	// (WithRequiredAMR(AMRMFA)) or refuse interim sessions outright (WithDenyInterim), instead of
+	// relying on every handler author to remember which sessions are safe to accept.
+	//
+	// The zero value is false, so tokens minted before this field existed and tokens from issuers
+	// that do not model interim sessions keep their previous meaning.
+	Interim bool
+	Custom  C
+}
+
+// IsInterim reports whether the token was minted before a second factor was presented (see
+// Claims.Interim). It is safe to call on a nil Claims: an absent token is not interim, and callers
+// that gate on it should treat a missing token as unauthenticated by other means.
+func (c *Claims[C]) IsInterim() bool {
+	return c != nil && c.Interim
 }
 
 // FreshAuth reports whether the subject authenticated within maxAge of now, anchored on AuthTime

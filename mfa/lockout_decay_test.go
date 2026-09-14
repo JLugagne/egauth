@@ -120,3 +120,98 @@ func TestUnlockMFA_AdminPrimitive(t *testing.T) {
 	require.NoError(t, svc.VerifyTOTP(ctx, "", uid, clk.code(t, secret)),
 		"a valid code must be accepted immediately after UnlockMFA")
 }
+
+// TestWithLockoutDurationZeroIsPermanent pins the documented meaning of the strictest lockout
+// configuration. The constructor used to rewrite a zero duration to DefaultLockoutDuration, which
+// made "the caller left it alone" and "the caller asked for a permanent lockout" indistinguishable:
+// a deployment that deliberately chose "after 5 bad codes this factor is dead until an operator
+// intervenes" silently got 5 guesses every 15 minutes, forever, with no signal that the permanent
+// lockout never took effect.
+func TestWithLockoutDurationZeroIsPermanent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	svc := mfa.NewService(memory.NewStore(),
+		mfa.WithLockoutDuration(0),
+		mfa.WithClock(clock),
+	)
+	uid := uuid.Must(uuid.NewV7())
+	enroll, err := svc.EnrollTOTP(ctx, "", uid, "user@example.com")
+	require.NoError(t, err)
+	code, err := mfa.GenerateCode(enroll.Secret, now, mfa.DefaultDigits, mfa.DefaultPeriod)
+	require.NoError(t, err)
+	_, err = svc.ConfirmTOTP(ctx, "", uid, code)
+	require.NoError(t, err)
+
+	// Burn the budget.
+	for i := 0; i < mfa.DefaultMaxAttempts; i++ {
+		now = now.Add(time.Second)
+		require.Error(t, svc.VerifyTOTP(ctx, "", uid, "000000"))
+	}
+	now = now.Add(time.Second)
+	require.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts,
+		"precondition: the factor is locked")
+
+	// Walk far past the default window. A permanent lockout must not decay.
+	now = now.Add(24 * time.Hour)
+	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts,
+		"WithLockoutDuration(0) must stay locked past DefaultLockoutDuration, as documented")
+
+	// And an operator can still release it explicitly.
+	require.NoError(t, svc.UnlockMFA(ctx, "", uid))
+}
+
+// TestDefaultLockoutDurationStillDecays is the control: the seeded default must keep decaying, so
+// fixing the zero case did not turn every deployment into a permanent lockout.
+func TestDefaultLockoutDurationStillDecays(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	svc := mfa.NewService(memory.NewStore(), mfa.WithClock(clock))
+	uid := uuid.Must(uuid.NewV7())
+	enroll, err := svc.EnrollTOTP(ctx, "", uid, "user@example.com")
+	require.NoError(t, err)
+	code, err := mfa.GenerateCode(enroll.Secret, now, mfa.DefaultDigits, mfa.DefaultPeriod)
+	require.NoError(t, err)
+	_, err = svc.ConfirmTOTP(ctx, "", uid, code)
+	require.NoError(t, err)
+
+	for i := 0; i < mfa.DefaultMaxAttempts; i++ {
+		now = now.Add(time.Second)
+		require.Error(t, svc.VerifyTOTP(ctx, "", uid, "000000"))
+	}
+	now = now.Add(time.Second)
+	require.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts)
+
+	now = now.Add(mfa.DefaultLockoutDuration + time.Second)
+	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrInvalidCode,
+		"the default window must still decay to a fresh budget")
+}
+
+// TestNegativeLockoutDurationMeansPermanent documents the boundary: a negative duration has no
+// meaning as a window, so it selects the strictest behaviour rather than being silently rewritten.
+func TestNegativeLockoutDurationMeansPermanent(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+
+	svc := mfa.NewService(memory.NewStore(), mfa.WithLockoutDuration(-time.Minute), mfa.WithClock(clock))
+	uid := uuid.Must(uuid.NewV7())
+	enroll, err := svc.EnrollTOTP(ctx, "", uid, "user@example.com")
+	require.NoError(t, err)
+	code, err := mfa.GenerateCode(enroll.Secret, now, mfa.DefaultDigits, mfa.DefaultPeriod)
+	require.NoError(t, err)
+	_, err = svc.ConfirmTOTP(ctx, "", uid, code)
+	require.NoError(t, err)
+
+	for i := 0; i < mfa.DefaultMaxAttempts; i++ {
+		now = now.Add(time.Second)
+		require.Error(t, svc.VerifyTOTP(ctx, "", uid, "000000"))
+	}
+	now = now.Add(time.Second)
+	require.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts)
+	now = now.Add(24 * time.Hour)
+	assert.ErrorIs(t, svc.VerifyTOTP(ctx, "", uid, "000000"), mfa.ErrTooManyAttempts)
+}

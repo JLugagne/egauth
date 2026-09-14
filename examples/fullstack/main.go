@@ -157,6 +157,14 @@ func BuildServer() (http.Handler, error) {
 
 	// ------------------------------------------------------------------ MFA (TOTP)
 	mfaStore := mfamem.NewStore()
+	// The identity service doubles as the authoritative account-state resolver: every issuance path
+	// re-loads the live account through it, so a disabled or deleted account cannot be minted a
+	// credential even if it was active when the ceremony started.
+	sessionResolver, ok := idSvc.(issuance.Resolver)
+	if !ok {
+		return nil, errors.New("identity service does not expose authoritative session state")
+	}
+
 	mfaSvc := mfa.NewService(
 		mfaStore,
 		mfa.WithIssuer("egauth-fullstack-example"),
@@ -210,6 +218,16 @@ func BuildServer() (http.Handler, error) {
 		idSvc, issuer, claimsOf,
 		identity.WithInsecureNoOriginCheck(),
 		identity.WithCookies(cookies),
+		// MFA IS A DEPLOYMENT DECISION. This example turns it ON, because a sample that mounts
+		// the second-factor handlers without requiring the factor would show a working-looking
+		// setup in which nobody is actually protected: a user could enrol a TOTP factor, confirm
+		// it, and still sign in with the password alone.
+		//
+		// Requiring it is a policy only you can set, so the library never chooses for you — drop
+		// this one option and the same handlers give users an OPTIONAL factor instead: they may
+		// enrol and confirm one, and a password login still yields a full pair. Both are supported;
+		// pick deliberately. mfa.Service satisfies identity.MFAEnrollmentChecker directly.
+		identity.WithMFAGate(mfaSvc),
 	))
 	mux.Handle("POST /auth/refresh", tokens.RefreshHandler[AppClaims](
 		issuer,
@@ -247,6 +265,29 @@ func BuildServer() (http.Handler, error) {
 		mfa.VerifyHandler(mfaSvc, mfaOpts...),
 		tokens.WithCookieAuth[AppClaims](cookies),
 	))
+	// The completion half of the gate wired on /auth/login: exchanges a correct second factor for
+	// the full access+refresh pair. It runs on the interim access cookie, so the claims builder
+	// only supplies subject, tenant and custom data — the handler stamps the authoritative AMR
+	// (primary factor + otp + mfa). sessionResolver re-checks the live account state before the
+	// renewable pair is minted, so an account disabled between the two factors stays blocked.
+	mux.Handle("POST /mfa/step-up", tokens.ContextMiddleware[AppClaims](
+		issuer,
+		mfa.StepUpHandler[AppClaims](mfaSvc, issuer,
+			func(_ context.Context, userID uuid.UUID, tenant string) tokens.Claims[AppClaims] {
+				return tokens.Claims[AppClaims]{
+					Subject:  userID,
+					TenantID: tenant,
+					Roles:    []string{"user"},
+					Custom:   AppClaims{},
+				}
+			},
+			append(mfaOpts,
+				mfa.WithCookies(cookies),
+				mfa.WithSessionStateResolver(sessionResolver),
+			)...,
+		),
+		tokens.WithCookieAuth[AppClaims](cookies),
+	))
 
 	// -- passkey ----------------------------------------------------------
 	//
@@ -264,10 +305,6 @@ func BuildServer() (http.Handler, error) {
 	// The passkey login callback mints through the same issuance pipeline as every other login
 	// path, so the account state is re-loaded, the tenant is bound, and the forced-change flag
 	// and MFA gate are applied before the JWT pair is issued.
-	sessionResolver, ok := idSvc.(issuance.Resolver)
-	if !ok {
-		return nil, errors.New("identity service does not expose authoritative session state")
-	}
 	sessionPipe, err := issuance.New[AppClaims](issuer,
 		issuance.WithResolver(sessionResolver),
 		issuance.WithEventSink(audit),

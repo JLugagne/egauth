@@ -2,6 +2,7 @@ package passkey
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -89,3 +90,14 @@ func (s *SingleTenant) SignalAllAcceptedCredentials(ctx context.Context, userID 
 func (s *SingleTenant) SignalUnknownCredential(credentialID []byte) *protocol.SignalUnknownCredential {
 	return s.svc.SignalUnknownCredential(credentialID)
 }
+
+// String renders the facade by delegating to the wrapped Service, so the ceremony-cookie key stays
+// redacted on this path too. Without the delegation, a caller who logs the single-tenant facade
+// (the shape the quick-start hands them) would fall back to fmt's struct dump and print the key.
+func (s *SingleTenant) String() string { return s.svc.String() }
+
+// GoString redacts the %#v representation.
+func (s *SingleTenant) GoString() string { return s.svc.String() }
+
+// LogValue redacts the facade for structured (slog) logging.
+func (s *SingleTenant) LogValue() slog.Value { return s.svc.LogValue() }

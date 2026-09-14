@@ -1,0 +1,100 @@
+name: Release gate
+
+# A tag push matches neither ci.yml trigger (push to main, pull_request to main), so publishing a
+# release used to run no verification at all: no tests, no vulnerability scan, no signature check.
+# The tag gate in scripts/verify-release-tag.sh was a step a human had to remember.
+#
+# This workflow runs the gate on the tag itself, so an unsigned or lightweight tag is reported
+# instead of silently becoming a release. Note the ordering limitation stated in RELEASING.md: the
+# Go module proxy can serve a pushed semver tag before any workflow finishes, so this is a detector,
+# not a publication gate. The publication gate is the tag ruleset described in RELEASING.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - 'adapters/*/v*'
+  # Allow a manual run against an existing tag (e.g. to verify a release after the fact).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to verify (e.g. v0.13.0 or adapters/pgx/v0.13.0)'
+        required: true
+        type: string
+
+# Least privilege: verification only reads the repository.
+permissions:
+  contents: read
+
+jobs:
+  verify-tag:
+    name: Verify the release tag is signed
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout (full history, no tags needed beyond the pushed one)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the tag under test
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.ref_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$EVENT_TAG"
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::no tag to verify (neither a tag push nor a workflow_dispatch input)"
+            exit 2
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Verifying: $tag"
+
+      # The verifier needs a trusted public key. It is supplied as a repository secret rather than
+      # committed, because the release signing key lives outside the repository by design (see
+      # RELEASING.md) — an attacker who can push to the default branch could otherwise replace the
+      # trusted key and the gate would happily accept their signature. Set
+      # RELEASE_SIGNING_PUBKEY to the same line that goes into allowed_signers.
+      #
+      # SSH and OpenPGP signatures verify offline. Keyless Sigstore (gitsign) uses the local Sigstore
+      # trust root, which the action refreshes on first use.
+      - name: Configure the trusted signer
+        env:
+          PUBKEY: ${{ secrets.RELEASE_SIGNING_PUBKEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PUBKEY:-}" ]; then
+            echo "::warning::RELEASE_SIGNING_PUBKEY is not set. The gate will only be able to verify keyless Sigstore tags; SSH-signed tags will fail verification. See RELEASING.md."
+            exit 0
+          fi
+          mkdir -p "$HOME/.config/git"
+          printf '%s\n' "$PUBKEY" > "$HOME/.config/git/allowed_signers"
+          git config --global gpg.ssh.allowedSignersFile "$HOME/.config/git/allowed_signers"
+
+      - name: Run the release gate
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-tag.sh "$TAG"
+
+      - name: Summarise
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "### Release gate: \`$TAG\`"
+            echo
+            echo "Result: \`${{ job.status }}\`"
+            echo
+            echo "A failure here means the tag is missing, lightweight, or carries a signature the"
+            echo "configured verifier does not accept. Do not advertise the release until the cause is"
+            echo "understood — and remember the module proxy may already be serving the tag."
+          } >> "$GITHUB_STEP_SUMMARY"

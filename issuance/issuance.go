@@ -222,6 +222,10 @@ func (p *Pipeline[C]) Issue(ctx context.Context, req Request[C]) (*Result[C], er
 		}
 		if enrolled {
 			interim = true
+			// Stamp the claim, not just the short expiry: downstream middleware can then refuse a
+			// pre-second-factor session structurally (tokens.WithDenyInterim) instead of every
+			// handler having to know which AMR values mean "not fully authenticated yet".
+			claims.Interim = true
 			ttl := req.InterimTTL
 			if ttl <= 0 {
 				ttl = p.interim

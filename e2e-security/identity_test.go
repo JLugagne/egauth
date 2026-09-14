@@ -57,7 +57,7 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 		assert.Equal(t, 0, hashCount, "SEC-ID-01 fixed: expensive Hash must not be performed on invalid token")
 	})
 
-	t.Run("Register does not hash when email already exists", func(t *testing.T) {
+	t.Run("Register rejects a duplicate email before any store write", func(t *testing.T) {
 		// First registration succeeds
 		_, err := svc.Register(ctx, "", "existing@example.com", "ValidP@ssw0rd2026!")
 		require.NoError(t, err)
@@ -69,8 +69,19 @@ func TestSecurity_SEC_ID_01_PreAuth_Argon2id_DoS(t *testing.T) {
 		// Registration fails with email collision
 		assert.ErrorIs(t, err, identity.ErrEmailAlreadyExists)
 
-		// SEC-ID-01 fixed: Hasher is not invoked on duplicate email, preventing pre-auth DoS
-		assert.Equal(t, 0, hashCount, "SEC-ID-01 fixed: expensive Hash must not be performed before checking email uniqueness")
+		// SEC-ID-01: the uniqueness check stays FIRST, so the request can never reach CreateUser /
+		// AddIdentity for an address the caller does not own, and no credential row is written. The
+		// single hash spent here is the deliberate decoy that keeps the branch's response time equal
+		// to the free-address branch's — without it, the timing difference alone discloses whether
+		// the address is registered, which is a stronger disclosure than the DoS this guards.
+		assert.Equal(t, 1, hashCount,
+			"the taken branch spends exactly one decoy hash and nothing else")
+		assert.LessOrEqual(t, hashCount, 1,
+			"argon2 work must stay bounded per request: no work beyond the single decoy")
+
+		// The rejected attempt must not have created a second account.
+		_, err = svc.Authenticate(ctx, "", "password", "existing@example.com", "ValidP@ssw0rd2026!")
+		require.NoError(t, err, "the original account must still authenticate")
 	})
 }
 

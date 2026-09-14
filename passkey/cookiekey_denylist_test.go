@@ -98,3 +98,22 @@ func TestBeginRegistrationHandler_TenantResolverZeroKeyFailsClosed(t *testing.T)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Nil(t, findCookie(rec.Result().Cookies(), passkey.DefaultSessionCookieName))
 }
+
+// TestNewService_RejectsSigningKeyPublishedElsewhere proves the ceremony-cookie check consults
+// the shared published-key list: a literal published as an HS256 signing key is just as public as
+// one published as a cookie key, so it must not be accepted here either.
+func TestNewService_RejectsSigningKeyPublishedElsewhere(t *testing.T) {
+	for _, key := range []string{
+		"a-32-byte-minimum-hs256-signing-secret!!",
+		"super-secret-32-byte-key-here!!!",
+		"a-high-entropy-secret-kept-out-of-source-control",
+	} {
+		t.Run(key, func(t *testing.T) {
+			cfg := secureCfg()
+			cfg.CookieKey = []byte(key)
+			_, err := passkey.NewService(memory.NewStore(), cfg)
+			require.Error(t, err, "a signing key published elsewhere must not be accepted as a cookie key")
+			assert.Contains(t, err.Error(), "published")
+		})
+	}
+}

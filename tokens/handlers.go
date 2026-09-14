@@ -43,6 +43,7 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 	for _, opt := range opts {
 		opt(&c)
 	}
+	c.cookies.MustValidate()
 	return c
 }
 
@@ -50,8 +51,13 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 func WithCookies(c Cookies) HandlerOption { return func(h *handlerConfig) { h.cookies = c } }
 
 // WithCookieDomain scopes the auth cookies to a domain.
+//
+// A Domain is incompatible with the __Host- prefix the default names carry, so a cookie name still
+// carrying it is DEMOTED (to __Secure- while the cookie stays Secure with Path="/", otherwise to
+// the bare name): setting a Domain is an explicit opt-out of host-lock semantics. Note that this
+// forfeits the subdomain cookie-tossing protection __Host- provides.
 func WithCookieDomain(domain string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Domain = domain }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithDomain(domain) }
 }
 
 // WithSameSite overrides the SameSite attribute of the auth cookies.
@@ -60,19 +66,26 @@ func WithSameSite(mode http.SameSite) HandlerOption {
 }
 
 // WithCookiePath sets the path for both the access and refresh cookies.
+//
+// A path other than "/" is incompatible with the __Host- prefix the default names carry, so a
+// cookie name still carrying it is DEMOTED (see WithCookieDomain).
 func WithCookiePath(path string) HandlerOption {
-	return func(h *handlerConfig) {
-		h.cookies.Path = path
-		h.cookies.RefreshPath = path
-	}
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithPath(path) }
 }
 
 // WithRefreshCookiePath scopes only the refresh cookie (e.g. to a dedicated refresh route).
+//
+// A path other than "/" is incompatible with the __Host- prefix the default refresh name carries,
+// so that name is DEMOTED (see WithCookieDomain).
 func WithRefreshCookiePath(path string) HandlerOption {
-	return func(h *handlerConfig) { h.cookies.RefreshPath = path }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithRefreshPath(path) }
 }
 
 // WithInsecureCookies disables the Secure attribute. Use only for local HTTP development.
+//
+// Browsers reject a __Host- or __Secure- named cookie that is not Secure, so the cookie names are
+// DEMOTED to their bare form ("access_token" / "refresh_token"): the option is an explicit opt-out
+// of the prefixed, browser-enforced naming.
 //
 // Guard against production misuse: because there is no host at construction time, the handlers
 // inspect each request and, when insecure cookies are served to a host that is not
@@ -84,7 +97,7 @@ func WithRefreshCookiePath(path string) HandlerOption {
 // for legitimate non-loopback HTTP dev, omit WithHandlerEventSink (a nil sink is a no-op),
 // serve over a loopback host, or terminate TLS so r.TLS is set.
 func WithInsecureCookies() HandlerOption {
-	return func(h *handlerConfig) { h.cookies.Insecure = true }
+	return func(h *handlerConfig) { h.cookies = h.cookies.WithInsecure() }
 }
 
 // WithSuccessRedirect makes the handler reply with a 303 redirect to url on success
@@ -153,16 +166,27 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 
 		refreshToken, ok := cfg.cookies.Refresh(r)
 		if !ok {
-			cfg.cookies.Clear(w)
+			// No refresh cookie at all: there is nothing to rotate and nothing to invalidate, so
+			// this request clears NO cookie. Clearing the pair here (or even just the access
+			// cookie) would destroy a live interim session — the state an MFA-gated login
+			// deliberately leaves the client in, holding an access cookie and no refresh cookie —
+			// and the subject could then never complete the second factor. Clearing is reserved for
+			// the cases below, where a presented refresh token actually failed.
 			cfg.fail(w, r, http.StatusUnauthorized, "missing_refresh_token")
 			return
 		}
 
+		tenant, ok := cfg.resolveTenant(r)
+		if !ok {
+			cfg.cookies.Clear(w)
+			cfg.fail(w, r, http.StatusUnauthorized, "unresolved_tenant")
+			return
+		}
 		clientCtx := WithClientContext(r.Context(), ClientContext{
 			IP:        httputil.ClientIP(r),
 			UserAgent: r.UserAgent(),
 		})
-		pair, err := rotator.Rotate(clientCtx, cfg.tenant(r), refreshToken)
+		pair, err := rotator.Rotate(clientCtx, tenant, refreshToken)
 		if err != nil {
 			// ErrRefreshConcurrent is benign concurrency: a parallel request won the rotation
 			// race and already minted a fresh, valid refresh cookie for this client (the family
@@ -214,7 +238,12 @@ func LogoutHandler(revoker FamilyRevoker, opts ...HandlerOption) http.HandlerFun
 		}
 
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-			tenantID := cfg.tenant(r)
+			tenantID, ok := cfg.resolveTenant(r)
+			if !ok {
+				cfg.cookies.Clear(w)
+				cfg.fail(w, r, http.StatusUnauthorized, "unresolved_tenant")
+				return
+			}
 			hash := HashToken(refreshToken)
 			rt, err := revoker.FindRefreshToken(r.Context(), tenantID, hash)
 			switch {
@@ -267,6 +296,30 @@ func (cfg handlerConfig) tenant(r *http.Request) string {
 		return ""
 	}
 	return cfg.tenantResolver(r)
+}
+
+// resolveTenant derives the tenant for a request that mutates session state.
+//
+// When no resolver is configured the deployment is single-tenant and "" is the correct partition.
+// When a resolver IS configured it must map the request to a non-empty tenant: an empty result
+// means the request could not be mapped, and treating that as the "" partition would look up the
+// single-tenant partition instead. The lookup then misses, which these handlers read as "the token
+// is already gone" — so the handler would clear the cookies and report success while the token in
+// its real tenant stayed live and renewable. tokens.WithAuthTenantResolver and
+// sessions.WithTenantResolver already fail closed the same way; this closes the gap in the
+// refresh/logout pair.
+// It returns ok=false WITHOUT writing a response, so the caller can clear the client's cookies
+// before failing: the cookie write must precede the status write, or the Set-Cookie is dropped and
+// the browser keeps presenting a token the server has already refused.
+func (cfg handlerConfig) resolveTenant(r *http.Request) (string, bool) {
+	if cfg.tenantResolver == nil {
+		return "", true
+	}
+	tenant := cfg.tenantResolver(r)
+	if tenant == "" {
+		return "", false
+	}
+	return tenant, true
 }
 
 // fail emits a failure response: a 303 redirect to the configured failure URL (carrying an

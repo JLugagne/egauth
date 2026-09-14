@@ -20,3 +20,10 @@ coverage*.out
 go.work.sum
 
 /.tickets
+
+# transient build caches used during local verification
+/.gocache-local/
+/.golangci-cache/
+
+# compiled example binary accidentally left at the repo root
+/fullstack

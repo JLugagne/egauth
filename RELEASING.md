@@ -144,8 +144,10 @@ GPG keys; the API equivalent is `POST /user/ssh_signing_keys`.
 One-time setup (maintainer machine and, to verify, consumer machines):
 
 ```sh
-# Install gitsign (pin a version you have reviewed; `latest` is shown for brevity).
-go install github.com/sigstore/gitsign@latest   # or: brew install gitsign
+# Install gitsign. Pinned: it produces the signature consumers verify the tag against, so it runs
+# with your OIDC identity — never install it at @latest. Keep the version in sync with
+# GITSIGN_VERSION in the Makefile, which is the single home for the pin.
+go install github.com/sigstore/gitsign@v0.13.0   # or: brew install gitsign
 
 git config --global gpg.x509.program gitsign
 git config --global gpg.format x509
@@ -253,8 +255,9 @@ both consumer verification commands are documented below.
 ### Option A — keyless cosign (available today)
 
 ```sh
-# Install cosign (pin a version you have reviewed; `latest` is shown for brevity).
-go install github.com/sigstore/cosign/v2/cmd/cosign@latest
+# Install cosign. Pinned for the same reason as gitsign: it signs the SBOM release assets.
+# Keep in sync with COSIGN_VERSION in the Makefile.
+go install github.com/sigstore/cosign/v2/cmd/cosign@v2.5.0
 
 cosign sign-blob --yes \
   --bundle libauth-vX.Y.Z.sbom.json.sigstore.json \
@@ -406,9 +409,38 @@ repository.  After going public, configure protection via:
 GitHub → Settings → Branches → Add branch protection rule for `main`:
 
 - Require a pull request before merging
-- Require status checks to pass (select the CI jobs)
+- Require status checks to pass. Name these explicitly, so "does the vulnerability scan gate
+  merges?" is answerable by reading this file rather than by inspecting the UI:
+  **Vulnerability Check (all modules)**, **Linting (both modules)**,
+  **Fuzz (short pass on untrusted-input parsers)**, **Core — Test & Vet**,
+  and **Docs API Drift**.
 - Require conversation resolution before merging
 - Do not allow force pushes
+
+---
+
+## Tag protection and the release gate
+
+A pushed tag is served by the Go module proxy as soon as it is pushed, when the first consumer
+requests it. **Nothing can gate that after the fact**, so the control that matters is who may create
+a tag at all.
+
+GitHub → Settings → Rules → New ruleset, targeting `refs/tags/v*` and
+`refs/tags/adapters/*/v*`:
+
+- Restrict creations, updates and deletions to the maintainer (bypass list empty)
+- Block force pushes
+
+`.github/workflows/release-verify.yml` runs `scripts/verify-release-tag.sh` on every tag push as a
+**detector**: it reports an unsigned or lightweight tag immediately instead of letting it pass
+unnoticed, and `workflow_dispatch` lets you verify an existing tag. It cannot prevent publication —
+by the time it runs, the tag may already be resolvable.
+
+Set the repository secret **`RELEASE_SIGNING_PUBKEY`** to the `allowed_signers` line for the release
+key (see "Verifying a release" in `SECURITY.md`) so the gate can verify SSH or OpenPGP signatures.
+Without it the gate can only verify keyless Sigstore tags and will say so. The key is a secret rather
+than a committed file on purpose: anyone able to push to the default branch could otherwise replace a
+committed trusted key and the gate would accept their signature.
 
 ---
 

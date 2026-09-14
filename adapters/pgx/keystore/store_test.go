@@ -52,7 +52,7 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 // newManager builds a keystore.Manager over the pgx Store with a test KEK.
 func newManager(t *testing.T, pool *pgxpool.Pool) *keystore.Manager {
 	t.Helper()
-	kek, err := keystore.NewKEK(bytes.Repeat([]byte("k"), keystore.KEKKeyLength))
+	kek, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
 	require.NoError(t, err)
 	mgr, err := keystore.NewManager(pgxkeystore.NewStore(pool), kek)
 	require.NoError(t, err)

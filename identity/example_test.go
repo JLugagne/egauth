@@ -10,6 +10,7 @@ import (
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/identity"
 	identitymem "github.com/JLugagne/egauth/identity/memory"
+	"github.com/JLugagne/egauth/internal/examplekey"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/passwords/policy"
 	"github.com/JLugagne/egauth/tokens"
@@ -43,10 +44,12 @@ func Example() {
 			return tokens.Claims[struct{}]{Subject: userID, TenantID: tenantID}, nil
 		},
 	)
+	// SecretKey is generated per run so this snippet never publishes a usable credential;
+	// a real application loads it from a secret manager or the environment instead.
 	issuer := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:          tokenmem.NewStore[struct{}](),
 		Issuer:         "example-app",
-		SecretKey:      "a-32-byte-minimum-hs256-signing-secret!!",
+		SecretKey:      examplekey.New(),
 		AccessTTL:      15 * time.Minute,
 		RefreshTTL:     720 * time.Hour,
 		ClaimsProvider: claimsProvider, // required for Rotate (refresh)
@@ -110,7 +113,7 @@ func ExampleLoginHandler() {
 	issuer := jwt.New[struct{}](jwt.Config[struct{}]{
 		Store:      tokenStore,
 		Issuer:     "example-app",
-		SecretKey:  "a-32-byte-minimum-hs256-signing-secret!!",
+		SecretKey:  examplekey.New(), // generated per run: see Example
 		AccessTTL:  15 * time.Minute,
 		RefreshTTL: 720 * time.Hour,
 		ClaimsProvider: tokens.ClaimsProviderFunc[struct{}](

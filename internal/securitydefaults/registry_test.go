@@ -25,6 +25,14 @@ var scannedPackages = []string{
 	"sessions",
 	"tokens",
 	"tokens/basic",
+	// webapp is the composition preset the quick-start hands a consumer, so it builds the
+	// endpoints most deployments actually expose. Its constructor returns (http.Handler, error),
+	// which returnsHTTPHandler matches once the multi-value result is unwrapped.
+	"webapp",
+	// origin and ratelimit export middleware constructors: they wrap an application's own routes,
+	// so the control they apply (or decline to apply) is a default every route behind them inherits.
+	"origin",
+	"ratelimit",
 }
 
 // handlerRecord documents one exported handler constructor: whether it builds a state-changing
@@ -95,10 +103,24 @@ var handlerRegistry = map[string]handlerRecord{
 	"sessions.RequireSession": {mutation: true, control: "cookie-auth unsafe-method same-origin gate (Bearer exempt); __Host- session cookie; tenant resolver fails closed"},
 
 	// tokens: cookie-driven handlers and the verification middleware.
-	"tokens.RefreshHandler":    {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
-	"tokens.LogoutHandler":     {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
-	"tokens.RequireAuth":       {mutation: false, control: "access-token verification; tenant resolver fails closed (401)"},
-	"tokens.ContextMiddleware": {mutation: false, control: "access-token verification; tenant resolver fails closed (401)"},
+	// webapp is a composition preset: it mounts the identity register/login handlers and the tokens
+	// refresh/logout handlers, so it inherits their controls and adds its own construction-time
+	// requirements. Refresh rotates the family and writes cookies, so the preset as a whole mutates.
+	"webapp.NewWebApp": {mutation: true, control: "refuses to build without TrustedOrigins (CSRF-by-default) and rejects TrustedOrigins+InsecureNoOriginCheck; per-client-IP rate limit ON (burst 20, refill 6s, InsecureNoRateLimit opt-out); cookie configuration validated at construction; non-nil slog event sink"},
+
+	// Middleware constructors: they wrap an application's OWN routes, so the control they apply — or
+	// decline to apply — is a default every route behind them inherits.
+	"origin.Middleware":    {mutation: true, control: "strict same-origin check ON for every unsafe method by default (empty allowlist = same-host only; a request with neither Origin nor Referer is rejected); InsecureNoOriginCheck is the explicit opt-out"},
+	"ratelimit.Middleware": {mutation: false, control: "denies by default once the limiter refuses; KeyFunc defaults to ratelimit.ClientIP, which does NOT trust X-Forwarded-For; widen by passing a permissive limiter"},
+	"ratelimit.Wrap":       {mutation: false, control: "same policy as ratelimit.Middleware, for a single http.HandlerFunc"},
+
+	"tokens.RefreshHandler": {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
+	"tokens.LogoutHandler":  {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
+	// mutation is true for both: with WithAutoRefresh they rotate the refresh family and rewrite
+	// the auth cookies on a request that arrived without a usable access token, so a route behind
+	// them can change server-side state. The gate matrix itself is non-mutating.
+	"tokens.RequireAuth":       {mutation: true, control: "access-token verification; tenant resolver fails closed (401); opt-in auto-refresh rotates the family and rewrites cookies"},
+	"tokens.ContextMiddleware": {mutation: true, control: "access-token verification; tenant resolver fails closed (401); opt-in auto-refresh rotates the family and rewrites cookies"},
 
 	// tokens/basic: the C=struct{} facade over the tokens constructors.
 	"basic.RefreshHandler":    {mutation: true, control: "same-origin CSRF gate (cookie-driven POST)"},
@@ -222,22 +244,46 @@ func scanHandlerConstructors(t *testing.T, root, pkg string) []string {
 
 // returnsHTTPHandler reports whether a function result list contains a selector of the form
 // http.Handler or http.HandlerFunc.
+// returnsHTTPHandler reports whether a function returns an http.Handler/http.HandlerFunc, either
+// directly or as the result of a curried middleware: origin.Middleware returns
+// func(http.Handler) http.Handler, and a consumer calls the inner function to wrap a route. Both
+// shapes decide a control for every route they touch, so both belong in the registry.
 func returnsHTTPHandler(results *ast.FieldList) bool {
 	if results == nil {
 		return false
 	}
 	for _, field := range results.List {
-		sel, ok := field.Type.(*ast.SelectorExpr)
-		if !ok {
-			continue
-		}
-		ident, ok := sel.X.(*ast.Ident)
-		if !ok || ident.Name != "http" {
-			continue
-		}
-		if sel.Sel.Name == "Handler" || sel.Sel.Name == "HandlerFunc" {
+		if isHTTPHandlerType(field.Type) || isHandlerMiddlewareType(field.Type) {
 			return true
 		}
+	}
+	return false
+}
+
+// isHandlerMiddlewareType reports whether a type expression is func(http.Handler) http.Handler.
+func isHandlerMiddlewareType(e ast.Expr) bool {
+	fn, ok := e.(*ast.FuncType)
+	if !ok {
+		return false
+	}
+	if fn.Params == nil || len(fn.Params.List) != 1 || !isHTTPHandlerType(fn.Params.List[0].Type) {
+		return false
+	}
+	return fn.Results != nil && len(fn.Results.List) == 1 && isHTTPHandlerType(fn.Results.List[0].Type)
+}
+
+// isHTTPHandlerType reports whether a type expression is http.Handler or http.HandlerFunc, unwrapping
+// the parenthesised and generic forms that appear in real signatures.
+func isHTTPHandlerType(e ast.Expr) bool {
+	switch node := e.(type) {
+	case *ast.ParenExpr:
+		return isHTTPHandlerType(node.X)
+	case *ast.SelectorExpr:
+		ident, ok := node.X.(*ast.Ident)
+		if !ok || ident.Name != "http" {
+			return false
+		}
+		return node.Sel.Name == "Handler" || node.Sel.Name == "HandlerFunc"
 	}
 	return false
 }

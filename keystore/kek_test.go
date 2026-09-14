@@ -14,7 +14,7 @@ import (
 
 func validKEK(t *testing.T) *keystore.KEK {
 	t.Helper()
-	k, err := keystore.NewKEK(bytes.Repeat([]byte("k"), keystore.KEKKeyLength))
+	k, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
 	if err != nil {
 		t.Fatalf("NewKEK: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestKEK_OpenRejectsTamperAndWrongKey(t *testing.T) {
 	}
 
 	// Wrong KEK.
-	other, _ := keystore.NewKEK(bytes.Repeat([]byte("z"), keystore.KEKKeyLength))
+	other, _ := keystore.NewKEK([]byte("other-kek-fixture-9876543210zyxw"))
 	if _, err := other.Open(sealed); !errors.Is(err, keystore.ErrCiphertextCorrupt) {
 		t.Fatalf("wrong KEK: want ErrCiphertextCorrupt, got %v", err)
 	}

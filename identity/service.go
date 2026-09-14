@@ -266,6 +266,7 @@ type service struct {
 	emailChangeTTL       time.Duration
 	phoneVerificationTTL time.Duration
 	recoveryEmailTTL     time.Duration
+	recoveryCooldown     time.Duration
 	erasers              []AccountEraser
 	disableRevokers      []AccountRevoker
 	events               event.Sink
@@ -322,6 +323,21 @@ func WithEmailChangeTTL(d time.Duration) ServiceOption {
 // WithPhoneVerificationTTL overrides how long a phone-verification token stays valid.
 func WithPhoneVerificationTTL(d time.Duration) ServiceOption {
 	return func(s *service) { s.phoneVerificationTTL = d }
+}
+
+// WithRecoveryChannelCooldown sets how long a newly enrolled recovery channel must exist before it
+// may be used to reset a password. The default is zero (no window).
+//
+// A recovery channel is a credential: whoever enrols one can receive a password-reset token on it,
+// and enrolment needs only a live session — not a fresh factor. A non-zero window means an attacker
+// who enrols a channel cannot immediately monetise it through the recovery reset flow, which gives
+// the legitimate owner time to notice the change and act. Enforce it by gating a reset on
+// RecoveryChannels(...).Usable(now) rather than on Any().
+func WithRecoveryChannelCooldown(d time.Duration) ServiceOption {
+	if d < 0 {
+		d = 0
+	}
+	return func(s *service) { s.recoveryCooldown = d }
 }
 
 // WithRecoveryEmailTTL overrides how long a recovery-email enrollment token stays valid.
@@ -438,8 +454,16 @@ func (s *service) Register(ctx context.Context, tenantID string, email, password
 	}
 
 	// Check whether the email already exists before running the expensive password hasher,
-	// preventing unauthenticated pre-auth CPU/memory exhaustion DoS (SEC-ID-01).
+	// preventing unauthenticated pre-auth CPU/memory exhaustion DoS (SEC-ID-01). The cheap pre-check
+	// must stay FIRST: hashing before the uniqueness check would let an unauthenticated caller spend
+	// a full Argon2id pass per request against an address that is already taken.
 	if _, ferr := s.store.FindUserByEmail(ctx, tenantID, email); ferr == nil {
+		// Spend the same work the free-address path spends below, so the response TIME does not
+		// disclose whether the address is registered. Without it, the taken branch returns after a
+		// store lookup while the free branch runs a memory-hard KDF — a gap wide enough that one
+		// request classifies the account, which no rate limit can mitigate. The decoy is what lets
+		// the DoS guard and the anti-enumeration requirement coexist.
+		s.decoyHash(ctx, password)
 		return nil, ErrEmailAlreadyExists
 	} else if !errors.Is(ferr, ErrUserNotFound) {
 		return nil, ferr
@@ -748,6 +772,16 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	// compromised; failing to revoke live sessions after a reset leaves the attacker's foothold
 	// intact. Collect every eraser error so one failure does not mask another.
 	var errs []error
+
+	// Recovery channels are credentials, not contact metadata: the reset-via-recovery flow
+	// delivers a token to whatever address is enrolled, so a channel the attacker added is a way
+	// straight back in. They are identity-owned rather than cross-module, so no AccountEraser can
+	// reach them and the store call has to happen here. Without it, a victim who resets their
+	// password after a compromise finds the attacker waiting on the channel that survived.
+	if err := s.store.ClearRecoveryChannels(ctx, tenantID, user.ID); err != nil {
+		errs = append(errs, err)
+	}
+
 	for _, erase := range s.erasers {
 		if erase == nil {
 			continue
@@ -859,6 +893,19 @@ func (s *service) RequestEmailChange(ctx context.Context, tenantID string, userI
 		return "", ferr
 	}
 
+	// Refuse a new address that is already the enrolled recovery address. Moving the primary email
+	// onto the recovery channel collapses the two into one mailbox, which is the end state
+	// RequestRecoveryEmail exists to prevent; leaving this route open would let the invariant be
+	// reached the other way round and make RecoveryChannels.Any() report a channel that is not
+	// independent. Gate on the live user, which also rejects a soft-deleted account up front.
+	if user, uerr := s.store.FindUserByID(ctx, tenantID, userID); uerr == nil {
+		if err := s.assertRecoveryChannelDistinct(user, newEmail); err != nil {
+			return "", err
+		}
+	} else if !errors.Is(uerr, ErrUserNotFound) {
+		return "", uerr
+	}
+
 	// Bind the requested address to the token as metadata. CreateVerificationToken also gates
 	// on userID being a live, same-tenant account (returning ErrUserNotFound otherwise).
 	token, err := s.store.CreateVerificationToken(ctx, tenantID, userID, KindEmailChange, s.emailChangeTTL, []byte(newEmail))
@@ -891,11 +938,23 @@ func (s *service) ConfirmEmailChange(ctx context.Context, tenantID string, token
 	if err := s.store.UpdateUserEmail(ctx, tenantID, user.ID, newEmail, now); err != nil {
 		return nil, err
 	}
+	// The address that just lost access. Captured before the swap below overwrites it, because the
+	// alert that matters goes to the OLD address: an attacker who holds a session can move the
+	// account's email, and the previous owner otherwise learns nothing. The event carries it so the
+	// application's sink can send that alert; the library does not send mail itself.
+	previousEmail := user.Email
+
 	// Reflect the post-swap state on the returned user (it was loaded pre-swap).
 	user.Email = newEmail
 	user.EmailVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.EmailChanged, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.EmailChanged, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{
+			event.AttrPreviousEmail: previousEmail,
+			event.AttrNewEmail:      newEmail,
+		},
+	})
 	return user, nil
 }
 
@@ -1198,7 +1257,10 @@ func (s *service) ConfirmPhoneVerification(ctx context.Context, tenantID string,
 	user.Phone = &phone
 	user.PhoneVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.PhoneVerified, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{event.AttrRecoveryChannel: phone},
+	})
 	return user, nil
 }
 
@@ -1210,11 +1272,33 @@ type RecoveryChannels struct {
 	RecoveryEmail bool
 	// Phone is true when a verified phone number is enrolled.
 	Phone bool
+	// NotBefore is the earliest instant at which these channels may be used to reset a password.
+	// It is zero when no cooling-off window is configured (the default), or when every enrolled
+	// channel has already passed it.
+	//
+	// The window exists because a recovery channel is a credential the account holder may not have
+	// asked for: whoever adds one can then receive a password-reset token on it. A consumer that
+	// gates a reset (or any sensitive change) on this predicate should also require
+	// !NotBefore.After(now), which turns "add a channel, immediately use it" into a two-step
+	// operation the legitimate owner has time to notice. Set the length with
+	// WithRecoveryChannelCooldown; the default is zero so existing deployments do not change
+	// behaviour.
+	NotBefore time.Time
 }
 
 // Any reports whether the account has at least one verified independent recovery channel.
 func (rc RecoveryChannels) Any() bool {
 	return rc.RecoveryEmail || rc.Phone
+}
+
+// Usable reports whether the account has a verified independent recovery channel that is past its
+// cooling-off window as of now. It is the predicate a reset flow should gate on: Any answers "is a
+// channel enrolled", Usable answers "may it be relied on yet".
+func (rc RecoveryChannels) Usable(now time.Time) bool {
+	if !rc.Any() {
+		return false
+	}
+	return !rc.NotBefore.After(now)
 }
 
 // RequestRecoveryEmail mints a token that, once confirmed, enrolls userID's recovery email.
@@ -1234,17 +1318,8 @@ func (s *service) RequestRecoveryEmail(ctx context.Context, tenantID string, use
 	if user.DeletedAt != nil {
 		return "", ErrUserNotFound
 	}
-	// Compare against the primary in the SAME fully-canonicalized form (NFC + IDN A-label)
-	// that normalizeEmail produced for the candidate. The stored primary may not have been
-	// normalized (e.g. an externally provisioned account), so a byte-exact comparison would
-	// let a Unicode/IDN-equivalent of the primary slip past as an "independent" channel.
-	// If the stored primary cannot be canonicalized, fall back to the raw stored value.
-	primary := user.Email
-	if canonical, normErr := normalizeEmail(primary); normErr == nil {
-		primary = canonical
-	}
-	if recoveryEmail == primary {
-		return "", ErrRecoveryEmailIsPrimary
+	if err := s.assertRecoveryChannelDistinct(user, recoveryEmail); err != nil {
+		return "", err
 	}
 
 	// Bind the requested address to the token as metadata. CreateVerificationToken also re-checks
@@ -1275,7 +1350,10 @@ func (s *service) ConfirmRecoveryEmail(ctx context.Context, tenantID string, tok
 	user.RecoveryEmail = &recoveryEmail
 	user.RecoveryEmailVerifiedAt = &now
 	user.UpdatedAt = now
-	s.emit(ctx, event.Event{Type: event.RecoveryChannelEnrolled, UserID: user.ID.String(), TenantID: user.TenantID})
+	s.emit(ctx, event.Event{
+		Type: event.RecoveryChannelEnrolled, UserID: user.ID.String(), TenantID: user.TenantID,
+		Attrs: map[string]any{event.AttrRecoveryChannel: recoveryEmail},
+	})
 	return user, nil
 }
 
@@ -1288,15 +1366,66 @@ func (s *service) RecoveryChannels(ctx context.Context, tenantID string, userID 
 	if user.DeletedAt != nil {
 		return RecoveryChannels{}, ErrUserNotFound
 	}
-	return recoveryChannelsOf(user), nil
+	return s.recoveryChannelsOf(user), nil
 }
 
 // recoveryChannelsOf derives the verified-channel inventory from a loaded user.
-func recoveryChannelsOf(user *User) RecoveryChannels {
-	return RecoveryChannels{
+func (s *service) recoveryChannelsOf(user *User) RecoveryChannels {
+	verified := RecoveryChannels{
 		RecoveryEmail: user.RecoveryEmail != nil && *user.RecoveryEmail != "" && user.RecoveryEmailVerifiedAt != nil,
 		Phone:         user.Phone != nil && *user.Phone != "" && user.PhoneVerifiedAt != nil,
 	}
+	if s.recoveryCooldown <= 0 || !verified.Any() {
+		return verified
+	}
+	// Report the LATER of the two channels' windows: a reset may go to either channel, so both must
+	// clear the cooldown before the account is usable for recovery.
+	var earliest time.Time
+	for _, at := range []*time.Time{user.RecoveryEmailVerifiedAt, user.PhoneVerifiedAt} {
+		if at == nil {
+			continue
+		}
+		ready := at.Add(s.recoveryCooldown)
+		if ready.After(earliest) {
+			earliest = ready
+		}
+	}
+	verified.NotBefore = earliest
+	return verified
+}
+
+// assertRecoveryChannelDistinct rejects a candidate recovery address that equals the account's
+// primary email.
+//
+// The check runs in BOTH directions. RequestRecoveryEmail refused to enrol the primary address,
+// but nothing stopped RequestEmailChange from moving the primary address ONTO an already-enrolled
+// recovery address — which produces the same end state by the other route and makes
+// RecoveryChannels.Any() report a channel that is not independent at all. Since that predicate is
+// the documented way for an application to answer "does this account have a second way in?", the
+// invariant it relies on has to hold however the addresses arrived.
+//
+// Comparisons use the same fully-canonicalized form (NFC + IDN A-label) that normalizeEmail
+// produces, because the stored primary may not have been normalized (an externally provisioned
+// account, for instance) and a byte-exact comparison would let a Unicode/IDN-equivalent slip past
+// as "independent". A primary that cannot be canonicalized falls back to its raw stored value.
+func (s *service) assertRecoveryChannelDistinct(user *User, candidate string) error {
+	if user == nil || candidate == "" {
+		return nil
+	}
+	canonical := func(v string) string {
+		if c, err := normalizeEmail(v); err == nil {
+			return c
+		}
+		return v
+	}
+	if canonical(candidate) == canonical(user.Email) {
+		return ErrRecoveryEmailIsPrimary
+	}
+	if user.RecoveryEmail != nil && *user.RecoveryEmail != "" &&
+		canonical(candidate) == canonical(*user.RecoveryEmail) {
+		return ErrRecoveryEmailIsPrimary
+	}
+	return nil
 }
 
 // RequestPasswordResetViaRecovery mints a reset token directed at a verified recovery channel.
@@ -1337,8 +1466,10 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 	// The whole point of this variant is to NOT trust the primary inbox: require a verified
 	// independent recovery channel. Without one, stay enumeration-uniform (no token, no error) —
 	// the caller cannot distinguish "no such account" from "no recovery channel".
-	channels := recoveryChannelsOf(user)
-	if !channels.Any() {
+	channels := s.recoveryChannelsOf(user)
+	// Usable, not Any: a channel still inside its cooling-off window is enrolled but must not be
+	// relied on yet, so the flow stays enumeration-uniform rather than minting a token to it.
+	if !channels.Usable(s.now()) {
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
