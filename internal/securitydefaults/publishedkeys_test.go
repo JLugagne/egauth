@@ -320,7 +320,13 @@ func collectFiles(t *testing.T, root string, keep func(path string, d fs.DirEntr
 		if err != nil {
 			return err
 		}
-		if !d.IsDir() && keep(path, d) {
+		if d.IsDir() {
+			if isSkippedDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if keep(path, d) {
 			out = append(out, path)
 		}
 		return nil

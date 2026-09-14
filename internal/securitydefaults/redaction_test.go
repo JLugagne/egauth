@@ -5,6 +5,7 @@ import (
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"reflect"
 	"regexp"
@@ -41,9 +42,6 @@ var redactionExemptions = map[string]string{
 	"identity.VerificationToken": "carries the one-way verifier hash, not the presented verifier",
 	"mfa.RecoveryCode":           "carries the one-way recovery-code hash, not the code",
 	"tokens.RefreshToken":        "carries the one-way refresh-token hash, not the token",
-	// Configuration and derivation types: they are inputs the caller constructs, their key material
-	// is validated at construction, and the running objects built from them are redacted.
-	"jwt.TenantKey": "per-tenant key material held by the key store, whose accessors return it deliberately",
 	// Flow state is a signed cookie payload that is already carried in the client's __Host- cookie;
 	// the token that authenticates it lives on the Engine, which is redacted.
 	"authflow.FlowResult": "the flow token is returned to the client by design; see SECURITY.md on JSON marshalling",
@@ -168,10 +166,19 @@ func collectExportedTypes(t *testing.T, root string) []goType {
 
 	// Pass 1: collect exported struct declarations and their field names.
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if err != nil {
 			return nil
 		}
-		if isSkippedDir(d.Name()) || strings.Contains(filepath.ToSlash(path), "/adapters/") {
+		if d.IsDir() {
+			if isSkippedDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		if strings.Contains(filepath.ToSlash(path), "/adapters/") {
 			return nil
 		}
 		fset := token.NewFileSet()
@@ -222,10 +229,19 @@ func collectExportedTypes(t *testing.T, root string) []goType {
 
 	// Pass 2: record which redaction methods each type declares (value or pointer receiver).
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || !strings.HasSuffix(path, ".go") {
+		if err != nil {
 			return nil
 		}
-		if isSkippedDir(d.Name()) || strings.Contains(filepath.ToSlash(path), "/adapters/") {
+		if d.IsDir() {
+			if isSkippedDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		if strings.Contains(filepath.ToSlash(path), "/adapters/") {
 			return nil
 		}
 		fset := token.NewFileSet()
@@ -323,3 +339,30 @@ var (
 	_ = reflect.TypeOf((*interface{ String() string })(nil)).Elem()
 	_ = reflect.TypeOf((*interface{ GoString() string })(nil)).Elem()
 )
+
+func TestCollectExportedTypesSkipsHiddenDirs(t *testing.T) {
+	root := t.TempDir()
+	writeGo := func(rel, src string) {
+		t.Helper()
+		path := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	writeGo("pkg/visible.go", "package pkg\n\ntype Visible struct {\n\tSecret string\n}\n")
+	writeGo(".worktrees/pkg/hidden.go", "package pkg\n\ntype Hidden struct {\n\tSecret string\n}\n")
+
+	names := make(map[string]bool)
+	for _, typ := range collectExportedTypes(t, root) {
+		names[typ.qualified] = true
+	}
+	if !names["pkg.Visible"] {
+		t.Fatalf("expected pkg.Visible to be collected, got %v", names)
+	}
+	if names["pkg.Hidden"] {
+		t.Fatal("collectExportedTypes walked a hidden directory: pkg.Hidden was collected")
+	}
+}
