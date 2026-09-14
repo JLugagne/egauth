@@ -77,13 +77,18 @@ Generate a Software Bill of Materials (SBOM) in CycloneDX format. This documents
 and their versions, critical for supply-chain transparency and vulnerability tracking:
 
 ```sh
-# Install syft if not already present (https://github.com/anchore/syft).
-# Pinned to an exact version — keep in sync with SYFT_VERSION in the Makefile.
-go install github.com/anchore/syft@v1.51.1
+# Preferred: the Makefile target installs the pinned syft and emits both formats.
+make sbom VERSION=vX.Y.Z
 
-# Generate SBOM from the module and save to the release directory
-syft -o cyclonedx-json github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.json
-syft -o cyclonedx github.com/JLugagne/egauth@vX.Y.Z > libauth-vX.Y.Z.sbom.xml
+# Manual equivalent. syft v1.x scans a directory, not a module path, so resolve the
+# published module to its cache directory first. The main package is cmd/syft — keep
+# the version in sync with SYFT_VERSION in the Makefile.
+go install github.com/anchore/syft/cmd/syft@v1.51.1
+dir="$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@vX.Y.Z)"
+syft "dir:$dir" --source-name github.com/JLugagne/egauth --source-version vX.Y.Z \
+  -o cyclonedx-json > libauth-vX.Y.Z.sbom.json
+syft "dir:$dir" --source-name github.com/JLugagne/egauth --source-version vX.Y.Z \
+  -o cyclonedx > libauth-vX.Y.Z.sbom.xml
 ```
 
 To update the pinned syft version, run `go list -m -versions github.com/anchore/syft`, review the
@@ -285,12 +290,14 @@ cosign verify-blob \
 ### Option B — GitHub artifact attestations (recommended once the repository is public)
 
 GitHub serves artifact attestations for private repositories only on GitHub Enterprise Cloud,
-so this is a **maintainer step to enable when the repository goes public**, not a wired-in
-workflow today. Once public, add a workflow triggered on `release: [published]` with
-`id-token: write` and `attestations: write` that checks out the tag, regenerates the SBOM with
-the pinned syft version, and attests it with
+so this is only available once the repository is public. It is **wired in** as
+[`.github/workflows/attest-release.yml`](.github/workflows/attest-release.yml): triggered on
+`release: [published]` with `id-token: write` and `attestations: write`, it checks out the tag,
+regenerates the SBOM with the pinned syft version, attests it with
 [`actions/attest-build-provenance`](https://github.com/actions/attest-build-provenance)
-(`subject-path: libauth-*.sbom.*`). Consumers then verify with the GitHub CLI:
+(`subject-path: libauth-*.sbom.*`), and re-uploads the SBOMs so the attested bytes are the ones
+a consumer downloads. Use `workflow_dispatch` with a `tag` input to (re)attest an existing
+release. Consumers then verify with the GitHub CLI:
 
 ```sh
 gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
@@ -459,7 +466,7 @@ Before pushing a new release, ensure all steps below are complete:
 - [ ] **Tag pushed**: Push the signed tag with `git push origin vX.Y.Z`
 - [ ] **GitHub release created**: Use `gh release create` with CHANGELOG notes; record the signer's `--certificate-identity` and the `scripts/verify-release-tag.sh` output in the notes
 - [ ] **SBOM attached**: Upload SBOM JSON and XML files to the GitHub release
-- [ ] **Artifacts attested**: Sign the SBOM bundles with keyless cosign (Step 7 Option A) or attest them via GitHub artifact attestations once public (Option B), and upload the bundles
+- [ ] **Artifacts attested**: the `attest-release.yml` workflow attests the SBOMs on `release: [published]` (Step 7 Option B); for a release cut before it ran, use `workflow_dispatch` with the tag (or keyless cosign, Step 7 Option A)
 - [ ] **Adapter tag (if applicable)**: For multi-module releases, cut the signed adapter tag after the core tag is published and gate it with `bash scripts/verify-release-tag.sh adapters/pgx/vX.Y.Z`
 
 ### Vulnerability gate

@@ -109,8 +109,11 @@ test-e2e:
 sbom:
 	@if [ -z "$(VERSION)" ]; then echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1; fi
 	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$(VERSION)..."
-	go install github.com/anchore/syft@$(SYFT_VERSION)
-	syft -o cyclonedx-json github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.json
-	syft -o cyclonedx github.com/JLugagne/egauth@$(VERSION) > libauth-$(VERSION).sbom.xml
+	go install github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
+	@dir=$$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@$(VERSION)); \
+	if [ -z "$$dir" ] || [ ! -d "$$dir" ]; then echo "FAIL: could not resolve module source for $(VERSION) (is the tag published?)"; exit 1; fi; \
+	MODULE=$$(GOWORK=off go list -m -f '{{.Path}}' github.com/JLugagne/egauth@$(VERSION)); \
+	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$(VERSION)" -o cyclonedx-json > libauth-$(VERSION).sbom.json; \
+	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$(VERSION)" -o cyclonedx > libauth-$(VERSION).sbom.xml
 	@echo "==> SBOM generated: libauth-$(VERSION).sbom.json and libauth-$(VERSION).sbom.xml"
 	@echo "==> Attach these files to the GitHub release using: gh release upload $(VERSION) libauth-$(VERSION).sbom.*"

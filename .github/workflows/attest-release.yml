@@ -1,0 +1,89 @@
+name: Attest release artifacts
+
+# The release SBOMs are release artifacts just like the source tag: a consumer must be able to
+# verify they were published by the maintainer's identity. Keyless cosign (RELEASING.md Step 7
+# Option A) needs an interactive OIDC flow, so on a public repository the automatable path is
+# GitHub's native artifact attestations (Option B): this workflow regenerates the SBOMs with the
+# pinned syft, records a signed build-provenance attestation, and publishes the SBOMs on the
+# release so the attested bytes are exactly the ones a consumer downloads.
+#
+# Consumers verify with:
+#   gh attestation verify libauth-vX.Y.Z.sbom.json --repo JLugagne/egauth
+
+on:
+  release:
+    types: [published]
+  # Allow a manual run against an existing tag (e.g. a release cut before this workflow existed).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to (re)attest (e.g. v0.14.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write     # publish the SBOMs on the release
+  id-token: write     # mint the OIDC token Sigstore uses to sign the attestation
+  attestations: write # record the attestation on the repository
+
+jobs:
+  attest:
+    name: Generate and attest the release SBOMs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Resolve the release tag
+        id: tag
+        env:
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_TAG:-}" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$EVENT_TAG"
+          fi
+          if [ -z "$tag" ]; then
+            echo "::error::no tag to attest (neither a release event nor a workflow_dispatch input)"
+            exit 2
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Attesting: $tag"
+
+      - name: Checkout the tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Install Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Generate SBOMs (pinned syft)
+        run: make sbom VERSION=${{ steps.tag.outputs.tag }}
+
+      - name: Attest SBOM build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: libauth-*.sbom.*
+
+      - name: Publish the SBOMs on the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: gh release upload "$TAG" libauth-*.sbom.* --clobber
+
+      - name: Summarise
+        if: always()
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          {
+            echo "### Release attestation: \`$TAG\`"
+            echo
+            echo "Result: \`${{ job.status }}\`"
+            echo
+            echo "Verify with: \`gh attestation verify libauth-$TAG.sbom.json --repo JLugagne/egauth\`"
+          } >> "$GITHUB_STEP_SUMMARY"

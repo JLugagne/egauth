@@ -27,3 +27,6 @@ go.work.sum
 
 # compiled example binary accidentally left at the repo root
 /fullstack
+
+# generated release SBOMs (attached to the GitHub release, not committed)
+libauth-*.sbom.*
