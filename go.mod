@@ -13,7 +13,7 @@ retract (
 
 require (
 	github.com/fxamacker/cbor/v2 v2.9.4
-	github.com/go-webauthn/webauthn v0.18.1
+	github.com/go-webauthn/webauthn v0.18.2
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
