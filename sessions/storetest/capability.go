@@ -274,7 +274,8 @@ func SessionStoreContract(t *testing.T, store sessions.SessionStore, useMultiTen
 func SessionReaperContract(t *testing.T, store interface {
 	sessions.SessionStore
 	sessions.SessionReaper
-}, useMultiTenant bool) {
+}, useMultiTenant bool,
+) {
 	t.Helper()
 	ctx := context.Background()
 

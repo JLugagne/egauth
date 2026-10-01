@@ -324,3 +324,68 @@ func TestStore_RevokeFamily_PreservesAuditTrail(t *testing.T) {
 	require.NoError(t, err, "row must remain in tokens table for audit trail")
 	assert.NotNil(t, revokedAt, "revoked_at must be stamped in database")
 }
+
+// TestRefreshTokenAMRRoundTrip pins the AMR persistence added with the amr column:
+// SaveRefreshToken stores it, FindRefreshToken reads it back, and RotateRefreshToken carries it
+// onto the successor record so a stepped-up family keeps its assurance across a silent refresh.
+func TestRefreshTokenAMRRoundTrip(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	store := pgx.NewStore[customClaims](pool)
+	tenantID := "tenant-amr"
+	userID := uuid.Must(uuid.NewV7())
+	familyID := uuid.Must(uuid.NewV7())
+	amr := []string{egauthtokens.AMRPassword, egauthtokens.AMROTP, egauthtokens.AMRMFA}
+
+	rt := &egauthtokens.RefreshToken{
+		Hash:      "pgx-amr-old",
+		TenantID:  tenantID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		AMR:       amr,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	require.NoError(t, store.SaveRefreshToken(ctx, tenantID, rt))
+
+	got, err := store.FindRefreshToken(ctx, tenantID, "pgx-amr-old")
+	require.NoError(t, err)
+	assert.Equal(t, amr, got.AMR)
+
+	successor := &egauthtokens.RefreshToken{
+		Hash:      "pgx-amr-new",
+		TenantID:  tenantID,
+		UserID:    userID,
+		FamilyID:  familyID,
+		AMR:       amr,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	require.NoError(t, store.RotateRefreshToken(ctx, tenantID, "pgx-amr-old", successor))
+
+	rotated, err := store.FindRefreshToken(ctx, tenantID, "pgx-amr-new")
+	require.NoError(t, err)
+	assert.Equal(t, amr, rotated.AMR, "rotation must persist the successor's AMR")
+}
+
+// TestRefreshTokenAMRLegacyNullStaysNil pins the NULL semantics of the amr column: a row inserted
+// before the field existed (amr IS NULL) must read back as a nil slice, never an empty one, so
+// callers can still tell "no recorded assurance" from "assurance = []".
+func TestRefreshTokenAMRLegacyNullStaysNil(t *testing.T) {
+	pool := newTestPool(t)
+	ctx := context.Background()
+	// Migrate is idempotent: re-running it must be a no-op (the amr ALTER is guarded).
+	require.NoError(t, pgx.Migrate(ctx, pool))
+	store := pgx.NewStore[customClaims](pool)
+	tenantID := "tenant-amr-legacy"
+	userID := uuid.Must(uuid.NewV7())
+
+	// Insert a legacy row directly, omitting amr so the column stays NULL.
+	_, err := pool.Exec(ctx,
+		`INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, expires_at, created_at)
+		 VALUES ($1, $2, $3, $4, now() + interval '1 hour', now())`,
+		tenantID, "pgx-amr-legacy", userID, uuid.Must(uuid.NewV7()))
+	require.NoError(t, err)
+
+	got, err := store.FindRefreshToken(ctx, tenantID, "pgx-amr-legacy")
+	require.NoError(t, err)
+	assert.Nil(t, got.AMR, "a legacy NULL amr must read back as nil, never an empty slice")
+}

@@ -44,6 +44,8 @@ type Store struct {
 	mu      sync.RWMutex
 	maxSize int                 // 0 means unbounded
 	codes   map[string]*otp.OTP // key: tenant \x00 subject \x00 purpose
+	// issued is the issuance tombstone: the last instant a code was issued for a key. It is written by IssueOTP/SaveOTP and deliberately NOT cleared by ConsumeOTP/DeleteOTP/expiry/eviction, so burning or consuming a code cannot reset the resend cooldown (F-OTP-001). Entries are small (a string key and a time) and overwritten on every reissue.
+	issued map[string]time.Time
 }
 
 // DefaultMaxEntries is the default hard cap on the number of codes an in-memory Store created by
@@ -64,7 +66,10 @@ func NewStore() *Store {
 // [github.com/JLugagne/egauth/janitor]); prefer [NewStore]'s bounded default
 // unless the caller guarantees that eviction runs.
 func NewUnboundedStore() *Store {
-	return &Store{codes: make(map[string]*otp.OTP)}
+	return &Store{
+		codes:  make(map[string]*otp.OTP),
+		issued: make(map[string]time.Time),
+	}
 }
 
 func key(tenantID string, subjectID uuid.UUID, purpose string) string {
@@ -88,6 +93,9 @@ func (s *Store) SaveOTP(ctx context.Context, tenantID string, o *otp.OTP) error 
 		s.evictOneLocked()
 	}
 	s.codes[k] = &stored
+	// Record the issuance instant so a later IssueOTP enforces the cooldown even after this
+	// row is consumed, burned or evicted (F-OTP-001).
+	s.issued[k] = o.CreatedAt
 	return nil
 }
 
@@ -179,6 +187,7 @@ func NewBoundedStore(maxSize int) *Store {
 	return &Store{
 		maxSize: maxSize,
 		codes:   make(map[string]*otp.OTP),
+		issued:  make(map[string]time.Time),
 	}
 }
 
@@ -234,4 +243,32 @@ func (s *Store) evictOneLocked() {
 	if found {
 		delete(s.codes, victimKey)
 	}
+}
+
+// IssueOTP atomically enforces the resend cooldown and upserts the new code under one lock:
+// concurrent issues for the same key cannot all pass the check (F-OTP-002), and the issuance
+// instant survives every terminal transition of the previous code (F-OTP-001). o.CreatedAt is
+// the caller's issuance instant, so the Service's injectable clock governs the comparison.
+func (s *Store) IssueOTP(ctx context.Context, tenantID string, o *otp.OTP, cooldown time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if o.TenantID != "" && o.TenantID != tenantID {
+		return otp.ErrTenantMismatch
+	}
+	k := key(tenantID, o.SubjectID, o.Purpose)
+	if cooldown > 0 {
+		if last, ok := s.issued[k]; ok && (o.CreatedAt.Sub(last) < cooldown || last.After(o.CreatedAt)) {
+			return otp.ErrCooldownActive
+		}
+	}
+
+	stored := *o
+	stored.TenantID = tenantID
+	if _, exists := s.codes[k]; !exists && s.maxSize > 0 && len(s.codes) >= s.maxSize {
+		s.evictOneLocked()
+	}
+	s.codes[k] = &stored
+	s.issued[k] = o.CreatedAt
+	return nil
 }

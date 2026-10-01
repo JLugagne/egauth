@@ -46,17 +46,21 @@ func NewHasher(opts ...Option) *Hasher
 
 Defaults (OWASP 2021, highly-concurrent workload): `m=65536 KiB (64 MB)`, `t=1`, `p=4`, `keyLen=32`, `saltLen=16`. Output is PHC string format.
 
-Cost floors (values below are clamped up silently):
-- `MinMemoryKiB = 19456` (19 MiB)
-- `MinTime = 1`
-- `MinThreads = 1`
+Cost bounds (options are clamped **into** the range `Compare` accepts, on both ends):
+- memory: `[MinMemoryKiB = 19456` (19 MiB), `MaxMemoryKiB = 524288` (512 MiB)`]`
+- time: `[MinTime = 1, MaxTime = 16]`
+- threads: clamped up to `MinThreads = 1` (no upper clamp)
 
 Options:
 ```go
-func WithMemory(memory uint32) Option   // KiB; clamped to MinMemoryKiB
-func WithTime(time uint32) Option       // iterations; clamped to MinTime
-func WithThreads(threads uint8) Option  // parallelism; clamped to MinThreads
+func WithMemory(memory uint32) Option   // KiB; clamped up to MinMemoryKiB and down to MaxMemoryKiB
+func WithTime(time uint32) Option       // iterations; clamped up to MinTime and down to MaxTime
+func WithThreads(threads uint8) Option  // parallelism; clamped up to MinThreads
 ```
+
+The ceilings are the same values `Compare` enforces on the verify path (stored `m` above
+`MaxMemoryKiB` or stored `t` above `MaxTime` → `ErrInvalidPassword`), so a hasher can never be
+configured to emit a PHC string it would itself permanently reject.
 
 Rehash-on-login (not part of `passwords.Hasher` interface — concrete method only):
 ```go

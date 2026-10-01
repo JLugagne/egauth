@@ -24,12 +24,15 @@ type failingStore struct{}
 func (failingStore) SaveCredential(_ context.Context, _ string, _ *passkey.Credential) error {
 	return errors.New("db down")
 }
+
 func (failingStore) GetCredentials(_ context.Context, _ string, _ uuid.UUID) ([]*passkey.Credential, error) {
 	return nil, errors.New("db down")
 }
+
 func (failingStore) UpdateCredential(_ context.Context, _ string, _ *passkey.Credential) error {
 	return errors.New("db down")
 }
+
 func (failingStore) DeleteCredential(_ context.Context, _ string, _ uuid.UUID, _ []byte) error {
 	return errors.New("db down")
 }
@@ -54,7 +57,7 @@ func findCookie(cookies []*http.Cookie, name string) *http.Cookie {
 func TestBeginRegistrationHandler(t *testing.T) {
 	svc, _ := testService(t)
 	uid := uuid.Must(uuid.NewV7())
-	h := passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())
 
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/register/begin", nil))
@@ -78,7 +81,7 @@ func TestBeginRegistrationHandler_EmptyCookieKeyOverrideFailsClosed(t *testing.T
 	svc, _ := testService(t)
 	// The Service carries a validated cookie key, but a per-handler override that clears it must
 	// still fail closed (defense in depth) rather than emit an unauthenticated cookie.
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(nil))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(nil), passkey.WithInsecureNoAssuranceCheck())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -91,7 +94,7 @@ func TestBeginRegistrationHandler_ShortCookieKeyOverrideFailsClosed(t *testing.T
 	// exactly like the per-tenant resolver branch — NewService's construction-time length
 	// guarantee must not be silently bypassable at the handler layer with a weak HMAC key.
 	short := make([]byte, passkey.MinCookieKeyLength-1)
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(short))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(short), passkey.WithInsecureNoAssuranceCheck())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -104,7 +107,7 @@ func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 
 	// Begin to obtain a validly-signed ceremony cookie.
 	beginRec := httptest.NewRecorder()
-	passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))(
+	passkey.BeginRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())(
 		beginRec, httptest.NewRequest(http.MethodPost, "/", nil))
 	cookie := findCookie(beginRec.Result().Cookies(), passkey.DefaultSessionCookieName)
 	require.NotNil(t, cookie)
@@ -115,7 +118,7 @@ func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	finishReq := httptest.NewRequest(http.MethodPost, "/", nil)
 	finishReq.AddCookie(tampered)
 	finishRec := httptest.NewRecorder()
-	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey))(finishRec, finishReq)
+	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())(finishRec, finishReq)
 
 	assert.Equal(t, http.StatusBadRequest, finishRec.Code, "a tampered ceremony cookie must be rejected")
 
@@ -123,7 +126,7 @@ func TestCeremonyCookie_TamperedIsRejected(t *testing.T) {
 	otherReq := httptest.NewRequest(http.MethodPost, "/", nil)
 	otherReq.AddCookie(&http.Cookie{Name: cookie.Name, Value: cookie.Value})
 	otherRec := httptest.NewRecorder()
-	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey([]byte("a-totally-different-secret-key-32")))(otherRec, otherReq)
+	passkey.FinishRegistrationHandler(svc, resolver(uid), passkey.WithCookieKey([]byte("a-totally-different-secret-key-32")), passkey.WithInsecureNoAssuranceCheck())(otherRec, otherReq)
 	assert.Equal(t, http.StatusBadRequest, otherRec.Code)
 }
 
@@ -145,7 +148,7 @@ func TestPasskeyHandlers_AuthAndMethodGuards(t *testing.T) {
 
 func TestFinishRegistrationHandler_MissingSessionCookie(t *testing.T) {
 	svc, _ := testService(t)
-	h := passkey.FinishRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey))
+	h := passkey.FinishRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())
 
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/passkey/register/finish", nil))
@@ -175,7 +178,7 @@ func TestFinishRegistrationHandler_AttestationRejectedIs403(t *testing.T) {
 		ProhibitedAAGUIDs: []uuid.UUID{prohibited},
 	})
 	uid := uuid.Must(uuid.NewV7())
-	opts := []passkey.HandlerOption{resolver(uid), passkey.WithCookieKey(testCookieKey)}
+	opts := []passkey.HandlerOption{resolver(uid), passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck()}
 
 	beginRec := httptest.NewRecorder()
 	passkey.BeginRegistrationHandler(svc, opts...)(beginRec, httptest.NewRequest(http.MethodPost, "/register/begin", nil))
@@ -231,7 +234,7 @@ func TestCeremonyCookie_CrossTenantRejection(t *testing.T) {
 			return uidB, "bob", "Bob", "tenant-b", true
 		})
 
-		beginA := passkey.BeginRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		beginA := passkey.BeginRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())
 		recA := httptest.NewRecorder()
 		beginA(recA, httptest.NewRequest(http.MethodPost, "/register/begin", nil))
 		require.Equal(t, http.StatusOK, recA.Code)
@@ -239,7 +242,7 @@ func TestCeremonyCookie_CrossTenantRejection(t *testing.T) {
 		require.NotNil(t, cookie)
 
 		// Submitting cookie to Tenant B must fail with session_invalid (HTTP 400).
-		finishB := passkey.FinishRegistrationHandler(svc, resB, passkey.WithCookieKey(testCookieKey))
+		finishB := passkey.FinishRegistrationHandler(svc, resB, passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())
 		reqB := httptest.NewRequest(http.MethodPost, "/register/finish", strings.NewReader("{}"))
 		reqB.AddCookie(cookie)
 		recB := httptest.NewRecorder()
@@ -248,7 +251,7 @@ func TestCeremonyCookie_CrossTenantRejection(t *testing.T) {
 		assert.Contains(t, recB.Body.String(), "session_invalid")
 
 		// Submitting cookie to Tenant A (same tenant) must pass session check (not session_invalid).
-		finishA := passkey.FinishRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey))
+		finishA := passkey.FinishRegistrationHandler(svc, resA, passkey.WithCookieKey(testCookieKey), passkey.WithInsecureNoAssuranceCheck())
 		reqA := httptest.NewRequest(http.MethodPost, "/register/finish", strings.NewReader("{}"))
 		reqA.AddCookie(cookie)
 		recA2 := httptest.NewRecorder()
@@ -332,4 +335,8 @@ func TestCeremonyCookie_CrossTenantRejection(t *testing.T) {
 		finishA(recA2, reqA)
 		assert.NotContains(t, recA2.Body.String(), "session_invalid")
 	})
+}
+
+func (failingStore) DeleteCredentialsByUser(_ context.Context, _ string, _ uuid.UUID) error {
+	return errors.New("db down")
 }

@@ -14,9 +14,9 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/internal/secretpolicy"
 	"github.com/JLugagne/egauth/issuance"
 	"github.com/JLugagne/egauth/tokens"
-	"github.com/JLugagne/egauth/tokens/jwt"
 	"github.com/google/uuid"
 )
 
@@ -286,6 +286,15 @@ func BeginHandler(p *Provider, opts ...HandlerOption) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if cfg.configErr != nil {
 			http.Error(w, "oauth handler misconfigured", http.StatusInternalServerError)
+			return
+		}
+		// Fail closed on a provider whose endpoint configuration failed the https-only
+		// validation (F-OAPROV-001): New records a deferred configErr that Exchange already
+		// honors, and the begin path must too. Otherwise the authorization redirect sends
+		// state, PKCE challenge, client_id and redirect_uri to a cleartext or cross-origin
+		// endpoint the provider itself refuses to talk to.
+		if p == nil || p.configErr != nil {
+			http.Error(w, "oauth provider misconfigured", http.StatusInternalServerError)
 			return
 		}
 		tenant, ok := cfg.resolveTenant(w, r)
@@ -837,10 +846,13 @@ func (cfg handlerConfig) validate() error {
 	var errs []error
 	if len(cfg.stateSigningKey) == 0 {
 		errs = append(errs, errors.New("oauth: WithStateSigningKey is required: the OAuth state cookie must be HMAC-signed, otherwise a cookie an attacker can plant (sibling-subdomain tossing, plaintext HTTP) drives the callback into a forged login (STATE-01)"))
-	} else if len(cfg.stateSigningKey) < MinStateSigningKeyLength {
-		errs = append(errs, fmt.Errorf("oauth: WithStateSigningKey key must be at least %d bytes, got %d: a shorter HMAC-SHA-256 key is brute-forceable offline from a single captured state cookie, re-enabling forged logins (STATE-01)", MinStateSigningKeyLength, len(cfg.stateSigningKey)))
-	} else if jwt.DeniedSecrets[string(cfg.stateSigningKey)] {
-		errs = append(errs, errors.New("oauth: WithStateSigningKey is a key published in this project's examples or docs; generate a unique key with crypto/rand or load one from a secret manager — a copy-pasted published key lets anyone forge state cookies"))
+	} else if err := secretpolicy.Validate("OAuth state signing key", cfg.stateSigningKey, MinStateSigningKeyLength); err != nil {
+		// The state cookie's HMAC is the only control binding the CSRF state, PKCE verifier,
+		// OIDC nonce, provider, tenant and redirect_uri, so a short or attacker-known key
+		// re-enables forged logins (STATE-01). This routes through the shared credential
+		// policy (F-OAFLOW-001) instead of the fragmented exact-match denylist that missed
+		// published literals and marker-bearing near-copies.
+		errs = append(errs, fmt.Errorf("oauth: WithStateSigningKey: %w: the state cookie's HMAC is the only control binding the CSRF state, PKCE verifier, nonce, provider, tenant and redirect_uri, so a short or attacker-known key re-enables forged logins (STATE-01)", err))
 	}
 	if strings.HasPrefix(cfg.stateCookieName, hostPrefix) {
 		if cfg.cookies.Domain != "" {

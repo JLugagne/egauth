@@ -43,9 +43,9 @@ type ChallengeStore struct {
 	mu sync.Mutex
 	// entries maps key -> absolute expiry. It is the authority for Consume.
 	entries map[string]time.Time
-	// expiry is an index over entries ordered by expiry, used to reap without a full scan. Entries
-	// may appear more than once (a key re-Put after being replaced), so a pop is validated against
-	// entries before it is honoured.
+	// expiry is an index over entries ordered by expiry, used to reap without a full scan. It
+	// tracks each key's row position, so Consume and a key replacement remove the superseded row
+	// instead of leaving a stale duplicate behind for the TTL window.
 	expiry expiryHeap
 	// live counts unexpired entries per tenant, so the cap check is O(1).
 	live map[string]int
@@ -78,6 +78,7 @@ func WithClock(now func() time.Time) ChallengeStoreOption {
 func NewChallengeStore(opts ...ChallengeStoreOption) *ChallengeStore {
 	s := &ChallengeStore{
 		entries: make(map[string]time.Time),
+		expiry:  expiryHeap{pos: make(map[string]int)},
 		live:    make(map[string]int),
 		max:     DefaultMaxChallenges,
 		now:     time.Now,
@@ -111,11 +112,13 @@ func (s *ChallengeStore) Put(_ context.Context, tenantID, challenge string, expi
 	s.reapLocked(now)
 
 	key := challengeKey(tenantID, challenge)
-	if _, replacing := s.entries[key]; !replacing && s.live[tenantID] >= s.max {
-		return ErrChallengeStoreFull
-	}
-
-	if _, replacing := s.entries[key]; !replacing {
+	if _, replacing := s.entries[key]; replacing {
+		// Drop the superseded index row so a re-Put cannot accumulate rows.
+		s.expiry.remove(key)
+	} else {
+		if s.live[tenantID] >= s.max {
+			return ErrChallengeStoreFull
+		}
 		s.live[tenantID]++
 	}
 	s.entries[key] = expiresAt
@@ -134,8 +137,10 @@ func (s *ChallengeStore) Consume(_ context.Context, tenantID, challenge string) 
 	if !found {
 		return false, nil
 	}
-	// Single-use: delete regardless of expiry so a stale entry cannot linger.
+	// Single-use: delete regardless of expiry so a stale entry cannot linger. The index row
+	// is removed with it, so the expiry index stays bounded by the live entries.
 	delete(s.entries, key)
+	s.expiry.remove(key)
 	if s.live[tenantID] > 0 {
 		s.live[tenantID]--
 	}
@@ -166,17 +171,17 @@ func (s *ChallengeStore) Len() int {
 
 // reapLocked pops expired entries from the expiry index. The caller must hold s.mu.
 //
-// A key can appear more than once in the index (a replaced entry leaves its old index row behind),
-// so a popped row is only honoured when it still matches the entry it names.
+// Each key has at most one row (Consume and replacement remove the superseded row), so a popped
+// row is normally the entry it names; the match check stays as a defensive guard.
 func (s *ChallengeStore) reapLocked(now time.Time) {
 	for s.expiry.Len() > 0 {
-		top := s.expiry[0]
+		top := s.expiry.rows[0]
 		if now.Before(top.at) {
 			return
 		}
 		heap.Pop(&s.expiry)
 		current, ok := s.entries[top.key]
-		if !ok || current != top.at {
+		if !ok || !current.Equal(top.at) {
 			// Stale index row: the key was consumed, replaced, or already reaped.
 			continue
 		}
@@ -195,18 +200,40 @@ type expiryEntry struct {
 }
 
 // expiryHeap is a min-heap on at, so reaping only ever touches entries that have actually expired.
-type expiryHeap []expiryEntry
+type expiryHeap struct {
+	rows []expiryEntry
+	// pos maps a key to the index of its current row. Every key has at most one row, so Consume
+	// and replacement can remove the row instead of leaving a stale duplicate in the heap.
+	pos map[string]int
+}
 
-func (h expiryHeap) Len() int           { return len(h) }
-func (h expiryHeap) Less(i, j int) bool { return h[i].at.Before(h[j].at) }
-func (h expiryHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
-func (h *expiryHeap) Push(x any)        { *h = append(*h, x.(expiryEntry)) }
+func (h expiryHeap) Len() int           { return len(h.rows) }
+func (h expiryHeap) Less(i, j int) bool { return h.rows[i].at.Before(h.rows[j].at) }
+func (h expiryHeap) Swap(i, j int) {
+	h.rows[i], h.rows[j] = h.rows[j], h.rows[i]
+	h.pos[h.rows[i].key] = i
+	h.pos[h.rows[j].key] = j
+}
+
+func (h *expiryHeap) Push(x any) {
+	e := x.(expiryEntry)
+	h.rows = append(h.rows, e)
+	h.pos[e.key] = len(h.rows) - 1
+}
+
 func (h *expiryHeap) Pop() any {
-	old := *h
-	n := len(old)
-	item := old[n-1]
-	*h = old[:n-1]
+	n := len(h.rows)
+	item := h.rows[n-1]
+	h.rows = h.rows[:n-1]
+	delete(h.pos, item.key)
 	return item
+}
+
+// remove drops the row for key when present, keeping pos consistent.
+func (h *expiryHeap) remove(key string) {
+	if i, ok := h.pos[key]; ok {
+		heap.Remove(h, i)
+	}
 }
 
 var _ passkey.ChallengeStore = (*ChallengeStore)(nil)

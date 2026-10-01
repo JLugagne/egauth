@@ -24,6 +24,10 @@ type UserInfo struct {
 type Provider struct { /* unexported fields */ }
 
 func (p *Provider) Name() string
+// AuthCodeURL returns "" when the Provider was built with an endpoint URL that failed the
+// https-only validation (deferred configErr): direct callers must treat an empty result as a
+// fatal misconfiguration. BeginHandler fails closed on the same condition, and Exchange returns
+// the underlying configErr.
 func (p *Provider) AuthCodeURL(state, redirectURI, codeChallenge string, opts ...AuthCodeOption) string
 func (p *Provider) Exchange(ctx context.Context, code, redirectURI, codeVerifier string, opts ...ExchangeOption) (*UserInfo, error)
 
@@ -129,7 +133,8 @@ WithCookieDomain(domain string) HandlerOption               // scope cookies to 
 WithSameSite(mode http.SameSite) HandlerOption              // override SameSite on auth cookies
 WithInsecureCookies() HandlerOption                         // dev-only: disable Secure attribute; demotes names to bare form
 WithRedirectURL(rawURL string) HandlerOption                // explicit redirect_uri (required in prod)
-WithStateCookieName(name string) HandlerOption              // default: "oauth_state"
+WithStateSigningKey(key []byte) HandlerOption               // REQUIRED: HMAC key for the state cookie, >= 32 bytes; shared credential policy refuses trivial/published keys
+WithStateCookieName(name string) HandlerOption              // default: "__Host-oauth_state" (host-locked)
 WithStateTTL(d time.Duration) HandlerOption                 // default: 10m
 WithoutPKCE() HandlerOption                                 // disable PKCE (non-compliant providers only)
 WithSuccessRedirect(url string) HandlerOption               // 303 redirect on success instead of 204
@@ -139,7 +144,7 @@ WithTenantResolver(f func(*http.Request) string) HandlerOption // derive tenantI
 WithAllowUnverifiedEmail() HandlerOption                    // allow unverified emails (off by default)
 ```
 
-State cookie: `HttpOnly`, `Secure` (unless `WithInsecureCookies`), `SameSite=Lax` (fixed — Strict breaks provider redirect).
+State cookie: `HttpOnly`, `Secure` (unless `WithInsecureCookies`), `SameSite=Lax` (fixed — Strict breaks provider redirect), HMAC-SHA-256 authenticated with `WithStateSigningKey`, host-locked by the `__Host-` name prefix by default.
 
 ## SSRF guard
 
@@ -286,14 +291,18 @@ identSvc := identity.NewService(db)
 // 3. Wire token issuer
 tokenIssuer := tokens.NewIssuer[MyClaims](signingKey)
 
-// 4. Register handlers
+// 4. Register handlers (WithStateSigningKey is REQUIRED on every oauth handler you mount;
+//    a missing/short/published key fails closed with 500).
+stateKey := stateSigningKeyFromSecretStore // >= 32 bytes, unique per deployment
 mux.Handle("GET /auth/google", oauth.BeginHandler(p,
     oauth.WithRedirectURL("https://example.com/auth/google/callback"),
+    oauth.WithStateSigningKey(stateKey),
 ))
 mux.Handle("GET /auth/google/callback", oauth.CallbackHandler(p, identSvc, tokenIssuer, MakeClaimsFunc,
     oauth.WithRedirectURL("https://example.com/auth/google/callback"),
     oauth.WithSuccessRedirect("/dashboard"),
     oauth.WithFailureRedirect("/login"),
+    oauth.WithStateSigningKey(stateKey),
 ))
 
 // Multi-tenant dynamic variant
@@ -302,6 +311,7 @@ store.AddProvider("tenant-abc", p)
 mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
     oauth.WithTenantResolver(func(r *http.Request) string { return r.PathValue("tenant") }),
     oauth.WithRedirectURL("https://example.com/auth/google/callback"),
+    oauth.WithStateSigningKey(stateKey),
 ))
 ```
 
@@ -309,12 +319,12 @@ mux.Handle("GET /auth/google", oauth.DynamicBeginHandler(store, "google",
 
 - **PKCE-S256**: on by default for all providers; disable only with `WithoutPKCE` for non-compliant providers.
 - **State CSRF binding**: state cookie packs `state + PKCE verifier + nonce + provider + tenant`; callback verifies all five fields with constant-time comparison.
-- **State cookie is opaque, NOT signed/encrypted**: it is a plain concatenation; the PKCE verifier and OIDC nonce sit in it **in plaintext**. Integrity model is "attacker can't read/write the cookie" (`HttpOnly` + `Secure` + `SameSite=Lax`), not tamper-evidence. Consumer must **never log/mirror request cookies** (the verifier/nonce would leak), and must re-derive the guarantee if moving `state` off the cookie (server-side handle, header, different prefix). Default name `oauth_state` is **not** `__Host-` prefixed (unlike tokens/sessions cookies); for subdomain cookie-tossing defence set `WithStateCookieName("__Host-oauth_state")` when serving over HTTPS with no cookie `Domain`.
+- **State cookie is authenticated and host-locked by default**: default name `__Host-oauth_state` (browser-enforced `Secure`, no `Domain`, `Path=/`), `HttpOnly` + `Secure` + `SameSite=Lax`, HMAC-SHA-256 signed with the **required** `WithStateSigningKey` (>= `MinStateSigningKeyLength` = 32 bytes; the shared credential policy also refuses trivial and published/near-copy keys), and the callback compares the `state` binding in constant time. It is **not encrypted**: the PKCE verifier and OIDC nonce sit in it **in plaintext**. Consumer must **never log/mirror request cookies** (the verifier/nonce would leak), and must re-derive the guarantee if moving `state` off the cookie (server-side handle, header, different prefix). A deployment that must share the in-flight state cookie across subdomains opts out of host-locking explicitly with `WithCookieDomain` + `WithStateCookieName`.
 - **Nonce replay**: nonce minted per flow (32 random bytes), bound in state cookie, verified against id_token `nonce` claim; single-use (state cookie cleared on any callback outcome).
 - **JWKS id_token verification**: signature checked against issuer's JWKS; JWKS host must match issuer host (`ErrJWKSHostMismatch`); `"none"` and HMAC algs always rejected.
 - **SSRF**: two-layer guard — `ValidateExternalURL` at registration time (https, no literal internal IP), `SafeHTTPClient` at dial time (post-DNS-resolution, DNS-rebinding-proof); env proxies ignored. `SafeHTTPClient` is the default for the provider's token/userinfo fetches as well as discovery/JWKS; `oauth.WithHTTPClient` and the dev-only `oauth.WithInsecureURLs` opt out.
 - **Unverified email**: rejected by default (`WithAllowUnverifiedEmail` to opt in); prevents account squatting.
-- **Deferred config errors**: invalid provider config (non-https endpoint, bad OIDC config) is recorded at construction and surfaced on first use; never panics (safe for dynamic `ProviderStore` over tenant-controlled data).
+- **Deferred config errors fail closed on the begin path**: invalid provider config (non-https endpoint, bad OIDC config) is recorded at construction (never panics — safe for dynamic `ProviderStore` over tenant-controlled data). The begin path now refuses such a provider with `500`, and `AuthCodeURL` returns `""`, so the authorization redirect never sends the state, PKCE challenge, `client_id` or `redirect_uri` to an endpoint that failed the https-only validation; `Exchange` returns the underlying config error.
 - **Apple**: no userinfo endpoint — `WithOIDC` is mandatory, not optional.
 - **Facebook**: no email-verified signal; `UserInfo.EmailVerified` is always `false`.
 

@@ -49,10 +49,16 @@ type handlerConfig struct {
 	stepUpRequired    bool
 	amrResolve        func(r *http.Request) []string
 	// sessionResolver, when set, is the authoritative account-state resolver the step-up
-	// issuance pipeline consults before re-issuing the full pair. When nil the pipeline uses the
-	// resolved user/tenant with no extra lifecycle lookup, because the handler has already
-	// verified the second factor against the interim session. See WithSessionStateResolver.
+	// issuance pipeline consults before re-issuing the full pair. When nil the StepUpHandler fails
+	// closed (500 misconfigured) unless insecureEchoSessionState is set. See
+	// WithSessionStateResolver and WithInsecureEchoSessionState.
 	sessionResolver issuance.Resolver
+	// assurance, when set, is the credential-enrollment assurance gate (see WithCredentialAssurance). EnrollHandler/ConfirmHandler call it before doing any work and refuse with 403 assurance_required when it returns an error. When nil AND insecureNoAssuranceCheck is false the handlers FAIL CLOSED: enrolling a second factor must never silently accept an interim (pre-MFA) session.
+	assurance func(*http.Request) error
+	// insecureNoAssuranceCheck disables the fail-closed assurance requirement (see WithInsecureNoAssuranceCheck): enrollment then accepts any authenticated session, including an interim (pre-MFA) one.
+	insecureNoAssuranceCheck bool
+	// insecureEchoSessionState restores the legacy StepUpHandler default (see WithInsecureEchoSessionState): with no authoritative session-state resolver, the issuance pipeline echoes the interim token's own subject/tenant. Off by default so the handler fails closed instead.
+	insecureEchoSessionState bool
 }
 
 // HandlerOption configures the MFA HTTP handlers.
@@ -160,9 +166,12 @@ func WithMustChangeResolver(fn func(r *http.Request) bool) HandlerOption {
 // keeps account lifecycle state outside the interim token (the usual case): the interim token
 // may outlive the account's disabled/deleted check by its TTL, so step-up must re-check the
 // live account before minting a renewable pair. The resolver's must-change answer is OR-ed with
-// the interim/must-change-resolver signal, so it can add the flag but never clear it. When nil,
-// the pipeline still enforces the tenant binding and the forced-change flag carried by the
-// ceremony.
+// the interim/must-change-resolver signal, so it can add the flag but never clear it.
+//
+// StepUpHandler FAILS CLOSED without it: when neither this option nor
+// WithInsecureEchoSessionState is supplied, every step-up request is refused with 500
+// misconfigured. The legacy echo behavior is available only through the explicit insecure
+// opt-out.
 func WithSessionStateResolver(r issuance.Resolver) HandlerOption {
 	return func(h *handlerConfig) { h.sessionResolver = r }
 }
@@ -200,6 +209,11 @@ func WithAMRResolver(fn func(r *http.Request) []string) HandlerOption {
 func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		// Enrolling a second factor is a credential-management action: refuse a session that
+		// has not met the configured assurance gate (fail closed by default).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
 		account := r.PostForm.Get(cfg.accountField)
 		if account == "" {
 			account = uid.String()
@@ -218,6 +232,11 @@ func EnrollHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 func ConfirmHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		// Confirming a factor is a credential-management action: refuse a session that has not
+		// met the configured assurance gate (fail closed by default).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
 		codes, err := svc.ConfirmTOTP(r.Context(), tenant, uid, r.PostForm.Get(cfg.codeField))
 		if err != nil {
 			cfg.failErr(w, r, err)
@@ -479,10 +498,22 @@ type StepUpClaimsBuilder[C any] func(ctx context.Context, userID uuid.UUID, tena
 // new token but never the interim one. On an incorrect/expired code it fails (like VerifyHandler)
 // and mints nothing, so the interim session is never upgraded.
 //
+// It FAILS CLOSED without an authoritative session-state resolver: when neither
+// WithSessionStateResolver nor WithInsecureEchoSessionState is supplied, every request is
+// refused with 500 misconfigured, because minting the renewable pair from the interim token's
+// own subject would let an account disabled between the two factors obtain a fresh session.
+// The legacy echo behavior is available only through the explicit insecure opt-out.
+//
 // Rate-limiting note matches VerifyHandler: wrap this endpoint with ratelimit.Middleware.
 func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	resolver := cfg.sessionResolver
+	// Fail closed: minting the final renewable pair from the interim token's own subject is a
+	// lifecycle bypass — an account disabled between the password factor and the second factor
+	// would obtain a fresh session — so with no authoritative resolver (and no explicit
+	// opt-out) every request is refused. See WithInsecureEchoSessionState for the legacy echo
+	// behavior.
+	misconfigured := resolver == nil && !cfg.insecureEchoSessionState
 	if resolver == nil {
 		// No lifecycle store is available to the MFA package; the interim ceremony has already
 		// proven the second factor, so the state source reports the resolved identity only. Wire
@@ -493,6 +524,10 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 	}
 	pipe, pipeErr := issuance.New(issuer, issuance.WithResolver(resolver))
 	return cfg.guarded(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID, tenant string) {
+		if misconfigured {
+			cfg.fail(w, r, http.StatusInternalServerError, "misconfigured")
+			return
+		}
 		if pipeErr != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
 			return
@@ -576,4 +611,58 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 // remove, the allowlist.
 func WithInsecureNoOriginCheck() HandlerOption {
 	return func(h *handlerConfig) { h.insecureNoOriginCheck = true }
+}
+
+// WithCredentialAssurance gates the credential-enrollment handlers (EnrollHandler and
+// ConfirmHandler) on fn, which must return nil for a session allowed to enroll a factor and
+// an error otherwise. The intended gate is tokens.DenyInterim, which refuses an interim
+// (pre-second-factor) session: without it, an attacker holding only the password can enroll
+// their own TOTP factor on the interim session and then complete step-up with it.
+//
+// The handlers FAIL CLOSED by default: when neither this option nor
+// WithInsecureNoAssuranceCheck is supplied, Enroll/Confirm refuse with 403
+// assurance_required. That makes the secure composition the default rather than a wiring the
+// application must remember.
+func WithCredentialAssurance(fn func(*http.Request) error) HandlerOption {
+	return func(h *handlerConfig) { h.assurance = fn }
+}
+
+// WithInsecureNoAssuranceCheck removes the fail-closed credential-enrollment protection: the
+// enrollment handlers no longer require an assurance gate, so ANY authenticated session —
+// including an interim (pre-MFA) session minted after only the password factor — can enroll a
+// second factor. Use it only when the application has no second factor to protect (an interim
+// session is then indistinguishable from a full one) or enforces the assurance requirement in
+// an outer layer. Prefer WithCredentialAssurance(tokens.DenyInterim).
+func WithInsecureNoAssuranceCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoAssuranceCheck = true }
+}
+
+// assuranceCheck enforces the credential-enrollment assurance gate. It reports true when the
+// request may proceed. By default (no gate configured and no explicit opt-out) it fails closed
+// with 403 assurance_required, because an enrollment route must never silently accept an
+// interim (pre-MFA) session.
+func (cfg handlerConfig) assuranceCheck(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.insecureNoAssuranceCheck {
+		return true
+	}
+	if cfg.assurance == nil {
+		cfg.fail(w, r, http.StatusForbidden, "assurance_required")
+		return false
+	}
+	if err := cfg.assurance(r); err != nil {
+		cfg.fail(w, r, http.StatusForbidden, "assurance_required")
+		return false
+	}
+	return true
+}
+
+// WithInsecureEchoSessionState restores the legacy StepUpHandler default: with no
+// WithSessionStateResolver the issuance pipeline re-uses the interim token's own subject and
+// tenant without consulting authoritative account state. That disables the live
+// disabled/deleted re-check every other login path enforces by construction, so an account
+// suspended between the password factor and the second factor can still complete step-up and
+// receive a full renewable pair. Use it only when account lifecycle is enforced outside the
+// library, or in tests of the legacy behavior; prefer WithSessionStateResolver.
+func WithInsecureEchoSessionState() HandlerOption {
+	return func(h *handlerConfig) { h.insecureEchoSessionState = true }
 }

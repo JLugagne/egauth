@@ -34,6 +34,8 @@ func TestAllowed(t *testing.T) {
 		{"prefix lookalike rejected", req("https://app.example.com.evil.com", ""), false},
 		{"missing origin and referer rejected", req("", ""), false},
 		{"referer fallback allowed", req("", "https://app.example.com/page"), true},
+		{"userinfo-smuggled referer rejected", req("", "https://evil.example.com@app.example.com/settings"), false},
+		{"scheme-relative referer rejected", req("", "//app.example.com/settings"), false},
 		{"opaque null rejected", req("null", ""), false},
 	}
 	for _, tc := range cases {

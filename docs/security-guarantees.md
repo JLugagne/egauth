@@ -48,6 +48,15 @@ experimental) are listed in
   OAuth re-linking; soft-deleted accounts are re-checked on every consume path.
 - Forced-password-change is set only by administrative provisioning and is carried onto every
   renewal of the session family; a flagged user is never locked out.
+- The authenticated `ChangePassword` verifies the current password under the same lockout policy
+  as login: a wrong guess feeds the failed-attempt counter (and can lock the account), a locked
+  account cannot change its password, and a success clears the counter.
+- Every password rotation (`ResetPassword`, `ChangePassword`, `SetTemporaryPassword`) clears the
+  account's recovery channels, purges its pending verification tokens, and runs every registered
+  `AccountEraser`; account deletion does the same and `DisableUser` also purges pending tokens.
+- The credential-enrollment handlers (email change, phone, recovery email) default to the
+  `tokens.DenyInterim` gate and refuse an interim (pre-second-factor) session with
+  `403 assurance_required`.
 - A pre-auth body cap bounds password-hashing work.
 
 **Consumer must**
@@ -55,8 +64,9 @@ experimental) are listed in
 - Rate-limit the `Request*`, login and verify endpoints (per IP and per account/destination).
 - Supply `Mailer`/`SMSSender` implementations and deliver off the response path; `egauth` never
   sends anything.
-- Register `AccountErasers` for the stores that hold credential state so account deletion and
-  password changes revoke live sessions and token families promptly.
+- Register `AccountErasers` for every credential class you use — at minimum
+  `tokens.NewAccountRevoker(...)` and `passkey.Service.AccountEraser()` — so password changes,
+  resets and account deletion evict live sessions, refresh families and passkey credentials.
 - Treat the documented account-existence disclosures (`429`, `409 email_taken`) as a deliberate
   trade-off and override the handlers where the threat model forbids them.
 
@@ -66,14 +76,18 @@ experimental) are listed in
 
 - JWT verification pins the algorithm and selects the signer by `kid`; `"none"` and algorithm
   confusion are rejected.
-- Signing keys are validated at construction: HMAC secrets below 32 bytes, all-zero/repeated-byte
-  keys and published example keys are rejected (`InsecureAllowWeakKey` suppresses only the length
-  gate).
+- Signing keys are validated at construction through the shared credential policy: HMAC secrets
+  below 32 bytes, all-zero/repeated-byte keys, exact published-example literals and marker-bearing
+  near-copies are rejected (`InsecureAllowWeakKey` suppresses only the length gate).
 - Refresh tokens are single-use, chained by family, and stored only as SHA-256 hashes. Replaying
-  a consumed token within its validity revokes the whole family; concurrent benign re-use inside
-  `ReuseGracePeriod` is rejected without revocation.
-- Rotation carries the tenant, the forced-change flag and the original `auth_time` forward; the
-  tenant is immutable across a family.
+  a consumed token within its validity revokes the whole family; the benign cases — re-use inside
+  `ReuseGracePeriod`, or losing the atomic consume race for the same token — surface
+  `ErrRefreshConcurrent` and are rejected *without* revocation. A failed successor save never
+  restores a concurrently revoked record.
+- Rotation carries the tenant, the forced-change flag, the original `auth_time` and the proved
+  AMR forward (when the `ClaimsProvider` returns no AMR, the family's recorded AMR is used); the
+  tenant is immutable across a family. Both refresh surfaces (the handler and auto-refresh)
+  supply the presenting client's IP/User-Agent so within-grace theft detection is client-aware.
 - Multi-tenant verification fails closed: with `Config.MultiTenant` set, the tenant-unaware
   `VerifyAccessToken` refuses and `VerifyAccessTokenForTenant` binds the signed `tenant_id` to
   the request tenant. The `RequireAuth` tenant resolver rejects an unresolved tenant with `401`.
@@ -121,7 +135,8 @@ experimental) are listed in
   construction and the account-existence paths invoke a decoy hash.
 - Hash and compare reject input longer than `MaxPasswordLength` before the KDF runs.
 - Stored cost parameters are bounds-checked before `argon2.IDKey` (lower bounds prevent panics,
-  `MaxMemoryKiB` prevents an allocation-based denial of service).
+  `MaxMemoryKiB`/`MaxTime` prevent allocation/CPU denial of service); `WithMemory`/`WithTime`
+  clamp to those same bounds, so a hasher cannot emit a PHC string its own `Compare` rejects.
 - The passphrase policy is length-first (counted in Unicode code points) with no composition
   rules, plus an optional denylist and `BreachChecker` seam.
 
@@ -142,11 +157,21 @@ experimental) are listed in
 - Digits are validated at construction (6–8) so no compliant authenticator receives an
   out-of-range code.
 - Recovery codes are single-use and stored only as SHA-256 hashes.
-- Failed attempts are counted atomically and locked after the configured budget, with a
-  time-based decay or an explicit administrative unlock.
+- Failed attempts are counted atomically and locked after the configured budget — independently
+  for TOTP and recovery codes — with a time-based decay or an explicit administrative unlock;
+  a successful verification on either path clears both counters.
+- Enrolment over HTTP is fail-closed: `EnrollHandler`/`ConfirmHandler` answer
+  `403 assurance_required` unless a gate (canonical: `tokens.DenyInterim`) or the explicit
+  insecure opt-out is wired, so an interim (pre-MFA) session cannot enrol its own factor.
+- `StepUpHandler` is fail-closed: without an authoritative `WithSessionStateResolver` it answers
+  `500 misconfigured` instead of minting the full pair from the interim token's own subject.
 
 **Consumer must**
 
+- Wire `WithCredentialAssurance(tokens.DenyInterim)` on the enrolment handlers and
+  `WithSessionStateResolver(...)` on step-up — assert `idSvc.(issuance.Resolver)`, since the
+  exported `identity.Service` interface does not expose the resolver method; opt out only
+  deliberately.
 - Rate-limit TOTP and recovery-code verification (the module does not throttle).
 - Encrypt the TOTP secret at rest at the storage layer: it must be recoverable for code
   computation and is intentionally not hashed.
@@ -162,6 +187,10 @@ experimental) are listed in
   nor burn a freshly issued replacement.
 - Attempt slots are reserved atomically before comparison, so concurrent wrong guesses cannot
   exceed the limit, and codes carry a TTL and a per-subject cooldown.
+- Issuance is one atomic cooldown-check-and-upsert (`Store.IssueOTP`), so concurrent issue
+  requests yield exactly one code (the rest get `ErrCooldownActive`), and the last-issued instant
+  is a durable tombstone that survives consume/burn/expiry/eviction — burning a code cannot reset
+  the resend throttle or start a fresh attempt budget.
 - Digits are validated at construction (6–10).
 
 **Consumer must**
@@ -177,7 +206,13 @@ experimental) are listed in
 - WebAuthn ceremonies are scoped to the configured Relying Party ID, and the ceremony
   `SessionData` travels in a short-lived HMAC-signed cookie that the client cannot tamper with.
 - `Config.CookieKey` and `Config.ChallengeStore` are required (fail-fast at construction);
+  the key is screened by the shared credential policy (trivial/published/near-copy rejected),
   challenges are single-use and server-side, and user verification defaults to required.
+- Registration Begin/Finish are fail-closed: they answer `403 assurance_required` unless a gate
+  (canonical: `tokens.DenyInterim`) or the explicit insecure opt-out is wired.
+- `Service.AccountEraser()` returns an `identity.AccountEraser` that deletes every passkey the
+  user registered; wired into `identity.WithAccountErasers` it makes password reset/change and
+  account deletion evict passkey credentials (including an attacker-enrolled one).
 - A regressed signature counter is rejected as a possible cloned credential.
 - `Config.AccountGate` lets the ceremony refuse suspended/deleted accounts.
 - `RenameCredentialHandler` enforces the same-origin gate plus `Content-Type: application/json`.
@@ -186,6 +221,9 @@ experimental) are listed in
 
 - Supply a stable random `CookieKey`, a challenge store, an account gate where accounts can be
   disabled, and serve over HTTPS.
+- Wire `WithCredentialAssurance(tokens.DenyInterim)` on the registration handlers, and register
+  `passkeySvc.AccountEraser()` with `identity.WithAccountErasers` (with the token revoker) so
+  password rotations evict registered passkeys.
 - Rate-limit ceremony attempts; the module deliberately does not throttle them.
 - Route the login success callback through the `issuance` pipeline (or the `authflow` engine) so
   the account-state, tenant and forced-change invariants are applied.
@@ -196,7 +234,10 @@ experimental) are listed in
 
 - Authorization-code flow with PKCE S256 by default; the CSRF `state`, PKCE verifier and OIDC
   nonce are carried in a host-locked `__Host-oauth_state` cookie that is HMAC-signed with a
-  required key (`WithStateSigningKey`, minimum 32 bytes) and compared in constant time.
+  required key (`WithStateSigningKey`, minimum 32 bytes, screened by the shared credential policy
+  against trivial/published/near-copy values) and compared in constant time. A provider whose
+  endpoint URLs failed the https-only validation is refused on the begin path (`500`, no
+  redirect) instead of receiving the state/PKCE/`redirect_uri`.
 - The token exchange and userinfo fetches run server-side with `oauth.SafeHTTPClient` by default:
   the dial-time guard rejects loopback/link-local/private/unique-local/unspecified/multicast
   addresses after DNS resolution (rebinding-safe), does not follow redirects, and ignores
@@ -235,7 +276,9 @@ experimental) are listed in
 - Signing material is resolved per tenant; a key presented under the wrong tenant fails closed
   with `ErrTenantMismatch`, and a tenant with no active key fails closed with `ErrNoActiveKey`.
 - Stored secrets are sealed with the deployment KEK (envelope encryption); the KEK is required
-  and validated at construction.
+  and validated at construction through the shared credential policy — trivial (all-zero/
+  repeated-byte), published-example and near-copy KEKs are refused (`ErrTrivialKEK` /
+  `ErrPublishedKEK`).
 - Provision, renew, revoke and delete are explicit lifecycle operations with event emission; the
   empty tenant ID is a real single-tenant partition, and the static single-keyset mode remains
   the default elsewhere in the library.
@@ -270,6 +313,11 @@ experimental) are listed in
   gate for both handler families, and a per-IP rate limit. It refuses to build with an empty
   `Config.TrustedOrigins` unless `Config.InsecureNoOriginCheck` is set, and the opt-out is
   applied consistently to both families.
+- `Config.EventSink` is wired into both handler families and the issuer the preset builds (a nil
+  sink selects `event.NewSlogSink(nil)` instead of dropping events), so logout and
+  refresh-family revocation are audited. Events from a caller-constructed `identity.Service`
+  (login/registration/password changes) are wired by the caller via `identity.WithEventSink` on
+  that service.
 
 **Consumer must**
 
@@ -283,6 +331,9 @@ experimental) are listed in
 - The flow state is carried in an HMAC-SHA-256 signed, expiring token; the account validator is
   required whenever the MFA gate is configured; credentials are minted only through the
   `issuance` pipeline.
+- The engine's flow-token HMAC key is screened by the shared credential policy (short,
+  trivial, published-example and near-copy keys are refused), and the engine redacts its secret
+  on every `fmt` verb — including the value form and non-string verbs — as well as `slog`.
 
 **Consumer must**
 

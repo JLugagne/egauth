@@ -10,14 +10,14 @@ import (
 // mandatory tenantID argument. An empty string is a legal tenant key (the single-tenant
 // default partition); it must still be passed explicitly.
 //
-// Store is the composition of the single cohesive CredentialStore capability. Credential
-// persistence has no background-only (reaper) or otherwise optional operation to split out today,
-// so there is just one capability interface — but expressing Store as an embedding of named
-// capability interfaces keeps it uniform with the other modules and means a future v1.x capability
-// (e.g. a credential reaper) can ship as a NEW optional interface that implementers type-assert
-// for, rather than as a method added to Store, which would break every external implementation.
+// Store is the composition of the cohesive credential-CRUD capability (CredentialStore) and the
+// account-recovery capability (CredentialEraser). Expressing Store as an embedding of named
+// capability interfaces keeps it uniform with the other modules and means a future v1.x
+// capability (e.g. a credential reaper) can ship as a NEW interface rather than as a method
+// added ad hoc to Store.
 type Store interface {
 	CredentialStore
+	CredentialEraser
 }
 
 // CredentialStore is the credential-CRUD capability of a passkey backend: saving newly registered
@@ -35,4 +35,18 @@ type CredentialStore interface {
 	// DeleteCredential removes one of the user's credentials by its credential ID. Returns
 	// ErrCredentialNotFound if absent.
 	DeleteCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) error
+}
+
+// CredentialEraser is the account-recovery capability of a passkey backend: deleting every
+// credential a user has registered so a password reset / account recovery evicts passkeys an
+// attacker may have enrolled. It backs Service.AccountEraser, which adapts it to the
+// identity.AccountEraser hook the identity service runs on reset and deletion.
+//
+// Implementations MUST be idempotent (deleting for a user with no credentials returns nil),
+// because account erasure may be retried after a partial failure, and MUST scope the deletion
+// to the given tenant and user only.
+type CredentialEraser interface {
+	// DeleteCredentialsByUser removes every credential registered by userID in tenantID and
+	// returns nil when the user has none.
+	DeleteCredentialsByUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }

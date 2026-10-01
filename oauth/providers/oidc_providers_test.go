@@ -113,7 +113,7 @@ func TestOIDC_DiscoversEndpoints(t *testing.T) {
 	t.Cleanup(srv.Close)
 	issuer = srv.URL
 
-	p := providers.OIDC(context.Background(), issuer, "id", "secret", nil,
+	p := providers.OIDC(context.Background(), issuer, "id", "secret", []oauth.ProviderOption{oauth.WithInsecureURLs()},
 		providers.WithDiscoveryHTTPClient(srv.Client()),
 		providers.WithProviderName("fake-idp"),
 		providers.WithInsecureDiscoveryURLs(), // test server is http; opt-in required
@@ -213,7 +213,7 @@ func TestOIDC_InsecureOptInAllowsLoopback(t *testing.T) {
 	t.Cleanup(srv.Close)
 	issuer = srv.URL // http://127.0.0.1:<port>
 
-	p := providers.OIDC(context.Background(), issuer, "id", "secret", nil,
+	p := providers.OIDC(context.Background(), issuer, "id", "secret", []oauth.ProviderOption{oauth.WithInsecureURLs()},
 		providers.WithDiscoveryHTTPClient(srv.Client()),
 		providers.WithInsecureDiscoveryURLs(), // loopback http opt-in
 	)

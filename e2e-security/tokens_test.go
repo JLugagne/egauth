@@ -2,6 +2,7 @@ package e2esecurity_test
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"reflect"
 	"testing"
@@ -648,7 +649,12 @@ func TestVulnerability_SECTOK05_DestructiveKeyDeletionOnRetireExpiredKeys(t *tes
 	currTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return currTime }
 
-	kek, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
+	// The KEK is generated with crypto/rand: the shared credential policy now refuses published
+	// example keys (keystore.ErrPublishedKEK), and a test must not ship attacker-known material.
+	kekKey := make([]byte, keystore.KEKKeyLength)
+	_, err := rand.Read(kekKey)
+	require.NoError(t, err)
+	kek, err := keystore.NewKEK(kekKey)
 	require.NoError(t, err)
 
 	// Memory store with soft-retire enabled

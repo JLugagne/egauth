@@ -3,6 +3,8 @@ package revocation
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"sync"
 )
 
@@ -41,6 +43,10 @@ func (b *MemBus) Subscribe(target TargetType, h Handler) {
 // already cancelled, and otherwise calls every matched handler even if earlier ones fail,
 // returning all handler errors joined via errors.Join (nil when every handler succeeds). The
 // wildcard set is not double-delivered when rev.TargetType is itself TargetAll.
+//
+// A handler that panics is recovered: the panic is logged at Error level and reported as an error
+// in the joined result, so a misbehaving subscriber can neither abort the fan-out — every later
+// subscriber still receives the revocation — nor unwind into the producer's request path.
 func (b *MemBus) Publish(ctx context.Context, rev Revocation) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -60,9 +66,24 @@ func (b *MemBus) Publish(ctx context.Context, rev Revocation) error {
 			errs = append(errs, err)
 			break
 		}
-		if err := h.HandleRevocation(ctx, rev); err != nil {
+		if err := handleSafely(ctx, h, rev); err != nil {
 			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// handleSafely invokes h and converts a panic into an error. MemBus has no observer seam, so a
+// recovered panic is surfaced two ways: it is logged at Error level (a broken revocation
+// subscriber is security-relevant) and returned, so Publish reports it in the joined error
+// instead of letting the producer believe every subscriber revoked. This mirrors event.safeEmit.
+func handleSafely(ctx context.Context, h Handler, rev Revocation) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("revocation: handler panicked: %v", r)
+			slog.Default().Error("egauth: revocation handler panicked",
+				"target_type", string(rev.TargetType), "panic", r)
+		}
+	}()
+	return h.HandleRevocation(ctx, rev)
 }

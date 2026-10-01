@@ -92,6 +92,15 @@ type handlerConfig struct {
 	// sessionResolver overrides the authoritative account-state resolver the issuance pipeline
 	// consults; nil means "use the Service's SessionStateReader". See WithSessionStateResolver.
 	sessionResolver issuance.Resolver
+	// assurance, when set, is the credential-enrollment assurance gate (see
+	// WithCredentialAssurance): the six enrollment handlers (Request/Confirm recovery email, email
+	// change and phone verification) call it before doing any work and refuse with 403
+	// assurance_required when it returns an error. It defaults to tokens.DenyInterim, which refuses
+	// only a positively-present interim (pre-MFA) access-token context: token-less (session-based)
+	// applications and fully-elevated sessions are unaffected, while token-based applications get
+	// the fail-closed composition the interim-session model requires (F-COMP-001). Set it to nil
+	// (WithInsecureNoAssuranceCheck) to opt out.
+	assurance func(*http.Request) error
 }
 
 // HandlerOption configures the identity HTTP handlers (LoginHandler, RegisterHandler).
@@ -115,6 +124,10 @@ func newHandlerConfig(opts []HandlerOption) handlerConfig {
 		deliveryConcurrency:  DefaultDeliveryConcurrency,
 		deliveryTimeout:      DefaultDeliveryTimeout,
 		interimTTL:           DefaultInterimTokenTTL,
+		// Credential-enrollment handlers default to the canonical interim gate: it denies only
+		// when an interim (pre-MFA) access-token context is positively present, so token-less
+		// (session-based) applications are unaffected (F-COMP-001).
+		assurance: tokens.DenyInterim,
 	}
 	for _, opt := range opts {
 		opt(&c)
@@ -1177,6 +1190,12 @@ func isMFAVerified[C any](r *http.Request, cfg handlerConfig) bool {
 func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Starting an email change is credential management: the default tokens.DenyInterim gate
+		// refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1256,6 +1275,12 @@ func RequestEmailChangeHandler(svc Service, mailer Mailer, opts ...HandlerOption
 func ConfirmEmailChangeHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Completing an email change is credential management: the default tokens.DenyInterim
+		// gate refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1416,6 +1441,12 @@ func parseFormBool(v string) bool {
 func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Starting a phone enrollment is credential management: the default tokens.DenyInterim
+		// gate refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1491,6 +1522,12 @@ func RequestPhoneVerificationHandler(svc Service, sender SMSSender, opts ...Hand
 func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Completing a phone enrollment is credential management: the default tokens.DenyInterim
+		// gate refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1528,6 +1565,12 @@ func ConfirmPhoneVerificationHandler(svc Service, opts ...HandlerOption) http.Ha
 func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Starting a recovery-channel enrollment is credential management: the default
+		// tokens.DenyInterim gate refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1598,6 +1641,12 @@ func RequestRecoveryEmailHandler(svc Service, mailer Mailer, opts ...HandlerOpti
 func ConfirmRecoveryEmailHandler(svc Service, opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Completing a recovery-channel enrollment is credential management: the default
+		// tokens.DenyInterim gate refuses an interim (pre-MFA) session (F-COMP-001).
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
+
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", http.MethodPost)
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -1782,4 +1831,41 @@ func requestContext(r *http.Request) event.RequestContext {
 		ip = host
 	}
 	return event.RequestContext{IP: ip, UserAgent: r.UserAgent()}
+}
+
+// assuranceCheck enforces the credential-enrollment assurance gate. It reports true when the
+// request may proceed. The default gate is tokens.DenyInterim (see handlerConfig.assurance); a
+// nil gate means the application explicitly opted out (WithInsecureNoAssuranceCheck). A denying
+// gate fails the request closed with 403 assurance_required.
+func (cfg handlerConfig) assuranceCheck(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.assurance == nil {
+		return true
+	}
+	if err := cfg.assurance(r); err != nil {
+		cfg.fail(w, r, http.StatusForbidden, "assurance_required")
+		return false
+	}
+	return true
+}
+
+// WithCredentialAssurance overrides the default credential-enrollment assurance gate. The gate
+// is called before the enrollment handlers (Request/Confirm recovery email, email change and
+// phone verification) do any work; returning an error makes them refuse with 403
+// assurance_required. The default and intended gate is tokens.DenyInterim, which refuses an
+// interim (pre-second-factor) access-token context and allows everything else — including a
+// request with no token context at all (session-based applications).
+//
+// A nil gate is treated as "no gate"; prefer WithInsecureNoAssuranceCheck for that, whose name
+// makes the security decision explicit.
+func WithCredentialAssurance(fn func(*http.Request) error) HandlerOption {
+	return func(h *handlerConfig) { h.assurance = fn }
+}
+
+// WithInsecureNoAssuranceCheck removes the credential-enrollment assurance gate: the six
+// enrollment handlers then accept ANY authenticated request, including an interim (pre-MFA)
+// session. That reopens the MFA-bypass class F-COMP-001 describes: a password-only interim
+// session could start enrolling a recovery channel or move the primary email. Only use it when
+// an outer layer enforces the same assurance; prefer the default tokens.DenyInterim.
+func WithInsecureNoAssuranceCheck() HandlerOption {
+	return func(h *handlerConfig) { h.assurance = nil }
 }

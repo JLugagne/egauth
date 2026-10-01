@@ -4,8 +4,10 @@
 //
 // [NewStore] is bounded by default: the store retains at most [DefaultMaxEntries]
 // per-user recovery-code attempt records, evicting the stalest record when a new
-// user is tracked at the cap. It is the only map that can be grown by callers
-// without an existing enrollment, so it is the only one capped.
+// user is tracked at the cap. A record under an active lockout is never evicted —
+// each becomes reclaimable once its lock decays — so the map can temporarily
+// exceed the cap while every tracked record is locked. It is the only map that can
+// be grown by callers without an existing enrollment, so it is the only one capped.
 //
 // TOTP enrollments and recovery codes are durable per-user security state (one
 // record per account), so they are never silently evicted; [NewUnboundedStore]
@@ -33,7 +35,7 @@ type recoveryAttempt struct {
 //
 // Stores created by [NewStore] cap the number of tracked recovery-attempt records
 // at [DefaultMaxEntries]; TOTP enrollments and recovery codes are durable and are
-// never evicted.
+// never evicted, and neither is an active recovery lockout (see [NewBoundedStore]).
 type Store struct {
 	mu               sync.RWMutex
 	maxSize          int // cap on recoveryAttempts; 0 means unbounded
@@ -42,11 +44,12 @@ type Store struct {
 	recoveryAttempts map[string]*recoveryAttempt
 }
 
-// DefaultMaxEntries is the default hard cap on the number of per-user recovery-code attempt
+// DefaultMaxEntries is the default cap on the number of per-user recovery-code attempt
 // records an in-memory Store created by [NewStore] tracks. It is deliberately generous so
 // ordinary single-process use never hits it; it exists because recovery attempts can be recorded
 // for caller-supplied user IDs even when no enrollment exists, so the map is otherwise a memory
-// exhaustion vector.
+// exhaustion vector. Records under an active lockout are never evicted, so the map can exceed
+// this cap while every tracked record is locked.
 const DefaultMaxEntries = 100_000
 
 // NewStore creates a new in-memory Store bounded by [DefaultMaxEntries].
@@ -56,8 +59,10 @@ func NewStore() *Store {
 
 // NewBoundedStore creates a new in-memory Store that tracks at most maxSize
 // recovery-attempt records. When a new user is tracked at the cap the stalest
-// record (earliest last attempt) is evicted. maxSize must be >= 1; values below
-// 1 are floored to 1.
+// record (earliest last attempt) is evicted — except a record under an active
+// lockout, which is never evicted: the map can exceed maxSize while every tracked
+// record is locked, and each locked record becomes reclaimable once its lock
+// decays. maxSize must be >= 1; values below 1 are floored to 1.
 func NewBoundedStore(maxSize int) *Store {
 	if maxSize < 1 {
 		maxSize = 1
@@ -80,9 +85,10 @@ func NewUnboundedStore() *Store {
 	}
 }
 
-// MaxEntries returns the configured hard cap on the number of recovery-attempt
-// records the store tracks. Zero means the store is unbounded (see
-// [NewUnboundedStore]).
+// MaxEntries returns the configured cap on the number of recovery-attempt records
+// the store tracks. Zero means the store is unbounded (see [NewUnboundedStore]).
+// The reported cap is nominal: active lockouts may temporarily exceed it (see
+// [NewBoundedStore]).
 func (s *Store) MaxEntries() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -258,7 +264,7 @@ func (s *Store) IncrementRecoveryAttempts(ctx context.Context, tenantID string, 
 	att, ok := s.recoveryAttempts[k]
 	if !ok {
 		if s.maxSize > 0 && len(s.recoveryAttempts) >= s.maxSize {
-			s.evictStalestRecoveryAttemptLocked()
+			s.evictStalestRecoveryAttemptLocked(now, maxAttempts, lockoutDuration)
 		}
 		att = &recoveryAttempt{}
 		s.recoveryAttempts[k] = att
@@ -313,16 +319,25 @@ func (s *Store) DeleteStaleRecoveryAttempts(ctx context.Context, tenantID string
 	return deleted, nil
 }
 
-// evictStalestRecoveryAttemptLocked removes the recovery-attempt record with the
-// earliest lastAttemptAt to make room for a new one. Must be called with the write
-// lock held.
-func (s *Store) evictStalestRecoveryAttemptLocked() {
+// evictStalestRecoveryAttemptLocked removes the recovery-attempt record with the earliest
+// lastAttemptAt to make room for a new one, skipping records whose lockout is still active: a
+// locked record's timestamp is frozen by the lockout branch of IncrementRecoveryAttempts, so it
+// is always the stalest and would otherwise be evicted first, silently lifting the lockout the
+// store is supposed to enforce (F-MFA-001). When every tracked record is locked the cap is
+// exceeded temporarily — each locked record becomes reclaimable once its lock decays. Must be
+// called with the write lock held.
+func (s *Store) evictStalestRecoveryAttemptLocked(now time.Time, maxAttempts int, lockoutDuration time.Duration) {
 	var (
 		victimKey string
 		victimAt  time.Time
 		found     bool
 	)
 	for k, att := range s.recoveryAttempts {
+		if lockedFor(att, now, maxAttempts, lockoutDuration) {
+			// Never reclaim live lockout state: evicting it would hand the caller a fresh
+			// guess budget without waiting for the lockout to expire (F-MFA-001).
+			continue
+		}
 		if !found || att.lastAttemptAt.Before(victimAt) {
 			victimKey = k
 			victimAt = att.lastAttemptAt
@@ -347,4 +362,19 @@ func (s *Store) ResetTOTPAttempts(ctx context.Context, tenantID string, userID u
 	e.FailedAttempts = 0
 	e.LastAttemptAt = time.Time{}
 	return nil
+}
+
+// lockedFor reports whether att is under an active lockout that eviction must not clear. It
+// mirrors the lockout branch of IncrementRecoveryAttempts: a record is locked when the
+// failed-attempt count reached maxAttempts and the configured lockoutDuration has not elapsed
+// since the locking attempt (a non-positive lockoutDuration never decays). A non-positive
+// maxAttempts disables limiting, so nothing is ever locked.
+func lockedFor(att *recoveryAttempt, now time.Time, maxAttempts int, lockoutDuration time.Duration) bool {
+	if maxAttempts <= 0 || att.failedAttempts < maxAttempts {
+		return false
+	}
+	if lockoutDuration > 0 && !att.lastAttemptAt.IsZero() && now.Sub(att.lastAttemptAt) > lockoutDuration {
+		return false // decayed: the record is reclaimable and the next attempt starts a fresh budget
+	}
+	return true
 }

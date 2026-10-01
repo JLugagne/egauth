@@ -230,10 +230,7 @@ func (cfg Config[C]) Validate() error {
 			if len(k.Secret) < MinSecretKeyLength {
 				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q].Secret must be at least %d bytes for HS256", k.KeyID, MinSecretKeyLength))
 			}
-			if err := deniedSecretError([]byte(k.Secret)); err != nil {
-				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q]: %w", k.KeyID, err))
-			}
-			if err := trivialSecretError([]byte(k.Secret)); err != nil {
+			if err := validateSecretPolicy([]byte(k.Secret), 0); err != nil {
 				errs = append(errs, fmt.Errorf("jwt: SigningKeys[%q]: %w", k.KeyID, err))
 			}
 		}
@@ -251,10 +248,7 @@ func (cfg Config[C]) Validate() error {
 	}
 
 	if cfg.SecretKey != "" {
-		if err := deniedSecretError([]byte(cfg.SecretKey)); err != nil {
-			errs = append(errs, fmt.Errorf("jwt: SecretKey: %w", err))
-		}
-		if err := trivialSecretError([]byte(cfg.SecretKey)); err != nil {
+		if err := validateSecretPolicy([]byte(cfg.SecretKey), 0); err != nil {
 			errs = append(errs, fmt.Errorf("jwt: SecretKey: %w", err))
 		}
 	}
@@ -530,6 +524,7 @@ func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], fami
 		TenantID:           claims.TenantID,
 		AuthTime:           authTime,
 		MustChangePassword: claims.MustChangePassword,
+		AMR:                append([]string(nil), claims.AMR...),
 		ExpiresAt:          refreshExpiresAt,
 		CreatedAt:          now,
 	}
@@ -732,7 +727,6 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		keyFunc = s.tenantKeyFunc(ctx, tenantID)
 	}
 	token, err := jwt.ParseWithClaims(tokenStr, &wrapper, keyFunc, opts...)
-
 	if err != nil {
 		// An expired token keeps the dedicated sentinel. An iss/aud mismatch is an
 		// invalid-token condition (a confused-deputy attempt), NOT an expiry, so it maps to
@@ -927,6 +921,14 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	// - A freshly flagged account (where ClaimsProvider returns claims.MustChangePassword == true)
 	//   has its flag preserved and stamped onto the rotated pair and descendant refresh token (newRT).
 	claims.MustChangePassword = rt.MustChangePassword || claims.MustChangePassword
+	// Carry the family's proved assurance forward when the ClaimsProvider returns no AMR:
+	// a silent refresh must not silently downgrade a stepped-up session (a refreshed MFA
+	// session would otherwise stop satisfying WithRequiredAMR(AMRMFA)). A provider that
+	// re-evaluates AMR still wins; only an empty provider value falls back to the family's
+	// recorded assurance. Legacy records have nil AMR, so this is backward compatible.
+	if len(claims.AMR) == 0 && len(rt.AMR) > 0 {
+		claims.AMR = append([]string(nil), rt.AMR...)
+	}
 
 	// Mint the new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the
@@ -969,8 +971,23 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	}
 
 	if err := s.store.SaveRefreshToken(ctx, claims.TenantID, newRT); err != nil {
-		// Rollback: unmark the old token's ConsumedAt so the session isn't permanently orphaned.
-		rollbackRT := *rt
+		// Rollback: re-enable the old token so a transient save failure does not permanently
+		// orphan the session — but NEVER restore the pre-rotation snapshot blindly. A
+		// revocation can land between ConsumeRefreshToken and this failed Save (a concurrent
+		// theft-detection replay revoking the family, or an account-disable fan-out
+		// revoking/deleting every session), and SaveRefreshToken is an upsert: writing the
+		// stale snapshot back would clear a non-nil RevokedAt, un-consume the token and — on a
+		// delete-based store — resurrect a record the revocation removed. Re-read the record
+		// and refuse to restore unless it is still live: a revoked or deleted record always
+		// wins over the rollback.
+		current, ferr := s.store.FindRefreshToken(ctx, tenantID, hash)
+		if ferr != nil {
+			return nil, fmt.Errorf("failed to save refresh token (%w); token no longer live, rollback skipped: %v", err, ferr)
+		}
+		if current.RevokedAt != nil {
+			return nil, fmt.Errorf("failed to save refresh token (%w); token was revoked concurrently, rollback skipped", err)
+		}
+		rollbackRT := *current
 		rollbackRT.ConsumedAt = nil
 		if rerr := s.store.SaveRefreshToken(ctx, tenantID, &rollbackRT); rerr != nil {
 			return nil, fmt.Errorf("failed to save refresh token (%w); rollback also failed: %v", err, rerr)

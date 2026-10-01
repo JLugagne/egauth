@@ -40,14 +40,14 @@ func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 
 	// Enroll + confirm a TOTP factor for the user.
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var captured tokens.Claims[struct{}]
@@ -69,7 +69,7 @@ func TestStepUpHandler_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	// Step up with a fresh TOTP code (advance one period so it differs from the confirm code).
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	rec = httptest.NewRecorder()
-	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -100,14 +100,14 @@ func TestStepUpHandler_MustChange_FlaggedRenewable(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var captured tokens.Claims[struct{}]
@@ -130,7 +130,8 @@ func TestStepUpHandler_MustChange_FlaggedRenewable(t *testing.T) {
 	rec = httptest.NewRecorder()
 	// The interim token is flagged must-change.
 	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver,
-		mfa.WithMustChangeResolver(func(*http.Request) bool { return true }))
+		mfa.WithMustChangeResolver(func(*http.Request) bool { return true }),
+		mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -157,14 +158,14 @@ func TestStepUpHandler_MustChange_NormalUserGetsFullPair(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var captured tokens.Claims[struct{}]
@@ -187,7 +188,8 @@ func TestStepUpHandler_MustChange_NormalUserGetsFullPair(t *testing.T) {
 	rec = httptest.NewRecorder()
 	// Resolver reports false: the interim token is NOT flagged.
 	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver,
-		mfa.WithMustChangeResolver(func(*http.Request) bool { return false }))
+		mfa.WithMustChangeResolver(func(*http.Request) bool { return false }),
+		mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -207,13 +209,13 @@ func TestStepUpHandler_BadCodeMintsNothing(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	issued := false
 	issuer := &issuertest.MockIssuer[struct{}]{
@@ -227,7 +229,7 @@ func TestStepUpHandler_BadCodeMintsNothing(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)(rec, mfaPost(url.Values{"code": {"000000"}}))
+	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())(rec, mfaPost(url.Values{"code": {"000000"}}))
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, issued, "no token may be issued on a failed step-up")
@@ -245,7 +247,7 @@ func TestStepUpHandler_RecoveryCode_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
@@ -253,7 +255,7 @@ func TestStepUpHandler_RecoveryCode_ReissuesFullPairWithAMRMFA(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var confirm struct {
 		RecoveryCodes []string `json:"recovery_codes"`
@@ -280,7 +282,7 @@ func TestStepUpHandler_RecoveryCode_ReissuesFullPairWithAMRMFA(t *testing.T) {
 
 	// 1. Submit valid recovery code to StepUpHandler:
 	rec = httptest.NewRecorder()
-	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"code": {validRecoveryCode}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -315,14 +317,14 @@ func TestStepUpHandler_RecoveryCodeParam_ReissuesFullPair(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	var confirm struct {
 		RecoveryCodes []string `json:"recovery_codes"`
 	}
@@ -343,7 +345,7 @@ func TestStepUpHandler_RecoveryCodeParam_ReissuesFullPair(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"recovery_code": {confirm.RecoveryCodes[0]}}))
 
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -360,14 +362,14 @@ func TestStepUpHandler_InvalidRecoveryCodeMintsNothing(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	issued := false
 	issuer := &issuertest.MockIssuer[struct{}]{
@@ -381,7 +383,7 @@ func TestStepUpHandler_InvalidRecoveryCodeMintsNothing(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)(rec, mfaPost(url.Values{"code": {"ABCD-EFGH-IJKL-9999"}}))
+	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())(rec, mfaPost(url.Values{"code": {"ABCD-EFGH-IJKL-9999"}}))
 
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.False(t, issued, "no token may be issued on a failed step-up")
@@ -401,14 +403,14 @@ func TestStepUpHandler_PreservesInterimPrimaryAMR(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var captured tokens.Claims[struct{}]
@@ -432,7 +434,7 @@ func TestStepUpHandler_PreservesInterimPrimaryAMR(t *testing.T) {
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	rec = httptest.NewRecorder()
-	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, amrResolver)
+	h := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, amrResolver, mfa.WithInsecureEchoSessionState())
 	h(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
@@ -452,13 +454,13 @@ func TestStepUpHandler_NoInterimAMR_FallsBackToPassword(t *testing.T) {
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	var captured tokens.Claims[struct{}]
 	issuer := &issuertest.MockIssuer[struct{}]{
@@ -476,7 +478,7 @@ func TestStepUpHandler_NoInterimAMR_FallsBackToPassword(t *testing.T) {
 
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	rec = httptest.NewRecorder()
-	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, emptyAMR)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, emptyAMR, mfa.WithInsecureEchoSessionState())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, []string{tokens.AMRPassword, tokens.AMROTP, tokens.AMRMFA}, captured.AMR,

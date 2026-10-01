@@ -2,7 +2,6 @@ package otp
 
 import (
 	"context"
-	"errors"
 	"time"
 
 	"github.com/JLugagne/egauth/event"
@@ -96,23 +95,11 @@ func NewService(store Store, opts ...ServiceOption) Service {
 
 func (s *service) Issue(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*Challenge, error) {
 	now := s.now()
-	if s.cooldown > 0 {
-		existing, err := s.store.GetOTP(ctx, tenantID, subjectID, purpose)
-		if err == nil && existing != nil && !existing.CreatedAt.IsZero() {
-			if now.Sub(existing.CreatedAt) < s.cooldown || existing.CreatedAt.After(now) {
-				return nil, ErrCooldownActive
-			}
-		} else if err != nil && !errors.Is(err, ErrCodeNotFound) {
-			return nil, err
-		}
-	}
-
 	code, err := generateCode(s.digits)
 	if err != nil {
 		return nil, err
 	}
 	expiresAt := now.Add(s.ttl)
-
 	record := &OTP{
 		SubjectID: subjectID,
 		TenantID:  tenantID,
@@ -121,10 +108,13 @@ func (s *service) Issue(ctx context.Context, tenantID string, subjectID uuid.UUI
 		ExpiresAt: expiresAt,
 		CreatedAt: now,
 	}
-	if err := s.store.SaveOTP(ctx, tenantID, record); err != nil {
+	// One atomic store operation enforces the resend cooldown and persists the new code: the
+	// check and the write happen under a single lock, so concurrent issues cannot all pass
+	// (F-OTP-002), and the issuance state survives every terminal transition of the previous
+	// code, so burning or consuming it cannot reset the attack budget (F-OTP-001).
+	if err := s.store.IssueOTP(ctx, tenantID, record, s.cooldown); err != nil {
 		return nil, err
 	}
-
 	return &Challenge{
 		SubjectID: subjectID,
 		TenantID:  tenantID,

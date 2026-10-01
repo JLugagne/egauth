@@ -33,6 +33,14 @@
 // The token custom-claims type carries a Role field ("user" or "admin"), demonstrating
 // the generic tokens/jwt API with C = AppClaims.
 //
+// # Credential assurance
+//
+// The credential-enrollment routes (/mfa/enroll, /mfa/confirm and the passkey register
+// begin/finish routes) are gated with tokens.DenyInterim: an interim (pre-second-factor)
+// session cannot install a new factor or passkey. Account deletion and password reset run the
+// registered AccountErasers, which revoke refresh-token families and evict passkey credentials,
+// so a credential an attacker installed while holding the password does not survive recovery.
+//
 // # Audit
 //
 // All modules are wired with an event.Sink backed by slog.Default(), so every
@@ -98,14 +106,10 @@ func BuildServer() (http.Handler, error) {
 	// alerting, or a dedicated audit store.
 	audit := event.NewSlogSink(slog.Default())
 
-	// ------------------------------------------------------------------ identity
+	// ------------------------------------------------------------------ identity store
 	idStore := identitymem.NewStore()
-	idSvc := identity.NewService(
-		idStore,
-		argon2.NewHasher(),
-		policy.NewDefaultPolicy(),
-		identity.WithEventSink(audit),
-	)
+	// The identity service itself is built after the token store and passkey service (see the
+	// eraser wiring below): its AccountErasers close the cross-module revocation loop.
 
 	// ------------------------------------------------------------------ tokens (custom claims)
 	// ClaimsProvider re-derives the user's role on every refresh, so a
@@ -157,13 +161,6 @@ func BuildServer() (http.Handler, error) {
 
 	// ------------------------------------------------------------------ MFA (TOTP)
 	mfaStore := mfamem.NewStore()
-	// The identity service doubles as the authoritative account-state resolver: every issuance path
-	// re-loads the live account through it, so a disabled or deleted account cannot be minted a
-	// credential even if it was active when the ceremony started.
-	sessionResolver, ok := idSvc.(issuance.Resolver)
-	if !ok {
-		return nil, errors.New("identity service does not expose authoritative session state")
-	}
 
 	mfaSvc := mfa.NewService(
 		mfaStore,
@@ -199,6 +196,31 @@ func BuildServer() (http.Handler, error) {
 	})
 	if err != nil {
 		return nil, fmt.Errorf("passkey.NewService: %w", err)
+	}
+
+	// ------------------------------------------------------------------ identity service
+	// Built after the token store and passkey service because its cross-module revocation hooks
+	// close the dependency loop: DeleteAccount and ResetPassword run every registered
+	// AccountEraser, so the token revoker and the passkey eraser must already exist. Wiring both
+	// means an account recovery kills the refresh-token families AND evicts every passkey
+	// credential — including one an attacker enrolled while holding the password (F-COMP-002);
+	// without the passkey eraser that credential survives the reset and keeps minting sessions.
+	idSvc := identity.NewService(
+		idStore,
+		argon2.NewHasher(),
+		policy.NewDefaultPolicy(),
+		identity.WithEventSink(audit),
+		identity.WithAccountErasers(
+			tokens.NewAccountRevoker(tokenStore),
+			pkSvc.AccountEraser(),
+		),
+	)
+	// The identity service doubles as the authoritative account-state resolver: every issuance path
+	// re-loads the live account through it, so a disabled or deleted account cannot be minted a
+	// credential even if it was active when the ceremony started.
+	sessionResolver, ok := idSvc.(issuance.Resolver)
+	if !ok {
+		return nil, errors.New("identity service does not expose authoritative session state")
 	}
 
 	// ------------------------------------------------------------------ HTTP mux
@@ -249,6 +271,11 @@ func BuildServer() (http.Handler, error) {
 	mfaOpts := []mfa.HandlerOption{
 		mfa.WithUserResolver(tokens.UserResolverFromContext),
 		mfa.WithInsecureNoOriginCheck(),
+		// Enrolling or confirming a second factor is a credential-management action: refusing an
+		// interim (pre-second-factor) session here is what stops a password attacker from quietly
+		// installing their own factor and then completing step-up with it. tokens.DenyInterim is
+		// the canonical gate — it allows full sessions and requests with no token context at all.
+		mfa.WithCredentialAssurance(tokens.DenyInterim),
 	}
 	mux.Handle("POST /mfa/enroll", tokens.ContextMiddleware[AppClaims](
 		issuer,
@@ -335,6 +362,9 @@ func BuildServer() (http.Handler, error) {
 		issuer,
 		passkey.BeginRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
+			// Enrolling a passkey is a credential-management action: an interim session may not
+			// install one (same rationale as the MFA enrollment gate above).
+			passkey.WithCredentialAssurance(tokens.DenyInterim),
 			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
 			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),
@@ -345,6 +375,9 @@ func BuildServer() (http.Handler, error) {
 		issuer,
 		passkey.FinishRegistrationHandler(pkSvc,
 			passkey.WithUserResolver(passkeyUserResolver),
+			// Enrolling a passkey is a credential-management action: an interim session may not
+			// install one (same rationale as the MFA enrollment gate above).
+			passkey.WithCredentialAssurance(tokens.DenyInterim),
 			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
 			passkey.WithSessionCookieName("passkey_ceremony"),
 			passkey.WithInsecureCookies(),

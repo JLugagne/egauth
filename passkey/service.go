@@ -595,3 +595,17 @@ func (s *Service) SignalUnknownCredential(credentialID []byte) *protocol.SignalU
 		RPID:         s.wa.Config.RPID,
 	}
 }
+
+// AccountEraser returns a function with the identity.AccountEraser shape
+// (func(ctx context.Context, tenantID string, userID uuid.UUID) error) that deletes every
+// passkey credential the user has registered. Register it with identity.WithAccountErasers so
+// a password reset or account deletion evicts passkeys enrolled before the recovery: without
+// it, a credential an attacker enrolled while holding the password survives the reset and
+// keeps minting sessions. The returned value is structurally assignable to
+// identity.AccountEraser — this package does not import identity, keeping the modules decoupled.
+// The eraser is idempotent and tenant-scoped.
+func (s *Service) AccountEraser() func(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	return func(ctx context.Context, tenantID string, userID uuid.UUID) error {
+		return s.store.DeleteCredentialsByUser(ctx, tenantID, userID)
+	}
+}

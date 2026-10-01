@@ -43,9 +43,12 @@ func WithErrorParam(rawURL, code string) string {
 	return u.String()
 }
 
-// RequestOriginURL returns the parsed URL from the request's Origin header, or falls back to
-// the Referer header. Returns nil when neither header is present or parseable, when the parsed
-// host is empty, or when Origin is the special value "null" (opaque origin).
+// RequestOriginURL returns the request's origin as a canonical scheme://host[:port] URL, taken
+// from the Origin header or, failing that, the Referer header. Returns nil when neither header is
+// present or canonical, when the parsed host is empty, or when Origin is the special value "null"
+// (opaque origin). A Referer is a full page URL whose path, query and fragment are legitimate and
+// simply not consulted; its origin is validated with the same strict parser as Origin (see
+// parseRefererOrigin).
 func RequestOriginURL(r *http.Request) *url.URL {
 	if o := r.Header.Get("Origin"); o != "" {
 		// A present Origin is authoritative. The opaque "null" origin (sandboxed iframe, some
@@ -57,11 +60,10 @@ func RequestOriginURL(r *http.Request) *url.URL {
 		}
 		return parseOriginHeader(o)
 	}
-	// Referer is a full URL, so it is parsed as one; only its host:port is ever consulted.
+	// Referer is a full URL, so it is parsed as one; only its origin is ever consulted, and it
+	// is validated with the same canonical parser as Origin (see parseRefererOrigin).
 	if ref := r.Header.Get("Referer"); ref != "" {
-		if u, err := url.Parse(ref); err == nil && u.Host != "" {
-			return u
-		}
+		return parseRefererOrigin(ref)
 	}
 	return nil
 }
@@ -263,4 +265,20 @@ func originHost(entry string) (string, error) {
 		return "", errors.New("not a bare host")
 	}
 	return u.Host, nil
+}
+
+// parseRefererOrigin extracts the origin of a full Referer URL and validates it with the same
+// strict canonical parser the Origin header uses, returning the bare scheme://host[:port] URL.
+//
+// A Referer legitimately carries a path, query and fragment (it is the page's URL), so those
+// are dropped rather than rejected: only the origin is compared. The permissive url.Parse would
+// otherwise accept "https://evil@allowed/" — Host=allowed with the real host in the userinfo —
+// and "//allowed/" (empty scheme), both of which would then pass the same-origin check; the
+// explicit userinfo rejection and the round-trip through parseOriginHeader close those gaps.
+func parseRefererOrigin(ref string) *url.URL {
+	u, err := url.Parse(ref)
+	if err != nil || u.User != nil || u.Host == "" {
+		return nil
+	}
+	return parseOriginHeader(u.Scheme + "://" + u.Host)
 }

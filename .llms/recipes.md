@@ -102,17 +102,24 @@ import (
 
 google := providers.Google(clientID, clientSecret, oauth.WithOIDC(oauth.OIDCConfig{Audience: clientID}))
 
-mux.Handle("GET /auth/google",          oauth.BeginHandler(google, oauth.WithRedirectURL("https://app.example.com/auth/google/callback")))
+// REQUIRED: the state cookie is HMAC-signed; a missing/short/published key fails closed 500.
+stateKey := stateSigningKeyFromSecretStore // >= 32 bytes, random, never a published example
+beginOpts := []oauth.HandlerOption{
+    oauth.WithRedirectURL("https://app.example.com/auth/google/callback"),
+    oauth.WithStateSigningKey(stateKey),
+}
+mux.Handle("GET /auth/google",          oauth.BeginHandler(google, beginOpts...))
 mux.Handle("GET /auth/google/callback", oauth.CallbackHandler(google, svc /* identity.Service is the IdentityLinker */, issuer, claimsOf,
-    oauth.WithRedirectURL("https://app.example.com/auth/google/callback")))
+    oauth.WithRedirectURL("https://app.example.com/auth/google/callback"),
+    oauth.WithStateSigningKey(stateKey)))
 // Begin mints state(CSRF)+PKCE(+nonce), redirects to provider. Callback validates state, exchanges code,
 // verifies UserInfo/id_token, JIT-links identity, sets auth cookies → 204.
 
 // Multi-tenant SSO (per-tenant providers): use a ProviderStore + Dynamic*Handler
 store := oauth.NewMemoryStore()
 store.AddProvider("tenant-a", providers.Okta(/* ... */))
-mux.Handle("GET /sso/begin",    oauth.DynamicBeginHandler(store, "okta", oauth.WithTenantResolver(tenantFromHost)))
-mux.Handle("GET /sso/callback", oauth.DynamicCallbackHandler(store, "okta", svc, issuer, claimsOf, oauth.WithTenantResolver(tenantFromHost)))
+mux.Handle("GET /sso/begin",    oauth.DynamicBeginHandler(store, "okta", oauth.WithTenantResolver(tenantFromHost), oauth.WithStateSigningKey(stateKey)))
+mux.Handle("GET /sso/callback", oauth.DynamicCallbackHandler(store, "okta", svc, issuer, claimsOf, oauth.WithTenantResolver(tenantFromHost), oauth.WithStateSigningKey(stateKey)))
 ```
 
 12 providers: Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab(+SelfHosted), Google, Keycloak,
@@ -127,9 +134,11 @@ second factor, mint tokens whose `AMR` includes `mfa` and gate sensitive routes 
 
 ```go
 import (
+    "github.com/JLugagne/egauth/issuance"
     "github.com/JLugagne/egauth/mfa"
     mfamem "github.com/JLugagne/egauth/mfa/memory"
     "github.com/JLugagne/egauth/tokens"
+    "github.com/JLugagne/egauth/tokens/basic"
 )
 
 mfaSvc := mfa.NewService(mfamem.NewStore(), mfa.WithIssuer("Example"))
@@ -142,9 +151,32 @@ mfaSvc := mfa.NewService(mfamem.NewStore(), mfa.WithIssuer("Example"))
 // tokens.Verifier[C] from §1 (a *jwtissuer issuer satisfies it).
 protect := func(h http.Handler) http.Handler { return tokens.ContextMiddleware(verifier, h) }
 
-mux.Handle("POST /mfa/enroll",  protect(mfa.EnrollHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext))))  // → {secret, otpauth:// uri}
-mux.Handle("POST /mfa/confirm", protect(mfa.ConfirmHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext)))) // → {recovery_codes:[...]}
+// Enrollment handlers FAIL CLOSED: without an assurance gate they answer 403
+// assurance_required. tokens.DenyInterim is the canonical gate — it refuses only an
+// interim (pre-MFA) session, so a stolen password cannot enroll an attacker factor.
+enrollOpts := []mfa.HandlerOption{
+    mfa.WithUserResolver(tokens.UserResolverFromContext),
+    mfa.WithCredentialAssurance(tokens.DenyInterim),
+}
+mux.Handle("POST /mfa/enroll",  protect(mfa.EnrollHandler(mfaSvc, enrollOpts...)))  // → {secret, otpauth:// uri}
+mux.Handle("POST /mfa/confirm", protect(mfa.ConfirmHandler(mfaSvc, enrollOpts...))) // → {recovery_codes:[...]}
 mux.Handle("POST /mfa/verify",  protect(mfa.VerifyHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext))))  // 204 / 429 too_many_attempts
+
+// Step-up FAILS CLOSED (500 misconfigured) without an authoritative account-state resolver:
+// the post-factor pair must not be minted from the interim token's own subject alone.
+// The identity.Service *interface* does not expose ResolveSessionState; the concrete service
+// returned by identity.NewService does, so type-assert it (or supply your own resolver).
+sessionResolver, ok := svc.(issuance.Resolver)
+if !ok {
+    panic("identity service does not expose authoritative session state")
+}
+mfaClaimsOf := func(_ context.Context, uid uuid.UUID, tenant string) basic.Claims {
+    return basic.Claims{Subject: uid, TenantID: tenant}
+}
+mux.Handle("POST /mfa/step-up", protect(mfa.StepUpHandler(mfaSvc, issuer, mfaClaimsOf,
+    mfa.WithUserResolver(tokens.UserResolverFromContext),
+    mfa.WithSessionStateResolver(sessionResolver),
+)))
 
 // step-up: issue access token with AMR after factor verified; protect route with FreshAuth:
 if !claims.FreshAuth(5 * time.Minute) { http.Error(w, "reauth_required", 401); return }
@@ -161,19 +193,40 @@ MUST match the frontend. Pairs with tokens/sessions on the finish step.
 
 ```go
 import (
+    "github.com/JLugagne/egauth/identity"
     "github.com/JLugagne/egauth/passkey"
     pkmem "github.com/JLugagne/egauth/passkey/memory"
+    "github.com/JLugagne/egauth/passwords/argon2"
+    "github.com/JLugagne/egauth/passwords/policy"
+    "github.com/JLugagne/egauth/tokens"
 )
 
 svc, _ := passkey.NewService(pkmem.NewStore(), passkey.Config{
     RPID: "example.com", RPDisplayName: "Example", RPOrigins: []string{"https://example.com"},
-    CookieKey: cookieSecret /* >=32B */, ChallengeStore: pkmem.NewChallengeStore(),
+    CookieKey: cookieSecret /* >=32B; trivially-known/published keys are refused */,
+    ChallengeStore: pkmem.NewChallengeStore(),
+    AccountGate: passkey.NewIdentityAccountGate(idStore), // refuse disabled/deleted accounts
 })
-mux.Handle("POST /passkey/register/begin",  passkey.BeginRegistrationHandler(svc, passkey.WithUserResolver(resolver)))
-mux.Handle("POST /passkey/register/finish", passkey.FinishRegistrationHandler(svc, passkey.WithUserResolver(resolver)))
+
+// Registration FAILS CLOSED: without an assurance gate it answers 403 assurance_required.
+// tokens.DenyInterim refuses only an interim (pre-MFA) session.
+regOpts := []passkey.HandlerOption{
+    passkey.WithUserResolver(resolver),
+    passkey.WithCredentialAssurance(tokens.DenyInterim),
+}
+mux.Handle("POST /passkey/register/begin",  passkey.BeginRegistrationHandler(svc, regOpts...))
+mux.Handle("POST /passkey/register/finish", passkey.FinishRegistrationHandler(svc, regOpts...))
 mux.Handle("POST /passkey/login/begin",     passkey.BeginLoginHandler(svc, passkey.WithUserResolver(resolver)))
 mux.Handle("POST /passkey/login/finish",    passkey.FinishLoginHandler(svc, passkey.WithUserResolver(resolver),
     passkey.WithLoginSuccess(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID) { /* issue token */ })))
+
+// REQUIRED for account recovery: register the passkey eraser so a password reset or
+// account deletion evicts every credential the user enrolled (including an attacker's).
+identitySvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
+    identity.WithAccountErasers(
+        tokens.NewAccountRevoker(tokenStore), // refresh families + API keys
+        svc.AccountEraser(),                  // passkey credentials (structurally identity.AccountEraser)
+    ))
 ```
 
 Details: [passkey.md](passkey.md).
@@ -242,9 +295,17 @@ pool, _ := pgxpool.New(ctx, dsn)
 _ = identitypgx.Migrate(ctx, pool)           // once at startup; forward-only, idempotent
 idStore := identitypgx.NewStore(pool)
 
-// 2. security events → slog
+// 2. security events → slog, and the credential-rotation erasers. The erasers run on
+//    ResetPassword / ChangePassword / SetTemporaryPassword / DeleteAccount, so a session
+//    hijack cannot leave a passkey or recovery channel behind. Register EVERY credential class
+//    (tokenStore and passkeySvc as in recipes 1 and 5):
 sink := event.NewSlogSink(slog.Default())
-svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(), identity.WithEventSink(sink))
+svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
+    identity.WithEventSink(sink),
+    identity.WithAccountErasers(
+        tokens.NewAccountRevoker(tokenStore), // refresh-token families + API keys
+        passkeySvc.AccountEraser(),           // passkey credentials (passkey.Service.AccountEraser)
+    ))
 
 // 3. breach check (HIBP k-anonymity) — pass to policy/registration per passwords.md
 breach := hibp.New()
@@ -325,7 +386,7 @@ mux.Handle("POST /metrics", tokens.RequireAuth(issuer, handler,
 |---|---|---|
 | `api_key.created` | `IssueAPIKey` | `key_type`, `created_by` |
 | `api_key.auth.succeeded` | successful `VerifyAPIKey*` | `key_type` [+ `ip`, `user_agent`] |
-| `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `tenant_mismatch` / `wrong_type` |
+| `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `revoked` / `tenant_mismatch` / `wrong_type` |
 | `api_key.purged` | expired-key sweep | `count` |
 
 **Revoke on disable:** to kill every credential a user holds when an account is suspended, wire `tokens.NewAccountRevoker(store)` (revokes all their refresh tokens + API keys) into `identity.WithDisableRevokers(...)` so `identity.DisableUser` cascades the revocation. See [identity.md](identity.md) and [tokens.md](tokens.md).

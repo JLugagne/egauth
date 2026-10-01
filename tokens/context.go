@@ -26,6 +26,11 @@ import (
 // package can forge an authenticated entry or collide with the slot.
 type ctxKey struct{}
 
+// interimContextKey is the unexported, zero-size key under which RequireAuth and
+// ContextMiddleware record the verified token's pre-second-factor state as a plain bool.
+// It is type-erased so the non-generic DenyInterim gate can consult it without knowing C.
+type interimContextKey struct{}
+
 // authContext is what ContextMiddleware stores: the Actor and the full verified Claims[C]
 // together, so ClaimsFromContext needs no second lookup and the two can never disagree.
 type authContext[C any] struct {
@@ -84,6 +89,9 @@ func ContextMiddleware[C any](verifier Verifier[C], next http.Handler, opts ...A
 				actorValue: actor,
 				claims:     claims,
 			})
+			// Record the type-erased interim marker so the non-generic DenyInterim gate can
+			// refuse pre-second-factor enrollment requests without knowing Claims[C].
+			ctx = context.WithValue(ctx, interimContextKey{}, claims.IsInterim())
 			next.ServeHTTP(w, r.WithContext(ctx))
 		})
 	})

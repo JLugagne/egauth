@@ -29,6 +29,18 @@ func (s *Service) FinishDiscoverableLogin(ctx context.Context, tenantID string, 
 // Credential management
 func (s *Service) ListCredentials(ctx context.Context, tenantID string, userID uuid.UUID) ([]*Credential, error)
 func (s *Service) DeleteCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) error
+
+// AccountEraser returns a func(ctx, tenantID, userID) error that deletes EVERY credential the
+// user has registered. It is structurally assignable to identity.AccountEraser (this package does
+// not import identity): register it with identity.WithAccountErasers so ResetPassword /
+// ChangePassword / SetTemporaryPassword / DeleteAccount evict passkeys an attacker may have
+// enrolled. Idempotent and tenant-scoped. Consumers MUST register it — without it a passkey
+// enrolled while the attacker held the password survives the victim's password reset.
+func (s *Service) AccountEraser() func(ctx context.Context, tenantID string, userID uuid.UUID) error
+
+// SingleTenant facade: same identity.AccountEraser shape, hard-wired to the "" partition
+// (the caller-supplied tenantID is ignored).
+func (s *SingleTenant) AccountEraser() func(ctx context.Context, tenantID string, userID uuid.UUID) error
 ```
 
 ## Key types
@@ -55,7 +67,7 @@ type Config struct {
     RPDisplayName            string                               // shown by authenticator UI
     RPOrigins                []string                             // allowed origins e.g. ["https://example.com"]
     UserVerification         protocol.UserVerificationRequirement // zero value = VerificationRequired (secure default)
-    CookieKey                []byte                               // HMAC-SHA256 key, >= 32 bytes; REQUIRED
+    CookieKey                []byte                               // HMAC-SHA256 key, >= 32 bytes; REQUIRED; shared policy refuses trivial/published keys
     ChallengeStore           ChallengeStore                       // single-use replay protection; REQUIRED unless InsecureNoChallengeStore
     InsecureNoChallengeStore bool                                 // opt-out of ChallengeStore requirement (NOT for passwordless)
     Events                   event.Sink                           // optional; receives LoginSucceeded / AccountBlocked events
@@ -127,15 +139,21 @@ func (s *SingleTenant) DeleteCredential(ctx context.Context, userID uuid.UUID, c
 
 ```go
 // Store persists WebAuthn credentials. All ops are tenant-scoped; "" is the single-tenant partition.
+// It composes CredentialStore (CRUD) + CredentialEraser (account recovery).
 type Store interface {
     SaveCredential(ctx context.Context, tenantID string, c *Credential) error
     GetCredentials(ctx context.Context, tenantID string, userID uuid.UUID) ([]*Credential, error)
     UpdateCredential(ctx context.Context, tenantID string, c *Credential) error
     DeleteCredential(ctx context.Context, tenantID string, userID uuid.UUID, credentialID []byte) error
+    // DeleteCredentialsByUser removes every credential registered by userID in tenantID; nil when
+    // the user has none. Backs Service.AccountEraser; MUST be idempotent and tenant-scoped.
+    DeleteCredentialsByUser(ctx context.Context, tenantID string, userID uuid.UUID) error
 }
 
 // ChallengeStore provides single-use TTL-bounded challenge storage (replay protection SEC-05).
 // Consume MUST be atomic: second call for same (tenantID, challenge) returns (false, nil).
+// Consuming also removes the entry from the memory store's expiry index, so a Begin/Finish
+// cycling flood cannot grow that index without bound (the live-entry cap is a true memory bound).
 type ChallengeStore interface {
     Put(ctx context.Context, tenantID, challenge string, expiresAt time.Time) error
     Consume(ctx context.Context, tenantID, challenge string) (bool, error)
@@ -178,7 +196,17 @@ WithInsecureCookies()                     // clear Secure flag (local HTTP dev o
 WithMaxBodyBytes(n int64)                 // default: 64 KiB; <=0 disables cap
 WithTrustedOrigins(origins ...string)     // widen the strict CSRF allowlist for RenameCredentialHandler (hosts, no scheme)
 WithInsecureNoOriginCheck()               // explicit opt-out of the RenameCredentialHandler CSRF gate
+WithCredentialAssurance(fn func(*http.Request) error) // gate Begin/FinishRegistration; canonical value: tokens.DenyInterim
+WithInsecureNoAssuranceCheck()            // explicit opt-out of the registration assurance gate
 ```
+
+**Registration is gated fail-closed.** `BeginRegistrationHandler` / `FinishRegistrationHandler`
+refuse with `403 assurance_required` unless an assurance gate is wired. Use
+`passkey.WithCredentialAssurance(tokens.DenyInterim)` — it refuses an interim (pre-second-factor)
+session, so a password-only attacker cannot enroll an authenticator; token-less (session-based)
+applications pass. `passkey.WithInsecureNoAssuranceCheck()` is the loud opt-out. The gate runs
+before the ceremony cookie is read or the challenge consumed, so a refused enrollment does not
+burn the ceremony.
 
 The `__Host-` prefix is browser-enforced (Secure, no `Domain`, `Path=/`); a misconfigured pairing (e.g. `WithCookieDomain` or `WithInsecureCookies` under the default name) makes handlers fail closed with 500. Check it at startup with `ValidateHandlerConfig(opts...)` (returns an error).
 
@@ -217,6 +245,8 @@ HTTP error mapping (via `fail`):
 | `ErrCredentialNotFound` | 404 `credential_not_found` |
 | `ErrCredentialExists` | 409 `credential_exists` |
 | `ErrAttestationRejected` | 403 `attestation_rejected` |
+| assurance gate denial (registration) | 403 `assurance_required` |
+| `ErrStoreCapacityReached` (wrapped by `ErrChallengeStoreFull` / `ErrTooManyCredentials`) | 503 `store_capacity` |
 | `ErrAccountDisabled` | 403 `account_disabled` |
 | `ErrAccountDeleted` | 403 `account_deleted` |
 | `*protocol.Error` | 400 `verification_failed` |
@@ -226,6 +256,9 @@ HTTP error mapping (via `fail`):
 
 - **UserVerification**: zero value of `Config.UserVerification` = `protocol.VerificationRequired`. UV-cleared assertions rejected at Finish. Explicitly set `VerificationPreferred`/`VerificationDiscouraged` to relax.
 - **Cookie authentication**: ceremony cookie is HMAC-SHA256 signed with `CookieKey` (prepended 32-byte tag + base64url). Tampered or missing cookies → `ErrSessionInvalid`. Cookie is single-use: cleared on every `loadSession` call regardless of outcome.
+- **Cookie key policy**: `CookieKey` (and a per-tenant `WithTenantCookieKeys` resolver value) is validated by the shared credential policy: shorter than `MinCookieKeyLength`, all-zero / repeated-byte, published-example literals and marker-bearing near-copies are all refused. `csrf_test.go`-style test fixtures must use a non-trivial 32-byte key.
+- **Credential enrollment gate (fail-closed)**: registration Begin/Finish refuse `403 assurance_required` unless `WithCredentialAssurance(...)` is wired; wire `tokens.DenyInterim` so an interim (pre-MFA) session cannot enroll a credential. Opting out is explicit (`WithInsecureNoAssuranceCheck`).
+- **Account-recovery eraser**: register `Service.AccountEraser()` with `identity.WithAccountErasers` so password reset / change / deletion evicts every credential the user enrolled. Without it, `ResetPassword` clears sessions and recovery channels but the attacker-enrolled passkey survives.
 - **Replay protection**: `ChallengeStore.Consume` called on Finish before assertion verification. Second Consume of same challenge returns false → 400. Atomic Consume is a contract requirement on implementations.
 - **Clone detection**: regressed signature counter → `ErrCredentialCloned` + `AccountBlocked` event emitted.
 - **Account lifecycle**: wire `Config.AccountGate` (`passkey.NewIdentityAccountGate(identityStore)`) so `identity.DisableUser`/`DeleteUser` take effect on the passkey login path — `DisableUser` preserves passkey enrollment by design, so without the gate a suspended account still mints sessions. Blocked logins emit an `AccountBlocked` event with `Reason="account_disabled"` / `"account_deleted"`.
@@ -238,8 +271,10 @@ HTTP error mapping (via `fail`):
 
 ```go
 import (
+    "github.com/JLugagne/egauth/identity"
     "github.com/JLugagne/egauth/passkey"
     "github.com/JLugagne/egauth/passkey/memory"
+    "github.com/JLugagne/egauth/tokens"
 )
 
 store   := memory.NewStore()
@@ -259,8 +294,13 @@ resolver := func(r *http.Request) (uuid.UUID, string, string, string, bool) {
     return userID, name, displayName, tenant, true
 }
 
-mux.Handle("POST /passkey/register/begin",  passkey.BeginRegistrationHandler(svc, passkey.WithUserResolver(resolver)))
-mux.Handle("POST /passkey/register/finish", passkey.FinishRegistrationHandler(svc, passkey.WithUserResolver(resolver)))
+// Registration is fail-closed: wire the interim gate (canonical: tokens.DenyInterim).
+regOpts := []passkey.HandlerOption{
+    passkey.WithUserResolver(resolver),
+    passkey.WithCredentialAssurance(tokens.DenyInterim),
+}
+mux.Handle("POST /passkey/register/begin",  passkey.BeginRegistrationHandler(svc, regOpts...))
+mux.Handle("POST /passkey/register/finish", passkey.FinishRegistrationHandler(svc, regOpts...))
 mux.Handle("POST /passkey/login/begin",     passkey.BeginLoginHandler(svc, passkey.WithUserResolver(resolver)))
 mux.Handle("POST /passkey/login/finish",    passkey.FinishLoginHandler(svc,
     passkey.WithUserResolver(resolver),
@@ -268,6 +308,10 @@ mux.Handle("POST /passkey/login/finish",    passkey.FinishLoginHandler(svc,
         // issue session token
     }),
 ))
+
+// REQUIRED: register the eraser so password reset / account deletion evicts passkeys.
+identitySvc := identity.NewService(idStore, hasher, policy,
+    identity.WithAccountErasers(passkeySvc.AccountEraser()))
 
 // Discoverable login (no userID needed on Begin)
 assertion, session, err := svc.BeginDiscoverableLogin()
@@ -291,7 +335,7 @@ The events are emitted on the `Config.Events` sink configured at `NewService`.
 ## Gotchas
 
 - **Discoverable vs identified login**: `BeginDiscoverableLogin` takes no userID; `allowCredentials` is empty so the authenticator selects the key. `FinishDiscoverableLogin` resolves the user from the credential's user handle (UUID bytes). Multi-tenant: pass `tenantID` derived from request (host/subdomain), not from the credential.
-- **Challenge store eviction**: `memory.ChallengeStore` prunes lazily on access. In production use a shared backend (e.g. pgx) for multi-process deployments; a single-process `memory.ChallengeStore` won't share state across replicas.
+- **Challenge store eviction**: `memory.ChallengeStore` enforces the per-tenant live-entry cap (`DefaultMaxChallenges`) and removes consumed challenges from its expiry index too, so the index stays bounded by the live entries rather than growing with request volume. In production use a shared backend (e.g. pgx) for multi-process deployments; a single-process `memory.ChallengeStore` won't share state across replicas.
 - **RPID/origin must match frontend**: RPID = registrable domain (no scheme, no port). RPOrigins = full origin strings (scheme + host + optional port). Mismatch → go-webauthn `*protocol.Error` → 400.
 - **CookieKey rotation**: all in-flight ceremonies using the old key fail at Finish (HMAC mismatch → `ErrSessionInvalid`). Rotate during low-traffic windows; ceremony TTL is 5 min.
 - **SingleTenant misuse**: `NewSingleTenant` hard-wires tenant `""`. Do NOT mix `SingleTenant` calls with multi-tenant `Service` calls against the same store; `""` is a real partition key that could collide with an explicit tenant.

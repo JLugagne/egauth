@@ -1,6 +1,7 @@
 package tokens
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strings"
@@ -211,7 +212,10 @@ func RequireAuth[C any](verifier Verifier[C], next AuthenticatedHandlerFunc[C], 
 				wrongPrincipalKind(w)
 				return
 			}
-			next(w, r, actor, claims.Custom)
+			// Record the type-erased interim marker so the non-generic DenyInterim gate can
+			// refuse pre-second-factor enrollment requests without knowing Claims[C].
+			ctx := context.WithValue(r.Context(), interimContextKey{}, claims.IsInterim())
+			next(w, r.WithContext(ctx), actor, claims.Custom)
 		})
 	}
 }
@@ -290,7 +294,15 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 	// No usable access token. Attempt opt-in auto-refresh from the refresh cookie.
 	if cfg.rotator != nil && cfg.cookies != nil {
 		if refreshToken, ok := cfg.cookies.Refresh(r); ok {
-			pair, err := cfg.rotator.Rotate(r.Context(), tenantID, refreshToken)
+			// Populate the client context exactly as RefreshHandler does: Rotate's within-grace
+			// theft detection compares the presenting client (IP + User-Agent) with the client
+			// that performed the rotation, and an empty context short-circuits isClientTheft to
+			// false — silently disabling family revocation on the auto-refresh path.
+			clientCtx := WithClientContext(r.Context(), ClientContext{
+				IP:        httputil.ClientIP(r),
+				UserAgent: r.UserAgent(),
+			})
+			pair, err := cfg.rotator.Rotate(clientCtx, tenantID, refreshToken)
 			if err != nil {
 				// ErrRefreshConcurrent is benign concurrency: a parallel request won the
 				// rotation race and already minted a fresh, valid refresh cookie for this

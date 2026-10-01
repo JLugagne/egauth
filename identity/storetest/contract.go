@@ -39,6 +39,7 @@ type MockStore struct {
 	CreateVerificationTokenFunc         func(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
 	ConsumeVerificationTokenFunc        func(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
 	DeleteExpiredVerificationTokensFunc func(ctx context.Context, tenantID string) (int64, error)
+	DeleteVerificationTokensByUserFunc  func(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error)
 }
 
 var _ identity.Store = (*MockStore)(nil)
@@ -328,6 +329,53 @@ func StoreContractTesting(t *testing.T, store identity.Store, useMultiTenant boo
 		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "deletion must purge the user's verification tokens")
 	})
 
+	t.Run("Contract: DeleteVerificationTokensByUser purges only that user in that tenant", func(t *testing.T) {
+		userA, err := store.CreateUser(ctx, tenantA, "purge_a@example.com")
+		require.NoError(t, err)
+		userB, err := store.CreateUser(ctx, tenantA, "purge_b@example.com")
+		require.NoError(t, err)
+
+		tokA, err := store.CreateVerificationToken(ctx, tenantA, userA.ID, identity.KindPasswordReset, time.Hour, nil)
+		require.NoError(t, err)
+		tokB, err := store.CreateVerificationToken(ctx, tenantA, userB.ID, identity.KindMagicLink, time.Hour, nil)
+		require.NoError(t, err)
+
+		n, err := store.DeleteVerificationTokensByUser(ctx, tenantA, userA.ID)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, n, "the purge must report the number of tokens removed")
+
+		// The target user's token is GONE (not merely inert): a replayed enrollment token must
+		// no longer resolve after the credential rotation purged it.
+		_, _, err = store.ConsumeVerificationToken(ctx, tenantA, tokA, identity.KindPasswordReset)
+		assert.ErrorIs(t, err, identity.ErrVerificationTokenNotFound, "the target user's token must be purged")
+
+		// Another user's token in the same tenant is untouched.
+		uid, _, err := store.ConsumeVerificationToken(ctx, tenantA, tokB, identity.KindMagicLink)
+		require.NoError(t, err)
+		assert.Equal(t, userB.ID, uid, "another user's token must survive the purge")
+
+		// Purging an account with no pending tokens is a no-op success.
+		n, err = store.DeleteVerificationTokensByUser(ctx, tenantA, uuid.Must(uuid.NewV7()))
+		require.NoError(t, err)
+		assert.EqualValues(t, 0, n, "an unknown user yields no deletions and no error")
+
+		if useMultiTenant {
+			// The purge is tenant-scoped: a purge in tenant A must not reach a token minted in
+			// tenant B for a different user.
+			userC, err := store.CreateUser(ctx, tenantB, "purge_c@example.com")
+			require.NoError(t, err)
+			tokC, err := store.CreateVerificationToken(ctx, tenantB, userC.ID, identity.KindPasswordReset, time.Hour, nil)
+			require.NoError(t, err)
+
+			n, err = store.DeleteVerificationTokensByUser(ctx, tenantA, userC.ID)
+			require.NoError(t, err)
+			assert.EqualValues(t, 0, n, "a cross-tenant purge must not match")
+
+			uid, _, err := store.ConsumeVerificationToken(ctx, tenantB, tokC, identity.KindPasswordReset)
+			require.NoError(t, err)
+			assert.Equal(t, userC.ID, uid, "the other tenant's token must survive")
+		}
+	})
 	t.Run("Contract: Identity CRUD", func(t *testing.T) {
 		email := "test_identity@example.com"
 		user, err := store.CreateUser(ctx, tenantA, email)
@@ -1025,4 +1073,11 @@ func StoreUpdateUserSoftDeleteContract(t *testing.T, store identity.Store, tenan
 	err = store.UpdateUser(ctx, tenant, user)
 	assert.ErrorIs(t, err, identity.ErrUserNotFound,
 		"UpdateUser on a soft-deleted user must return ErrUserNotFound (resurrection gate)")
+}
+
+func (m *MockStore) DeleteVerificationTokensByUser(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error) {
+	if m.DeleteVerificationTokensByUserFunc == nil {
+		panic("called not defined DeleteVerificationTokensByUserFunc")
+	}
+	return m.DeleteVerificationTokensByUserFunc(ctx, tenantID, userID)
 }

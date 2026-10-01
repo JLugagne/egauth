@@ -63,15 +63,25 @@ model behind those statements.
   short-circuiting on `ErrAccountLocked`; lockout remains on by default in production.
 - **Brute-force lockout (identity).** After `DefaultLockThreshold` (5) consecutive
   password failures the identity is locked for `DefaultLockDuration` (15 min). Lockout is
-  **on by default** and hardened against misconfiguration: `identity.WithLockout(0, 0)` does
-  NOT disable it — a non-positive argument falls back to the safe default, matching the
-  convention of `mfa.WithMaxAttempts`. To explicitly opt out (e.g. when an external
-  WAF or rate-limiter enforces the budget), use `identity.WithNoLockout()`, which makes the
-  intent auditable and greppable.
+  **on by default** and hardened against misconfiguration: any non-positive argument to
+  `identity.WithLockout` — `WithLockout(0, 0)` or a negative threshold — falls back to the
+  safe default, matching the convention of `mfa.WithMaxAttempts`. To explicitly opt out (e.g.
+  when an external WAF or rate-limiter enforces the budget), use `identity.WithNoLockout()`,
+  whose internal sentinel `WithLockout` can never produce by accident, making the intent
+  auditable and greppable. The authenticated `ChangePassword` path verifies the current
+  password under the **same** lockout policy: a wrong guess feeds the failed-attempt counter
+  (and can lock the account), a locked account cannot change its password, and a successful
+  verification clears the counter — so a stolen session does not give an unlimited
+  current-password oracle.
 - **Single-use refresh-token rotation with theft detection.** Refresh tokens are
   single-use and chained by `FamilyID`. Each rotation atomically consumes the old token
   and mints a new one in the same family; the access-token lifetime is always
-  issuer-controlled on rotation, and the family's tenant is immutable across rotations.
+  issuer-controlled on rotation, and the family's tenant is immutable across rotations. The
+  family also records the AMR proved when it was minted, and `Rotate` falls back to that value
+  when the `ClaimsProvider` returns none, so a stepped-up session keeps its assurance across a
+  silent refresh instead of silently decaying to an empty AMR. If persisting a rotated successor
+  fails, the rollback re-reads the record and refuses to restore it once it is revoked or gone, so
+  a concurrent revocation (theft detection, account disable) is never undone by a failed rotation.
   Replaying a consumed token **that is still within its validity** revokes the **entire
   family** (forcing re-authentication), and a revocation that fails is surfaced rather than
   silently swallowed. (Once a token has expired it can no longer be rotated and may have been
@@ -89,7 +99,10 @@ model behind those statements.
   valid refresh cookie for this client, and clearing it would wipe that and force a full
   re-login — the very lockout the grace window exists to prevent. After-grace reuse, expiry
   and not-found still clear all cookies. Set a negative `ReuseGracePeriod` for strict mode
-  where any replay revokes.
+  where any replay revokes. Both refresh surfaces supply the presenting client's context: the
+  dedicated `RefreshHandler` and the auto-refresh path behind `RequireAuth`/`ContextMiddleware`
+  both pass IP + User-Agent into `Rotate`, so a within-grace replay from a different client
+  triggers family revocation on either path instead of being waved through as benign concurrency.
 - **Single-use verification tokens (selector/verifier).** Password-reset and email-verification
   tokens follow a selector/verifier scheme: a 128-bit random `selector` indexes the row, and only
   the SHA-256 of the secret `verifier` half is stored. Consumption compares the verifier in
@@ -125,16 +138,28 @@ model behind those statements.
   PRD's "no at-rest encryption in v1" non-objective, the `mfa` store persists the secret in clear;
   deployments that need defense against a database leak should encrypt the `secret` column at the
   storage/DB layer (envelope encryption).
-  **Failed-attempt lockout is time-bound.** Once `FailedAttempts` exceeds `MaxAttempts` (default 5)
-  the factor is locked and `ConfirmTOTP`, `VerifyTOTP`, and `VerifyRecoveryCode` all return
-  `ErrTooManyAttempts`. When `ConfirmTOTP` exhausts the budget the pending enrollment is deleted
-  so an attacker cannot continue guessing; the user must restart from `EnrollTOTP`.
+  **Failed-attempt lockout is time-bound and per-path.** TOTP and recovery codes each have their
+  own atomic attempt budget (`Store.IncrementTOTPAttempts` / `Store.IncrementRecoveryAttempts`),
+  so exhausting one does not lock the other. Once a path's counter exceeds `MaxAttempts` (default
+  5), the calls on that path (`ConfirmTOTP`/`VerifyTOTP` for TOTP, `VerifyRecoveryCode` for
+  recovery) return `ErrTooManyAttempts`; a successful verification on either path clears both
+  counters. When `ConfirmTOTP` exhausts the budget the pending enrollment is deleted so an
+  attacker cannot continue guessing; the user must restart from `EnrollTOTP`.
   The lockout automatically resets after `LockoutDuration` (default 15 min, measured from the last
   failed attempt), giving legitimate users a self-service recovery path without operator action.
   Operators can also unblock a user immediately via `Service.UnlockMFA(ctx, tenantID, userID)`,
   which wraps `Store.ResetTOTPAttempts`. The window is configurable via
   `mfa.WithLockoutDuration(d)`; passing `0` makes the lockout permanent until `UnlockMFA` is
   called or the factor is disabled.
+
+  **Credential enrollment and step-up are gated by default (fail-closed).** `mfa.EnrollHandler`
+  and `mfa.ConfirmHandler` refuse with `403 assurance_required` unless
+  `mfa.WithCredentialAssurance(tokens.DenyInterim)` (the canonical gate) or the explicit
+  `mfa.WithInsecureNoAssuranceCheck()` opt-out is wired, so a password-only interim session cannot
+  enroll its own factor. `mfa.StepUpHandler` fails closed with `500 misconfigured` unless an
+  authoritative `mfa.WithSessionStateResolver(...)` is supplied; the legacy echo behaviour (trust
+  the interim token's own subject without re-checking account lifecycle) is available only through
+  the explicit `mfa.WithInsecureEchoSessionState()` opt-out.
 - **Passkeys (WebAuthn).** The `passkey` module wraps go-webauthn. Credentials are scoped to the
   configured Relying Party ID; the ceremony challenge and user-verification requirement
   (`SessionData`) are carried between Begin and Finish in a short-lived, **HMAC-signed**
@@ -154,9 +179,12 @@ model behind those statements.
   - **`Config.CookieKey` (required).** A stable, random secret of at least
     `passkey.MinCookieKeyLength` (32) bytes used to HMAC-authenticate the ceremony cookie.
     `NewService` returns `ErrCookieKeyMissing` if it is unset or too short — the key is validated
-    at construction, not on the first ceremony, so a misconfiguration fails at startup. (A
-    per-handler `passkey.WithCookieKey` override still exists for the rare case of a distinct key,
-    and the handlers also fail closed defensively if that override clears the key.)
+    at construction, not on the first ceremony, so a misconfiguration fails at startup. The key
+    is also screened by the module-wide credential policy (`internal/secretpolicy`): an all-zero
+    or single-repeated-byte key, an exact credential published in this project's examples/docs,
+    and a marker-bearing near-copy are all refused. (A per-handler `passkey.WithCookieKey`
+    override still exists for the rare case of a distinct key, and the handlers also fail closed
+    defensively if that override clears the key.)
   - **`Config.ChallengeStore` (required).** Provides single-use, server-side replay protection
     (SEC-05): the challenge is recorded on Begin and atomically consumed on Finish, so a captured
     raw Finish request cannot be replayed within the cookie TTL. `NewService` returns
@@ -172,6 +200,16 @@ model behind those statements.
     is for local HTTP development only.
   - **Rate-limit ceremony attempts** in front of the handlers (egauth does not throttle them —
     see the next bullet).
+  - **Credential-enrollment assurance gate (fail-closed).** `BeginRegistrationHandler` and
+    `FinishRegistrationHandler` refuse with `403 assurance_required` unless
+    `passkey.WithCredentialAssurance(tokens.DenyInterim)` (the canonical gate) or the explicit
+    `passkey.WithInsecureNoAssuranceCheck()` opt-out is wired. The default is fail-closed because
+    an interim (pre-MFA) access token is a first-class credential for every route behind
+    `tokens.ContextMiddleware`, and passkey registration is the highest-value action it can reach.
+  - **Register the passkey account eraser.** `passkey.Service.AccountEraser()` deletes every
+    credential a user has registered; register it with `identity.WithAccountErasers` so a password
+    reset or account deletion evicts passkeys enrolled before the recovery. Without it, a passkey an
+    attacker enrolled while holding the password survives the reset and keeps minting sessions.
 - **MFA verification is not rate-limited by egauth.** Per the non-objectives, throttling TOTP /
   recovery-code / passkey attempts is the consumer's responsibility; egauth exposes the errors
   and propagates `context.Context` so an external limiter can be attached in front of the handlers.
@@ -180,7 +218,10 @@ model behind those statements.
   - *Enforcement.* `tokens.WithRequiredAMR(...)` gates a route on those factors (e.g. require
     `AMRMFA`), returning 403 for an authenticated-but-under-assured subject. It fails **closed**: a
     token that does not carry the required AMR value never passes, so a password-only session can
-    never satisfy `WithRequiredAMR(AMRMFA)`.
+    never satisfy `WithRequiredAMR(AMRMFA)`. Its structural counterpart `tokens.WithDenyInterim()`
+    refuses a verified token known to be interim (pre-second-factor) with `403 step_up_required`,
+    without needing to know which AMR values count as complete; the non-generic
+    `tokens.DenyInterim` exposes the same verdict to the enrollment handlers below.
   - *Production.* `identity.WithMFAGate(mfaSvc)` makes `LoginHandler` check `IsEnrolled` after a
     correct password; an enrolled user receives a **short-lived interim access token**
     (`AMR=[AMRPassword]`, default 5 min, configurable via `WithInterimTokenTTL`) and **no refresh
@@ -202,9 +243,12 @@ model behind those statements.
     setting, and a password login still yields a full pair. `identity.Service` and `mfa.Service`
     both satisfy the gate interface, so switching between the two is one option per login path.
 
-  Mounting the `mfa` handlers alone changes no login outcome — enrolment and confirmation succeed
-  while logins stay password-only. That is a legitimate configuration for "optional MFA", and a
-  wiring mistake for "required MFA", so decide which one you are shipping and check it.
+  Mounting the `mfa` handlers alone changes no login outcome — logins stay password-only — but
+  enrolment and confirmation are themselves fail-closed until an assurance gate is wired (see the
+  gate above), so an optional-MFA app wires `mfa.WithCredentialAssurance(tokens.DenyInterim)` on
+  `EnrollHandler`/`ConfirmHandler` to let users enrol. That is a legitimate configuration for
+  "optional MFA", and a wiring mistake for "required MFA", so decide which one you are shipping and
+  check it.
 
   The one thing that is not left to policy: `DisableHandler` and `RegenerateRecoveryCodesHandler`
   require an elevated session by default (`mfa.WithStepUpRequired(false)` opts out). That is not
@@ -215,8 +259,11 @@ model behind those statements.
   Without `WithMFAGate`/`StepUpHandler`, AMR production is entirely consumer-implemented: the
   application's `ClaimsBuilder`/`ClaimsProvider` must stamp the AMR values itself when issuing the
   pair after a second factor, and a plain `LoginHandler` issues a full refreshable pair on the
-  password alone. On refresh the AMR is re-evaluated by the `ClaimsProvider`, not frozen at login.
-  To make that re-evaluation per-session rather than per-user, `Rotate` attaches a
+  password alone. On refresh the AMR is re-evaluated by the `ClaimsProvider`; when the provider
+  returns no AMR, `Rotate` falls back to the AMR recorded on the refresh-token family at mint time,
+  so a legitimately stepped-up session does not silently lose `mfa` after its first silent refresh
+  (a provider that does return AMR still wins). To make that re-evaluation per-session rather than
+  per-user, `Rotate` attaches a
   `tokens.RotationContext` (the rotation family ID and the family's preserved `auth_time`) to the
   context passed to `ClaimsProvider.ClaimsForUser`; recover it with `tokens.RotationContextFromContext`.
   This lets a provider keyed by family ID preserve (or deliberately downgrade) the assurance the
@@ -301,7 +348,7 @@ model behind those statements.
   - `api_key.auth.succeeded` — fired on a successful verify; `Attrs` carry `"key_type"`, and optionally
     `"ip"` / `"user_agent"` when a `event.RequestContext` is threaded in by the handler.
   - `api_key.auth.failed` — fired on a failed verify; `Event.Reason` is one of: `not_found`,
-    `expired`, `tenant_mismatch`, `wrong_type`. No token or hash is included.
+    `expired`, `revoked`, `tenant_mismatch`, `wrong_type`. No token or hash is included.
   - `api_key.purged` — fired by the `DeleteExpired` GC sweep; `Attrs` carry `"count"`.
 
   **Opt-in route gates** (`WithRequiredKind`, `WithRequiredScopes`, `RequireMachine`, `RequireHuman`)
@@ -325,7 +372,24 @@ model behind those statements.
   directs the reset token to a verified recovery channel **instead of** the primary inbox, so a
   compromised primary mailbox cannot drive the reset; it is enumeration-uniform — an unknown
   account, an OAuth-only account, and a known account with no recovery channel all produce the
-  same empty, no-error response.
+  same empty, no-error response. The enrollment endpoints are themselves fail-closed: the six
+  credential-enrollment handlers (`Request`/`ConfirmEmailChange`, `Request`/`ConfirmPhoneVerification`,
+  `Request`/`ConfirmRecoveryEmail`) run the default `tokens.DenyInterim` gate and refuse an
+  interim (pre-MFA) access-token session with `403 assurance_required`; token-less (session-based)
+  applications and fully-elevated sessions pass. Override with `identity.WithCredentialAssurance`
+  or opt out explicitly with `identity.WithInsecureNoAssuranceCheck`.
+- **Credential rotation evicts recovery material.** `ResetPassword`, `ChangePassword` and
+  `SetTemporaryPassword` clear the account's enrolled recovery channels
+  (`ClearRecoveryChannels`), purge its pending verification tokens through the per-user revoke
+  `VerificationTokenStore.DeleteVerificationTokensByUser` (recovery-email/phone enrollment and
+  email-change tokens minted by a session that predates the rotation), and run every registered
+  `identity.AccountEraser`. Account deletion does the same, and `DisableUser` also purges pending
+  tokens. This closes the takeover chains in which an attacker-planted recovery channel or a
+  pre-rotation enrollment/email-change token survived the victim's remediation. The passkey module
+  ships the eraser for its credential class: register `passkeySvc.AccountEraser()` alongside
+  `tokens.NewAccountRevoker(...)` via `identity.WithAccountErasers` — **consumers MUST register
+  it**, because without it a passkey enrolled by an attacker survives a password reset and keeps
+  minting sessions.
 - **Deactivation revokes pending tokens and blocks re-authentication.** Magic-link,
   password-reset and email-verification all reject a token whose account has since been
   soft-deleted (`DeleteUser`): the consume path re-checks `DeletedAt` and returns "not found",
@@ -343,7 +407,12 @@ model behind those statements.
   Both guarantees hold under concurrency: success consumes the code through an atomic guarded
   delete keyed on the exact hash that was compared (only one of N parallel correct-code
   verifications wins), and an attempt slot is reserved atomically *before* the code is compared,
-  so concurrent wrong guesses cannot exceed the limit. The hash guard also covers the Issue/Verify
+  so concurrent wrong guesses cannot exceed the limit. Issuance is also a single atomic store
+  operation (`otp.Store.IssueOTP`) that enforces the resend cooldown and upserts the code together,
+  so N concurrent issue requests yield exactly one code; and the last-issued instant is a durable
+  tombstone that survives every terminal transition of the previous code (consume, burn, expiry,
+  invalidation, eviction), so burning or verifying a code cannot reset the cooldown or the
+  attempt budget. The hash guard also covers the Issue/Verify
   interleave: if the code is reissued between a verifier's read and its consume, the stored row
   now carries a different hash, so the stale verification deletes nothing and fails — a superseded
   code can neither be accepted nor burn its freshly issued replacement.
@@ -369,14 +438,18 @@ model behind those statements.
   not interruptible mid-hash, so the guard is a pre-call check, not a kill switch for an in-flight
   pass; in-memory map lookups in the reference stores are not individually cancellable but complete
   in microseconds.
-- **Argon2id cost parameters from stored hashes are bounds-checked on both sides.** `Compare`
-  parses the `m`/`t`/`p` cost fields from the stored PHC string and validates them before invoking
-  `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads) prevent library panics.
-  An upper bound (`MaxMemoryKiB` = 512 MiB = 524 288 KiB) prevents an OOM DoS: `argon2.IDKey`
-  allocates `memory × 1 024` bytes, so a tampered or corrupt stored hash row carrying e.g.
-  `m=4000000000` would attempt a multi-TiB allocation on the victim's next login. Any stored hash
-  whose memory parameter exceeds `MaxMemoryKiB` is rejected as `ErrInvalidPassword` (same opaque
-  mismatch signal as all other validation failures) before the KDF is invoked.
+- **Argon2id cost parameters are bounds-checked on both the generation and verify paths.**
+  `Compare` parses the `m`/`t`/`p` cost fields from the stored PHC string and validates them before
+  invoking `argon2.IDKey`. Lower bounds (time ≥ 1, threads ≥ 1, memory ≥ 8×threads) prevent library
+  panics. An upper bound (`MaxMemoryKiB` = 512 MiB = 524 288 KiB, plus `MaxTime` for iterations)
+  prevents an OOM/CPU DoS: `argon2.IDKey` allocates `memory × 1 024` bytes, so a tampered or
+  corrupt stored hash row carrying e.g. `m=4000000000` would attempt a multi-TiB allocation on the
+  victim's next login. Any stored hash whose memory parameter exceeds `MaxMemoryKiB` (or whose `t`
+  exceeds `MaxTime`) is rejected as `ErrInvalidPassword` (same opaque mismatch signal as all other
+  validation failures) before the KDF is invoked. The generation path applies the same range:
+  `WithTime`/`WithMemory` clamp **up** to the floors and **down** to those ceilings, so a hasher can
+  never emit a PHC string its own `Compare` would permanently reject — the asymmetry that produced
+  unverifiable hashes above the ceilings is closed.
 - **Redaction on credential-bearing types (defence in depth).** The structs most likely to be
   logged or printed implement `fmt.Stringer`/`fmt.GoStringer` and `slog.LogValuer` so their
   secret fields render as `REDACTED` on the accidental-leak paths (`%v`/`%s`/`%+v`/`%#v`, `log`,
@@ -384,16 +457,24 @@ model behind those statements.
   `tokens/jwt.Config`, `tokens/jwt.SigningKey` and the running `tokens/jwt.Service`
   (`SecretKey` / `SigningKeys[].Secret` and the resolved key bytes), `webapp.Config.SigningKey`,
   `passkey.Config.CookieKey`, the `oauth.Provider` client secret, `keystore.SigningKey` /
-  `keystore.Keyset` (`Secret`), and `mfa.TOTPEnrollment.Secret`. Non-secret identifiers (key IDs,
-  issuer, tenant, endpoints, expiry) stay visible to aid debugging. This is a safety net, **not**
-  a licence to log these values (see below). JSON marshalling is intentionally **not** redacted,
-  since returning a freshly issued token to its owner in a response body is a legitimate use.
-- **Trivially known signing keys are rejected at construction.** `tokens/jwt` (and therefore the
-  `keystore` JWT adapter, which projects each key through `jwt.NewHMACSigner`) refuses an HS256
-  secret that is all-zero or a single repeated byte in addition to one shorter than
-  `MinSecretKeyLength` or matching a published example key. `Config.InsecureAllowWeakKey`
-  suppresses only the minimum-length gate — the published-key denylist and the trivially-known-key
-  check are unconditional.
+  `keystore.Keyset` (`Secret`), and `mfa.TOTPEnrollment.Secret`. `authflow.Engine` additionally
+  uses value receivers plus a `fmt.Formatter` implementation, so both the value and pointer forms
+  and every fmt verb (`%d`, `%x`, …) render the redacted summary rather than dumping the flow-token
+  HMAC key through fmt reflection. Non-secret identifiers (key IDs, issuer, tenant, endpoints,
+  expiry) stay visible to aid debugging. This is a safety net, **not** a licence to log these
+  values (see below). JSON marshalling is intentionally **not** redacted, since returning a freshly
+  issued token to its owner in a response body is a legitimate use.
+- **Credential-material policy is shared and fail-fast.** One policy
+  (`internal/secretpolicy`) applies to every key-loading path: the `tokens/jwt` HMAC secret (and
+  therefore the `keystore` JWT adapter), the `keystore.NewKEK` deployment KEK, the `oauth`
+  state-signing key, the `passkey` ceremony-cookie key and the `authflow.NewEngine` flow-token HMAC
+  key. Each path refuses a key shorter than its documented minimum, one that is all-zero or a
+  single repeated byte, an exact credential literal published in this project's examples/docs, and
+  a near-copy carrying a published-example marker. The shared sentinels are
+  `secretpolicy.ErrTooShort` / `ErrTrivial` / `ErrPublished` / `ErrNearCopy`; `keystore` maps the
+  material failures onto `ErrTrivialKEK` / `ErrPublishedKEK`. `jwt.Config.InsecureAllowWeakKey`
+  suppresses only the minimum-length gate — the trivial, published and near-copy rejections are
+  unconditional.
 - **Errors do not echo secrets.** Wrapped errors carry the underlying cause
   (`%w`) or non-sensitive metadata (e.g. a JWT `alg` header), never the plaintext
   password or token bytes.
@@ -472,8 +553,12 @@ redaction is in any case only a backstop. Therefore the consumer must:
   least `oauth.MinStateSigningKeyLength` (32) bytes; the handlers fail closed with `500` when the
   key is missing or too short, so a cookie an attacker can plant (sibling-subdomain tossing,
   plaintext HTTP) cannot drive a forged login, and a short key cannot be brute-forced offline
-  from a captured cookie. On callback the `state` binding is additionally compared in constant
-  time. Two consequences for the consumer:
+  from a captured cookie. The key is screened by the shared credential policy as well: an exact
+  published-example literal and a marker-bearing near-copy are refused, not just a short key. On
+  the begin path a provider whose endpoint URLs failed the https-only validation is refused with
+  `500` (and `Provider.AuthCodeURL` returns `""`) instead of redirecting the browser — with the
+  state, PKCE challenge, `client_id` and `redirect_uri` — to the rejected endpoint. On callback the
+  `state` binding is additionally compared in constant time. Two consequences for the consumer:
   - **Never log or mirror request cookies.** The verifier and nonce sit in the cookie in
     plaintext; any infra that logs cookies, ships them to an observability backend, or proxies
     them through something that persists headers is recording sensitive material.
@@ -630,6 +715,14 @@ records errors via `span.RecordError`. For Prometheus counters or SIEM ingestion
 `context.Context`, so span propagation and deadline enforcement are fully under the consumer's
 control.
 
+The **`webapp` preset** wires `Config.EventSink` into both handler families and the issuer it
+builds; a nil sink selects `event.NewSlogSink(nil)` rather than silently dropping events, so
+logout and refresh-family revocation are audited out of the box. Events emitted by a
+caller-constructed `identity.Service` (login, registration, password changes) are still wired by
+the caller via `identity.WithEventSink` on that service. The reference `revocation.MemBus` also
+recovers a panicking subscriber: the panic is logged and returned in the joined error while the
+fan-out continues, so one broken subscriber cannot abort the revocation of every later subscriber.
+
 **Idempotency** — request-level deduplication (idempotency keys, retry-safe mutations) is the
 application layer's responsibility. egauth provides no idempotency-key layer; consuming
 applications that need it must implement or proxy one in front of the egauth handlers, mirroring
@@ -647,8 +740,10 @@ rate-limit keys cannot exhaust heap memory:
   soonest-expiring record; `sessions/memory` never evicts live sessions and instead fails the
   insert with `sessions.ErrStoreCapacityExceeded`. Durable account records (users, identities,
   MFA enrollments, recovery codes, API keys) are never evicted.
-- `mfa/memory` caps recovery-attempt records at `DefaultMaxEntries`, evicting the stalest first;
-  TOTP enrollments and recovery codes are durable.
+- `mfa/memory` caps recovery-attempt records at `DefaultMaxEntries`, evicting the stalest first —
+  but a record under an active lockout is never evicted, so the map can temporarily exceed the cap
+  while every tracked record is locked (each becomes reclaimable once its lock decays). TOTP
+  enrollments and recovery codes are durable.
 - `ratelimit.TokenBucket` caps tracked keys at `DefaultMaxKeys` (100,000) and evicts the
   least-pressured bucket.
 
@@ -784,9 +879,13 @@ the login endpoint (per the non-objectives), which covers the remainder.
 The **password-reset request** endpoint (`RequestPasswordResetHandler`) is, by contrast,
 deliberately uniform: it returns the same response for a known account, an unknown account, an
 OAuth-only account (no password to reset), and even a backend error — and it dispatches email
-delivery off the response path so the Mailer's latency is not a timing oracle. Account existence
-must not be inferable from this endpoint. (Residual in-process timing — one extra indexed DB
-read for an existing account — is left to the consumer's rate limiting, per the non-objectives.)
+delivery off the response path so the Mailer's latency is not a timing oracle. The non-minting
+branches also spend the same store round trips as the minting branch (decoy
+`FindIdentitiesByUserID` / `FindUserByEmail` / `CreateVerificationToken` calls against values that
+cannot match), so account existence is not exposed through store-work asymmetry either.
+`RequestMagicLink` and `RequestPasswordResetViaRecovery` are equalized the same way. Account
+existence must not be inferable from these endpoints; any residual in-process timing is left to the
+consumer's rate limiting, per the non-objectives.
 
 ## Constant-time strategy and evidence
 

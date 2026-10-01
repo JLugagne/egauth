@@ -301,7 +301,9 @@ func TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault(t *testing.T) {
 	resolverA := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
 		return uidA, "alice", "Alice", "tenant-alpha", true
 	})
-	beginA := passkey.BeginRegistrationHandler(svc, resolverA)
+	// Assurance is out of scope for this test (its target is ceremony-cookie tenant binding):
+	// opt out explicitly rather than thread an assurance gate through this harness.
+	beginA := passkey.BeginRegistrationHandler(svc, resolverA, passkey.WithInsecureNoAssuranceCheck())
 
 	// 1. Initiate ceremony on Tenant A to obtain the ceremony cookie
 	beginRec := httptest.NewRecorder()
@@ -322,7 +324,7 @@ func TestSEC_PSK_04_CrossTenant_CeremonyCookie_AcceptedByDefault(t *testing.T) {
 	resolverB := passkey.WithUserResolver(func(*http.Request) (uuid.UUID, string, string, string, bool) {
 		return uidB, "bob", "Bob", "tenant-beta", true
 	})
-	finishB := passkey.FinishRegistrationHandler(svc, resolverB)
+	finishB := passkey.FinishRegistrationHandler(svc, resolverB, passkey.WithInsecureNoAssuranceCheck())
 
 	// Case 1: If an invalid/tampered cookie is provided to Tenant B, loadSession fails with session_invalid (HTTP 400).
 	dummyReq := httptest.NewRequest(http.MethodPost, "/passkey/register/finish", strings.NewReader("{}"))
@@ -387,7 +389,10 @@ func TestSEC_MFA_04_StepUp_RecoveryCodes_CannotElevateSession(t *testing.T) {
 		return tokens.Claims[struct{}]{Subject: userID, TenantID: tenant}
 	}
 
-	stepUpH := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver)
+	// No authoritative session-state store exists in this harness (the issuer is a mock), so the
+	// step-up account-lifecycle re-check is out of scope: opt into the legacy echo behavior
+	// explicitly. The assertions below cover recovery-code elevation, not lifecycle enforcement.
+	stepUpH := mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState())
 
 	// 1. User submits valid recovery code to StepUpHandler:
 	stepUpForm := url.Values{"code": {validRecoveryCode}}

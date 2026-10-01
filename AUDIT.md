@@ -24,9 +24,17 @@ audit**. "AI-audited" is **not** a synonym for "audited" — do not read it as o
 
 ### What was reviewed (and how)
 
-- **Adversarial review pass** over the security-sensitive modules (`identity`, `tokens`/`jwt`,
+- **Adversarial review pass (v1.0)** over the security-sensitive modules (`identity`, `tokens`/`jwt`,
   `sessions`, `passwords`/`argon2`, `mfa`, `otp`, `passkey`, `oauth`) looking for high/critical
   issues. The pass found no high/critical issue at the reviewed commit.
+- **Second AI-driven adversarial audit (2026-09-23/24)**, run against commit `b275d34` with
+  per-domain slicing and a failing proof-of-concept test required for every confirmed finding:
+  **27 findings** (1 critical, 6 high, 12 medium, 8 low), all 27 reproduced on the audited code
+  and all re-verified adversarially. Fixes for the full set are landed in the tree; the working
+  record (scope, full report, attack-chain analysis, PoCs, verification) is kept outside version
+  control under `.security-audit/2026-09-23-2354/` and is **not** a published report. This pass is
+  AI-driven, exactly like the first, and does **not** change the "no independent third-party human
+  audit" status below.
 - **Threat model + guarantees** documented in `SECURITY.md`: hashing at rest, constant-time
   comparison and authentication paths (with benchmark evidence), enumeration resistance,
   refresh-token rotation with theft detection, alg-pinned JWTs (`iss`/`aud` checks),

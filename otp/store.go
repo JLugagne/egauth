@@ -2,24 +2,27 @@ package otp
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 // Store persists outstanding one-time passcodes (one per subject+purpose).
 //
-// It is the composition of the stable-core OTPStore (the issue/look-up/attempt-count/consume
-// operations the Service touches on every send and verify) and the optional OTPReaper (the
-// schedulable expired-code sweep that only a background job calls). Segmenting the contract this
-// way means a future v1.x capability can ship as a NEW optional interface rather than a method on
-// this one, which would break every external Store. Both the in-memory and pgx stores implement
-// the whole Store.
+// It is the composition of the stable-core OTPStore (the look-up/attempt-count/consume
+// operations the Service touches on every verify), the atomic-issuance capability OTPIssuer (the
+// cooldown-enforcing single-operation issue the Service touches on every send) and the optional
+// OTPReaper (the schedulable expired-code sweep that only a background job calls). Segmenting the
+// contract this way means a future v1.x capability can ship as a NEW interface rather than a
+// method on this one, which would break every external Store. Both the in-memory and pgx stores
+// implement the whole Store.
 //
 // Every operation is scoped to a tenant via a mandatory tenantID argument. An empty
 // string is a legal tenant key (the single-tenant default partition); it must still be
 // passed explicitly.
 type Store interface {
 	OTPStore
+	OTPIssuer
 	OTPReaper
 }
 
@@ -29,7 +32,8 @@ type Store interface {
 // interface, never as a method here.
 type OTPStore interface {
 	// SaveOTP upserts the code for a subject+purpose, replacing (and resetting the attempt
-	// count of) any previous outstanding code. If the record already carries a non-empty
+	// count of) any previous outstanding code, and records o.CreatedAt as the issuance instant
+	// IssueOTP's cooldown check measures from. If the record already carries a non-empty
 	// TenantID that differs from tenantID, it returns ErrTenantMismatch.
 	SaveOTP(ctx context.Context, tenantID string, o *OTP) error
 	// GetOTP returns the outstanding code for the subject+purpose, or ErrCodeNotFound.
@@ -50,10 +54,34 @@ type OTPStore interface {
 	DeleteOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error
 }
 
+// OTPIssuer is the atomic-issuance capability of an OTP backend: it folds the resend-cooldown
+// check and the upsert of the new code into ONE store operation, so concurrent issue requests
+// cannot all pass the check (only one succeeds; the rest get ErrCooldownActive) and the cooldown
+// state survives every terminal transition of the previous code (consume, burn, expiry,
+// invalidation). The full Store composes OTPStore + OTPIssuer + OTPReaper.
+type OTPIssuer interface {
+	// IssueOTP atomically enforces the resend cooldown and persists o as the new outstanding
+	// code.
+	//
+	// o.CreatedAt is the issuance instant supplied by the caller's clock; implementations MUST
+	// use it (not their own clock) so the Service's injectable clock governs. When cooldown is
+	// positive and the last code issued for the same (tenant, subject, purpose) was issued less
+	// than cooldown before o.CreatedAt (or after it, i.e. clock skew), IssueOTP returns
+	// ErrCooldownActive and stores nothing. The last-issued instant MUST survive every terminal
+	// transition of the code — ConsumeOTP, DeleteOTP, expiry and eviction — because burning or
+	// consuming a code must not reset the resend throttle. A non-positive cooldown disables the
+	// check.
+	//
+	// If the record already carries a non-empty TenantID that differs from tenantID, it returns
+	// ErrTenantMismatch. On success it upserts the code for the subject+purpose, replacing (and
+	// resetting the attempt count of) any previous outstanding code.
+	IssueOTP(ctx context.Context, tenantID string, o *OTP, cooldown time.Duration) error
+}
+
 // OTPReaper is the optional GC capability of an OTP backend: the schedulable sweep that purges
 // expired codes. It is separated from the core OTPStore because the request path never calls it —
-// only a background job does. The full Store composes OTPStore + OTPReaper; both the in-memory and
-// pgx stores implement the whole Store.
+// only a background job does. The full Store composes OTPStore + OTPIssuer + OTPReaper; both the
+// in-memory and pgx stores implement the whole Store.
 type OTPReaper interface {
 	// DeleteExpired purges codes past their expiry within the given tenant, returning the number
 	// deleted. It is the schedulable GC reaper. A background job sweeping every tenant must loop.

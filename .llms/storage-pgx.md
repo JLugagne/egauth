@@ -50,6 +50,7 @@ Methods:
 - `ResetFailedAttempts(ctx, tenantID, identityID) error`
 - `CreateVerificationToken(ctx, tenantID, userID, kind string, ttl time.Duration, metadata []byte) (string, error)`
 - `ConsumeVerificationToken(ctx, tenantID, token, kind string) (uuid.UUID, []byte, error)` — atomic single-use
+- `DeleteVerificationTokensByUser(ctx, tenantID, userID) (int64, error)` — per-user purge run by password rotation / account deletion / disable (unknown user = `(0, nil)`)
 - `DeleteExpiredVerificationTokens(ctx, tenantID) (int64, error)`
 
 Migrations (schema evolution):
@@ -171,12 +172,17 @@ constructor: `func NewStore(db DBQuerier, kek KEK) *Store`
 `KEK` provides envelope encryption for TOTP secrets and must be implemented or provided by the `keystore` package.
 
 Methods:
-- `SaveTOTP`, `GetTOTP`, `DeleteTOTP`
+- `SaveTOTP`, `GetTOTP`, `DeleteTOTP` (TOTP secret sealed with the KEK)
+- `ConfirmEnrollment(ctx, tenantID, e *mfa.TOTPEnrollment, codeHashes []string) error` — marks the enrollment confirmed and stores the initial recovery codes in one transaction
 - `MarkTOTPUsed(ctx, tenantID, userID, step int64) (bool, error)` — replay prevention
-- `IncrementTOTPAttempts(ctx, tenantID, userID) (int, error)`
+- `IncrementTOTPAttempts(ctx, tenantID, userID, now, maxAttempts, lockoutDuration) (int, error)`
+- `ResetTOTPAttempts(ctx, tenantID, userID) error`
 - `ReplaceRecoveryCodes(ctx, tenantID, userID, codeHashes []string) error`
 - `ConsumeRecoveryCode(ctx, tenantID, userID, codeHash string) error`
-- `DeleteRecoveryCodes`
+- `DeleteRecoveryCodes(ctx, tenantID, userID) error`
+- `IncrementRecoveryAttempts(ctx, tenantID, userID, now, maxAttempts, lockoutDuration) (int, error)` — atomic upsert, so concurrent first-burst attempts cannot bypass the lockout (F-PGX-001)
+- `ResetRecoveryAttempts(ctx, tenantID, userID) error`
+- `Ping(ctx)` (health.Pinger)
 
 Migrations:
 ```
@@ -194,13 +200,17 @@ constructor: `func NewStore(db DBQuerier) *Store`
 
 Methods:
 - `SaveOTP`, `GetOTP`, `DeleteOTP`
-- `ConsumeOTP(ctx, tenantID, subjectID uuid.UUID, purpose string) (bool, error)`
+- `ConsumeOTP(ctx, tenantID, subjectID uuid.UUID, purpose, expectedCodeHash string) (bool, error)` — single-use + identity guard: deletes only when the stored hash still equals `expectedCodeHash`
 - `IncrementOTPAttempts(ctx, tenantID, subjectID uuid.UUID, purpose string) (int, error)`
+- `IssueOTP(ctx, tenantID, o *otp.OTP, cooldown time.Duration) error` — atomic cooldown check + upsert; the cooldown is measured against a durable tombstone row in `otp_issuances`, so it survives consume/burn/expiry/eviction; concurrent issues yield exactly one winner and `ErrCooldownActive` for the rest
 - `DeleteExpired(ctx, tenantID) (int64, error)`
+- `Ping(ctx)` (health.Pinger)
 
 Migrations:
 ```
 001_create_otp_codes.sql
+002_add_expires_at_index.sql
+003_create_otp_issuances.sql   -- durable issuance tombstone (cooldown state)
 ```
 
 ---
@@ -208,7 +218,7 @@ Migrations:
 ### passkey
 
 import: `github.com/JLugagne/egauth/adapters/pgx/passkey`
-implements: `passkey.Store`
+implements: `passkey.Store` and `passkey.ChallengeStore` (single-use ceremony challenges)
 constructor: `func NewStore(db DBQuerier) *Store`
 
 Methods:
@@ -216,10 +226,15 @@ Methods:
 - `GetCredentials(ctx, tenantID, userID) ([]*passkey.Credential, error)` — empty slice if none
 - `UpdateCredential(ctx, tenantID, c *passkey.Credential) error` — persists updated signature counter; returns `ErrCredentialNotFound` if absent
 - `DeleteCredential(ctx, tenantID, userID, credentialID []byte) error` — returns `ErrCredentialNotFound` if absent
+- `DeleteCredentialsByUser(ctx, tenantID, userID) error` — deletes every credential for the user; idempotent, tenant-scoped; backs `passkey.Service.AccountEraser()` so password reset/change/deletion evicts passkeys
+- `Put(ctx, tenantID, challenge string, expiresAt) error` / `Consume(ctx, tenantID, challenge) (bool, error)` — `passkey.ChallengeStore`; Consume is atomic (one winner)
+- `Ping(ctx)` (health.Pinger)
 
 Migrations:
 ```
 001_create_passkey_credentials.sql
+002_add_credential_management_metadata.sql
+003_create_passkey_challenges.sql
 ```
 
 ---

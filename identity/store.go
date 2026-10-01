@@ -127,13 +127,23 @@ type VerificationTokenStore interface {
 	// to the user, kind and TTL. Only the selector and the verifier hash are stored. The
 	// returned string (selector.verifier) is a credential handed to the user exactly once.
 	CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
-
+	// DeleteVerificationTokensByUser deletes every pending verification token bound to userID in
+	// the tenant, returning the number deleted. Unlike DeleteUser (which purges as part of the
+	// soft-delete) this is the explicit per-user revoke the credential-rotation paths
+	// (ResetPassword, ChangePassword, SetTemporaryPassword) and account deletion/disable call: the
+	// tokens minted by a hijacked session — recovery-channel/phone enrollment and email change —
+	// are credentials delivered to a caller-supplied address, so a password rotation that only
+	// revoked sessions would leave the attacker able to confirm a pre-rotation token and
+	// re-establish a way back in.
+	//
+	// It is a purge, not a lookup: an unknown user or an account with no pending tokens yields
+	// (0, nil), so callers need not distinguish "nothing to revoke" from "user never existed".
+	DeleteVerificationTokensByUser(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error)
 	// ConsumeVerificationToken validates and atomically consumes (single-use) a token of the
 	// given kind, returning the bound user ID and any stored metadata. It returns
 	// ErrVerificationTokenNotFound for an unknown/malformed token or a verifier mismatch, and
 	// ErrVerificationTokenExpired for a matching-but-expired token.
 	ConsumeVerificationToken(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
-
 	// DeleteExpiredVerificationTokens purges verification tokens past their expiry within the
 	// given tenant, returning the number deleted. It is the schedulable GC reaper for the
 	// (selector/verifier) token table. It scopes to a single tenant; a background job sweeping

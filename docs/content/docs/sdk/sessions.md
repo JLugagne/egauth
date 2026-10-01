@@ -9,7 +9,7 @@ If you prefer stateful, server-side tracking over JWTs, use the `sessions` modul
 
 ## Initializing Sessions
 
-`NewService` takes a `Store` plus optional `ServiceOption`s. The idle duration is **not** an option — you pass it per call (to `CreateSession`, `Touch`, and `Rotate`). The two options are `WithClock` (inject a clock, mainly for testing) and `WithMaxLifetime` (an absolute cap on how long a session may live, measured from `CreatedAt`).
+`NewService` takes a `Store` plus optional `ServiceOption`s. The idle duration is **not** an option — you pass it per call (to `CreateSession`, `Touch`, and `Rotate`). The options are `WithClock` (inject a clock, mainly for testing), `WithMaxLifetime` (tune the 30-day default absolute cap, measured from `CreatedAt`) and `WithNoMaxLifetime` (disable the cap, insecure).
 
 ```go
 import (
@@ -104,7 +104,7 @@ The `sessions` module ships two defenses worth calling out here. See [Security H
 
 ### Absolute Lifetime Cap
 
-`WithMaxLifetime` caps a session's total lifetime from its `CreatedAt`. Once `now` is past `CreatedAt + d`, `ValidateSession` rejects the session and `Touch`/`Rotate` can no longer keep it alive — they clamp the slid `ExpiresAt` so it never moves past the absolute deadline. This stops an idle-timeout slide from keeping a stolen-but-kept-warm token alive indefinitely. The zero value disables the cap (idle timeout only).
+`NewService` applies a **30-day absolute cap by default**. `WithMaxLifetime` tunes it: once `now` is past `CreatedAt + d`, `ValidateSession` rejects the session and `Touch`/`Rotate` can no longer keep it alive — they clamp the slid `ExpiresAt` so it never moves past the absolute deadline. This stops an idle-timeout slide from keeping a stolen-but-kept-warm token alive indefinitely. `WithMaxLifetime(0)` keeps the default (it does not disable the cap); only `WithNoMaxLifetime()` disables it, which is insecure.
 
 ```go
 sessionSvc := sessions.NewService(

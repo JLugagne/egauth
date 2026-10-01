@@ -12,7 +12,7 @@ Key properties vs stateless tokens:
 - Revocation is O(1) and instant (no token still valid until expiry)
 - Per-request store lookup required (latency trade-off)
 - Idle-timeout via `Touch` (slide `ExpiresAt` on activity)
-- Absolute-lifetime cap via `WithMaxLifetime` (slide cannot keep a stolen token warm indefinitely)
+- Absolute-lifetime cap on by default (30 days) and tunable via `WithMaxLifetime` (slide cannot keep a stolen token warm indefinitely)
 - Session fixation defense via `Rotate` (new token, same session ID, old token instantly invalid)
 
 ## Service interface
@@ -66,7 +66,8 @@ func NewService(store Store, opts ...ServiceOption) Service
 
 // ServiceOptions:
 func WithClock(now func() time.Time) ServiceOption       // override time source (tests)
-func WithMaxLifetime(d time.Duration) ServiceOption      // absolute cap; zero = disabled
+func WithMaxLifetime(d time.Duration) ServiceOption      // absolute cap; default 30 days; zero = keep the default
+func WithNoMaxLifetime() ServiceOption                   // disable the absolute cap entirely (insecure)
 func WithEventSink(sink event.Sink) ServiceOption        // security-event sink for revocations (see M9 below)
 
 // Single-tenant convenience wrapper — drops tenantID arg, always uses ""
@@ -202,7 +203,8 @@ Rotate(duration=D)         →  ExpiresAt = min(now+D, CreatedAt+maxLifetime)
 WithMaxLifetime(M):
   ValidateSession checks now > CreatedAt+M  →  ErrSessionNotFound
   Touch/Rotate clamp: ExpiresAt never exceeds CreatedAt+M
-  Zero value = no absolute cap (idle-timeout only)
+  NewService applies M = 30 days by default; WithMaxLifetime(0) KEEPS that default
+  (it does not disable the cap); WithNoMaxLifetime() disables it (insecure)
 ```
 
 ## Eviction
@@ -233,7 +235,7 @@ import (
 
 store := memory.NewStore()
 svc := sessions.NewService(store,
-    sessions.WithMaxLifetime(7*24*time.Hour), // optional absolute cap
+    sessions.WithMaxLifetime(7*24*time.Hour), // shorten the 30-day default cap
     sessions.WithEventSink(myAuditSink),      // optional: emit event.Logout on revocation (M9)
 )
 
@@ -270,6 +272,6 @@ svc.RevokeAllForUser(ctx, tenantID, userID, rc)
 - Concurrent `Rotate` on the same token: only the first succeeds. The second gets `ErrSessionNotFound` — handle it as a session conflict (re-validate or force re-login), not a transient error.
 - Cookie flags (`Secure`, `HttpOnly`, `SameSite`) are **not set by the library**. The middleware only reads the cookie — by default the hardened `__Host-session_token` (`sessions.DefaultSessionCookieName`); the caller writes it under the same name. The `__Host-` prefix is browser-enforced (`Secure`, `Path=/`, no `Domain`); use `WithCookieName` to opt out only when you genuinely can't meet those rules.
 - `DeleteExpired` is per-tenant. A multi-tenant memory store needs one `DeleteExpired` call per active tenant per janitor tick; there is no single cross-tenant purge.
-- `WithMaxLifetime` zero value disables the absolute cap entirely — a session with a long idle timeout can theoretically live forever if `Touch` is called before every expiry. Set an explicit cap for production.
+- `NewService` applies a 30-day absolute cap by default. `WithMaxLifetime(0)` keeps the default (it does not disable it); only `WithNoMaxLifetime()` disables the cap, after which a session with a long idle timeout can live forever if `Touch` is called before every expiry.
 - `ValidateSession` returns `ErrSessionNotFound` for both idle-expired and absolute-cap-expired sessions — no way to tell them apart from the error alone.
 - The `pgx` backend (`sessions/pgx`) is a separate nested module; use it for persistent or horizontally-scaled deployments. The memory store is for tests and single-process single-restart scenarios only.

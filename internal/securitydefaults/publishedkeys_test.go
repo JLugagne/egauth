@@ -33,7 +33,7 @@ const minPublishedKeyLength = jwt.MinSecretKeyLength
 
 // denyListSourceFile is where the denylist itself lives. It necessarily contains the very literals
 // it denies, so the scan skips it.
-const denyListSourceFile = "tokens/jwt/denylist.go"
+const denyListSourceFile = "internal/secretpolicy/secretpolicy.go"
 
 // TestNoPublishedKeyLiteralsInExamples is the guard behind the denylist: every long string literal
 // assigned to a key-bearing field in a *_test.go Example (which go/doc publishes as the package's
@@ -401,5 +401,45 @@ func TestReleaseToolingPinsHaveOneHome(t *testing.T) {
 		if !strings.Contains(string(mk), name) {
 			t.Errorf("Makefile must pin %s: the release runbook refers to it by name", name)
 		}
+	}
+}
+
+// TestDenyListSourceFileHoldsTheDeniedLiterals keeps the skip honest: the scan skips the one
+// file that necessarily contains the literals, so that file must actually be where tokens/jwt's
+// alias resolves to. If the literals move again without updating denyListSourceFile, this fails
+// instead of letting the skip silently drift onto an unrelated file.
+func TestDenyListSourceFileHoldsTheDeniedLiterals(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join(repoRoot(t), filepath.FromSlash(denyListSourceFile)))
+	if err != nil {
+		t.Fatalf("read denylist source %s: %v — the scan skips this file, so it must exist and hold the literals", denyListSourceFile, err)
+	}
+	if len(jwt.DeniedSecrets) == 0 {
+		t.Fatal("tokens/jwt.DeniedSecrets is empty; the published-key guard has nothing to enforce")
+	}
+	for denied := range jwt.DeniedSecrets {
+		if !strings.Contains(string(raw), strconv.Quote(denied)) {
+			t.Errorf("denylist source %s does not contain %s; if the literals moved, update denyListSourceFile so the scan skips the right file",
+				denyListSourceFile, strconv.Quote(denied))
+		}
+	}
+}
+
+// TestGoKeyLiteralsFlagsAnonymousExample proves the AST half of the guard end to end: a long
+// literal assigned to a key-bearing field inside a godoc Example is extracted by goKeyLiterals
+// and rejected by publishedKeyProblem when it is absent from the denylist.
+func TestGoKeyLiteralsFlagsAnonymousExample(t *testing.T) {
+	root := t.TempDir()
+	unknown := strings.Repeat("q", minPublishedKeyLength)
+	src := "package example\n\nfunc ExampleNew() {\n\tcfg := Config{SecretKey: \"" + unknown + "\"}\n\t_ = cfg\n}\n"
+	path := filepath.Join(root, "example_test.go")
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	lits := goKeyLiterals(t, path)
+	if len(lits) != 1 || lits[0] != unknown {
+		t.Fatalf("goKeyLiterals = %q, want exactly the seeded published literal", lits)
+	}
+	if problem := publishedKeyProblem(relPath(t, root, path), lits[0]); problem == "" {
+		t.Fatal("an unknown literal extracted from an Example must fail the guard")
 	}
 }

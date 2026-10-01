@@ -2,6 +2,7 @@ package pgx_test
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"testing"
 	"time"
@@ -145,8 +146,7 @@ func TestPgxStore_OAuthSecretEncryptedAtRest(t *testing.T) {
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
 	// Provide a real KEK for testing
-	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
-	k, err := keystore.NewKEK(dummyKey)
+	k, err := keystore.NewKEK(randomKEKKey(t))
 	require.NoError(t, err)
 
 	store := oauthpgx.NewStore(pool, wrappedKEK{k})
@@ -204,8 +204,7 @@ func TestPgxStore_SEC_OAU_02_CrossTenantAAD(t *testing.T) {
 
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
-	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
-	k, err := keystore.NewKEK(dummyKey)
+	k, err := keystore.NewKEK(randomKEKKey(t))
 	require.NoError(t, err)
 
 	store := oauthpgx.NewStore(pool, wrappedKEK{k})
@@ -274,8 +273,7 @@ func TestPgxStore_SEC_OAU_02_LegacyFallbackWithoutAAD(t *testing.T) {
 
 	require.NoError(t, oauthpgx.Migrate(ctx, pool))
 
-	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
-	k, err := keystore.NewKEK(dummyKey)
+	k, err := keystore.NewKEK(randomKEKKey(t))
 	require.NoError(t, err)
 
 	store := oauthpgx.NewStore(pool, wrappedKEK{k})
@@ -298,4 +296,12 @@ func TestPgxStore_SEC_OAU_02_LegacyFallbackWithoutAAD(t *testing.T) {
 	p, err := store.GetProvider(ctx, tenantLegacy, providerName)
 	require.NoError(t, err, "legacy secret without AAD must be opened successfully via fallback")
 	require.Equal(t, providerName, p.Name())
+}
+
+func randomKEKKey(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	return key
 }

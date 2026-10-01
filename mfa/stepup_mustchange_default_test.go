@@ -27,14 +27,14 @@ import (
 func seedConfirmedEnrollment(t *testing.T, svc mfa.Service, resolver mfa.HandlerOption, clk *clock) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &enroll))
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {clk.code(t, enroll.Secret)}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	return enroll.Secret
 }
@@ -100,7 +100,7 @@ func TestStepUpHandler_MustChange_DefaultWiring_PreservesInterimFlag(t *testing.
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	rec := httptest.NewRecorder()
 	h := contextVerifying(interimClaims(uid, "t1", true),
-		mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver))
+		mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState()))
 	req := mfaPost(url.Values{"code": {clk.code(t, secret)}})
 	req.Header.Set("Authorization", "Bearer interim-access-jwt")
 	h.ServeHTTP(rec, req)
@@ -134,7 +134,7 @@ func TestStepUpHandler_MustChange_DefaultWiring_UnflaggedInterimStaysClean(t *te
 	clk.t = clk.t.Add(mfa.DefaultPeriod)
 	rec := httptest.NewRecorder()
 	h := contextVerifying(interimClaims(uid, "t1", false),
-		mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver))
+		mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver, mfa.WithInsecureEchoSessionState()))
 	req := mfaPost(url.Values{"code": {clk.code(t, secret)}})
 	req.Header.Set("Authorization", "Bearer interim-access-jwt")
 	h.ServeHTTP(rec, req)
@@ -166,7 +166,8 @@ func TestStepUpHandler_MustChange_ResolverOverridesInterim(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h := contextVerifying(interimClaims(uid, "t1", false),
 			mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver,
-				mfa.WithMustChangeResolver(func(*http.Request) bool { return true })))
+				mfa.WithMustChangeResolver(func(*http.Request) bool { return true }),
+				mfa.WithInsecureEchoSessionState()))
 		req := mfaPost(url.Values{"code": {clk.code(t, secret)}})
 		req.Header.Set("Authorization", "Bearer interim-access-jwt")
 		h.ServeHTTP(rec, req)
@@ -189,7 +190,8 @@ func TestStepUpHandler_MustChange_ResolverOverridesInterim(t *testing.T) {
 		rec := httptest.NewRecorder()
 		h := contextVerifying(interimClaims(uid, "t1", true),
 			mfa.StepUpHandler[struct{}](svc, issuer, builder, resolver,
-				mfa.WithMustChangeResolver(func(*http.Request) bool { return false })))
+				mfa.WithMustChangeResolver(func(*http.Request) bool { return false }),
+				mfa.WithInsecureEchoSessionState()))
 		req := mfaPost(url.Values{"code": {clk.code(t, secret)}})
 		req.Header.Set("Authorization", "Bearer interim-access-jwt")
 		h.ServeHTTP(rec, req)

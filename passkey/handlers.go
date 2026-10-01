@@ -93,6 +93,10 @@ type handlerConfig struct {
 	configErr error
 	// cookieKeys, when set, resolves the ceremony-cookie HMAC key per tenant so a cookie sealed for one tenant cannot be opened under another (per-tenant cryptographic isolation). When nil the static cookieKey is used for every tenant (unchanged single-key behavior).
 	cookieKeys CookieKeyResolver
+	// assurance, when set, is the credential-enrollment assurance gate (see WithCredentialAssurance). Registration Begin/Finish call it before doing any ceremony work and refuse with 403 assurance_required when it returns an error. When nil AND insecureNoAssuranceCheck is false the handlers FAIL CLOSED: a credential-enrollment route must never silently accept an interim (pre-MFA) session.
+	assurance func(*http.Request) error
+	// insecureNoAssuranceCheck disables the fail-closed assurance requirement (see WithInsecureNoAssuranceCheck): registration then accepts any authenticated session, including an interim (pre-MFA) one.
+	insecureNoAssuranceCheck bool
 }
 
 // HandlerOption configures the passkey HTTP handlers.
@@ -207,6 +211,11 @@ func BeginRegistrationHandler(svc *Service, opts ...HandlerOption) http.HandlerF
 		if !ok {
 			return
 		}
+		// Credential enrollment is a high-value action: refuse a session that has not met the
+		// configured assurance gate (fail closed by default) before starting the ceremony.
+		if !cfg.assuranceCheck(w, r) {
+			return
+		}
 		creation, session, err := svc.BeginRegistration(r.Context(), tenant, uid, name, displayName)
 		if err != nil {
 			cfg.fail(w, err)
@@ -233,6 +242,11 @@ func FinishRegistrationHandler(svc *Service, opts ...HandlerOption) http.Handler
 		}
 		uid, name, displayName, tenant, ok := cfg.subject(w, r)
 		if !ok {
+			return
+		}
+		// Refuse a session that has not met the assurance gate before touching the ceremony
+		// cookie or consuming the challenge, so a refused enrollment does not burn the ceremony.
+		if !cfg.assuranceCheck(w, r) {
 			return
 		}
 		session, ok := cfg.loadSession(w, r, tenant)
@@ -485,6 +499,7 @@ func (cfg handlerConfig) fail(w http.ResponseWriter, err error) {
 		// A store resource bound was reached. Surfaced as 503 rather than the default 5xx
 		// internal_error so the caller knows the request was well formed and a retry after the
 		// ceremony window (or freeing an authenticator) can succeed — while still failing closed.
+		http.Error(w, "store_capacity", http.StatusServiceUnavailable)
 	default:
 		// Anything else is a store/infrastructure failure: surface it as 5xx so it is not
 		// mislabeled as a client verification failure (and operators keep the error signal).
@@ -864,5 +879,50 @@ func (cfg handlerConfig) failClosedOnMisconfig(w http.ResponseWriter) bool {
 		return false
 	}
 	http.Error(w, "passkey handler misconfigured", http.StatusInternalServerError)
+	return true
+}
+
+// WithCredentialAssurance gates the credential-enrollment handlers (registration Begin and
+// Finish) on fn, which must return nil for a session allowed to enroll a credential and an
+// error otherwise. The intended gate is tokens.DenyInterim, which refuses an interim
+// (pre-second-factor) session: without it, an attacker holding only the password can enroll
+// their own authenticator on the interim session and convert it into a durable credential.
+//
+// The handlers FAIL CLOSED by default: when neither this option nor
+// WithInsecureNoAssuranceCheck is supplied, Begin/Finish refuse with 403 assurance_required.
+// That makes the secure composition the default rather than a wiring the application must
+// remember.
+func WithCredentialAssurance(fn func(*http.Request) error) HandlerOption {
+	return func(h *handlerConfig) { h.assurance = fn }
+}
+
+// WithInsecureNoAssuranceCheck removes the fail-closed credential-enrollment protection: the
+// registration handlers no longer require an assurance gate, so ANY authenticated session —
+// including an interim (pre-MFA) session minted after only the password factor — can enroll a
+// passkey. Use it only when the application has no second factor to protect (an interim
+// session is then indistinguishable from a full one) or enforces the assurance requirement in
+// an outer layer. Prefer WithCredentialAssurance(tokens.DenyInterim).
+func WithInsecureNoAssuranceCheck() HandlerOption {
+	return func(h *handlerConfig) { h.insecureNoAssuranceCheck = true }
+}
+
+// assuranceCheck enforces the credential-enrollment assurance gate. It reports true when the
+// request may proceed. By default (no gate configured and no explicit opt-out) it fails closed
+// with 403 assurance_required, because a credential-enrollment route must never silently
+// accept an interim (pre-MFA) session.
+func (cfg handlerConfig) assuranceCheck(w http.ResponseWriter, r *http.Request) bool {
+	if cfg.insecureNoAssuranceCheck {
+		return true
+	}
+	if cfg.assurance == nil {
+		httputil.MarkNoStore(w)
+		http.Error(w, "assurance_required", http.StatusForbidden)
+		return false
+	}
+	if err := cfg.assurance(r); err != nil {
+		httputil.MarkNoStore(w)
+		http.Error(w, "assurance_required", http.StatusForbidden)
+		return false
+	}
 	return true
 }

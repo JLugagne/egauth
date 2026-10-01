@@ -101,3 +101,15 @@ func (s *SingleTenant) GoString() string { return s.svc.String() }
 
 // LogValue redacts the facade for structured (slog) logging.
 func (s *SingleTenant) LogValue() slog.Value { return s.svc.LogValue() }
+
+// AccountEraser returns a function with the identity.AccountEraser shape
+// (func(ctx context.Context, tenantID string, userID uuid.UUID) error) that deletes every
+// passkey credential of the user in the empty (single-tenant) partition. The tenantID argument
+// passed by the caller is ignored: every call is hard-wired to "", so a SingleTenant facade can
+// never delete another tenant's credentials. Register it with identity.WithAccountErasers so a
+// password reset or account deletion evicts passkeys.
+func (s *SingleTenant) AccountEraser() func(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	return func(ctx context.Context, _ string, userID uuid.UUID) error {
+		return s.svc.AccountEraser()(ctx, "", userID)
+	}
+}

@@ -46,7 +46,13 @@ type Verifier[C any] interface {
 
 type Rotator[C any] interface {
     // Consumes refreshToken, issues fresh pair in same family.
-    // ErrRefreshTokenReused on replay → revokes whole family.
+    // ErrRefreshTokenReused on an after-grace replay → revokes whole family.
+    // ErrRefreshConcurrent (wraps ErrRefreshTokenReused) for the benign cases — replay within
+    // ReuseGracePeriod, or two requests racing the SAME not-yet-consumed token — which are
+    // rejected WITHOUT revoking.
+    // Pass the presenting client's context — tokens.WithClientContext(ctx, tokens.ClientContext{
+    // IP, UserAgent}) — so within-grace theft detection can compare the presenting client with
+    // the one that rotated; an empty/absent ClientContext disables that comparison.
     Rotate(ctx context.Context, tenantID string, refreshToken string) (*TokenPair[C], error)
 }
 
@@ -114,7 +120,9 @@ type Claims[C any] struct {
     Groups    []string
     Roles     []string
     // AMR: RFC 8176 authentication method refs (pwd, otp, hwk, mfa).
-    // Re-evaluated by ClaimsProvider on every rotation, not frozen at login.
+    // Re-evaluated by ClaimsProvider on every rotation, not frozen at login; when the provider
+    // returns no AMR, Rotate falls back to the family's recorded AMR (RefreshToken.AMR), so a
+    // legitimately stepped-up session does not silently decay to an empty AMR on silent refresh.
     AMR    []string
     // MustChangePassword is a first-class advisory flag set for admin-provisioned temporary
     // credentials (identity.AdminCreateUser / SetTemporaryPassword). It is a soft gate: a flagged
@@ -154,6 +162,10 @@ type RefreshToken struct {
     UserID     uuid.UUID
     TenantID   string
     AuthTime   time.Time  // preserved across family rotation for step-up anchoring
+    // AMR records the methods proved when the family was minted (copied from Claims.AMR).
+    // Rotate falls back to it when the ClaimsProvider returns no AMR, so step-up assurance
+    // survives silent rotation instead of decaying to an empty list. nil for legacy rows.
+    AMR        []string
     ExpiresAt  time.Time
     CreatedAt  time.Time
     ConsumedAt *time.Time // non-nil = consumed (single-use enforced)
@@ -501,6 +513,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithAuthTenantResolver[C](func(*http.Request) string)` | Tenant-aware mode: resolve tenantID per request; verify via `VerifyAccessTokenForTenant` and scope auto-refresh. `""` return → 401 (fail-closed) |
 | `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
+| `WithDenyInterim[C]()` | Refuse a verified token minted before the second factor (`Claims.Interim`), answering `403 step_up_required`. Structural counterpart of `WithRequiredAMR`; the non-generic `tokens.DenyInterim` exposes the same verdict to enrollment handlers as `func(*http.Request) error`. No effect by default. |
 | `WithMaxAuthAge[C](d time.Duration)` | Require `AuthTime` within d (sudo-mode gate; not reset by silent refresh) |
 | `WithPasswordChangeGate[C](resetURL string)` | Soft forced-password-change gate: after successful token verification, if `Claims.MustChangePassword` is true, the wrapped handler is NOT invoked and the request is redirected `303` to `resetURL` (or returns `403 password_change_required` if `resetURL` is empty). The change-password and logout routes should be excluded from this middleware. |
 | `WithRequiredScopes[C](scopes ...string)` | Require ALL listed scopes present in `Claims.Scopes`; rejects with `403 insufficient_scope`. Opt-in only — no default scope policy. |
@@ -600,9 +613,12 @@ var ErrInvalidClaims         = errors.New("tokens: invalid claims")
 var ErrAPIKeyNotFound        = errors.New("tokens: api key not found")
 var ErrAPIKeyRevoked         = errors.New("tokens: api key revoked")        // soft-revoked key presented at VerifyAPIKey
 var ErrRefreshTokenNotFound  = errors.New("tokens: refresh token not found")
-var ErrRefreshTokenReused    = errors.New("tokens: refresh token reused")   // triggers family revoke
+var ErrRefreshTokenReused    = errors.New("tokens: refresh token reused")   // after-grace replay triggers family revoke
+var ErrRefreshConcurrent     = errors.New("tokens: refresh token reused: concurrent rotation within grace") // wraps ErrRefreshTokenReused; benign, NO revoke
+var ErrTokenFamilyRevoked    = errors.New("tokens: token revoked: token family revoked (tokens: refresh token not found)")
 var ErrNoClaimsProvider      = errors.New("tokens: no claims provider configured for rotation")
 var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
+var ErrInterimDenied         = errors.New("tokens: interim access token presented; a completed second factor is required") // returned by tokens.DenyInterim
 ```
 
 ## Security notes
@@ -610,9 +626,11 @@ var ErrTenantMismatch        = errors.New("tokens: tenant ID mismatch")
 - **Per-kid alg-pinning**: the access-token verifier resolves the signer by `kid` then pins its algorithm — a token is rejected unless `token.alg == signer.Method().Alg()`. This rejects `alg=none` and alg-confusion/downgrade (e.g. an `RS256`-keyed `kid` presented as `HS256`) for both symmetric (HS256) and asymmetric (RS256/ES256/ES384/ES512/EdDSA) signing.
 - **Publishable JWKS**: `Service.PublicJWKS()` returns an RFC 7517 key set. Asymmetric public keys are safe to serve at `/.well-known/jwks.json`; HMAC keys are emitted metadata-only (`kty:"oct"`) and the secret (`k`) is NEVER published.
 - **SHA-256 at rest / no clear-text retrieval**: refresh tokens and API keys are stored as `HashToken(raw)` (SHA-256 hex); the clear-text value is never persisted and is unrecoverable after issuance. `IssueAPIKey` returns `APIKey.Token` exactly once; subsequent reads (e.g. via `ListAPIKeysByCreator`) always return a blank `Token` field. Revocation is therefore always by key ID (`RevokeAPIKey`), not by token value.
-- **Rotation theft detection**: consuming an already-consumed refresh token (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) treated as benign concurrency (rejected, family not revoked).
+- **Rotation theft detection**: consuming an already-consumed refresh token **within its validity** (`ErrRefreshTokenReused`) immediately revokes the entire rotation family. Replay within `ReuseGracePeriod` (default 10 s) and losing the atomic consume race for the *same not-yet-consumed* token are benign concurrency: rejected with `ErrRefreshConcurrent` (which wraps `ErrRefreshTokenReused`), family NOT revoked. The comparison is client-aware: `Rotate` compares the presenting client (IP + User-Agent) in the context's `ClientContext` with the client that consumed the token, and both refresh surfaces populate it — `RefreshHandler` and the `WithAutoRefresh` path behind `RequireAuth`/`ContextMiddleware`. Pass it yourself when calling `Rotate` directly, or a within-grace replay from a different client is waved through as concurrency.
+- **Rollback never un-revokes**: if persisting the rotated successor fails, `Rotate` re-reads the record and refuses to restore the pre-rotation snapshot once the record is revoked or gone, so a concurrent revocation (theft detection, account disable) is never silently undone by a failed rotation.
+- **AMR across rotation**: the refresh-token family records the AMR proved at mint time (`RefreshToken.AMR`); when the `ClaimsProvider` returns no AMR on rotation, `Rotate` carries the family's value forward (a provider that returns AMR still wins), so a stepped-up session does not decay to an empty AMR on silent refresh.
 - **Secret redaction**: `TokenPair`, `APIKey`, `jwt.Config`, `jwt.SigningKey`, `jwt.Service` implement `String()`, `GoString()`, `LogValue()` to redact secrets in all fmt/slog paths. The same applies to the other key-bearing types across the library: `webapp.Config` (SigningKey), `passkey.Config` (CookieKey), `oauth.Provider` (client secret), `keystore.SigningKey`/`keystore.Keyset` (Secret) and `mfa.TOTPEnrollment` (Secret).
-- **Trivially known keys rejected**: `jwt.New`/`Config.Validate`/`NewHMACSigner` (and therefore the `keystore` JWT adapter) refuse every-byte-zero and repeated-single-byte HMAC secrets, not only short or published-example ones. `InsecureAllowWeakKey` suppresses only the minimum-length gate, never the denylist or the trivially-known-key check.
+- **Shared credential-material policy**: `jwt.New`/`Config.Validate`/`NewHMACSigner` (and therefore the `keystore` JWT adapter) validate the secret through `internal/secretpolicy`: short (below `MinSecretKeyLength` = 32), every-byte-zero / repeated-single-byte, exact published-example literals (`jwt.DeniedSecrets`, an alias of `secretpolicy.Denied`) and marker-bearing near-copies are all refused with `secretpolicy.ErrTooShort` / `ErrTrivial` / `ErrPublished` / `ErrNearCopy`. The same policy screens the `keystore` KEK (`ErrTrivialKEK` / `ErrPublishedKEK`), the `oauth` state-signing key, the `passkey` ceremony-cookie key and the `authflow` engine key. `InsecureAllowWeakKey` suppresses only the minimum-length gate, never the trivial/published/near-copy checks.
 - **Step-up / sudo mode**: `WithRequiredAMR` enforces RFC 8176 AMR; `WithMaxAuthAge` enforces `AuthTime` freshness. `AuthTime` is NOT reset by silent refresh — only a real re-authentication resets it.
 - **Key rotation**: `SigningKeys` (HMAC) or `Signers` (any scheme) + `ActiveKeyID` support kid-tagged overlapping-validity key rollover — every key verifies, `ActiveKeyID` signs — so an HMAC→asymmetric migration is just adding the new `Signer` and switching `ActiveKeyID`. Legacy `SecretKey` verifies un-kidded tokens during migration.
 - **CSRF**: the origin check is ON by default on `RefreshHandler`/`LogoutHandler` POSTs and every other handler family — a request whose `Origin`/`Referer` host is not the request `Host` or a trusted origin is rejected `403 cross_site_blocked`, and a POST with neither header is rejected. `WithTrustedOrigins` widens the allowlist (bare hosts and full origins both accepted, normalized then matched exactly); `WithInsecureNoOriginCheck` is the loud opt-out. Export the same check to your own routes with `origin.Middleware` / `origin.Allowed`.
@@ -694,4 +712,4 @@ mux.Handle("/api/delete-account", basic.RequireAuth(issuer,
 - `RefreshPath` on `Cookies` must remain `"/"` when using `WithAutoRefresh` middleware (the browser only sends the refresh cookie on matching paths).
 - Single-tenant shortcut: `jwt.NewSingleTenant(svc)` hard-wires `tenantID=""` on `Rotate`; do NOT mix with multi-tenant calls against the same `Service`.
 - Consumed refresh rows are retained until `ExpiresAt` for replay detection. The default memory store is bounded (`DefaultMaxEntries`, evicting expired then soonest-expiring); `Store.DeleteExpired` is only needed for the explicit `NewUnboundedStore()` opt-in. API keys are durable and never evicted — revoke them explicitly.
-- `WithAutoRefresh`: on expired access token + valid refresh cookie the middleware rotates transparently and proceeds — no redirect. On rotation failure it clears cookies and returns `401`.
+- `WithAutoRefresh`: on expired access token + valid refresh cookie the middleware rotates transparently and proceeds — no redirect. On an after-grace/expired/not-found rotation failure it clears all cookies and returns `401`; on the benign `ErrRefreshConcurrent` case it clears only the stale access cookie (the winning request already minted a fresh refresh cookie) and returns `401` without revoking the family. It also populates the client context (IP + User-Agent) for `Rotate`, so within-grace theft detection works on this path too.

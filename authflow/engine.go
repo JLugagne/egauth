@@ -15,6 +15,7 @@ import (
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/internal/httputil"
+	"github.com/JLugagne/egauth/internal/secretpolicy"
 	"github.com/JLugagne/egauth/tokens"
 )
 
@@ -167,8 +168,12 @@ func WithEventSink(sink event.Sink) Option {
 // store, and on an MFA-gated engine without the account lifecycle validator its step-up
 // path requires (ErrMissingAccountValidator).
 func NewEngine(secret []byte, opts ...Option) (*Engine, error) {
-	if len(secret) < 16 {
-		return nil, errors.New("authflow: secret must be at least 16 bytes")
+	// Reject trivially-known and published keys through the shared policy (F-AFLOW-002). The
+	// previous gate was length-only, so all-zero or repeated-byte keys — the shape a forgotten
+	// or failed crypto/rand read leaves behind — were accepted at any length, letting anyone
+	// who knows the placeholder forge flow tokens for arbitrary principals.
+	if err := secretpolicy.Validate("authflow flow-token HMAC key", secret, minEngineSecretLength); err != nil {
+		return nil, fmt.Errorf("authflow: %w", err)
 	}
 
 	e := &Engine{

@@ -46,8 +46,8 @@ func TestGuarded_RejectsOversizedBody(t *testing.T) {
 		name    string
 		handler http.HandlerFunc
 	}{
-		{"EnrollHandler", mfa.EnrollHandler(svc, resolver)},
-		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver)},
+		{"EnrollHandler", mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())},
+		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())},
 		{"VerifyHandler", mfa.VerifyHandler(svc, resolver)},
 		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver)},
 		{"RegenerateRecoveryCodesHandler", mfa.RegenerateRecoveryCodesHandler(svc, resolver)},

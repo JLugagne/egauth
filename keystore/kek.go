@@ -6,6 +6,8 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+
+	"github.com/JLugagne/egauth/internal/secretpolicy"
 )
 
 // KEK is a deployment Key-Encryption-Key used to envelope-encrypt tenant signing secrets at
@@ -14,7 +16,9 @@ import (
 // the deployment's secret manager, not the database.
 //
 // The KEK is REQUIRED and fail-fast validated: NewKEK rejects any key that is not exactly 32
-// bytes (AES-256), and NewManager rejects a nil KEK. There is no "no encryption" mode.
+// bytes (AES-256), refuses trivially-known and published example keys through the shared
+// credential policy (ErrTrivialKEK / ErrPublishedKEK), and NewManager rejects a nil KEK. There
+// is no "no encryption" mode.
 type KEK struct {
 	aead cipher.AEAD
 }
@@ -35,6 +39,14 @@ var ErrInvalidKEK = errors.New("keystore: KEK must be exactly 32 bytes (AES-256)
 // sufficient to recover every tenant's signing secret.
 var ErrTrivialKEK = errors.New("keystore: KEK is trivially known (all zero or a repeated byte); generate it with crypto/rand or load it from a secret manager")
 
+// ErrPublishedKEK is returned by NewKEK when the supplied key is a credential published in
+// this project's examples or docs (or a near-copy carrying a published-example marker). The
+// error chain also wraps secretpolicy.ErrPublished / secretpolicy.ErrNearCopy, so callers can
+// branch with errors.Is. A published KEK is not merely weak: it is a string anyone can read
+// from the public source tree, so whoever obtains a sealed key row can rebuild the KEK and
+// open every tenant's signing material.
+var ErrPublishedKEK = errors.New("keystore: KEK is a published example key (or a near-copy carrying a published-example marker); generate it with crypto/rand or load it from a secret manager")
+
 // ErrKEKRequired is returned by NewManager when no KEK is configured.
 var ErrKEKRequired = errors.New("keystore: a KEK is required (envelope encryption is mandatory)")
 
@@ -42,14 +54,29 @@ var ErrKEKRequired = errors.New("keystore: a KEK is required (envelope encryptio
 // authentication tag — tamper or wrong-KEK detection.
 var ErrCiphertextCorrupt = errors.New("keystore: sealed secret is corrupt or was sealed with a different KEK")
 
-// NewKEK builds a KEK from a 32-byte key. It fails fast on any other length so a misconfigured
-// deployment cannot start with a weak or wrong-sized key.
+// NewKEK builds a KEK from exactly 32 bytes. It fails fast on any other length and on key
+// material the shared credential policy refuses — trivially-known (all-zero / repeated byte),
+// published example literals, and marker-bearing near-copies — so a misconfigured deployment
+// cannot start with a weak, wrong-sized or publicly-known key.
 func NewKEK(key []byte) (*KEK, error) {
 	if len(key) != KEKKeyLength {
 		return nil, ErrInvalidKEK
 	}
-	if err := trivialKEKError(key); err != nil {
-		return nil, err
+	// Route the key-quality gate through the shared credential policy (F-KS-001): the previous
+	// check only refused fully-constant keys, so published example literals and
+	// marker-bearing near-copies were accepted and envelope encryption became a no-op for
+	// anyone who knows the public string. The mapping keeps the public sentinels stable and
+	// the secretpolicy sentinels reachable with errors.Is: ErrTrivialKEK for the trivial case,
+	// ErrPublishedKEK for published/near-copy.
+	if err := secretpolicy.Validate("KEK", key, KEKKeyLength); err != nil {
+		switch {
+		case errors.Is(err, secretpolicy.ErrTrivial):
+			return nil, fmt.Errorf("%w: %w", ErrTrivialKEK, secretpolicy.ErrTrivial)
+		case errors.Is(err, secretpolicy.ErrNearCopy):
+			return nil, fmt.Errorf("%w: %w", ErrPublishedKEK, secretpolicy.ErrNearCopy)
+		default:
+			return nil, fmt.Errorf("%w: %w", ErrPublishedKEK, secretpolicy.ErrPublished)
+		}
 	}
 	block, err := aes.NewCipher(key)
 	if err != nil {
@@ -96,24 +123,4 @@ func (k *KEK) Open(sealed []byte, aad ...[]byte) ([]byte, error) {
 		return nil, ErrCiphertextCorrupt
 	}
 	return pt, nil
-}
-
-// trivialKEKError reports a non-nil error when key is attacker-guessable at any length: every byte
-// zero, or a single byte value repeated throughout. Such a key satisfies the length gate, so the
-// check cannot be expressed as a minimum-length rule.
-//
-// It mirrors tokens/jwt's trivialSecretError and the published-example denylist in passkey: every
-// other key-loading path in this module refuses an all-zero or published key, and the KEK — the one
-// secret whose compromise defeats all of them at once — was the exception.
-func trivialKEKError(key []byte) error {
-	if len(key) == 0 {
-		return nil // the length check above rejects this; keep the helper total
-	}
-	first := key[0]
-	for _, b := range key[1:] {
-		if b != first {
-			return nil
-		}
-	}
-	return ErrTrivialKEK
 }

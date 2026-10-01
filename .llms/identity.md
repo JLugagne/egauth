@@ -20,7 +20,9 @@ type Service interface {
     LinkOrCreateIdentity(ctx context.Context, tenantID string, provider, providerID, email string, emailVerified bool) (*User, error)
     RequestMagicLink(ctx context.Context, tenantID string, email string) (token string, user *User, err error)
     LoginWithMagicLink(ctx context.Context, tenantID string, token string) (*User, error)
-    // ChangePassword changes the user's password and triggers all registered AccountErasers to terminate sessions.
+    // ChangePassword changes the user's password, evicting recovery channels + pending
+    // verification tokens and running all registered AccountErasers. It verifies the current
+    // password under the same brute-force lockout as Authenticate (a locked account is refused).
     ChangePassword(ctx context.Context, tenantID string, userID uuid.UUID, currentPassword, newPassword string) error
     RequestEmailChange(ctx context.Context, tenantID string, userID uuid.UUID, newEmail string) (token string, err error)
     ConfirmEmailChange(ctx context.Context, tenantID string, token string) (*User, error)
@@ -73,7 +75,7 @@ type Service interface {
   - `Selector string`, `VerifierHash string`, `UserID uuid.UUID`, `TenantID string`
   - `Kind string`, `Metadata []byte`, `ExpiresAt time.Time`, `CreatedAt time.Time`
 
-- `AccountEraser` — `func(ctx context.Context, tenantID string, userID uuid.UUID) error`; registered via `WithAccountErasers`, run by `DeleteAccount` before soft-deleting
+- `AccountEraser` — `func(ctx context.Context, tenantID string, userID uuid.UUID) error`; registered via `WithAccountErasers` and run by every credential rotation (`ResetPassword`, `ChangePassword`, `SetTemporaryPassword`) and by `DeleteAccount` before soft-deleting. Register one per credential class (`tokens.NewAccountRevoker` for refresh families/API keys, `passkey.Service.AccountEraser()` for passkey credentials) so an attacker-enrolled credential cannot survive the victim's remediation.
 - `AccountRevoker` — `func(ctx context.Context, tenantID string, userID uuid.UUID) error`; registered via `WithDisableRevokers`, run by `DisableUser` to invalidate active, re-establishable credentials (refresh tokens, API keys, sessions). Distinct from `AccountEraser`: disable is reversible, so revokers must NOT destroy enrollment data (MFA, passkeys) the account needs again after `EnableUser`.
 
 - `ClaimsBuilder[C any]` — `func(*User) tokens.Claims[C]`; maps an authenticated user to token claims for the handler layer
@@ -93,7 +95,7 @@ type Service interface {
 - `func WithEmailChangeTTL(d time.Duration) ServiceOption` — default 1h
 - `func WithPhoneVerificationTTL(d time.Duration) ServiceOption` — default 15 min
 - `func WithRecoveryEmailTTL(d time.Duration) ServiceOption` — default 24h
-- `func WithAccountErasers(erasers ...AccountEraser) ServiceOption` — cross-module revocation hooks for `DeleteAccount`
+- `func WithAccountErasers(erasers ...AccountEraser) ServiceOption` — cross-module revocation hooks run by `ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and `DeleteAccount` (in order) to terminate sessions, refresh families, MFA enrollments, passkeys, etc.
 - `func WithDisableRevokers(revokers ...AccountRevoker) ServiceOption` — cross-module revocation hooks for `DisableUser` (refresh tokens, API keys, sessions). Use `tokens.NewAccountRevoker(tokenStore)` for tokens/keys and `sessions.Service.RevokeAllForUser` for sessions.
 - `func WithEventSink(sink event.Sink) ServiceOption` — service-level security events
 - `func WithClock(now func() time.Time) ServiceOption` — override time source (tests)
@@ -123,6 +125,11 @@ type Store interface {
     // Verification tokens (selector/verifier scheme)
     CreateVerificationToken(ctx context.Context, tenantID string, userID uuid.UUID, kind string, ttl time.Duration, metadata []byte) (string, error)
     ConsumeVerificationToken(ctx context.Context, tenantID string, token, kind string) (uuid.UUID, []byte, error)
+    // DeleteVerificationTokensByUser deletes every pending token bound to userID in the tenant,
+    // returning the number deleted. Called by ResetPassword / ChangePassword /
+    // SetTemporaryPassword / DeleteAccount / DisableUser so a token minted by a pre-rotation
+    // session cannot be confirmed after the rotation. Purge semantics: unknown user = (0, nil).
+    DeleteVerificationTokensByUser(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error)
     DeleteExpiredVerificationTokens(ctx context.Context, tenantID string) (int64, error)
 
     // Lockout
@@ -142,6 +149,14 @@ Store is intentionally monolithic for v0.x; methods may be added in minor releas
 All handlers are POST-only; non-POST returns 405. On success: 204 No Content (or 303 redirect if `WithSuccessRedirect` set). On failure: HTTP error text with status code (or 303 with `?error=<code>` if `WithFailureRedirect` set).
 
 Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
+
+**Credential-enrollment handlers are gated by default.** `RequestEmailChangeHandler`,
+`ConfirmEmailChangeHandler`, `RequestPhoneVerificationHandler`, `ConfirmPhoneVerificationHandler`,
+`RequestRecoveryEmailHandler` and `ConfirmRecoveryEmailHandler` run the default
+`tokens.DenyInterim` gate and refuse an interim (pre-MFA) access-token session with
+`403 assurance_required`. Token-less (session-based) applications and fully-elevated sessions are
+unaffected. Override the gate with `WithCredentialAssurance`, or opt out with
+`WithInsecureNoAssuranceCheck`.
 
 ---
 
@@ -245,6 +260,8 @@ Request bodies are `application/x-www-form-urlencoded`. Default body cap: 4 KiB.
 - `func WithMaxBodyBytes(n int64) HandlerOption` — request body cap (default 4096; non-positive disables)
 - `func WithDeliveryConcurrency(n int) HandlerOption` — cap concurrent async deliveries per handler instance (default 64; non-positive disables, drops overflow with DeliveryFailed event)
 - `func WithDeliveryTimeout(d time.Duration) HandlerOption` — per-delivery timeout (default 30s; non-positive disables)
+- `func WithCredentialAssurance(fn func(*http.Request) error) HandlerOption` — override the enrollment assurance gate; default is `tokens.DenyInterim`
+- `func WithInsecureNoAssuranceCheck() HandlerOption` — remove the enrollment assurance gate entirely (accept an interim session; insecure)
 
 ## Errors (sentinels)
 
@@ -303,7 +320,11 @@ svc := identity.NewService(
     store,
     argon2.NewHasher(),
     policy.NewDefaultPolicy(),
-    identity.WithAccountErasers(sessions.NewEraser(sessionStore)),
+    identity.WithAccountErasers(
+        sessions.NewEraser(sessionStore),
+        tokens.NewAccountRevoker(tokenStore), // refresh families + API keys
+        passkeySvc.AccountEraser(),           // passkey credentials (MUST register)
+    ),
 )
 
 // Single-tenant shorthand
@@ -366,14 +387,16 @@ user, err := svc.LoginWithMagicLink(ctx, tenant, token,
 - All `Request*` handlers (`RequestPasswordResetHandler`, `RequestMagicLinkHandler`, `RequestPasswordResetViaRecoveryHandler`, `RequestPhoneVerificationHandler`) are enumeration-safe: they always respond 204 regardless of account existence or delivery success.
 - Token consumption is single-use and atomic; re-using a consumed token returns `ErrVerificationTokenNotFound`.
 - `ResetPassword` validates and hashes the new password BEFORE consuming the token, so a policy rejection does not burn a single-use token.
+- Every credential rotation evicts recovery material: `ResetPassword`, `ChangePassword` and `SetTemporaryPassword` call `ClearRecoveryChannels`, purge pending verification tokens (`DeleteVerificationTokensByUser`) and run all `AccountErasers`. Without the erasers wired (at minimum `tokens.NewAccountRevoker` + `passkey.Service.AccountEraser()`), an attacker-enrolled recovery channel, pending enrollment token or passkey can survive the rotation.
+- `ChangePassword` verifies the current password under the same brute-force lockout as `Authenticate`: a wrong guess feeds `IncrementFailedAttempts` (and can lock the account), and a currently locked account cannot change its password. It shares the verification helper with `Authenticate`, so the two paths cannot drift.
 - `DeleteAccount` runs all `AccountErasers` first; a revocation failure aborts before the soft-delete (cleanly retriable). Erasers should be idempotent.
-- `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued tokens valid until expiry — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately.
+- `DisableUser` stamps `DisabledAt` and emits `AccountDisabled` FIRST (fail-closed: the account is authoritatively blocked even if a downstream revoker fails), purges the user's pending verification tokens, then runs the registered `AccountRevoker`s (`WithDisableRevokers`) to revoke the user's refresh tokens, API keys and sessions, returning any joined revoker error so the idempotent call can be retried. It does NOT run `AccountErasers` (those are for permanent `DeleteAccount` and may destroy MFA/passkey enrollment that a reversible disable must preserve). With no revokers wired, `DisableUser` blocks new logins but leaves already-issued tokens valid until expiry — wire `tokens.NewAccountRevoker` and `sessions.Service.RevokeAllForUser` to kill them immediately.
 - A disabled account can not consume any verification token (including magic-link); `consumeForLiveUser` returns `ErrUserNotFound` for disabled accounts.
 - `LinkOrCreateIdentity` refuses silent email-based account linking (returns `ErrEmailAlreadyExists` if provider email matches an existing account); explicit linking from an authenticated session is required.
 - Verification token scheme is selector/verifier: selector stored in clear for O(1) lookup; only SHA-256 of verifier stored. Helpers: `GenerateVerificationToken()`, `SplitVerificationToken()`, `HashVerifier()`, `CompareVerifier()`.
 - Token kind constants: `KindPasswordReset`, `KindEmailVerification`, `KindMagicLink`, `KindEmailChange`, `KindPhoneVerification`, `KindRecoveryEmailVerification`.
 - Phone is a lower-assurance contact channel; the `mfa` module does not accept SMS as an authentication factor (NIST SP 800-63B).
 - Recovery email uniqueness is NOT enforced (multiple accounts may share a recovery contact); it is intentionally not a login key.
-- `WithTrustedOrigins` is disabled by default; CSRF protection is the consumer's responsibility when not set.
+- The strict same-origin CSRF gate is ON by default on every state-changing handler: a POST whose `Origin`/`Referer` host is neither the request `Host` nor a `WithTrustedOrigins` entry is rejected `403 cross_site_blocked`, as is a request carrying neither header. `WithTrustedOrigins` widens the allowlist; `WithInsecureNoOriginCheck` is the loud opt-out.
 - Default body cap is 4 KiB to bound pre-auth argon2 DoS; disabling it (`WithMaxBodyBytes(0)`) requires an upstream body-size limit.
 - `Store` interface is intentionally monolithic for v0.x; new methods may be added in minor releases without a major bump — run `identity/storetest` on every upgrade.

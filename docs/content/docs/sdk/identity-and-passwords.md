@@ -57,6 +57,14 @@ err := identityService.DeleteAccount(ctx, "tenant-123", authUser.ID)
 // The user's email is replaced with a random UUID, and their credentials are wiped.
 ```
 
+> **Register account erasers.** `DeleteAccount` and every password rotation (`ResetPassword`,
+> `ChangePassword`, `SetTemporaryPassword`) clear recovery channels, purge pending verification
+> tokens, and run the registered `AccountErasers`. Register at least
+> `tokens.NewAccountRevoker(tokenStore)` and `passkeySvc.AccountEraser()` via
+> `identity.WithAccountErasers(...)`; without the passkey eraser, a passkey an attacker enrolled
+> while holding the password survives the victim's reset and keeps minting sessions. See
+> [Security Hardening]({{< ref "security-hardening" >}}).
+
 ## User Lifecycle: Disabling Accounts
 
 `DisableUser` administratively suspends an account: it blocks new logins (`Authenticate` returns `ErrAccountDisabled`) and stops the account from consuming verification tokens. Unlike deletion it is **reversible** with `EnableUser` — so enrollment data (MFA secrets, passkeys) is intentionally preserved.

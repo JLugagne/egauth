@@ -5,9 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JLugagne/egauth/mfa"
 	"github.com/JLugagne/egauth/mfa/memory"
 	"github.com/JLugagne/egauth/mfa/storetest"
 	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -108,4 +110,53 @@ func TestUnboundedStore_DeleteStaleRecoveryAttempts(t *testing.T) {
 	if n, _ := store.IncrementRecoveryAttempts(ctx, tenantB, otherTenant, base.Add(4*time.Hour), 0, 0); n != 2 {
 		t.Fatalf("other tenant's record must survive: got attempts %d want 2", n)
 	}
+}
+
+// TestRecoveryLockoutSurvivesBoundedStoreEviction is the F-MFA-001 regression test: bounded
+// eviction must never reclaim a recovery-attempt record whose lockout is still active. The
+// original policy evicted the stalest record unconditionally, and because the lockout branch
+// deliberately freezes a locked record's lastAttemptAt, the locked record was always the
+// stalest — so the next insert at the cap silently lifted the lockout and handed out a fresh
+// guess budget.
+func TestRecoveryLockoutSurvivesBoundedStoreEviction(t *testing.T) {
+	ctx := context.Background()
+	base := time.Unix(1_700_000_000, 0)
+	now := base
+	store := memory.NewBoundedStore(2)
+	svc := mfa.NewService(store,
+		mfa.WithClock(func() time.Time { return now }),
+		mfa.WithMaxAttempts(5),
+	)
+
+	const tenant = "tenant-eviction"
+	victim := uuid.Must(uuid.NewV7())
+
+	// Lock the victim's recovery path: five wrong guesses.
+	for range 5 {
+		_ = svc.VerifyRecoveryCode(ctx, tenant, victim, "AAAA-BBBB-CCCC-DDDD")
+	}
+	require.ErrorIs(t, svc.VerifyRecoveryCode(ctx, tenant, victim, "AAAA-BBBB-CCCC-DDDD"), mfa.ErrTooManyAttempts,
+		"precondition: the recovery path is locked")
+
+	// Fill the bounded store to its cap with newer records, then insert one more: the stalest
+	// record (the victim's frozen, locked one) is the natural eviction victim.
+	for i := range 2 {
+		other := uuid.Must(uuid.NewV7())
+		_, err := store.IncrementRecoveryAttempts(ctx, tenant, other, base.Add(time.Duration(i+1)*time.Second), 5, mfa.DefaultLockoutDuration)
+		require.NoError(t, err)
+	}
+
+	assert.ErrorIs(t, svc.VerifyRecoveryCode(ctx, tenant, victim, "AAAA-BBBB-CCCC-DDDD"), mfa.ErrTooManyAttempts,
+		"a locked record must survive bounded eviction: otherwise the lockout is silently lifted")
+
+	// The cap is still a cap: once the lockout window elapses the record is reclaimable and
+	// normal eviction resumes.
+	now = base.Add(mfa.DefaultLockoutDuration + time.Second)
+	_, err := store.IncrementRecoveryAttempts(ctx, tenant, uuid.Must(uuid.NewV7()), now, 5, mfa.DefaultLockoutDuration)
+	require.NoError(t, err)
+
+	err = svc.VerifyRecoveryCode(ctx, tenant, victim, "AAAA-BBBB-CCCC-DDDD")
+	assert.ErrorIs(t, err, mfa.ErrRecoveryCodeNotFound,
+		"after the lockout window the decayed record may be evicted like any other")
+	assert.NotErrorIs(t, err, mfa.ErrTooManyAttempts)
 }

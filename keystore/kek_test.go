@@ -3,6 +3,7 @@ package keystore_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"testing"
 
@@ -14,7 +15,11 @@ import (
 
 func validKEK(t *testing.T) *keystore.KEK {
 	t.Helper()
-	k, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
+	key := make([]byte, keystore.KEKKeyLength)
+	if _, err := rand.Read(key); err != nil {
+		t.Fatalf("rand.Read: %v", err)
+	}
+	k, err := keystore.NewKEK(key)
 	if err != nil {
 		t.Fatalf("NewKEK: %v", err)
 	}

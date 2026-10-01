@@ -14,10 +14,11 @@ Everything here reflects the current code. Where a control is OFF by default, th
 explicitly so you can decide deliberately rather than inherit a silent default.
 
 > [!WARNING]
-> **Read this before going to production.** Skipping the opt-in controls below leaves real gaps:
-> sessions that never absolutely expire, passkeys that don't enforce user verification, OIDC
-> fetches that can be pointed at internal services, and unauthenticated endpoints that can be used
-> for mail/SMS bombing.
+> **Read this before going to production.** Some controls are fail-closed defaults (passkey user
+> verification and challenge binding, credential-enrolment gates, the session absolute-lifetime
+> cap), but the policy decisions still need you: key material must come from a secret manager,
+> OIDC fetches must keep the SSRF guard, and unauthenticated endpoints must be rate-limited
+> against mail/SMS bombing.
 
 ## Quick checklist
 
@@ -27,16 +28,21 @@ explicitly so you can decide deliberately rather than inherit a silent default.
 | Tokens (JWT) | `iss` / `aud` validation | `iss` checked if set; `aud` **off** | Set `Issuer` + `ExpectedAudience` |
 | Tokens (JWT) | Access-token tenant binding | fail-closed when `MultiTenant` set | Set `MultiTenant: true`; call `VerifyAccessTokenForTenant` |
 | Sessions | Cookie name (`__Host-` prefix) | **secure by default** (`__Host-session_token`) | Leave it; `WithCookieName` only as an escape hatch |
-| Sessions | Absolute lifetime | **off** (idle only) | `WithMaxLifetime` |
+| Sessions | Absolute lifetime | **on** (30-day cap) | Tune with `WithMaxLifetime`; `WithNoMaxLifetime` opts out (insecure) |
 | Sessions | Log-out-everywhere | available | Call `RevokeAllForUser` on reset/compromise |
-| Passkeys | User Verification | **preferred** (not enforced) | `UserVerification: protocol.VerificationRequired` |
-| Passkeys | Replay protection | **off** | `WithChallengeStore` + key required |
-| OAuth/OIDC | HTTPS on provider URLs | **enforced** | Leave on; never `WithInsecureURLs` in prod |
+| Passkeys | User Verification | **required** (zero value = `VerificationRequired`) | Relax to `VerificationPreferred`/`Discouraged` only when another factor already authenticated the user |
+| Passkeys | Replay protection | **on** (`ChallengeStore` + `CookieKey` required, fail-fast) | `Config.InsecureNoChallengeStore` knowingly accepts cookie-only protection; **do not** use for passwordless |
+| Passkeys | Credential-enrollment gate | **fail-closed** (`403 assurance_required` unless wired) | Wire `WithCredentialAssurance(tokens.DenyInterim)`; `WithInsecureNoAssuranceCheck` is the loud opt-out |
+| Passkeys | Account eraser | **must be registered** (`passkeySvc.AccountEraser()` via `identity.WithAccountErasers`) | None; without it an attacker-enrolled passkey survives a password reset |
+| MFA | Enrolment gate | **fail-closed** (`403 assurance_required` unless wired) | Wire `mfa.WithCredentialAssurance(tokens.DenyInterim)`; `WithInsecureNoAssuranceCheck` opts out |
+| MFA | Step-up issuance state | **fail-closed** (`500 misconfigured` without a resolver) | Wire `mfa.WithSessionStateResolver(idSvc.(issuance.Resolver))` (the concrete identity service implements it); `WithInsecureEchoSessionState` restores legacy echo |
+| OAuth/OIDC | State-cookie signing key | **required** (`WithStateSigningKey`, >= 32 bytes, 500 otherwise) | None; key comes from your secret manager |
+| OAuth/OIDC | HTTPS on provider URLs | **enforced** (deferred error fails the begin path closed) | Leave on; never `WithInsecureURLs` in prod |
 | OAuth/OIDC | JWKS bound to issuer (discovery) | enforced | Provide only the `Issuer` on the dynamic store |
 | OAuth/OIDC | Issuer allowlist (BYO-SSO) | **off** | `WithIssuerAllowlist` for untrusted tenants |
 | OAuth/OIDC | SSRF-safe HTTP client | **on** (token, userinfo, discovery, JWKS) | Leave it on; opt out only for a controlled internal/dev IdP |
 | HTTP | Rate limiting on `Request*` | **off** | Wrap with the `ratelimit` middleware |
-| HTTP | `webapp.NewWebApp` auth endpoints | **on** (per-IP `TokenBucket` on login/register/refresh/logout) | Tune `RateLimitBurst`/`RateLimitRefill` or replace with `RateLimiter`; `InsecureNoRateLimit` to opt out |
+| HTTP | `webapp.NewWebApp` auth endpoints | **on** (per-IP `TokenBucket` on login/register/refresh/logout; event sink defaults to slog) | Tune `RateLimitBurst`/`RateLimitRefill` or replace with `RateLimiter`; `InsecureNoRateLimit` to opt out |
 
 ---
 
@@ -180,7 +186,7 @@ import "github.com/JLugagne/egauth/sessions"
 
 sessionSvc := sessions.NewService(
 	sessionStore,
-	sessions.WithMaxLifetime(12*time.Hour), // absolute cap; zero = idle timeout only
+	sessions.WithMaxLifetime(12*time.Hour), // shorten the 30-day default cap
 )
 ```
 
@@ -204,11 +210,13 @@ event.
 
 ## Passkeys (WebAuthn)
 
-### Enforce User Verification
+### User Verification is required by default
 
-By default the UV (User Verified) flag is *preferred* but not enforced, which defeats
-passwordless and step-up use cases. Require it in the service config — it is propagated into the
-ceremony options and the session, so go-webauthn enforces the bit at every Finish:
+The zero value of `Config.UserVerification` is `protocol.VerificationRequired`: an assertion whose
+User Verified (UV) flag is unset is rejected at Finish across registration, login and discoverable
+login. Leave it at the default for passwordless/step-up; relax it explicitly to
+`VerificationPreferred` / `VerificationDiscouraged` **only** for a flow where another factor
+already authenticated the user.
 
 ```go
 import (
@@ -220,16 +228,18 @@ svc, err := passkey.NewService(store, passkey.Config{
 	RPID:             "example.com",
 	RPDisplayName:    "Example Inc",
 	RPOrigins:        []string{"https://example.com"},
-	UserVerification: protocol.VerificationRequired, // enforce UV (passwordless / step-up)
+	UserVerification: protocol.VerificationRequired, // explicit; also the zero-value default
 })
 ```
 
-### Replay protection (off by default)
+### Ceremony key and replay protection are required (fail-fast)
 
-The ceremony challenge lives in a signed cookie. Without a server-side single-use consume, a
-captured `Finish` request can be replayed within the cookie TTL — and the clone counter is a no-op
-for sign-count-0 platform passkeys. Wire a `ChallengeStore` (and the required cookie key) so each
-challenge is consumed exactly once:
+`Config.CookieKey` (at least `passkey.MinCookieKeyLength` = 32 bytes; screened by the shared
+credential policy against all-zero/repeated-byte, published-example and near-copy values) and a
+`Config.ChallengeStore` are required: `NewService` returns `ErrCookieKeyMissing` /
+`ErrChallengeStoreMissing` at construction, so a misconfiguration fails at startup instead of
+degrading silently. The challenge is recorded on Begin and atomically consumed on Finish, so a
+captured Finish request cannot be replayed within the cookie TTL.
 
 ```go
 import (
@@ -237,25 +247,36 @@ import (
 	passkeymem "github.com/JLugagne/egauth/passkey/memory"
 )
 
-challenges := passkeymem.NewChallengeStore() // process-local; back with a shared store in a cluster
-
-beginLogin := passkey.BeginLoginHandler(svc,
-	passkey.WithCookieKey(cookieKey),
-	passkey.WithChallengeStore(challenges),
-)
-finishLogin := passkey.FinishLoginHandler(svc,
-	passkey.WithCookieKey(cookieKey),
-	passkey.WithChallengeStore(challenges), // SAME store on Begin and Finish
-)
+svc, err := passkey.NewService(store, passkey.Config{
+	RPID:           "example.com",
+	RPDisplayName:  "Example Inc",
+	RPOrigins:      []string{"https://example.com"},
+	CookieKey:      cookieKey,                      // >= 32 bytes, from a secret manager
+	ChallengeStore: passkeymem.NewChallengeStore(), // process-local; back with a shared store in a cluster
+})
 ```
 
 > [!NOTE]
-> Pass the **same** `ChallengeStore` to the matching Begin and Finish handlers (registration and
-> login). The in-memory store is per-process; for a load-balanced deployment, back the
-> `passkey.ChallengeStore` interface with a shared store (e.g. Redis).
+> `Config.InsecureNoChallengeStore` knowingly accepts cookie-only protection (no server-side
+> replay binding); **do not** use it for passwordless. In a load-balanced deployment, back
+> `passkey.ChallengeStore` with a shared store (e.g. Redis) so Begin and Finish can land on
+> different replicas; the in-memory store is per-process.
 
-`WithCookieKey` is mandatory for the handlers regardless — without it the ceremony cookie is
-forgeable and the handlers fail closed (`500 server_misconfigured`).
+### Registration is gated fail-closed
+
+`BeginRegistrationHandler` / `FinishRegistrationHandler` answer `403 assurance_required` unless an
+assurance gate is wired. Wire `passkey.WithCredentialAssurance(tokens.DenyInterim)` — it refuses an
+interim (pre-second-factor) session, so a password-only attacker cannot enrol an authenticator;
+token-less (session-based) applications and fully-elevated sessions pass.
+`passkey.WithInsecureNoAssuranceCheck()` is the loud opt-out. The gate runs before the ceremony
+cookie is read or the challenge consumed.
+
+### Register the account eraser
+
+`passkey.Service.AccountEraser()` deletes every passkey a user has registered. Register it with
+`identity.WithAccountErasers` alongside `tokens.NewAccountRevoker(...)` so a password reset,
+password change or account deletion evicts passkeys — without it, a passkey an attacker enrolled
+while holding the password survives the victim's remediation and keeps minting sessions.
 
 ---
 
@@ -306,6 +327,25 @@ store := oauthpgx.NewStore(pool,
 		"https://login.microsoftonline.com/common/v2.0",
 	}),
 )
+```
+
+### State-cookie signing key is required
+
+The CSRF state cookie also carries the PKCE code verifier and OIDC nonce, so it is
+HMAC-SHA-256 authenticated with `oauth.WithStateSigningKey` — a stable random secret of at least
+`oauth.MinStateSigningKeyLength` (32) bytes from your secret manager. Every mounted auth handler
+needs it; a missing, short, trivially-known, published-example or near-copy key fails closed with
+`500` at request time (and validate at startup with `oauth.ValidateHandlerConfig`). The cookie is
+`HttpOnly` + `Secure` + `SameSite=Lax` and host-locked by the `__Host-oauth_state` default name.
+
+```go
+stateKey := stateSigningKeyFromSecretStore // >= 32 bytes, unique per deployment
+
+beginOpts := []oauth.HandlerOption{
+	oauth.WithRedirectURL("https://yourapp.com/auth/google/callback"),
+	oauth.WithStateSigningKey(stateKey),
+}
+callbackOpts := append(beginOpts, oauth.WithSuccessRedirect("/dashboard"))
 ```
 
 ### State cookie is bound to provider + tenant
@@ -382,8 +422,10 @@ deployment.
 - [ ] Argon2 cost tuned to your latency budget; `NeedsRehash` called after every successful login.
 - [ ] JWT `Issuer` set and `ExpectedAudience` set wherever a key is shared across services.
 - [ ] Prefer JWT `SigningKeys` rotation over a single `SecretKey`; wire an `EventSink`.
-- [ ] `sessions.WithMaxLifetime` set; `RevokeAllForUser` called on reset/compromise.
-- [ ] Passkey `UserVerification: protocol.VerificationRequired`; `WithChallengeStore` + `WithCookieKey` wired on all ceremony handlers.
+- [ ] Review `sessions.WithMaxLifetime` around the 30-day default; `RevokeAllForUser` called on reset/compromise.
+- [ ] Passkey `CookieKey` + `ChallengeStore` supplied at construction; registration gate wired; `passkeySvc.AccountEraser()` registered with `identity.WithAccountErasers`.
+- [ ] MFA `EnrollHandler`/`ConfirmHandler` gate wired; `StepUpHandler` given `WithSessionStateResolver`.
+- [ ] OAuth handlers given a random `WithStateSigningKey` (>= 32 bytes) from a secret manager.
 - [ ] No `WithInsecureURLs` / `AllowInsecureURLs` anywhere in production config.
 - [ ] BYO-SSO: `SafeHTTPClient()` for tenant URLs; `WithIssuerAllowlist` set; only `Issuer` supplied to the dynamic store (discovery resolves JWKS).
 - [ ] All `Request*` endpoints wrapped with `ratelimit` (per-IP **and** per-account/destination); SMS provider spend cap + region allowlist in place.

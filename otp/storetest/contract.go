@@ -3,6 +3,7 @@ package storetest
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -124,6 +125,63 @@ func StoreContractTesting(t *testing.T, store otp.Store, useMultiTenant bool) {
 		assert.ErrorIs(t, err, otp.ErrTenantMismatch, "record tenant != argument must be rejected")
 	})
 
+	t.Run("IssueOTP enforces the cooldown and survives terminal transitions", func(t *testing.T) {
+		sub := uuid.Must(uuid.NewV7())
+		base := time.Now()
+		first := &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h1", ExpiresAt: base.Add(time.Minute), CreatedAt: base}
+		require.NoError(t, store.IssueOTP(ctx, tenantA, first, time.Minute))
+
+		// A second issue inside the cooldown is refused and must not replace the code.
+		second := &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h2", ExpiresAt: base.Add(time.Minute), CreatedAt: base.Add(10 * time.Second)}
+		require.ErrorIs(t, store.IssueOTP(ctx, tenantA, second, time.Minute), otp.ErrCooldownActive)
+		got, err := store.GetOTP(ctx, tenantA, sub, "login")
+		require.NoError(t, err)
+		assert.Equal(t, "h1", got.CodeHash)
+
+		// Consuming the code must not clear the issuance state.
+		ok, err := store.ConsumeOTP(ctx, tenantA, sub, "login", "h1")
+		require.NoError(t, err)
+		require.True(t, ok)
+		require.ErrorIs(t, store.IssueOTP(ctx, tenantA, second, time.Minute), otp.ErrCooldownActive,
+			"the cooldown must survive a consume")
+
+		// Deleting the code must not clear it either.
+		require.NoError(t, store.IssueOTP(ctx, tenantA, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h3", ExpiresAt: base.Add(2 * time.Minute), CreatedAt: base.Add(2 * time.Minute)}, time.Minute))
+		require.NoError(t, store.DeleteOTP(ctx, tenantA, sub, "login"))
+		require.ErrorIs(t, store.IssueOTP(ctx, tenantA, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h4", ExpiresAt: base.Add(3 * time.Minute), CreatedAt: base.Add(2*time.Minute + 30*time.Second)}, time.Minute), otp.ErrCooldownActive,
+			"the cooldown must survive a delete")
+
+		// Once the cooldown has elapsed, issuance succeeds.
+		require.NoError(t, store.IssueOTP(ctx, tenantA, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h5", ExpiresAt: base.Add(4 * time.Minute), CreatedAt: base.Add(3 * time.Minute)}, time.Minute))
+	})
+
+	t.Run("IssueOTP is atomic under concurrency", func(t *testing.T) {
+		sub := uuid.Must(uuid.NewV7())
+		at := time.Now()
+		const n = 16
+		var (
+			wg     sync.WaitGroup
+			mu     sync.Mutex
+			issued int
+		)
+		start := make(chan struct{})
+		for i := 0; i < n; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				err := store.IssueOTP(ctx, tenantA, &otp.OTP{SubjectID: sub, Purpose: "login", CodeHash: "h", ExpiresAt: at.Add(time.Minute), CreatedAt: at}, time.Minute)
+				if err == nil {
+					mu.Lock()
+					issued++
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+		assert.Equal(t, 1, issued, "exactly one concurrent issue may pass the cooldown check")
+	})
 	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
 			sub := uuid.Must(uuid.NewV7())

@@ -176,9 +176,17 @@ type RefreshToken struct {
 	// cannot escape the WithPasswordChangeGate by waiting for the access token to expire. It is
 	// cleared only by minting a fresh family (a new login after the password has been changed).
 	MustChangePassword bool
-	ExpiresAt          time.Time
-	CreatedAt          time.Time
-	ConsumedAt         *time.Time
+	// AMR lists the authentication method references (RFC 8176) proved when this rotation
+	// family was minted, copied from Claims.AMR. Rotate falls back to this value when the
+	// ClaimsProvider returns no AMR, so a stepped-up session keeps its assurance across a
+	// silent refresh instead of silently decaying to an empty AMR. It is nil for records
+	// minted before the field existed (legacy records keep their previous meaning), and it
+	// never extends step-up freshness — auth_time remains the family's preserved
+	// authentication time.
+	AMR        []string
+	ExpiresAt  time.Time
+	CreatedAt  time.Time
+	ConsumedAt *time.Time
 	// RevokedAt records when this token's family was revoked. When non-nil, the token
 	// has been invalidated by family revocation but is preserved for audit trail.
 	RevokedAt *time.Time

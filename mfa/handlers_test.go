@@ -37,7 +37,7 @@ func TestHandlers_FullFlow(t *testing.T) {
 
 	// Enroll → JSON secret + uri.
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"user@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var enroll struct {
 		Secret string `json:"secret"`
@@ -50,7 +50,7 @@ func TestHandlers_FullFlow(t *testing.T) {
 	// Confirm with a valid code → JSON recovery codes.
 	code := clk.code(t, enroll.Secret)
 	rec = httptest.NewRecorder()
-	mfa.ConfirmHandler(svc, resolver)(rec, mfaPost(url.Values{"code": {code}}))
+	mfa.ConfirmHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"code": {code}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var confirm struct {
 		RecoveryCodes []string `json:"recovery_codes"`
@@ -107,7 +107,7 @@ func TestHandlers_TenantResolverFailsClosed(t *testing.T) {
 
 	// Without a tenant resolver, the user resolver's "" is the valid single-tenant partition.
 	rec := httptest.NewRecorder()
-	mfa.EnrollHandler(svc, resolver)(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
+	mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	// A configured tenant resolver that cannot map the request must fail closed instead of
@@ -119,7 +119,7 @@ func TestHandlers_TenantResolverFailsClosed(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "unresolved_tenant")
 
 	// A resolver that maps the request scopes the operation to that tenant.
-	h = mfa.EnrollHandler(svc, resolver, mfa.WithTenantResolver(func(*http.Request) string { return "t1" }))
+	h = mfa.EnrollHandler(svc, resolver, mfa.WithTenantResolver(func(*http.Request) string { return "t1" }), mfa.WithInsecureNoAssuranceCheck())
 	rec = httptest.NewRecorder()
 	h(rec, mfaPost(url.Values{"account": {"a@example.com"}}))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -164,8 +164,8 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 		form    url.Values
 	}
 	handlers := []tc{
-		{"EnrollHandler", mfa.EnrollHandler(svc, resolver, trusted), url.Values{"account": {"user@example.com"}}},
-		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
+		{"EnrollHandler", mfa.EnrollHandler(svc, resolver, trusted, mfa.WithInsecureNoAssuranceCheck()), url.Values{"account": {"user@example.com"}}},
+		{"ConfirmHandler", mfa.ConfirmHandler(svc, resolver, trusted, mfa.WithInsecureNoAssuranceCheck()), url.Values{"code": {"000000"}}},
 		{"VerifyHandler", mfa.VerifyHandler(svc, resolver, trusted), url.Values{"code": {"000000"}}},
 		{"VerifyRecoveryHandler", mfa.VerifyRecoveryHandler(svc, resolver, trusted), url.Values{"code": {"abc"}}},
 		// Both secret-changing handlers opt out of step-up here: this test asserts the origin
@@ -193,7 +193,7 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 	t.Run("no_trusted_origins_still_blocks_cross_origin", func(t *testing.T) {
 		// Strict by default (TASK-025 parity with tokens/identity): with NO WithTrustedOrigins,
 		// a cross-origin POST must still be rejected.
-		handlerDefault := mfa.EnrollHandler(svc, resolver)
+		handlerDefault := mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoAssuranceCheck())
 		rec := httptest.NewRecorder()
 		handlerDefault(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
 		assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -201,7 +201,7 @@ func TestHandlers_TrustedOrigins(t *testing.T) {
 
 	t.Run("with_insecure_no_origin_check_passes_any_origin", func(t *testing.T) {
 		// The loud opt-out restores the pre-v1 accept-all behavior.
-		handlerInsecure := mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoOriginCheck())
+		handlerInsecure := mfa.EnrollHandler(svc, resolver, mfa.WithInsecureNoOriginCheck(), mfa.WithInsecureNoAssuranceCheck())
 		rec := httptest.NewRecorder()
 		handlerInsecure(rec, mfaPostOrigin(url.Values{"account": {"u"}}, "https://anywhere.com"))
 		assert.NotEqual(t, http.StatusForbidden, rec.Code)

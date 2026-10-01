@@ -36,10 +36,23 @@ var scannedPackages = []string{
 }
 
 // handlerRecord documents one exported handler constructor: whether it builds a state-changing
-// handler and the default security control it applies (with the opt-out named in .llms).
+// handler, the default security control it applies (with the opt-out), and — for the
+// credential-enrollment surfaces — the fail-closed control applied when the caller supplies no
+// assurance wiring.
 type handlerRecord struct {
 	mutation bool
 	control  string
+	// credentialEnrollment marks constructors that hand out or upgrade credential material
+	// (passkey/mfa enrollment, identity recovery channels, MFA step-up). Such a surface must
+	// record the fail-closed control it applies when the caller supplies no assurance wiring,
+	// and the explicit opt-out, so a removed default is visible in review.
+	credentialEnrollment bool
+	// defaultControl is the control applied with no assurance wiring. It is required (and
+	// guarded) for every credentialEnrollment record so a removed fail-closed default is
+	// visible in review instead of silently disappearing.
+	defaultControl string
+	// optOut names the documented escape hatch that disables defaultControl.
+	optOut string
 }
 
 // handlerRegistry is the maintained inventory of every exported handler constructor in
@@ -61,23 +74,23 @@ var handlerRegistry = map[string]handlerRecord{
 	"identity.MagicLinkLoginHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 	"identity.ChangePasswordHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 	"identity.ChangePasswordWithReissueHandler":       {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.RequestEmailChangeHandler":              {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.ConfirmEmailChangeHandler":              {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
+	"identity.RequestEmailChangeHandler":              {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"identity.ConfirmEmailChangeHandler":              {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
 	"identity.DeleteAccountHandler":                   {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.RequestPhoneVerificationHandler":        {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.ConfirmPhoneVerificationHandler":        {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.RequestRecoveryEmailHandler":            {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"identity.ConfirmRecoveryEmailHandler":            {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
+	"identity.RequestPhoneVerificationHandler":        {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"identity.ConfirmPhoneVerificationHandler":        {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"identity.RequestRecoveryEmailHandler":            {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"identity.ConfirmRecoveryEmailHandler":            {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "tokens.DenyInterim (403 assurance_required when an interim pre-MFA session is present; token-less sessions pass)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
 	"identity.RequestPasswordResetViaRecoveryHandler": {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 
 	// mfa: all handlers share the guarded() preamble.
-	"mfa.EnrollHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
-	"mfa.ConfirmHandler":                 {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
+	"mfa.EnrollHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "403 assurance_required (fail closed: with no WithCredentialAssurance and no opt-out, the enrollment action refuses)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"mfa.ConfirmHandler":                 {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "403 assurance_required (fail closed: with no WithCredentialAssurance and no opt-out, confirming the factor refuses)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
 	"mfa.VerifyHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 	"mfa.VerifyRecoveryHandler":          {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 	"mfa.RegenerateRecoveryCodesHandler": {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
 	"mfa.DisableHandler":                 {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; step-up AMR gate; tenant resolver fails closed"},
-	"mfa.StepUpHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed"},
+	"mfa.StepUpHandler":                  {mutation: true, control: "same-origin CSRF gate; 4 KiB body cap; tenant resolver fails closed", credentialEnrollment: true, defaultControl: "500 misconfigured (fail closed: without WithSessionStateResolver the handler refuses to mint the renewable pair from the interim token's own subject)", optOut: "WithInsecureEchoSessionState (legacy echo)"},
 
 	// oauth: GET flows protected by the signed state cookie instead of the origin gate.
 	"oauth.BeginHandler":           {mutation: false, control: "HMAC-signed __Host- state cookie; PKCE by default; tenant resolver fails closed"},
@@ -91,8 +104,8 @@ var handlerRegistry = map[string]handlerRecord{
 
 	// passkey: ceremony handlers rely on the sealed __Host- ceremony cookie and the single-use
 	// challenge store; RenameCredentialHandler adds the origin gate.
-	"passkey.BeginRegistrationHandler":       {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store"},
-	"passkey.FinishRegistrationHandler":      {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store; body cap"},
+	"passkey.BeginRegistrationHandler":       {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store", credentialEnrollment: true, defaultControl: "403 assurance_required (fail closed: with no WithCredentialAssurance and no opt-out, registration Begin refuses before touching the ceremony)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
+	"passkey.FinishRegistrationHandler":      {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store; body cap", credentialEnrollment: true, defaultControl: "403 assurance_required (fail closed: with no WithCredentialAssurance and no opt-out, registration Finish refuses before consuming the challenge)", optOut: "WithInsecureNoAssuranceCheck; WithCredentialAssurance supplies an explicit gate"},
 	"passkey.BeginLoginHandler":              {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store"},
 	"passkey.FinishLoginHandler":             {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store; body cap"},
 	"passkey.BeginDiscoverableLoginHandler":  {mutation: true, control: "HMAC-sealed __Host- ceremony cookie; single-use challenge store"},
@@ -178,8 +191,8 @@ func TestRegistryRecordsMutationControls(t *testing.T) {
 }
 
 // registryProblems compares the constructors found in source with handlerRegistry and returns a
-// human-readable problem per mismatch. Findings in the registry that no longer exist and mutation
-// entries without a recorded control are also problems.
+// human-readable problem per mismatch, then validates each registry entry through recordProblems
+// (control recorded, and fail-closed default plus opt-out named for enrollment surfaces).
 func registryProblems(found []string) []string {
 	var problems []string
 	foundSet := make(map[string]bool, len(found))
@@ -200,9 +213,7 @@ func registryProblems(found []string) []string {
 			problems = append(problems, fmt.Sprintf(
 				"handlerRegistry lists %s but no exported handler constructor with that name exists anymore: update the registry", name))
 		}
-		if rec := handlerRegistry[name]; rec.mutation && strings.TrimSpace(rec.control) == "" {
-			problems = append(problems, fmt.Sprintf("handlerRegistry entry %s is a mutation handler but records no control", name))
-		}
+		problems = append(problems, recordProblems(name, handlerRegistry[name])...)
 	}
 	return problems
 }
@@ -309,4 +320,94 @@ func containsProblemAbout(problems []string, name string) bool {
 		}
 	}
 	return false
+}
+
+// recordProblems validates one registry entry on its own: a mutation handler must record its
+// control, and a credential-enrollment surface must record both the fail-closed default it
+// applies with no assurance wiring and the explicit opt-out that disables it.
+func recordProblems(name string, rec handlerRecord) []string {
+	var problems []string
+	if rec.mutation && strings.TrimSpace(rec.control) == "" {
+		problems = append(problems, fmt.Sprintf("handlerRegistry entry %s is a mutation handler but records no control", name))
+	}
+	if rec.credentialEnrollment {
+		if strings.TrimSpace(rec.defaultControl) == "" {
+			problems = append(problems, fmt.Sprintf("handlerRegistry entry %s is a credential-enrollment surface but records no fail-closed default control", name))
+		}
+		if strings.TrimSpace(rec.optOut) == "" {
+			problems = append(problems, fmt.Sprintf("handlerRegistry entry %s is a credential-enrollment surface but names no opt-out", name))
+		}
+	}
+	return problems
+}
+
+// TestRegistryRecordsCredentialEnrollmentControls makes the inventory enforce the documented
+// fail-closed guarantee: every credential-enrollment surface names the control it applies with
+// no assurance wiring and the explicit opt-out, and the families the docs promise (passkey
+// registration, mfa enrollment and step-up, identity recovery/email/phone enrollment) are all
+// covered.
+func TestRegistryRecordsCredentialEnrollmentControls(t *testing.T) {
+	required := map[string]string{
+		"passkey.BeginRegistrationHandler":         "assurance_required",
+		"passkey.FinishRegistrationHandler":        "assurance_required",
+		"mfa.EnrollHandler":                        "assurance_required",
+		"mfa.ConfirmHandler":                       "assurance_required",
+		"mfa.StepUpHandler":                        "misconfigured",
+		"identity.RequestRecoveryEmailHandler":     "DenyInterim",
+		"identity.ConfirmRecoveryEmailHandler":     "DenyInterim",
+		"identity.RequestEmailChangeHandler":       "DenyInterim",
+		"identity.ConfirmEmailChangeHandler":       "DenyInterim",
+		"identity.RequestPhoneVerificationHandler": "DenyInterim",
+		"identity.ConfirmPhoneVerificationHandler": "DenyInterim",
+	}
+	enrollment := 0
+	for name, rec := range handlerRegistry {
+		if !rec.credentialEnrollment {
+			continue
+		}
+		enrollment++
+		if strings.TrimSpace(rec.defaultControl) == "" {
+			t.Errorf("%s is a credential-enrollment surface but records no fail-closed default control", name)
+		}
+		if strings.TrimSpace(rec.optOut) == "" {
+			t.Errorf("%s is a credential-enrollment surface but names no opt-out", name)
+		}
+	}
+	for name, want := range required {
+		rec, ok := handlerRegistry[name]
+		if !ok {
+			t.Errorf("%s must be registered: the documented enrollment controls depend on it", name)
+			continue
+		}
+		if !rec.credentialEnrollment {
+			t.Errorf("%s must be marked credentialEnrollment: it hands out or upgrades credential material", name)
+		}
+		if !strings.Contains(rec.defaultControl, want) {
+			t.Errorf("%s defaultControl %q must name %q", name, rec.defaultControl, want)
+		}
+		if strings.TrimSpace(rec.optOut) == "" {
+			t.Errorf("%s must name the opt-out that disables its default control", name)
+		}
+	}
+	if enrollment < len(required) {
+		t.Errorf("registry marks only %d credential-enrollment surfaces; the documented families need at least %d", enrollment, len(required))
+	}
+}
+
+// TestRegistryGuardRejectsUncontrolledEnrollment proves the enrollment check has teeth: a
+// record marked as a credential-enrollment surface without a fail-closed default control (or
+// without an opt-out) is a problem, which is what silently deleting a default from the registry
+// would look like, while a fully annotated record passes.
+func TestRegistryGuardRejectsUncontrolledEnrollment(t *testing.T) {
+	problems := recordProblems("mfa.FakeEnrollmentHandler", handlerRecord{mutation: true, control: "x", credentialEnrollment: true})
+	if !containsProblemAbout(problems, "mfa.FakeEnrollmentHandler") {
+		t.Fatalf("an enrollment record without a fail-closed default control must fail the guard, got %v", problems)
+	}
+	if len(problems) != 2 {
+		t.Fatalf("expected one problem for the missing default control and one for the missing opt-out, got %v", problems)
+	}
+	annotated := handlerRecord{mutation: true, control: "x", credentialEnrollment: true, defaultControl: "403 assurance_required", optOut: "WithInsecureNoAssuranceCheck"}
+	if got := recordProblems("mfa.FakeEnrollmentHandler", annotated); len(got) != 0 {
+		t.Fatalf("a fully annotated enrollment record must pass, got %v", got)
+	}
 }

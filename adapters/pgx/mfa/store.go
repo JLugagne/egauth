@@ -411,64 +411,47 @@ func (s *Store) DeleteRecoveryCodes(ctx context.Context, tenantID string, userID
 }
 
 func (s *Store) IncrementRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error) {
-	increment := func(q DBQuerier) (int, error) {
-		var currentAttempts int
-		var lastAttemptAt *time.Time
-		err := q.QueryRow(ctx, `SELECT failed_attempts, last_attempt_at FROM mfa_recovery_attempts WHERE tenant_id = $1 AND user_id = $2 FOR UPDATE`, tenantID, userID).Scan(&currentAttempts, &lastAttemptAt)
-		if err != nil {
-			if !errors.Is(err, pgx.ErrNoRows) {
-				return 0, err
-			}
-			currentAttempts = 0
-			lastAttemptAt = nil
-		}
-
-		newAttempts := currentAttempts + 1
-		newLastAttempt := now.UTC()
-
-		if maxAttempts > 0 && currentAttempts >= maxAttempts {
-			decayed := false
-			if lockoutDuration > 0 && lastAttemptAt != nil && now.Sub(*lastAttemptAt) > lockoutDuration {
-				decayed = true
-			}
-			if !decayed {
-				// Locked and not decayed: DoS fix: do not increment or bump timestamp,
-				// but return an over-limit count so the service knows it's locked.
-				return currentAttempts + 1, nil
-			}
-			newAttempts = 1
-		}
-
-		const upsert = `
-			INSERT INTO mfa_recovery_attempts (tenant_id, user_id, failed_attempts, last_attempt_at)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (tenant_id, user_id) DO UPDATE
-			SET failed_attempts = EXCLUDED.failed_attempts,
-			    last_attempt_at = EXCLUDED.last_attempt_at
-		`
-		_, err = q.Exec(ctx, upsert, tenantID, userID, newAttempts, newLastAttempt)
-		if err != nil {
-			return 0, err
-		}
-		return newAttempts, nil
-	}
-
-	beginner, ok := s.db.(interface {
-		Begin(context.Context) (pgx.Tx, error)
-	})
-	if !ok {
-		return increment(s.db)
-	}
-	tx, err := beginner.Begin(ctx)
-	if err != nil {
-		return 0, err
-	}
-	attempts, err := increment(tx)
-	if err != nil {
-		_ = tx.Rollback(ctx)
-		return 0, err
-	}
-	if err := tx.Commit(ctx); err != nil {
+	// Single atomic upsert (F-PGX-001): the increment references the CURRENT row value
+	// (mfa_recovery_attempts.failed_attempts, never EXCLUDED), so PostgreSQL serialises concurrent
+	// callers on the conflicting row's lock and each observes a unique, monotonically increasing
+	// count. The previous read-modify-write took SELECT ... FOR UPDATE on a row that might not
+	// exist yet — locking nothing — so every caller of a first burst computed the same stale count
+	// and the upsert overwrote the counter with it, letting N concurrent recovery-code guesses all
+	// pass the service's reserve-before-compare maxAttempts gate.
+	//
+	// Lockout semantics mirror the in-memory store: while failed_attempts >= maxAttempts and the
+	// lockout has not decayed, the persisted counter is held at maxAttempts+1 and last_attempt_at
+	// is NOT advanced (a continuous attack cannot extend its own lockout); each such caller
+	// receives an over-limit count. Once now-last_attempt_at exceeds lockoutDuration the counter
+	// resets to 1. lockoutDuration <= 0 means the lockout never decays.
+	const query = `
+		INSERT INTO mfa_recovery_attempts (tenant_id, user_id, failed_attempts, last_attempt_at)
+		VALUES ($1, $2, 1, $3::timestamptz)
+		ON CONFLICT (tenant_id, user_id) DO UPDATE
+		SET failed_attempts = CASE
+		        WHEN $5::int > 0 AND mfa_recovery_attempts.failed_attempts >= $5::int THEN
+		            CASE
+		                WHEN $4::bigint > 0
+		                     AND mfa_recovery_attempts.last_attempt_at IS NOT NULL
+		                     AND mfa_recovery_attempts.last_attempt_at < $3::timestamptz - ($4::bigint * interval '1 millisecond')
+		                THEN 1
+		                ELSE LEAST(mfa_recovery_attempts.failed_attempts + 1, $5::int + 1)
+		            END
+		        ELSE mfa_recovery_attempts.failed_attempts + 1
+		    END,
+		    last_attempt_at = CASE
+		        WHEN $5::int > 0
+		             AND mfa_recovery_attempts.failed_attempts >= $5::int
+		             AND NOT ($4::bigint > 0
+		                      AND mfa_recovery_attempts.last_attempt_at IS NOT NULL
+		                      AND mfa_recovery_attempts.last_attempt_at < $3::timestamptz - ($4::bigint * interval '1 millisecond'))
+		        THEN mfa_recovery_attempts.last_attempt_at
+		        ELSE $3::timestamptz
+		    END
+		RETURNING failed_attempts
+	`
+	var attempts int
+	if err := s.db.QueryRow(ctx, query, tenantID, userID, now.UTC(), lockoutDuration.Milliseconds(), maxAttempts).Scan(&attempts); err != nil {
 		return 0, err
 	}
 	return attempts, nil

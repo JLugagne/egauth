@@ -21,8 +21,11 @@ import (
 // cost reported by NeedsRehash: any stored hash weaker than this hasher's
 // parameters is flagged for rehash on next successful login (SEC-10).
 //
-// Use WithTime, WithMemory and WithThreads to raise (or otherwise tune) the
-// cost; raising them upgrades existing users transparently via NeedsRehash.
+// Use WithTime, WithMemory and WithThreads to tune the cost; values are clamped
+// into the range Compare accepts ([MinTime, MaxTime] and
+// [MinMemoryKiB, MaxMemoryKiB]), so every accepted configuration both hashes and
+// verifies. Raising the cost upgrades existing users transparently via
+// NeedsRehash.
 func NewHasher(opts ...Option) *Hasher {
 	h := &Hasher{
 		time:    1,
@@ -52,7 +55,9 @@ type Option func(*Hasher)
 const (
 	// MinMemoryKiB is the minimum Argon2id memory cost in KiB (OWASP 2021: 19 MiB).
 	MinMemoryKiB uint32 = 19456
-	// MaxMemoryKiB is the upper bound on the memory parameter accepted by Compare.
+	// MaxMemoryKiB is the upper bound on the memory parameter enforced on both paths: Hash
+	// (through WithMemory's clamp) never emits a larger value, and Compare rejects a stored m
+	// above it.
 	// Any stored PHC hash carrying a memory value above this ceiling is rejected as
 	// ErrInvalidPassword before the KDF is invoked, preventing an OOM DoS via a
 	// tampered or corrupt stored hash row. 512 MiB (524288 KiB) is far above any
@@ -60,8 +65,9 @@ const (
 	MaxMemoryKiB uint32 = 524288
 	// MinTime is the minimum number of Argon2id iterations (the t parameter).
 	MinTime uint32 = 1
-	// MaxTime is the upper bound on the iteration count (t) accepted by Compare, the counterpart of
-	// MaxMemoryKiB for the CPU half of the same threat model.
+	// MaxTime is the upper bound on the iteration count (t) enforced on both paths: Hash (through
+	// WithTime's clamp) never emits a larger value, and Compare rejects a stored t above it. It
+	// is the CPU counterpart of MaxMemoryKiB.
 	//
 	// A stored PHC string is untrusted on the verify path: it may have been imported, migrated, or
 	// hand-edited, and the parser reads t into a uint32, so t=4294967295 is representable. argon2.IDKey
@@ -77,12 +83,21 @@ const (
 
 // WithTime sets the number of Argon2id iterations (the t parameter).
 //
-// A value below MinTime is clamped up to MinTime so the hasher cannot be tuned
-// below the safe floor (per the OWASP Password Storage Cheat Sheet, 2021).
+// Values outside [MinTime, MaxTime] are clamped into that range. The floor is
+// the safe minimum (per the OWASP Password Storage Cheat Sheet, 2021); the
+// ceiling is the largest value Compare accepts, so a hasher can never be
+// configured to emit a hash it would itself reject.
 func WithTime(time uint32) Option {
 	return func(h *Hasher) {
 		if time < MinTime {
 			time = MinTime
+		}
+		// Clamp to the ceiling Compare enforces (F-PWD-001). Without this, Hash accepted
+		// t > MaxTime, emitted a PHC string Compare classifies as ErrInvalidPassword before
+		// the KDF, and the affected accounts could never log in again — not even after the
+		// configuration was reverted, because the unusable cost is stored in the hash.
+		if time > MaxTime {
+			time = MaxTime
 		}
 		h.time = time
 	}
@@ -90,12 +105,22 @@ func WithTime(time uint32) Option {
 
 // WithMemory sets the Argon2id memory cost in KiB (the m parameter).
 //
-// A value below MinMemoryKiB (OWASP 2021: 19 MiB = 19456 KiB) is clamped up to
-// MinMemoryKiB so the hasher cannot be tuned below the safe floor.
+// Values outside [MinMemoryKiB, MaxMemoryKiB] are clamped into that range. The
+// floor is the OWASP 2021 minimum (19 MiB); the ceiling is the largest value
+// Compare accepts, so a hasher can never be configured to emit a hash it would
+// itself reject.
 func WithMemory(memory uint32) Option {
 	return func(h *Hasher) {
 		if memory < MinMemoryKiB {
 			memory = MinMemoryKiB
+		}
+		// Clamp to the ceiling Compare enforces (F-PWD-001). Without this, Hash accepted
+		// m > MaxMemoryKiB, emitted a PHC string Compare classifies as ErrInvalidPassword
+		// before the KDF, and the affected accounts could never log in again — not even
+		// after the configuration was reverted, because the unusable cost is stored in the
+		// hash.
+		if memory > MaxMemoryKiB {
+			memory = MaxMemoryKiB
 		}
 		h.memory = memory
 	}

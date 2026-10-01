@@ -170,6 +170,42 @@ func StoreContractTesting(t *testing.T, store passkey.Store, useMultiTenant bool
 		require.NoError(t, store.DeleteCredential(ctx, tenantA, uid, cred.ID))
 	})
 	if useMultiTenant {
+		t.Run("DeleteCredentialsByUser is tenant-scoped", func(t *testing.T) {
+			uid := uuid.Must(uuid.NewV7())
+			require.NoError(t, store.SaveCredential(ctx, tenantB, &passkey.Credential{
+				UserID: uid, ID: []byte{0x40}, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
+			}))
+			require.NoError(t, store.DeleteCredentialsByUser(ctx, tenantA, uid))
+			got, err := store.GetCredentials(ctx, tenantB, uid)
+			require.NoError(t, err)
+			assert.Len(t, got, 1, "tenant B's credentials must not be touched")
+		})
+	}
+	t.Run("DeleteCredentialsByUser removes every credential of the user", func(t *testing.T) {
+		uid := uuid.Must(uuid.NewV7())
+		other := uuid.Must(uuid.NewV7())
+		for i := 0; i < 3; i++ {
+			require.NoError(t, store.SaveCredential(ctx, tenantA, &passkey.Credential{
+				UserID: uid, ID: []byte{byte(0x30 + i)}, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
+			}))
+		}
+		require.NoError(t, store.SaveCredential(ctx, tenantA, &passkey.Credential{
+			UserID: other, ID: []byte{0x3f}, PublicKey: []byte{0x01}, Data: []byte(`{}`), CreatedAt: time.Now(),
+		}))
+
+		require.NoError(t, store.DeleteCredentialsByUser(ctx, tenantA, uid))
+
+		got, err := store.GetCredentials(ctx, tenantA, uid)
+		require.NoError(t, err)
+		assert.Empty(t, got, "every credential of the user must be deleted")
+		got, err = store.GetCredentials(ctx, tenantA, other)
+		require.NoError(t, err)
+		assert.Len(t, got, 1, "another user's credentials must survive")
+
+		// Idempotent: a retry after a partial failure must not error.
+		require.NoError(t, store.DeleteCredentialsByUser(ctx, tenantA, uid))
+	})
+	if useMultiTenant {
 		t.Run("tenant isolation", func(t *testing.T) {
 			uid := uuid.Must(uuid.NewV7())
 			require.NoError(t, store.SaveCredential(ctx, tenantA, &passkey.Credential{

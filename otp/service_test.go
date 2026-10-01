@@ -186,6 +186,10 @@ func TestService_SEC_OTP_01_CooldownAndAttackBudget(t *testing.T) {
 
 	// 3rd wrong guess burns the code (budget was NOT reset)
 	assert.ErrorIs(t, svc.Verify(ctx, "t1", sub, "login", wrongCode(ch1.Code)), otp.ErrTooManyAttempts)
+	// The burn deleted the outstanding row, but the issuance state must survive it: the next
+	// issue at the same instant must still be refused (F-OTP-001).
+	_, err = svc.Issue(ctx, "t1", sub, "login")
+	require.ErrorIs(t, err, otp.ErrCooldownActive, "a burned code must not reset the cooldown")
 
 	// 3. Advance clock past cooldown: reissue now succeeds
 	clk.t = clk.t.Add(otp.DefaultCooldown + time.Second)

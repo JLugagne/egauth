@@ -62,6 +62,8 @@ if err == nil {
 
 A lost device is recovered with `mfaSvc.VerifyRecoveryCode(ctx, tenantID, userID, code)`, which consumes one of the codes issued at confirmation.
 
+> **HTTP handlers are fail-closed.** If you mount `mfa.EnrollHandler` / `mfa.ConfirmHandler`, wire `mfa.WithCredentialAssurance(tokens.DenyInterim)` (otherwise they answer `403 assurance_required`, and an interim pre-MFA session could enrol a factor). `mfa.StepUpHandler` requires an authoritative `mfa.WithSessionStateResolver(...)` or answers `500 misconfigured`; the concrete service returned by `identity.NewService` implements `issuance.Resolver`, so assert it (`idSvc.(issuance.Resolver)`) or supply your own. `mfa.WithInsecureEchoSessionState()` restores the legacy echo behaviour only as an explicit, insecure opt-out. See [Security Hardening]({{< ref "security-hardening" >}}).
+
 > **Note on Storage:** The TOTP shared secret must be re-evaluated by the server and cannot be hashed. For maximum security, configure your database with Transparent Data Encryption (TDE) or encrypt the secret at the application layer before passing it to `egauth`.
 
 > **Single-tenant apps:** if you don't use tenants, wrap the service with `mfa.NewSingleTenant(mfaSvc)` to get the same methods without the `tenantID` argument.
@@ -79,43 +81,63 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/passkey"
+	passkeymem "github.com/JLugagne/egauth/passkey/memory"
+	"github.com/JLugagne/egauth/tokens"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/google/uuid"
 )
+
+// The ceremony-cookie HMAC key must come from your environment or a secret manager —
+// never hardcode it in source. passkey.NewService rejects keys shorter than 32 bytes,
+// all-zero/repeated-byte keys, and any key copied from a published example or doc.
+cookieKey := []byte(os.Getenv("EGAUTH_PASSKEY_COOKIE_KEY")) // crypto/rand-generated, >= 32 bytes
 
 passkeySvc, err := passkey.NewService(passkeyStore, passkey.Config{
 	RPID:             "myapp.com",
 	RPDisplayName:    "MyApp",
 	RPOrigins:        []string{"https://myapp.com"},
-	UserVerification: protocol.VerificationRequired,
+	UserVerification: protocol.VerificationRequired, // also the zero-value default
+	CookieKey:        cookieKey,                      // required; fail-fast if unset/too short/trivial/published
+	ChallengeStore:   passkeymem.NewChallengeStore(), // required: single-use server-side replay protection
 })
 if err != nil {
-	// handle error
+	// ErrCookieKeyMissing / ErrChallengeStoreMissing fail here, at startup.
 }
 
-// The ceremony-cookie HMAC key must come from your environment or a secret manager —
-// never hardcode it in source. passkey.NewService rejects keys shorter than 32 bytes,
-// all-zero keys, and any key copied from a published example or doc.
-cookieKey := []byte(os.Getenv("EGAUTH_PASSKEY_COOKIE_KEY")) // crypto/rand-generated, >= 32 bytes
-
-// Registration endpoints
-mux.Handle("/passkey/register/begin", passkey.BeginRegistrationHandler(passkeySvc, passkey.WithCookieKey(cookieKey)))
-mux.Handle("/passkey/register/finish", passkey.FinishRegistrationHandler(passkeySvc, passkey.WithCookieKey(cookieKey)))
+// Registration is gated fail-closed: without an assurance gate these answer
+// 403 assurance_required. tokens.DenyInterim refuses only an interim (pre-MFA) session,
+// so a stolen password cannot enrol an attacker authenticator.
+regOpts := []passkey.HandlerOption{
+	passkey.WithUserResolver(resolveUser), // your resolver
+	passkey.WithCredentialAssurance(tokens.DenyInterim),
+}
+mux.Handle("/passkey/register/begin", passkey.BeginRegistrationHandler(passkeySvc, regOpts...))
+mux.Handle("/passkey/register/finish", passkey.FinishRegistrationHandler(passkeySvc, regOpts...))
 
 // Login endpoints. The success callback is wired via WithLoginSuccess; its
 // userID argument is a uuid.UUID.
-mux.Handle("/passkey/login/begin", passkey.BeginLoginHandler(passkeySvc, passkey.WithCookieKey(cookieKey)))
+mux.Handle("/passkey/login/begin", passkey.BeginLoginHandler(passkeySvc, passkey.WithUserResolver(resolveUser)))
 mux.Handle("/passkey/login/finish", passkey.FinishLoginHandler(passkeySvc,
-	passkey.WithCookieKey(cookieKey),
+	passkey.WithUserResolver(resolveUser),
 	passkey.WithLoginSuccess(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
 		// Successfully logged in via Passkey! Issue your JWT/Session here.
 	}),
 ))
+
+// REQUIRED for account recovery: a password reset / change or account deletion must
+// evict the user's passkeys. Register the eraser (and the token revoker) on the
+// identity service.
+identitySvc := identity.NewService(idStore, hasher, passwordPolicy,
+	identity.WithAccountErasers(
+		tokens.NewAccountRevoker(tokenStore), // refresh families + API keys
+		passkeySvc.AccountEraser(),           // every passkey the user registered
+	))
 ```
 
-> **Security Note:** the passkey `CookieKey` must never be hardcoded or copied from documentation — a key published anywhere is attacker-known, and `passkey.NewService` rejects such values outright. Generate a unique 32-byte key with `crypto/rand` and load it at startup from your secret manager (environment variable, vault). Keys shorter than `passkey.MinCookieKeyLength` (32 bytes) are also rejected.
+> **Security Note:** the passkey `CookieKey` must never be hardcoded or copied from documentation — a key published anywhere is attacker-known, and `passkey.NewService` rejects such values outright (trivial all-zero/repeated-byte keys, published-example literals and near-copies too). Generate a unique 32-byte key with `crypto/rand` and load it at startup from your secret manager (environment variable, vault). Keys shorter than `passkey.MinCookieKeyLength` (32 bytes) are also rejected.
 
-`Config.UserVerification` controls whether the authenticator must prove user presence with a PIN/biometric; setting `protocol.VerificationRequired` enforces it during both registration and login. For replay protection of one-time challenges across a cluster, supply a `passkey.ChallengeStore` via the `passkey.WithChallengeStore(...)` handler option. See [Security Hardening]({{< ref "security-hardening" >}}) for depth on both.
+`Config.UserVerification` controls whether the authenticator must prove user presence with a PIN/biometric; it defaults to `protocol.VerificationRequired`, so an assertion whose UV flag is unset is rejected at Finish across registration, login and discoverable login. Relax it to `VerificationPreferred`/`VerificationDiscouraged` only for a flow where another factor already authenticated the user. `Config.ChallengeStore` keeps each ceremony challenge single-use server-side; back it with a shared store (e.g. Redis) in a load-balanced deployment. See [Security Hardening]({{< ref "security-hardening" >}}) for depth on both.
 
 > **Single-tenant apps:** `passkey.NewSingleTenant(passkeySvc)` exposes the service methods without the `tenantID` argument.

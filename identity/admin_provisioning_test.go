@@ -62,6 +62,10 @@ func TestSetTemporaryPassword_RunsErasers(t *testing.T) {
 			assert.Equal(t, userID, uid)
 			return nil
 		},
+		ClearRecoveryChannelsFunc: func(context.Context, string, uuid.UUID) error { return nil },
+		DeleteVerificationTokensByUserFunc: func(context.Context, string, uuid.UUID) (int64, error) {
+			return 0, nil
+		},
 	}
 	hasher := &hashertest.MockHasher{
 		HashFunc: func(ctx context.Context, p string) (string, error) { return hash, nil },
@@ -124,6 +128,10 @@ func TestSetTemporaryPassword_EraserErrorsCollected(t *testing.T) {
 	store := &storetest.MockStore{
 		UpdateIdentityPasswordFunc: func(_ context.Context, _ string, _ uuid.UUID, _ string, _ time.Time, _ bool) error {
 			return nil
+		},
+		ClearRecoveryChannelsFunc: func(context.Context, string, uuid.UUID) error { return nil },
+		DeleteVerificationTokensByUserFunc: func(context.Context, string, uuid.UUID) (int64, error) {
+			return 0, nil
 		},
 	}
 	hasher := &hashertest.MockHasher{HashFunc: func(ctx context.Context, p string) (string, error) { return "h", nil }}

@@ -48,7 +48,7 @@ Set at `IssueAPIKey` call time; persisted in the store; surfaced on the resultin
 |------|------|----------------|-------------|
 | `api_key.created` | Key issued | — | `"key_type"` (pat/service), `"created_by"` |
 | `api_key.auth.succeeded` | Verify succeeded | — | `"key_type"`, `"ip"`, `"user_agent"` (if RequestContext set) |
-| `api_key.auth.failed` | Verify failed | `not_found` / `expired` / `tenant_mismatch` / `wrong_type` | — |
+| `api_key.auth.failed` | Verify failed | `not_found` / `expired` / `revoked` / `tenant_mismatch` / `wrong_type` | — |
 | `api_key.purged` | GC sweep | — | `"count"` |
 
 Audit events never carry secrets, tokens, hashes, or raw user input — only the short machine codes above.

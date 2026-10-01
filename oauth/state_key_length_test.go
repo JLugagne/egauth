@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"crypto/rand"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -26,8 +27,11 @@ func TestValidateHandlerConfig_RejectsShortStateSigningKey(t *testing.T) {
 		assert.Contains(t, err.Error(), "32")
 	}
 
-	require.NoError(t, ValidateHandlerConfig(WithStateSigningKey(make([]byte, MinStateSigningKeyLength))),
-		"a key of exactly MinStateSigningKeyLength bytes must be accepted")
+	minKey := make([]byte, MinStateSigningKeyLength)
+	_, err := rand.Read(minKey)
+	require.NoError(t, err)
+	require.NoError(t, ValidateHandlerConfig(WithStateSigningKey(minKey)),
+		"a non-trivial key of exactly MinStateSigningKeyLength bytes must be accepted")
 }
 
 func TestBeginHandler_ShortStateSigningKeyFailsClosed(t *testing.T) {

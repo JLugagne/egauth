@@ -661,3 +661,16 @@ func (s *Store) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) e
 	}
 	return nil
 }
+
+// DeleteVerificationTokensByUser removes every verification token belonging to userID within the
+// tenant in one statement, returning the number deleted. Scoping to the tenant and user means an
+// account erasure cannot invalidate another user's pending email/phone verifications, and the
+// delete is naturally idempotent (a retry after a partial failure deletes the remainder).
+func (s *Store) DeleteVerificationTokensByUser(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error) {
+	const query = `DELETE FROM verification_tokens WHERE tenant_id = $1 AND user_id = $2`
+	tag, err := s.db.Exec(ctx, query, tenantID, userID)
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}

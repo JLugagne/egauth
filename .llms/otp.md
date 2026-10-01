@@ -57,10 +57,11 @@ func NewService(store Store, opts ...ServiceOption) Service
     // panics on nil store; clamps invalid digits/TTL/maxAttempts to defaults
 
 // ServiceOption functions
-func WithDigits(n int) ServiceOption                  // default 6
+func WithDigits(n int) ServiceOption                  // default 6; panics outside [6, 10]
 func WithTTL(d time.Duration) ServiceOption           // default 10m
 func WithMaxAttempts(n int) ServiceOption             // default 5
-func WithClock(now func() time.Time) ServiceOption    // test injection
+func WithCooldown(d time.Duration) ServiceOption      // min gap between issues per subject+purpose; default 30s; non-positive disables
+func WithClock(now func() time.Time) ServiceOption    // test injection; drives both TTL and cooldown
 func WithEventSink(sink event.Sink) ServiceOption     // AccountBlocked event on code burn
 
 // Single-tenant wrapper (omits tenantID, uses "" internally)
@@ -75,17 +76,43 @@ func memory.NewUnboundedStore() *memory.Store     // explicit opt-out: schedule 
 ## Store contract
 
 ```go
+// Store composes the stable-core OTPStore with the atomic-issuance OTPIssuer and the
+// schedulable OTPReaper. Both the in-memory and pgx stores implement the whole Store.
 type Store interface {
-    // SaveOTP: upserts; resets Attempts on replace; ErrTenantMismatch on conflicting TenantID
+    OTPStore
+    OTPIssuer
+    OTPReaper
+}
+
+type OTPStore interface {
+    // SaveOTP: upserts; resets Attempts on replace; records o.CreatedAt as the issuance
+    // instant the cooldown measures from; ErrTenantMismatch on conflicting TenantID
     SaveOTP(ctx context.Context, tenantID string, o *OTP) error
     // GetOTP: returns outstanding code or ErrCodeNotFound
     GetOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (*OTP, error)
     // IncrementOTPAttempts: atomic pre-compare gate; returns new count; ErrCodeNotFound if absent
     IncrementOTPAttempts(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (int, error)
-    // ConsumeOTP: atomic single-use guard; consumed=true only for the ONE caller that removes the row
-    ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) (consumed bool, err error)
+    // ConsumeOTP: atomic single-use AND identity guard. Removes the row only when its CodeHash
+    // == expectedCodeHash; consumed=true only for the ONE caller that removes it. A reissued
+    // (different-hash) row is left untouched and consumed=false, so a stale verification can
+    // neither be accepted nor burn its fresh replacement.
+    ConsumeOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose, expectedCodeHash string) (consumed bool, err error)
     // DeleteOTP: idempotent; used for expiry, burn, Invalidate
     DeleteOTP(ctx context.Context, tenantID string, subjectID uuid.UUID, purpose string) error
+}
+
+type OTPIssuer interface {
+    // IssueOTP: ONE atomic operation that enforces the resend cooldown and persists o as the
+    // new outstanding code. o.CreatedAt is the caller's clock (implementations MUST use it).
+    // Returns ErrCooldownActive and stores nothing when the last issue for the same
+    // (tenant, subject, purpose) was less than cooldown before o.CreatedAt; cooldown <= 0
+    // disables the check. The last-issued instant MUST survive every terminal transition of
+    // the code (consume, burn, expiry, eviction) — burning or verifying a code must not reset
+    // the throttle.
+    IssueOTP(ctx context.Context, tenantID string, o *OTP, cooldown time.Duration) error
+}
+
+type OTPReaper interface {
     // DeleteExpired: schedulable GC reaper; returns count deleted; scoped to one tenant
     DeleteExpired(ctx context.Context, tenantID string) (int64, error)
 }
@@ -93,6 +120,10 @@ type Store interface {
 
 Empty `tenantID` (`""`) is the single-tenant partition; must still be passed.
 `ErrTenantMismatch` if existing record's TenantID conflicts.
+
+The interface split is deliberate: `OTPStore` is the frozen v1 core, and new optional
+behaviour ships as a new capability interface (never as a new method on `Store`). A custom
+adapter must implement all three.
 
 ## HTTP handlers
 
@@ -148,9 +179,12 @@ var ErrCodeNotFound    = errors.New("otp: no matching code")  // absent, expired
 var ErrInvalidCode     = errors.New("otp: invalid code")      // wrong guess
 var ErrTooManyAttempts = errors.New("otp: too many attempts") // code is burned
 var ErrTenantMismatch  = errors.New("otp: tenant ID mismatch")
+var ErrCooldownActive  = errors.New("otp: cooldown active; please wait before requesting another code") // Issue within Cooldown
 ```
 
 `ErrCodeNotFound` and `ErrInvalidCode` are deliberately indistinguishable at the handler layer.
+`IssueHandler` swallows `ErrCooldownActive` too: it still answers `204` and simply does not
+deliver, so the cooldown is not a client-visible oracle.
 
 ## Code specifics
 
@@ -160,15 +194,19 @@ var ErrTenantMismatch  = errors.New("otp: tenant ID mismatch")
 
 **TTL:** default 10 minutes. Expiry checked in `Verify`; expired records deleted inline.
 
-**Single-use:** `ConsumeOTP` atomically removes the row; under concurrency only one caller observes `consumed=true`. A replayed correct code after consumption returns `ErrCodeNotFound`.
+**Single-use + hash guard:** `ConsumeOTP` atomically removes the row only if its `CodeHash` equals the hash the verifier compared, so under concurrency only one caller observes `consumed=true`, and a code reissued between the verifier's read and consume leaves the fresh row untouched (`consumed=false`) — the stale verification fails instead of accepting or burning its replacement. A replayed correct code after consumption returns `ErrCodeNotFound`.
 
 **Attempt limiting:** `IncrementOTPAttempts` called atomically BEFORE `compareCode`. On reaching `maxAttempts`, code is burned (`DeleteOTP`) and `AccountBlocked` event emitted. Default: 5 attempts. No `WithNoAttemptLimit` — attempts cannot be disabled; bad config clamps to default.
+
+**Atomic issuance + cooldown:** `Issue` mints the code and persists it through the single store operation `Store.IssueOTP(..., cooldown)`, which enforces the resend cooldown and the upsert under one lock. Concurrent issue requests therefore cannot all pass the check: exactly one wins and the rest get `ErrCooldownActive`. Cooldown defaults to `DefaultCooldown` (30 s) and is configurable via `WithCooldown`; a non-positive value disables it.
+
+**Issuance tombstone:** the last-issued instant is durable state that MUST survive every terminal transition of the previous code — `ConsumeOTP`, `DeleteOTP`, expiry and eviction. Burning or verifying a code therefore cannot reset the resend throttle or the per-code attempt budget: after 5 wrong guesses the attacker cannot re-issue immediately and start a fresh 5-guess budget. (The in-memory store keeps a separate `issued` map; the pgx store keeps a separate `otp_issuances` row — see `003_create_otp_issuances.sql`.)
 
 **Hash:** hex-encoded SHA-256 of the raw numeric string. Low-entropy by design; the hash does NOT protect against a database exfiltration — protection comes from TTL + single-use + attempt limit.
 
 **Delivery:** `Issue` returns `Challenge.Code` (plaintext, one-time). Application is responsible for delivery. `IssueHandler` dispatches delivery in a goroutine off the response path.
 
-**Purpose:** arbitrary string scoping the code (e.g. `"login"`, `"email-verify"`, `"step-up"`). One outstanding code per `subjectID+purpose`. `Issue` replaces any existing code for the same subject+purpose.
+**Purpose:** arbitrary string scoping the code (e.g. `"login"`, `"email-verify"`, `"step-up"`). One outstanding code per `subjectID+purpose`. A successful `Issue` replaces the existing code for the same subject+purpose; an issue inside the cooldown returns `ErrCooldownActive`, stores nothing, and leaves the existing code outstanding.
 
 **Eviction:** `DeleteExpired(ctx, tenantID)` is the GC reaper. The default memory store is bounded and self-evicting; `DeleteExpired` is required only for the explicit `NewUnboundedStore()` opt-in, where the map grows without bound unless called periodically.
 
@@ -223,10 +261,11 @@ mux.Handle("/otp/verify", otp.VerifyHandler(svc,
 - `Challenge.Code` is the plaintext — treat it as a credential; never log or store it. Only `CodeHash` is persisted. `Challenge`/`OTP` self-redact the code/hash in `%v`/`%#v`/`slog` output, but that is a safety net, not permission to log them.
 - `IssueHandler` always returns `204` — do NOT rely on its status to determine whether a code was issued or delivery succeeded.
 - All `VerifyHandler` failures are `401 invalid_code` — callers cannot distinguish a wrong guess from an expired/missing challenge. This is intentional (enumeration safety).
-- `Issue` replaces any outstanding code for the same `subjectID+purpose`. Old code is invalidated immediately.
+- `Issue` replaces any outstanding code for the same `subjectID+purpose` once the cooldown admits it. Inside the cooldown it returns `ErrCooldownActive`, stores nothing, and the old code stays valid.
 - Memory store is bounded by default (`NewStore()` caps at `DefaultMaxEntries`, self-evicting expired then soonest-expiring). The explicit `NewUnboundedStore()` opt-in MUST have `DeleteExpired` called periodically; skipping it is a denial-of-service vector (unbounded map growth).
 - `WithSubjectResolver` returning `ok=false` still produces a uniform `401 invalid_code` on `VerifyHandler` (not a different status).
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.
-- `NewService` panics on nil store; invalid `digits`/`ttl`/`maxAttempts` values are silently clamped to defaults (not panics).
+- `NewService` panics on nil store and on `digits` outside `[6, 10]`; invalid `ttl`/`maxAttempts` values are silently clamped to defaults, and a negative `cooldown` is clamped to 0 (disabled).
+- A custom `Store` adapter MUST implement `IssueOTP` atomically (cooldown check + upsert in one lock/statement) and keep the last-issued instant across every code transition; a non-atomic read-then-write silently reopens the concurrent-issue and burn-resets-throttle holes. Run `otp/storetest` against your adapter.
 - The strict same-origin CSRF check is ON by default (a request whose Origin/Referer host is not the request host or a trusted origin is rejected `403`, as is a POST carrying neither header). `WithTrustedOrigins` widens the allowlist (bare hosts or full origins); `WithInsecureNoOriginCheck` is the loud opt-out.
 - The `deliver` callback in `IssueHandler` runs in a goroutine; errors are silently discarded. Instrument delivery failures in the callback itself.

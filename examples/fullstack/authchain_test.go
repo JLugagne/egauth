@@ -383,3 +383,60 @@ func TestMFAChain_RefreshCookieGrantsSurface(t *testing.T) {
 		t.Fatalf("an elevated session must be able to refresh, got %d", resp.StatusCode)
 	}
 }
+
+// TestMFAChain_InterimSessionCannotEnrollCredentials pins the credential-assurance gates on the
+// enrollment routes: an interim (pre-second-factor) session may present the factor, but it may
+// not manage one. Without the gates, a password-only attacker installs their own TOTP secret or
+// passkey on the interim session, completes step-up with it, and converts knowledge of the
+// password into a durable credential.
+func TestMFAChain_InterimSessionCannotEnrollCredentials(t *testing.T) {
+	handler, err := BuildServer()
+	if err != nil {
+		t.Fatalf("BuildServer: %v", err)
+	}
+	c := newAuthClient(t, handler)
+
+	const email = "mfa-interim@example.com"
+	if code := c.postFormJSON("/auth/register", url.Values{
+		"email": {email}, "password": {chainPassword},
+	}, nil); code != http.StatusNoContent {
+		t.Fatalf("register: want 204, got %d", code)
+	}
+
+	// Registration yields a full session, so the first factor can be enrolled and confirmed.
+	var enrolment struct {
+		Secret string `json:"secret"`
+	}
+	if code := c.postFormJSON("/mfa/enroll", url.Values{"account": {email}}, &enrolment); code != http.StatusOK {
+		t.Fatalf("enroll on a full session: want 200, got %d", code)
+	}
+	if code := c.postFormJSON("/mfa/confirm", url.Values{
+		"code": {currentTOTP(t, enrolment.Secret)},
+	}, nil); code != http.StatusOK {
+		t.Fatalf("confirm on a full session: want 200, got %d", code)
+	}
+
+	// A fresh password login is now interim: it must not be able to enrol another credential.
+	c.clearCookies()
+	if code := c.postFormJSON("/auth/login", url.Values{
+		"email": {email}, "password": {chainPassword},
+	}, nil); code != http.StatusNoContent {
+		t.Fatalf("login: want 204, got %d", code)
+	}
+	if c.hasCookie(tokens.DefaultRefreshCookieName) {
+		t.Fatal("precondition: the login must be gated")
+	}
+
+	for _, path := range []string{"/mfa/enroll", "/passkey/register/begin"} {
+		resp := c.postForm(path, url.Values{"account": {email}})
+		body, _ := io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden {
+			t.Errorf("interim session on %s: want 403, got %d: %s", path, resp.StatusCode, body)
+			continue
+		}
+		if !strings.Contains(string(body), "assurance_required") {
+			t.Errorf("interim session on %s: want an assurance_required refusal, got %s", path, body)
+		}
+	}
+}

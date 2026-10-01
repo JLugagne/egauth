@@ -21,7 +21,7 @@ func TestHandlers_WithTrustedOrigins_AcceptsFullOrigin(t *testing.T) {
 	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
-	h := mfa.EnrollHandler(svc, resolver, mfa.WithTrustedOrigins("https://app.example.com"))
+	h := mfa.EnrollHandler(svc, resolver, mfa.WithTrustedOrigins("https://app.example.com"), mfa.WithInsecureNoAssuranceCheck())
 	req := mfaPost(url.Values{"account": {"user@example.com"}})
 	req.Host = "api.example.com" // not the allowlisted host
 	req.Header.Set("Origin", "https://app.example.com")
@@ -39,7 +39,7 @@ func TestHandlers_WithTrustedOrigins_FullOriginLookalikeStillRejected(t *testing
 	uid := uuid.Must(uuid.NewV7())
 	resolver := mfa.WithUserResolver(func(*http.Request) (uuid.UUID, string, bool) { return uid, "t1", true })
 
-	h := mfa.EnrollHandler(svc, resolver, mfa.WithTrustedOrigins("https://app.example.com"))
+	h := mfa.EnrollHandler(svc, resolver, mfa.WithTrustedOrigins("https://app.example.com"), mfa.WithInsecureNoAssuranceCheck())
 	req := mfaPost(url.Values{"account": {"user@example.com"}})
 	req.Host = "api.example.com"
 	req.Header.Set("Origin", "https://app.example.com.evil.com")

@@ -114,9 +114,13 @@ type Config struct {
 	// this when an outer proxy or middleware already throttles those routes; it restores the
 	// pre-v1 behavior. Cannot be combined with RateLimiter.
 	InsecureNoRateLimit bool
-	// EventSink receives security events (login, registration, refresh reuse, logout, ...).
-	// Nil selects event.NewSlogSink(nil), so events go to slog.Default() instead of being
-	// silently dropped — silent auth is un-auditable auth.
+	// EventSink receives the security events emitted by the handlers and issuer NewWebApp builds
+	// (session.issued, refresh.reuse_detected, token.family_revoked, logout, delivery.failed,
+	// cookies.insecure_misuse). Events emitted by the caller-constructed identity.Service
+	// (login, registration, password changes) are wired by the caller via identity.WithEventSink
+	// on that service, not by the preset. Nil selects event.NewSlogSink(nil), so the preset's
+	// own events go to slog.Default() instead of being silently dropped — silent auth is
+	// un-auditable auth.
 	EventSink event.Sink
 	Routes    Routes
 }
@@ -228,7 +232,10 @@ func NewWebApp(cfg Config) (http.Handler, error) {
 		identity.WithHandlerEventSink(sink),
 		identity.WithCookies(cookies),
 	}
-	tkOpts := []tokens.HandlerOption{tokens.WithCookies(cookies)}
+	tkOpts := []tokens.HandlerOption{
+		tokens.WithCookies(cookies),
+		tokens.WithEventSink(sink),
+	}
 	if len(cfg.TrustedOrigins) > 0 {
 		// Accept both the documented full-origin format ("https://app.example.com") and the
 		// bare-host format the handlers expect; normalize loudly so a mistyped entry fails

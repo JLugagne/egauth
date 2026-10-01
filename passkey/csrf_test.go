@@ -1,8 +1,8 @@
 package passkey_test
 
 import (
-	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -33,11 +33,14 @@ func newRenameCSRFFixture(t *testing.T, opts ...passkey.HandlerOption) *renameCS
 	t.Helper()
 
 	store := passkeymem.NewStore()
+	cookieKey := make([]byte, passkey.MinCookieKeyLength)
+	_, err := rand.Read(cookieKey)
+	require.NoError(t, err)
 	svc, err := passkey.NewService(store, passkey.Config{
 		RPID:           "app.example.com",
 		RPDisplayName:  "App",
 		RPOrigins:      []string{"https://app.example.com"},
-		CookieKey:      bytes.Repeat([]byte{0x42}, 32),
+		CookieKey:      cookieKey,
 		ChallengeStore: passkeymem.NewChallengeStore(),
 	})
 	require.NoError(t, err)

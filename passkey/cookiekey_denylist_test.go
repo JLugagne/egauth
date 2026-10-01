@@ -15,6 +15,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/JLugagne/egauth/internal/secretpolicy"
 	"github.com/JLugagne/egauth/passkey"
 	"github.com/JLugagne/egauth/passkey/memory"
 	"github.com/google/uuid"
@@ -32,7 +33,8 @@ func TestNewService_RejectsAllZeroCookieKey(t *testing.T) {
 	cfg.CookieKey = make([]byte, passkey.MinCookieKeyLength)
 	_, err := passkey.NewService(memory.NewStore(), cfg)
 	require.Error(t, err, "an all-zero cookie key must be rejected at construction")
-	assert.Contains(t, err.Error(), "all zero", "the error should name the all-zero key")
+	assert.ErrorIs(t, err, secretpolicy.ErrTrivial,
+		"an all-zero key is the trivially-guessable class the shared policy refuses")
 	assert.Contains(t, err.Error(), "crypto/rand", "the error should be actionable: point at crypto/rand or a secret manager")
 }
 
@@ -71,7 +73,7 @@ func TestBeginRegistrationHandler_ZeroCookieKeyOverrideFailsClosed(t *testing.T)
 	// like the short-key override: NewService's guard must not be silently bypassable
 	// at the handler layer with an attacker-known HMAC key.
 	zero := make([]byte, passkey.MinCookieKeyLength)
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(zero))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey(zero), passkey.WithInsecureNoAssuranceCheck())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -80,7 +82,7 @@ func TestBeginRegistrationHandler_ZeroCookieKeyOverrideFailsClosed(t *testing.T)
 
 func TestBeginRegistrationHandler_PublishedCookieKeyOverrideFailsClosed(t *testing.T) {
 	svc, _ := testService(t)
-	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey([]byte(publishedCookieKey)))
+	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())), passkey.WithCookieKey([]byte(publishedCookieKey)), passkey.WithInsecureNoAssuranceCheck())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -92,7 +94,8 @@ func TestBeginRegistrationHandler_TenantResolverZeroKeyFailsClosed(t *testing.T)
 	h := passkey.BeginRegistrationHandler(svc, resolver(uuid.Must(uuid.NewV7())),
 		passkey.WithTenantCookieKeys(func(context.Context, string) ([]byte, error) {
 			return make([]byte, passkey.MinCookieKeyLength), nil
-		}))
+		}),
+		passkey.WithInsecureNoAssuranceCheck())
 	rec := httptest.NewRecorder()
 	h(rec, httptest.NewRequest(http.MethodPost, "/", nil))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

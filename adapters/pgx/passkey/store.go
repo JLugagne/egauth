@@ -130,8 +130,10 @@ func (s *Store) DeleteCredential(ctx context.Context, tenantID string, userID uu
 	return nil
 }
 
-var _ passkey.Store = (*Store)(nil)
-var _ passkey.ChallengeStore = (*Store)(nil)
+var (
+	_ passkey.Store          = (*Store)(nil)
+	_ passkey.ChallengeStore = (*Store)(nil)
+)
 
 // Put records an issued challenge with an absolute expiry.
 func (s *Store) Put(ctx context.Context, tenantID, challenge string, expiresAt time.Time) error {
@@ -168,4 +170,14 @@ func (s *Store) Consume(ctx context.Context, tenantID, challenge string) (bool, 
 func (s *Store) Ping(ctx context.Context) error {
 	var ok int
 	return s.db.QueryRow(ctx, "SELECT 1").Scan(&ok)
+}
+
+// DeleteCredentialsByUser removes every credential registered by the user in the tenant. It is
+// idempotent (deleting for a user with no credentials returns nil) and tenant-scoped, so an
+// account erasure can never touch another user's or another tenant's credentials
+// (passkey.CredentialEraser contract).
+func (s *Store) DeleteCredentialsByUser(ctx context.Context, tenantID string, userID uuid.UUID) error {
+	const query = `DELETE FROM passkey_credentials WHERE tenant_id = $1 AND user_id = $2`
+	_, err := s.db.Exec(ctx, query, tenantID, userID)
+	return err
 }

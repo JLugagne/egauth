@@ -231,7 +231,19 @@ func WithAuthNonce(nonce string) AuthCodeOption {
 
 // AuthCodeURL builds the provider authorization URL for the given state, redirect URI and
 // (optional) PKCE S256 challenge. Pass WithAuthNonce to include an OIDC nonce.
+//
+// It returns "" when the Provider was built with an endpoint URL that failed the https-only
+// validation (the deferred configErr). Direct callers must treat an empty result as a fatal
+// misconfiguration: constructing the request anyway would send the state, PKCE challenge,
+// client_id and redirect_uri to an unvalidated endpoint. BeginHandler fails closed on the same
+// condition, and Exchange returns the underlying configErr.
 func (p *Provider) AuthCodeURL(state, redirectURI, codeChallenge string, opts ...AuthCodeOption) string {
+	// Fail closed when New rejected an endpoint URL (F-OAPROV-001): returning "" keeps direct
+	// callers from building a URL that would send the state, PKCE challenge, client_id and
+	// redirect_uri to an unvalidated endpoint. Exchange already enforces the same configErr.
+	if p.configErr != nil {
+		return ""
+	}
 	var params authCodeParams
 	for _, opt := range opts {
 		opt(&params)

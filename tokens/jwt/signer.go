@@ -88,10 +88,9 @@ func NewHMACSigner(keyID string, secret []byte) (Signer, error) {
 // always passes allowWeak=false. The published-key denylist and the trivially-known-key check are
 // enforced regardless of allowWeak — InsecureAllowWeakKey suppresses only the length gate.
 func newHMACSignerAllowWeak(keyID string, secret []byte, allowWeak bool) (Signer, error) {
-	if err := deniedSecretError(secret); err != nil {
-		return nil, err
-	}
-	if err := trivialSecretError(secret); err != nil {
+	// Trivial, published and near-copy rejection is unconditional via the shared policy;
+	// only the minimum-length gate below honors allowWeak (InsecureAllowWeakKey).
+	if err := validateSecretPolicy(secret, 0); err != nil {
 		return nil, err
 	}
 	if !allowWeak && len(secret) < MinSecretKeyLength {

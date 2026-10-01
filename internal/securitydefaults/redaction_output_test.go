@@ -2,6 +2,7 @@ package securitydefaults
 
 import (
 	"bytes"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -34,8 +35,18 @@ var secretLiterals = map[string]string{
 func assertRedacted(t *testing.T, label, rendered string) {
 	t.Helper()
 	for name, secret := range secretLiterals {
-		if strings.Contains(rendered, secret) {
-			t.Errorf("%s leaked the %s: %q", label, name, rendered)
+		// The readable literal, plus the recoverable renderings fmt produces for a leaked
+		// []byte: %v/%d print decimal byte values and %x prints hex, so a missing redaction
+		// method leaks the key even though the quoted string never appears.
+		forms := []string{
+			secret,
+			fmt.Sprintf("%v", []byte(secret)),
+			hex.EncodeToString([]byte(secret)),
+		}
+		for _, form := range forms {
+			if strings.Contains(rendered, form) {
+				t.Errorf("%s leaked the %s: %q", label, name, rendered)
+			}
 		}
 	}
 }
@@ -99,6 +110,10 @@ func TestAuthflowEngineIsRedacted(t *testing.T) {
 	assertRedacted(t, "authflow fmt %v", fmt.Sprintf("%v", engine))
 	assertRedacted(t, "authflow fmt %+v", fmt.Sprintf("%+v", engine))
 	assertRedacted(t, "authflow fmt %#v", fmt.Sprintf("%#v", engine))
+	// The value form and a non-string verb: Format (value receiver) must intercept both, or fmt
+	// prints the unexported secret []byte as recoverable decimal byte values (F-AFLOW-001).
+	assertRedacted(t, "authflow fmt value %v", fmt.Sprintf("%v", *engine))
+	assertRedacted(t, "authflow fmt pointer %d", fmt.Sprintf("%d", engine))
 
 	var buf bytes.Buffer
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("flow", "engine", engine)

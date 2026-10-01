@@ -19,7 +19,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-func newStoreAndPool(t *testing.T) (*mfapgx.Store, *pgxpool.Pool) {
+func newStoreAndPool(t *testing.T) (*mfapgx.Store, *pgxpool.Pool, *keystore.KEK) {
 	t.Helper()
 	if testing.Short() {
 		t.Skip("requires Docker (testcontainers); run without -short")
@@ -53,16 +53,15 @@ func newStoreAndPool(t *testing.T) (*mfapgx.Store, *pgxpool.Pool) {
 
 	require.NoError(t, mfapgx.Migrate(ctx, pool))
 
-	// Provide a dummy KEK for testing
-	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
-	kek, err := keystore.NewKEK(dummyKey)
+	// Provide a fresh random KEK for testing (never a published fixture).
+	kek, err := keystore.NewKEK(randomKEKKey(t))
 	require.NoError(t, err)
 
-	return mfapgx.NewStore(pool, kek), pool
+	return mfapgx.NewStore(pool, kek), pool, kek
 }
 
 func newStore(t *testing.T) *mfapgx.Store {
-	store, _ := newStoreAndPool(t)
+	store, _, _ := newStoreAndPool(t)
 	return store
 }
 
@@ -91,7 +90,7 @@ func TestPgxStore_ReplaceRecoveryCodesAtomic(t *testing.T) {
 // TestPgxStore_TOTPSecretEncryptedAtRest verifies that the TOTP secret is not stored in plaintext.
 func TestPgxStore_TOTPSecretEncryptedAtRest(t *testing.T) {
 	ctx := context.Background()
-	store, pool := newStoreAndPool(t)
+	store, pool, _ := newStoreAndPool(t)
 	uid := uuid.Must(uuid.NewV7())
 
 	const plaintextSecret = "my-super-secret-totp-key"
@@ -165,7 +164,7 @@ func TestPgxStore_ConfirmEnrollmentAtomic(t *testing.T) {
 // tenant B cannot read/decrypt it under tenant B (SEC-MFA-03).
 func TestPgxStore_SEC_MFA_03_CrossTenantAAD(t *testing.T) {
 	ctx := context.Background()
-	store, pool := newStoreAndPool(t)
+	store, pool, _ := newStoreAndPool(t)
 	uid := uuid.Must(uuid.NewV7())
 
 	const secret = "super-secret-totp"
@@ -197,12 +196,8 @@ func TestPgxStore_SEC_MFA_03_CrossTenantAAD(t *testing.T) {
 // without AAD (pre-migration / legacy) can still be decrypted via fallback (SEC-MFA-03).
 func TestPgxStore_SEC_MFA_03_BackwardCompatibility_LegacySecretWithoutAAD(t *testing.T) {
 	ctx := context.Background()
-	store, pool := newStoreAndPool(t)
+	store, pool, kek := newStoreAndPool(t)
 	uid := uuid.Must(uuid.NewV7())
-
-	dummyKey := []byte("kek-fixture-0123456789abcdefghij")
-	kek, err := keystore.NewKEK(dummyKey)
-	require.NoError(t, err)
 
 	const legacySecret = "legacy-unauthenticated-secret"
 	// Seal without AAD (legacy behavior)

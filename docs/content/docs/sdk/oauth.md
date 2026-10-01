@@ -104,7 +104,7 @@ p := providers.OIDC(ctx, issuer, "client-id", "client-secret",
 )
 ```
 
-If discovery fails, the error is deferred (like an invalid endpoint passed to `oauth.New`) and surfaces on the first `AuthCodeURL`/`Exchange` call rather than panicking. Discovery, token and userinfo fetches all use the SSRF-safe `oauth.SafeHTTPClient` by default; override discovery with `providers.WithDiscoveryHTTPClient` only when you need a custom transport.
+If discovery fails, the error is deferred (like an invalid endpoint passed to `oauth.New`) and surfaces on first use rather than panicking. The begin path fails closed: `BeginHandler` refuses such a provider with `500` (and `Provider.AuthCodeURL` returns `""`), so the authorization redirect never sends the state, PKCE challenge, `client_id` or `redirect_uri` to an endpoint that failed validation; `Exchange` returns the underlying config error. Discovery, token and userinfo fetches all use the SSRF-safe `oauth.SafeHTTPClient` by default; override discovery with `providers.WithDiscoveryHTTPClient` only when you need a custom transport.
 
 ## The OAuth Flow
 
@@ -114,10 +114,15 @@ Because `egauth` is unopinionated about routing, it provides `http.HandlerFunc` 
 
 Mount `BeginHandler` to initiate the redirect to the provider. The handler sets a secure, `HttpOnly` CSRF state cookie. PKCE is on by default (pass `oauth.WithoutPKCE()` only for a provider that rejects it).
 
+Every mounted OAuth handler needs `oauth.WithStateSigningKey` — a stable random key of at least `oauth.MinStateSigningKeyLength` (32) bytes from your secret manager, used to HMAC-authenticate the state cookie (which also carries the PKCE verifier and OIDC nonce). A missing, short, trivially-known, published-example or near-copy key fails closed with `500`.
+
 ```go
 // e.g. GET /auth/google/login
+stateKey := stateSigningKeyFromSecretStore // >= 32 bytes, random, never a published example
+
 mux.Handle("/auth/google/login", oauth.BeginHandler(google,
 	oauth.WithRedirectURL("https://yourapp.com/auth/google/callback"),
+	oauth.WithStateSigningKey(stateKey),
 ))
 ```
 
@@ -147,12 +152,13 @@ callback := oauth.CallbackHandler(
 	oauth.WithRedirectURL("https://yourapp.com/auth/google/callback"),
 	oauth.WithSuccessRedirect("/dashboard"),
 	oauth.WithFailureRedirect("/login?error=oauth"),
+	oauth.WithStateSigningKey(stateKey),
 )
 
 mux.Handle("/auth/google/callback", callback)
 ```
 
-Useful handler options include `WithRedirectURL`, `WithSuccessRedirect`, `WithFailureRedirect`, `WithCookies`, `WithCookieDomain`, `WithSameSite`, `WithStateTTL`, `WithTenantResolver`, `WithAllowUnverifiedEmail`, and `WithoutPKCE`.
+Useful handler options include `WithStateSigningKey` (required), `WithRedirectURL`, `WithSuccessRedirect`, `WithFailureRedirect`, `WithCookies`, `WithCookieDomain`, `WithSameSite`, `WithStateTTL`, `WithTenantResolver`, `WithAllowUnverifiedEmail`, and `WithoutPKCE`.
 
 ## Multi-Tenant (Bring Your Own SSO)
 
@@ -164,6 +170,7 @@ store.AddProvider("tenant-123", providers.Google("client-id", "client-secret"))
 
 mux.Handle("/auth/sso/login", oauth.DynamicBeginHandler(store, "google",
 	oauth.WithRedirectURL("https://yourapp.com/auth/sso/callback"),
+	oauth.WithStateSigningKey(stateKey), // required, as for the static handlers
 ))
 
 mux.Handle("/auth/sso/callback", oauth.DynamicCallbackHandler(
@@ -174,6 +181,7 @@ mux.Handle("/auth/sso/callback", oauth.DynamicCallbackHandler(
 		return tokens.Claims[C]{Subject: u.ID, TenantID: u.TenantID}
 	},
 	oauth.WithRedirectURL("https://yourapp.com/auth/sso/callback"),
+	oauth.WithStateSigningKey(stateKey),
 ))
 ```
 

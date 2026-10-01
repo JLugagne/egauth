@@ -204,3 +204,21 @@ func (s *Store) DeleteCredential(_ context.Context, tenantID string, userID uuid
 }
 
 var _ passkey.Store = (*Store)(nil)
+
+// DeleteCredentialsByUser removes every credential the user has registered in the tenant. It
+// is idempotent: deleting for a user with no credentials returns nil. Both the tenant-wide ID
+// index and the tenant count are updated, so the deleted slots are freed for future saves.
+func (s *Store) DeleteCredentialsByUser(_ context.Context, tenantID string, userID uuid.UUID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	k := key(tenantID, userID)
+	for _, c := range s.creds[k] {
+		delete(s.byID, idKey(tenantID, c.ID))
+		if s.counts[tenantID] > 0 {
+			s.counts[tenantID]--
+		}
+	}
+	delete(s.creds, k)
+	return nil
+}

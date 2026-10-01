@@ -3,6 +3,7 @@ package keystore_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"sync"
@@ -52,7 +53,7 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 // newManager builds a keystore.Manager over the pgx Store with a test KEK.
 func newManager(t *testing.T, pool *pgxpool.Pool) *keystore.Manager {
 	t.Helper()
-	kek, err := keystore.NewKEK([]byte("kek-fixture-0123456789abcdefghij"))
+	kek, err := keystore.NewKEK(randomKEKKey(t))
 	require.NoError(t, err)
 	mgr, err := keystore.NewManager(pgxkeystore.NewStore(pool), kek)
 	require.NoError(t, err)
@@ -271,4 +272,12 @@ func TestPgxKeystore_RetireExpiredKeys_SoftRetire(t *testing.T) {
 	hist, err := store.HistoricalKeys(ctx, tenantID)
 	require.NoError(t, err)
 	require.Contains(t, hist, "key-expired-1")
+}
+
+func randomKEKKey(t *testing.T) []byte {
+	t.Helper()
+	key := make([]byte, 32)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	return key
 }

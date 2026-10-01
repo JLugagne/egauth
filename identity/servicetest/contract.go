@@ -99,8 +99,10 @@ func (m *MockService) LoginWithMagicLink(ctx context.Context, tenantID string, t
 	return m.LoginWithMagicLinkFunc(ctx, tenantID, token, rc...)
 }
 
-var _ identity.Service = (*MockService)(nil)
-var _ identity.SessionStateReader = (*MockService)(nil)
+var (
+	_ identity.Service            = (*MockService)(nil)
+	_ identity.SessionStateReader = (*MockService)(nil)
+)
 
 func (m *MockService) RequestPasswordReset(ctx context.Context, tenantID string, email string) (string, *identity.User, error) {
 	if m.RequestPasswordResetFunc == nil {

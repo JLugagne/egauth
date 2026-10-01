@@ -139,6 +139,9 @@ handler := tokens.RequireAuth(
 	},
 	// Optional: gate the route on step-up authentication (RFC 8176 AMR).
 	tokens.WithRequiredAMR[MyClaims](tokens.AMRMFA),
+	// Optional: refuse an interim (pre-second-factor) token outright — the structural
+	// counterpart that needs no knowledge of which AMR values count as complete.
+	tokens.WithDenyInterim[MyClaims](),
 )
 
 mux.Handle("/api/private", handler)

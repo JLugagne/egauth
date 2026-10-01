@@ -3,6 +3,7 @@ package identity
 import (
 	"context"
 	"errors"
+	"math"
 	"net/mail"
 	"strings"
 	"time"
@@ -58,6 +59,11 @@ func normalizeEmail(email string) (string, error) {
 const (
 	DefaultLockThreshold = 5
 	DefaultLockDuration  = 15 * time.Minute
+	// noLockoutThreshold is the internal sentinel WithNoLockout writes. It is deliberately a
+	// value WithLockout can never produce by accident, so NewService can treat every OTHER
+	// non-positive threshold as "use the safe default" (F-IDCRED-003) while still honouring the
+	// explicit opt-out.
+	noLockoutThreshold = math.MinInt
 )
 
 // Default verification-token lifetimes.
@@ -295,9 +301,11 @@ func WithLockout(threshold int, duration time.Duration) ServiceOption {
 // is online-brute-forceable. Lockout is ON by default; only use this option when you
 // knowingly enforce the attempt budget elsewhere.
 func WithNoLockout() ServiceOption {
-	// A negative sentinel is normalized to zero (the internal "disabled" value) inside
-	// NewService after all options have been applied, so the verify path only tests > 0.
-	return func(s *service) { s.lockThreshold = -1 }
+	// The sentinel is math.MinInt, a value WithLockout can never produce by accident, so
+	// NewService can treat every other non-positive threshold as "use the safe default"
+	// (F-IDCRED-003) and still honour this explicit opt-out. Using -1 here would make
+	// WithLockout(-1, ...) silently disable lockout, contradicting its documented contract.
+	return func(s *service) { s.lockThreshold = noLockoutThreshold }
 }
 
 // WithPasswordResetTTL overrides how long a password-reset token stays valid.
@@ -418,15 +426,16 @@ func NewService(store Store, hasher passwords.Hasher, policy passwords.Policy, o
 	for _, opt := range opts {
 		opt(s)
 	}
-	// Lockout is secure-by-default: a non-positive threshold (e.g. from WithLockout(0, ...))
-	// means "use the safe default ceiling", not "disable". The negative sentinel written by
-	// WithNoLockout() is normalized to zero (the internal "disabled" value) so the downstream
-	// paths only need to test lockThreshold > 0.
+	// Lockout is secure-by-default: ANY non-positive threshold other than the explicit
+	// WithNoLockout sentinel (e.g. WithLockout(0, ...) or WithLockout(-1, ...)) means "use the
+	// safe default ceiling", never "disable" (F-IDCRED-003). The sentinel is normalized to zero
+	// (the internal "disabled" value) so the downstream paths only need to test
+	// lockThreshold > 0.
 	switch {
-	case s.lockThreshold == 0:
-		s.lockThreshold = DefaultLockThreshold
-	case s.lockThreshold < 0:
+	case s.lockThreshold == noLockoutThreshold:
 		s.lockThreshold = 0 // explicitly disabled via WithNoLockout
+	case s.lockThreshold <= 0:
+		s.lockThreshold = DefaultLockThreshold
 	}
 	// Similarly, a non-positive duration is treated as "use the safe default".
 	// Zero duration would produce a LockedUntil at/before now, so the lock would never bite.
@@ -600,32 +609,28 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 			return nil, ErrAccountDisabled
 		}
 
-		if ident.PasswordHash == nil {
-			s.decoyHash(ctx, password)
-			loginFailed(user.ID.String(), "invalid_credentials", "password")
-			return nil, ErrInvalidCredentials
-		}
-
-		if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
-			// Record the failed attempt (and possibly lock the account). The error is not
-			// propagated (the response stays uniform) but it gates the lockout event below.
-			justLocked, incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
-			loginFailed(user.ID.String(), "invalid_credentials", "password")
+		// The shared verification helper applies the same brute-force lockout policy as
+		// ChangePassword: a locked account is refused, a mismatch feeds the counter, and a success
+		// clears it. A nil hasher or an identity without a password hash fails closed inside it.
+		justLocked, verr := s.verifyCurrentPassword(ctx, tenantID, ident, password)
+		if verr != nil {
+			// Keep the audit reason aligned with this path's established taxonomy: a lockout is
+			// account_locked, everything else is invalid_credentials.
+			reason := "invalid_credentials"
+			if errors.Is(verr, ErrAccountLocked) {
+				reason = "account_locked"
+			}
+			loginFailed(user.ID.String(), reason, "password")
 			// Surface the lockout as its own event, driven by the store's atomic result rather
 			// than a pre-increment prediction. justLocked is true only on the request whose
 			// increment actually crossed the threshold, so under concurrent failed logins the
 			// event fires exactly once and is attributed to the correct request — a stale
 			// read-then-predict (ident.FailedAttempts+1) could mis-fire, double-fire, or miss
 			// the crossing request entirely.
-			if incErr == nil && justLocked {
+			if justLocked {
 				s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: user.ID.String(), TenantID: tenantID, Attrs: reqCtx.ApplyTo(nil)})
 			}
-			return nil, ErrInvalidCredentials
-		}
-
-		// Successful authentication: reset the counter only if there were prior attempts.
-		if ident.FailedAttempts > 0 {
-			_ = s.store.ResetFailedAttempts(ctx, tenantID, ident.ID)
+			return nil, verr
 		}
 
 		// amr reflects the credential verified at this step (password first factor only).
@@ -656,14 +661,22 @@ func (s *service) Authenticate(ctx context.Context, tenantID string, provider, p
 func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, email string) (string, *User, error) {
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
-		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		// Stay uniform: a malformed email behaves exactly like an unknown account, including the
+		// store round trips the minting branch below performs, so response timing cannot disclose
+		// account existence (F-IDREC-002).
+		s.decoyFindUserByEmail(ctx, tenantID, email)
+		s.decoyFindIdentities(ctx, tenantID)
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
-			// Do not reveal whether the account exists. Equalize timing via decoy token generation.
+			// Do not reveal whether the account exists. Equalize both the local crypto cost and
+			// the store round trips the minting branch performs (F-IDREC-002).
+			s.decoyFindIdentities(ctx, tenantID)
+			s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 			s.decoyToken()
 			return "", nil, nil
 		}
@@ -671,8 +684,10 @@ func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, ema
 	}
 
 	// A disabled (administratively suspended) account must not receive credential mail:
-	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	// behave exactly like an unknown account, and spend the same store round trips (F-IDREC-002).
 	if user.DisabledAt != nil {
+		s.decoyFindIdentities(ctx, tenantID)
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, nil
 	}
@@ -686,6 +701,8 @@ func (s *service) RequestPasswordReset(ctx context.Context, tenantID string, ema
 		return "", nil, err
 	}
 	if !hasPasswordIdentity(idents) {
+		// Only the minting round trip is missing here: the identity lookup already happened.
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, nil
 	}
@@ -781,6 +798,13 @@ func (s *service) ResetPassword(ctx context.Context, tenantID string, token, new
 	if err := s.store.ClearRecoveryChannels(ctx, tenantID, user.ID); err != nil {
 		errs = append(errs, err)
 	}
+	// Pending verification tokens are credentials too: enrollment and email-change tokens minted
+	// by a session that predates the reset are delivered to a caller-supplied address and stay
+	// independently valid after the reset revokes the session, letting the attacker re-enroll the
+	// channel this reset just cleared or move the primary email (F-IDREC-001). Purge them here.
+	if _, err := s.store.DeleteVerificationTokensByUser(ctx, tenantID, user.ID); err != nil {
+		errs = append(errs, err)
+	}
 
 	for _, erase := range s.erasers {
 		if erase == nil {
@@ -841,8 +865,17 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 		return ErrInvalidCredentials
 	}
 
-	if err := s.hasher.Compare(ctx, *pwIdent.PasswordHash, currentPassword); err != nil {
-		return ErrInvalidCredentials
+	// Verify the current password under the same brute-force lockout policy as Authenticate
+	// (F-IDCRED-002): a locked account is refused, a wrong guess feeds the counter (and can lock
+	// the account), and a success clears it. Verification and accounting are shared with
+	// Authenticate so the two paths cannot drift again.
+	justLocked, verr := s.verifyCurrentPassword(ctx, tenantID, pwIdent, currentPassword)
+	if verr != nil {
+		// Surface a lock transition as its own audit event exactly once, like Authenticate.
+		if justLocked {
+			s.emit(ctx, event.Event{Type: event.AccountLocked, UserID: userID.String(), TenantID: tenantID})
+		}
+		return verr
 	}
 
 	hash, err := s.hasher.Hash(ctx, newPassword)
@@ -854,6 +887,18 @@ func (s *service) ChangePassword(ctx context.Context, tenantID string, userID uu
 	}
 
 	var errs []error
+	// Recovery channels and pending verification tokens are credentials, not contact metadata:
+	// the reset-via-recovery flow delivers a reset token to whatever address is enrolled, and the
+	// enrollment/email-change tokens are delivered to a caller-supplied address. An attacker who
+	// briefly held a session could have started either, so every credential rotation — not only
+	// ResetPassword — must evict them (F-IDCRED-001 / F-IDREC-001). Without this, the attacker
+	// waits out the rotation and then confirms the token or resets through the surviving channel.
+	if err := s.store.ClearRecoveryChannels(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := s.store.DeleteVerificationTokensByUser(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, erase := range s.erasers {
 		if erase == nil {
 			continue
@@ -988,6 +1033,12 @@ func (s *service) DeleteAccount(ctx context.Context, tenantID string, userID uui
 		if err := erase(ctx, tenantID, userID); err != nil {
 			errs = append(errs, err)
 		}
+	}
+	// Pending verification tokens are credentials minted while the account was live; purge them
+	// explicitly as part of deletion too (DeleteUser also does, but this keeps the revocation on
+	// the service path and covers stores that only anonymize).
+	if _, err := s.store.DeleteVerificationTokensByUser(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
 	}
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -1125,22 +1176,29 @@ func (s *service) LinkOrCreateIdentity(ctx context.Context, tenantID string, pro
 func (s *service) RequestMagicLink(ctx context.Context, tenantID string, email string) (string, *User, error) {
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
-		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		// Stay uniform: a malformed email behaves exactly like an unknown account, including the
+		// store round trips the minting branch below performs (F-IDREC-002).
+		s.decoyFindUserByEmail(ctx, tenantID, email)
+		s.decoyMintVerificationToken(ctx, tenantID, KindMagicLink, s.magicLinkTTL)
 		s.decoyToken()
 		return "", nil, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			// Do not reveal whether the account exists. Equalize both the local crypto cost and
+			// the store round trip the minting branch performs (F-IDREC-002).
+			s.decoyMintVerificationToken(ctx, tenantID, KindMagicLink, s.magicLinkTTL)
 			s.decoyToken()
-			return "", nil, nil // do not reveal whether the account exists
+			return "", nil, nil
 		}
 		return "", nil, err
 	}
 
 	// A disabled (administratively suspended) account must not receive credential mail:
-	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	// behave exactly like an unknown account, and spend the same store round trip (F-IDREC-002).
 	if user.DisabledAt != nil {
+		s.decoyMintVerificationToken(ctx, tenantID, KindMagicLink, s.magicLinkTTL)
 		s.decoyToken()
 		return "", nil, nil
 	}
@@ -1432,22 +1490,29 @@ func (s *service) assertRecoveryChannelDistinct(user *User, candidate string) er
 func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID string, email string) (string, *User, RecoveryChannels, error) {
 	email, nerr := normalizeEmail(email)
 	if nerr != nil {
-		// Stay uniform: a malformed email behaves exactly like an unknown account.
+		// Stay uniform: a malformed email behaves exactly like an unknown account, including the
+		// store round trips the minting branch below performs (F-IDREC-002).
+		s.decoyFindUserByEmail(ctx, tenantID, email)
+		s.decoyFindIdentities(ctx, tenantID)
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
 	user, err := s.store.FindUserByEmail(ctx, tenantID, email)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			s.decoyFindIdentities(ctx, tenantID)
+			s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 			s.decoyToken()
 			return "", nil, RecoveryChannels{}, nil
 		}
 		return "", nil, RecoveryChannels{}, err
 	}
-
 	// A disabled (administratively suspended) account must not receive credential mail:
-	// behave exactly like an unknown account, after a decoy token to equalize timing.
+	// behave exactly like an unknown account, and spend the same store round trips (F-IDREC-002).
 	if user.DisabledAt != nil {
+		s.decoyFindIdentities(ctx, tenantID)
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
@@ -1459,6 +1524,7 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 		return "", nil, RecoveryChannels{}, err
 	}
 	if !hasPasswordIdentity(idents) {
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
@@ -1470,6 +1536,7 @@ func (s *service) RequestPasswordResetViaRecovery(ctx context.Context, tenantID 
 	// Usable, not Any: a channel still inside its cooling-off window is enrolled but must not be
 	// relied on yet, so the flow stays enumeration-uniform rather than minting a token to it.
 	if !channels.Usable(s.now()) {
+		s.decoyMintVerificationToken(ctx, tenantID, KindPasswordReset, s.passwordResetTTL)
 		s.decoyToken()
 		return "", nil, RecoveryChannels{}, nil
 	}
@@ -1500,6 +1567,12 @@ func (s *service) DisableUser(ctx context.Context, tenantID string, userID uuid.
 	s.emit(ctx, event.Event{Type: event.AccountDisabled, UserID: userID.String(), TenantID: tenantID})
 
 	var errs []error
+	// Purge pending verification tokens as defence in depth (F-IDREC-001): consumption is already
+	// blocked while the account is disabled, but a token that survives a disable -> enable cycle
+	// would become usable again. Purging also avoids stale credential rows after re-activation.
+	if _, err := s.store.DeleteVerificationTokensByUser(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, revoke := range s.disableRevokers {
 		if revoke == nil {
 			continue
@@ -1571,6 +1644,15 @@ func (s *service) SetTemporaryPassword(ctx context.Context, tenantID string, use
 	// distinguishes it from a self-service change so a SIEM can flag admin-initiated resets.
 	s.emit(ctx, event.Event{Type: event.PasswordChanged, UserID: userID.String(), TenantID: tenantID, Reason: "admin_temporary_password"})
 	var errs []error
+	// Mirror ResetPassword/ChangePassword: an admin-issued temporary password is a credential
+	// rotation, so it must evict recovery channels and pending verification tokens enrolled or
+	// minted by a hijacked session (F-IDCRED-001 / F-IDREC-001).
+	if err := s.store.ClearRecoveryChannels(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
+	if _, err := s.store.DeleteVerificationTokensByUser(ctx, tenantID, userID); err != nil {
+		errs = append(errs, err)
+	}
 	for _, erase := range s.erasers {
 		if erase == nil {
 			continue
@@ -1628,4 +1710,72 @@ func (s *service) AdminCreateUser(ctx context.Context, tenantID string, email, t
 	// Audit the admin-initiated account provisioning (parity with Register's UserRegistered).
 	s.emit(ctx, event.Event{Type: event.UserRegistered, UserID: user.ID.String(), TenantID: tenantID, Reason: "admin_created"})
 	return user, nil
+}
+
+// verifyCurrentPassword checks password against ident's hash under the shared brute-force
+// lockout policy used by BOTH Authenticate and ChangePassword, so the two verification paths
+// cannot drift apart (F-IDCRED-002):
+//
+//   - an account currently inside its lockout window is refused with ErrAccountLocked, after a
+//     decoy hash so the locked response is not measurably faster than a wrong-password one;
+//   - a mismatch records the failed attempt via IncrementFailedAttempts (which locks the account
+//     at the configured threshold) and returns ErrInvalidCredentials;
+//   - an identity without a usable password hash cannot match: it fails closed with
+//     ErrInvalidCredentials instead of dereferencing a nil PasswordHash or a nil hasher
+//     (F-IDCRED-004), after the same decoy hash.
+//
+// justLocked reports whether this call's increment crossed the lockout threshold, so the caller
+// can emit the once-per-lock AccountLocked event with correct attribution; it is false on every
+// other path (including when the store increment failed, since then no lock transition is known
+// to have happened).
+func (s *service) verifyCurrentPassword(ctx context.Context, tenantID string, ident *Identity, password string) (justLocked bool, err error) {
+	// Locked accounts are refused before any comparison. The decoy hash keeps the response time
+	// indistinguishable from the wrong-password path (user enumeration, PRD §108).
+	if ident.LockedUntil != nil && ident.LockedUntil.After(s.now()) {
+		s.decoyHash(ctx, password)
+		return false, ErrAccountLocked
+	}
+	// A nil hasher (legal for OAuth-only deployments) or an identity with no password hash cannot
+	// match anything: fail closed rather than panicking with a nil dereference.
+	if s.hasher == nil || ident.PasswordHash == nil {
+		s.decoyHash(ctx, password)
+		return false, ErrInvalidCredentials
+	}
+	if err := s.hasher.Compare(ctx, *ident.PasswordHash, password); err != nil {
+		// Record the failed attempt (and possibly lock the account). The error is not propagated
+		// (the response stays uniform) but a successful lock transition gates the lockout event
+		// emitted by the caller.
+		locked, incErr := s.store.IncrementFailedAttempts(ctx, tenantID, ident.ID, s.lockThreshold, s.lockDuration)
+		if incErr != nil {
+			locked = false
+		}
+		return locked, ErrInvalidCredentials
+	}
+	// Successful verification: clear the counter only if there were prior attempts.
+	if ident.FailedAttempts > 0 {
+		_ = s.store.ResetFailedAttempts(ctx, tenantID, ident.ID)
+	}
+	return false, nil
+}
+
+// decoyFindUserByEmail spends the user-lookup store round trip the minting branch of an
+// enumeration-safe Request* flow performs, for an address that cannot match. The result is
+// discarded: the point is that a malformed or unknown address costs the same round trip as a
+// known one, so response timing does not disclose account existence (F-IDREC-002).
+func (s *service) decoyFindUserByEmail(ctx context.Context, tenantID, email string) {
+	_, _ = s.store.FindUserByEmail(ctx, tenantID, email)
+}
+
+// decoyFindIdentities spends the identity-lookup store round trip against an id that cannot
+// match, equalizing the minting branch's FindIdentitiesByUserID work on non-minting branches
+// (F-IDREC-002).
+func (s *service) decoyFindIdentities(ctx context.Context, tenantID string) {
+	_, _ = s.store.FindIdentitiesByUserID(ctx, tenantID, uuid.New())
+}
+
+// decoyMintVerificationToken spends the token-insert store round trip against an id that cannot
+// match, so nothing is written while the account-dependent work is equalized with the minting
+// branch (F-IDREC-002).
+func (s *service) decoyMintVerificationToken(ctx context.Context, tenantID, kind string, ttl time.Duration) {
+	_, _ = s.store.CreateVerificationToken(ctx, tenantID, uuid.New(), kind, ttl, nil)
 }

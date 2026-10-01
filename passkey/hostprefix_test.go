@@ -34,9 +34,11 @@ func (hostPrefixTestStore) SaveCredential(context.Context, string, *Credential) 
 func (hostPrefixTestStore) GetCredentials(context.Context, string, uuid.UUID) ([]*Credential, error) {
 	return nil, nil
 }
+
 func (hostPrefixTestStore) UpdateCredential(context.Context, string, *Credential) error {
 	return nil
 }
+
 func (hostPrefixTestStore) DeleteCredential(context.Context, string, uuid.UUID, []byte) error {
 	return nil
 }
@@ -47,6 +49,7 @@ type hostPrefixTestChallengeStore struct{}
 func (hostPrefixTestChallengeStore) Put(context.Context, string, string, time.Time) error {
 	return nil
 }
+
 func (hostPrefixTestChallengeStore) Consume(context.Context, string, string) (bool, error) {
 	return true, nil
 }
@@ -81,6 +84,7 @@ func TestBeginRegistrationHandler_HostLockedCeremonyCookieAttributes(t *testing.
 	h := BeginRegistrationHandler(svc,
 		hostPrefixTestResolver(uuid.Must(uuid.NewV7())),
 		WithCookieKey([]byte(testHostPrefixCookieKey)),
+		WithInsecureNoAssuranceCheck(),
 	)
 
 	rec := httptest.NewRecorder()
@@ -120,6 +124,7 @@ func TestBeginRegistrationHandler_HostPrefixMisconfigurationFailsClosed(t *testi
 	subject := []HandlerOption{
 		hostPrefixTestResolver(uuid.Must(uuid.NewV7())),
 		WithCookieKey([]byte(testHostPrefixCookieKey)),
+		WithInsecureNoAssuranceCheck(),
 	}
 
 	t.Run("domain with the default __Host- name", func(t *testing.T) {
@@ -148,6 +153,7 @@ func TestBeginRegistrationHandler_PlainNameOptOutSucceeds(t *testing.T) {
 	h := BeginRegistrationHandler(svc,
 		hostPrefixTestResolver(uuid.Must(uuid.NewV7())),
 		WithCookieKey([]byte(testHostPrefixCookieKey)),
+		WithInsecureNoAssuranceCheck(),
 		WithSessionCookieName("passkey_ceremony"),
 		WithInsecureCookies(),
 	)
@@ -157,4 +163,8 @@ func TestBeginRegistrationHandler_PlainNameOptOutSucceeds(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.NotNil(t, findCeremonyCookieByName(rec.Result().Cookies(), "passkey_ceremony"),
 		"the plain-name opt-out must still emit the ceremony cookie")
+}
+
+func (hostPrefixTestStore) DeleteCredentialsByUser(context.Context, string, uuid.UUID) error {
+	return nil
 }

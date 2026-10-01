@@ -10,6 +10,7 @@ package keystoretest
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"testing"
@@ -18,11 +19,17 @@ import (
 	"github.com/JLugagne/egauth/keystore"
 )
 
-// testKEK is a fixed 32-byte AES-256 KEK used across the conformance suite. It is test-only
-// material — never reuse it in production.
-// testKEK is a non-constant 32-byte key: a repeated-byte or all-zero value is refused by NewKEK,
-// because a trivially-known KEK would void the at-rest protection under test.
-var testKEK = []byte("kek-fixture-0123456789abcdefghij")
+// testKEK is a random 32-byte AES-256 KEK generated fresh per test binary. It is test-only
+// material — never reuse it in production. A fixed literal would be refused by NewKEK as soon
+// as it is published in this file (the shared credential policy rejects keys that appear in
+// the source tree), so the suite generates its key at run time instead.
+var testKEK = func() []byte {
+	key := make([]byte, keystore.KEKKeyLength)
+	if _, err := rand.Read(key); err != nil {
+		panic("keystoretest: reading crypto/rand: " + err.Error())
+	}
+	return key
+}()
 
 // StoreFactory returns a fresh, empty store for each subtest, so tests never share state. The
 // store MUST use the supplied clock as its time source so its active/expired evaluation agrees

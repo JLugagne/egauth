@@ -687,3 +687,21 @@ func (s *Store) EnableUser(ctx context.Context, tenantID string, id uuid.UUID) e
 
 	return nil
 }
+
+// DeleteVerificationTokensByUser deletes every pending verification token bound to userID in the
+// tenant, returning the number deleted. It is the per-user revoke the credential-rotation paths
+// call, so a token minted by a hijacked session cannot be confirmed after the rotation. An
+// unknown user (or one with no pending tokens) yields (0, nil): it is a purge, not a lookup.
+func (s *Store) DeleteVerificationTokensByUser(ctx context.Context, tenantID string, userID uuid.UUID) (int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var deleted int64
+	for selector, vt := range s.verificationTokens {
+		if vt.UserID == userID && vt.TenantID == tenantID {
+			delete(s.verificationTokens, selector)
+			deleted++
+		}
+	}
+	return deleted, nil
+}

@@ -37,11 +37,24 @@ presented a factor destroy the factor?" — that is not a policy choice but the 
 factor and a decoration, so it is closed by default and opened explicitly with
 `mfa.WithStepUpRequired(false)` (or `WithoutStepUp()`) when an outer layer enforces the same thing.
 
-What follows from rows 1–3 being off: **enrolling and confirming a factor enforces nothing.** If you
-mount `EnrollHandler` / `ConfirmHandler` / `VerifyHandler` without wiring a gate, users can enrol an
-authenticator and confirm it, and the next password login still issues a full session. That is not a
-defect — the library cannot know your policy — but it is a wiring mistake that looks like a working
-setup, so check it deliberately when you enable MFA.
+What follows from rows 1–3 being off: **completing MFA enrolment enforces nothing at login.** If you
+mount `EnrollHandler` / `ConfirmHandler` / `VerifyHandler` (with the enrolment assurance gate wired,
+as required below) without an MFA policy gate, users can enrol and confirm an authenticator, and the
+next password login still issues a full session. That is not a defect — the library cannot know your
+policy — but it is a wiring mistake that looks like a working setup, so check it deliberately when
+you enable MFA.
+
+**What is not left to policy:** *which session may enroll a factor* and *whether step-up may mint
+from the interim token alone*. Both are fail-closed by default:
+
+- `EnrollHandler` / `ConfirmHandler` refuse `403 assurance_required` unless you wire
+  `mfa.WithCredentialAssurance(tokens.DenyInterim)` or the explicit
+  `mfa.WithInsecureNoAssuranceCheck()` opt-out. Without the gate a password-only interim session
+  could enroll its own factor and complete step-up with it.
+- `StepUpHandler` refuses `500 misconfigured` without an authoritative
+  `mfa.WithSessionStateResolver(...)`; the legacy echo behaviour is only available through
+  `mfa.WithInsecureEchoSessionState()`. Minting the final renewable pair from the interim token's
+  own subject would let an account disabled between the two factors obtain a fresh session.
 
 ## Service interface
 
@@ -107,7 +120,7 @@ func NewSingleTenant(svc Service) *SingleTenant
 
 // Memory store
 func memory.NewStore() *memory.Store              // bounded by DefaultMaxEntries recovery-attempt records
-func memory.NewBoundedStore(n int) *memory.Store  // pick the cap
+func memory.NewBoundedStore(n int) *memory.Store  // pick the cap; a record under an active lockout is NEVER evicted
 func memory.NewUnboundedStore() *memory.Store     // explicit opt-out; reap with DeleteStaleRecoveryAttempts
 func (s *memory.Store) DeleteStaleRecoveryAttempts(ctx, tenantID string, cutoff time.Time) (int64, error)
 ```
@@ -115,7 +128,16 @@ func (s *memory.Store) DeleteStaleRecoveryAttempts(ctx, tenantID string, cutoff 
 ## Store contract
 
 ```go
+// Store composes four capability interfaces. Both the in-memory and pgx stores implement the
+// whole Store; new optional behaviour ships as a new capability rather than a method here.
 type Store interface {
+    TOTPStore
+    RecoveryCodeStore
+    RecoveryAttemptStore
+    EnrollmentConfirmer
+}
+
+type TOTPStore interface {
     SaveTOTP(ctx context.Context, tenantID string, e *TOTPEnrollment) error
     GetTOTP(ctx context.Context, tenantID string, userID uuid.UUID) (*TOTPEnrollment, error)
     DeleteTOTP(ctx context.Context, tenantID string, userID uuid.UUID) error
@@ -123,12 +145,30 @@ type Store interface {
     MarkTOTPUsed(ctx context.Context, tenantID string, userID uuid.UUID, step int64) (bool, error)
     // IncrementTOTPAttempts: atomic pre-compare gate; returns new count; ErrNotEnrolled if absent
     IncrementTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error)
+    // ResetTOTPAttempts: clears the counter/LastAttemptAt (time-based decay + admin UnlockMFA)
+    ResetTOTPAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
 
+type RecoveryCodeStore interface {
     // ReplaceRecoveryCodes: atomically discards old hashes, stores new ones
     ReplaceRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID, codeHashes []string) error
     // ConsumeRecoveryCode: single-use; on success MUST reset FailedAttempts to 0
     ConsumeRecoveryCode(ctx context.Context, tenantID string, userID uuid.UUID, codeHash string) error
     DeleteRecoveryCodes(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
+
+type RecoveryAttemptStore interface {
+    // IncrementRecoveryAttempts: isolated lockout gate for recovery codes (SEC-MFA-05);
+    // the fix for the concurrent first-burst bypass (F-PGX-001) is an atomic upsert that
+    // creates the absent row and increments it in one statement.
+    IncrementRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID, now time.Time, maxAttempts int, lockoutDuration time.Duration) (int, error)
+    ResetRecoveryAttempts(ctx context.Context, tenantID string, userID uuid.UUID) error
+}
+
+type EnrollmentConfirmer interface {
+    // ConfirmEnrollment: atomically marks the enrollment confirmed AND persists the initial
+    // recovery-code hashes (both or neither).
+    ConfirmEnrollment(ctx context.Context, tenantID string, enrollment *TOTPEnrollment, codeHashes []string) error
 }
 ```
 
@@ -142,12 +182,13 @@ All handlers: `POST` only; require `WithUserResolver`; parse form fields.
 
 | Handler | Route (suggested) | Success | Failure |
 |---|---|---|---|
-| `EnrollHandler` | `POST /mfa/enroll` | `200 {"secret":"…","uri":"otpauth://…"}` | 401/409/400/500 |
-| `ConfirmHandler` | `POST /mfa/confirm` | `200 {"recovery_codes":["ABCD-EFGH-…",…]}` | 401/400/409/500 |
+| `EnrollHandler` | `POST /mfa/enroll` | `200 {"secret":"…","uri":"otpauth://…"}` | 403 `assurance_required` (gate unwired/denied), 401/409/400/500 |
+| `ConfirmHandler` | `POST /mfa/confirm` | `200 {"recovery_codes":["ABCD-EFGH-…",…]}` | 403 `assurance_required` (gate unwired/denied), 401/400/409/500 |
 | `VerifyHandler` | `POST /mfa/verify` | `204` (or 303) | 401/429/400/500 |
 | `VerifyRecoveryHandler` | `POST /mfa/verify-recovery` | `204` (or 303) | 401/429/500 |
 | `RegenerateRecoveryCodesHandler` | `POST /mfa/recovery/regenerate` | `200 {"recovery_codes":[…]}` | 401/400/500 |
 | `DisableHandler` | `POST /mfa/disable` | `204` (or 303) | 401/500 |
+| `StepUpHandler` | `POST /mfa/step-up` | `204` (sets full access+refresh cookies) | 500 `misconfigured` (no session-state resolver), 401/429/500 |
 
 Error body: plain text error code string.
 
@@ -158,6 +199,8 @@ Error body: plain text error code string.
 | 409 | `already_enrolled` | `ErrAlreadyEnrolled` |
 | 400 | `not_enrolled` | `ErrNotEnrolled` |
 | 400 | `not_confirmed` | `ErrNotConfirmed` |
+| 403 | `assurance_required` | assurance gate unwired or denied (`EnrollHandler`/`ConfirmHandler`) |
+| 500 | `misconfigured` | `StepUpHandler` without `WithSessionStateResolver` |
 | 500 | `mfa_error` | any other |
 
 Handler options:
@@ -167,6 +210,11 @@ func WithAccountField(name string) HandlerOption      // default "account"
 func WithCodeField(name string) HandlerOption         // default "code"
 func WithSuccessRedirect(rawURL string) HandlerOption // action handlers: 303 on success
 func WithFailureRedirect(rawURL string) HandlerOption // 303 ?error=<code> on failure
+func WithCredentialAssurance(fn func(*http.Request) error) HandlerOption // gate Enroll/Confirm; canonical: tokens.DenyInterim
+func WithInsecureNoAssuranceCheck() HandlerOption      // explicit opt-out of the enrollment gate (insecure)
+func WithSessionStateResolver(r issuance.Resolver) HandlerOption // authoritative account state; REQUIRED by StepUpHandler
+func WithInsecureEchoSessionState() HandlerOption      // explicit opt-out restoring the legacy StepUp echo behavior
+func WithMustChangeResolver(fn func(*http.Request) bool) HandlerOption // force-change signal for step-up
 ```
 
 ## Errors
@@ -224,19 +272,34 @@ svc   := mfa.NewService(store,
     mfa.WithEventSink(mySink),
 )
 
-resolve := mfa.UserResolver(func(r *http.Request) (uuid.UUID, string, bool) {
-    // extract from auth middleware context
-    claims, ok := tokens.ClaimsFromContext(r.Context())
-    if !ok { return uuid.Nil, "", false }
-    return claims.UserID, claims.TenantID, true
-})
+// tokens.UserResolverFromContext reads the Actor injected by ContextMiddleware / RequireAuth;
+// front each handler with one of those middlewares.
+resolve := mfa.UserResolver(tokens.UserResolverFromContext)
 
-mux.Handle("/mfa/enroll",             mfa.EnrollHandler(svc, mfa.WithUserResolver(resolve)))
-mux.Handle("/mfa/confirm",            mfa.ConfirmHandler(svc, mfa.WithUserResolver(resolve)))
+// Enrollment is fail-closed: without an assurance gate these answer 403 assurance_required.
+// tokens.DenyInterim refuses only an interim (pre-MFA) session.
+enrollOpts := []mfa.HandlerOption{
+    mfa.WithUserResolver(resolve),
+    mfa.WithCredentialAssurance(tokens.DenyInterim),
+}
+mux.Handle("/mfa/enroll",             mfa.EnrollHandler(svc, enrollOpts...))
+mux.Handle("/mfa/confirm",            mfa.ConfirmHandler(svc, enrollOpts...))
 mux.Handle("/mfa/verify",             mfa.VerifyHandler(svc, mfa.WithUserResolver(resolve)))
 mux.Handle("/mfa/verify-recovery",    mfa.VerifyRecoveryHandler(svc, mfa.WithUserResolver(resolve)))
 mux.Handle("/mfa/recovery/regenerate",mfa.RegenerateRecoveryCodesHandler(svc, mfa.WithUserResolver(resolve)))
 mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolver(resolve)))
+
+// Step-up is fail-closed: without an authoritative account-state resolver it answers
+// 500 misconfigured. The identity.Service *interface* does not expose ResolveSessionState;
+// the concrete service from identity.NewService does, so assert it (or supply your own).
+sessionResolver, ok := identitySvc.(issuance.Resolver)
+if !ok {
+    panic("identity service does not expose authoritative session state")
+}
+mux.Handle("/mfa/step-up", mfa.StepUpHandler(svc, issuer, claimsOf,
+    mfa.WithUserResolver(resolve),
+    mfa.WithSessionStateResolver(sessionResolver),
+))
 ```
 
 ## Gotchas
@@ -244,7 +307,7 @@ mux.Handle("/mfa/disable",            mfa.DisableHandler(svc, mfa.WithUserResolv
 - `TOTPEnrollment.Secret` is stored in plaintext (server must recompute codes). Encrypt at rest; see SECURITY.md. `TOTPEnrollment` implements `String`/`GoString`/`LogValue` and redacts `Secret` on all fmt/slog paths.
 - `ErrAlreadyEnrolled` is returned if attempting to re-enroll a CONFIRMED factor. Call `DisableTOTP` first.
 - `VerifyTOTP` returns `ErrNotConfirmed` (not `ErrNotEnrolled`) if enrollment exists but was never confirmed.
-- Attempt counter is shared between TOTP and recovery code paths. Locking one locks both.
+- TOTP and recovery codes have **independent** attempt budgets (`IncrementTOTPAttempts` vs `IncrementRecoveryAttempts`, SEC-MFA-05): exhausting one does not lock the other. A successful verification on either path clears both counters.
 - `MarkTOTPUsed` returning `false` for a cryptographically correct code means replay; treated as failure (slot already consumed, counter NOT reset).
 - `WithNoAttemptLimit` leaves the factor online-brute-forceable; only use with an external rate limiter.
 - `NewSingleTenant` hard-wires `tenantID=""`. Do NOT mix with multi-tenant `Service` calls against the same store.

@@ -92,6 +92,9 @@ func TestService_ChangePassword(t *testing.T) {
 				updated = true
 				return nil
 			},
+			IncrementFailedAttemptsFunc: func(context.Context, string, uuid.UUID, int, time.Duration) (bool, error) {
+				return false, nil
+			},
 		}
 		hasher := &hashertest.MockHasher{
 			CompareFunc: func(ctx context.Context, hash, password string) error {
@@ -122,6 +125,10 @@ func TestService_ChangePassword(t *testing.T) {
 				assert.Equal(t, userID, id)
 				gotHash = hash
 				return nil
+			},
+			ClearRecoveryChannelsFunc: func(context.Context, string, uuid.UUID) error { return nil },
+			DeleteVerificationTokensByUserFunc: func(context.Context, string, uuid.UUID) (int64, error) {
+				return 0, nil
 			},
 		}
 		hasher := &hashertest.MockHasher{
@@ -191,6 +198,10 @@ func TestService_ChangePassword(t *testing.T) {
 			},
 			UpdateIdentityPasswordFunc: func(ctx context.Context, tenantID string, id uuid.UUID, hash string, changedAt time.Time, mustChange bool) error {
 				return nil
+			},
+			ClearRecoveryChannelsFunc: func(context.Context, string, uuid.UUID) error { return nil },
+			DeleteVerificationTokensByUserFunc: func(context.Context, string, uuid.UUID) (int64, error) {
+				return 0, nil
 			},
 		}
 		hasher := &hashertest.MockHasher{
