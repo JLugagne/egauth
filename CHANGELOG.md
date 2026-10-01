@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.15.0] — 2026-10-01
+
+### Security
+
+- **Centralized secret material policy (`internal/secretpolicy`).** Replaced fragmented denylists with a unified policy enforcing minimum key lengths, blocking all-zero/repeated-byte patterns, and rejecting known/published key literals and near-copies across `tokens/jwt`, `keystore` (KEK), `oauth` (state keys), `passkey` (ceremony cookie keys), and `authflow` (flow tokens).
+- **Fail-closed credential-enrollment assurance.** Introduced `tokens.DenyInterim` and per-family `WithCredentialAssurance` / `WithInsecureNoAssuranceCheck`. `passkey` registration endpoints (default 403 `assurance_required`), `mfa` enroll/confirm (403), and `identity` recovery/email/phone enrollment default to rejecting interim sessions without required assurance.
+- **Fail-closed step-up lifecycle.** `mfa.StepUpHandler` now requires `WithSessionStateResolver` to resolve session state; misconfigured handlers fail closed (500 `misconfigured`) rather than echoing unverifiable state (with explicit `WithInsecureEchoSessionState()` opt-out).
+- **Cross-module credential eviction on rotation and recovery.** `identity` now executes registered `AccountErasers` on `ResetPassword`, `ChangePassword`, `SetTemporaryPassword`, and `DeleteAccount`. Exported `passkey.Service.AccountEraser()` (and `SingleTenant.AccountEraser`) to delete user passkeys when password or identity changes occur. Added `Store.DeleteVerificationTokensByUser` to purge user tokens upon rotation, and automatically clear recovery channels on password reset.
+- **MFA recovery attempt decay and race prevention.** Hardened PGX MFA store against concurrent brute-force races and implemented decay for failed recovery attempts.
+- **OTP cooldown survival and dedicated issuance tracking.** Added PGX migration `003_create_otp_issuances.sql` to track issuance timestamps and prevent cooldown circumvention and rate-limit bypass.
+- **Refresh token AMR preservation across rotations.** Refresh tokens record proved AMR claims and preserve them across rotations (supported by PGX migration `008_add_refresh_token_amr.sql`). Hardened rollback revocation to prevent reinstating revoked tokens after failed rotation.
+- **Passkey capacity and memory bounding.** Challenge store memory is strictly bounded and registration fails closed when capacity is reached. Tightened cookie key and CSRF validation.
+- **Argon2 ceiling roundtrip protection.** Added bounds and parameter checks preventing ceiling roundtrip vulnerabilities.
+
+### Changed
+
+- Updated dependencies across core and `adapters/pgx`: `cbor/v2 v2.9.4`, `webauthn v0.18.2`, `compress v1.20.1`, `msgp v1.6.5`, `testcontainers-go`, and related libraries.
+
 ## [v0.14.1] — 2026-09-14
 
 ### Fixed
