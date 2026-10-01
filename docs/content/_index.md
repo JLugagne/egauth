@@ -1,27 +1,48 @@
 ---
-title: "Introduction"
-type: docs
+title: "egauth"
+layout: hextra-home
 ---
 
-# Welcome to egauth
+<div class="hx:mt-8 hx:mb-6">
+{{< hextra/hero-headline >}}
+  Composable, Secure Authentication&nbsp;<br class="hx:sm:block hx:hidden" />Toolkit for Go
+{{< /hextra/hero-headline >}}
+</div>
 
-**egauth** is an authentication and identity management library for Go, designed to be embedded in any application with maximum composability and minimum adherence.
+<div class="hx:mb-10">
+{{< hextra/hero-subtitle >}}
+  Independent modules in the <code>database/sql</code> style. No framework, no vendor lock-in. Secure-by-default primitives for Passwords, Passkeys, MFA, JWT, and Sessions.
+{{< /hextra/hero-subtitle >}}
+</div>
 
-## Motivation
+<div class="hx:mb-12 hx:flex hx:gap-4">
+{{< hextra/hero-button text="Get Started" link="docs/sdk/getting-started" >}}
+{{< hextra/hero-button text="Architecture" link="docs/architecture" >}}
+</div>
 
-While the Go ecosystem has many excellent authentication libraries, developers often have to choose between low-level primitives that require manual assembly, or full-featured frameworks that impose specific architectural choices (like a particular ORM or HTTP router).
-
-`egauth` was built to provide a middle ground. It offers a comprehensive set of identity and authentication modules that are highly composable and unopinionated. It aims to integrate seamlessly into your existing Go project, offering flexibility over storage backends and HTTP routing without dictating your application's design.
-
-### A note on how this project was built
-
-Please read this before adopting `egauth` for anything sensitive. The library was developed largely through "vibe coding" (AI-assisted development), and its security review to date is an AI-driven audit rather than an external human one. It exists because I wanted a library like this for my own projects. The code is engineered carefully and secure-by-default, and an adversarial pass surfaced no high or critical issues — but it has not yet undergone an independent, third-party security audit. Weigh that status accordingly when deciding whether to rely on it.
-
-## Key Features
-
-- **Extreme Composability:** Separate business logic into independent modules (identity, sessions, tokens, passwords).
-- **Programmatic API:** Provided as a first-class citizen.
-- **A la carte HTTP Handlers:** Built directly within the respective modules via dependency injection.
-- **Contract Testing:** Guarantees the correctness of each implementation.
-- **Unopinionated:** Does not impose an ORM, HTTP framework, or global application structure.
-- **Native Multi-tenancy:** Native support for tenant isolation via the Options pattern.
+{{< hextra/feature-grid >}}
+  {{< hextra/feature-card
+    title="Extreme Composability"
+    subtitle="Import only what you need (identity, tokens, sessions, mfa, passkey). Wire with standard dependency injection."
+  >}}
+  {{< hextra/feature-card
+    title="Secure by Default"
+    subtitle="Decoy hashing, Argon2id, constant-time comparisons, single-use refresh token rotation, and strict CSRF protection."
+  >}}
+  {{< hextra/feature-card
+    title="Passkeys & WebAuthn"
+    subtitle="Built-in WebAuthn ceremony handlers with server-side challenge verification and tamper-proof ceremony cookies."
+  >}}
+  {{< hextra/feature-card
+    title="Bring Your Own Router"
+    subtitle="Standard net/http handlers compatible with standard library http.ServeMux, gorilla/mux, chi, gin, or echo."
+  >}}
+  {{< hextra/feature-card
+    title="Multi-Tenancy Enforced"
+    subtitle="Native tenant isolation across all stateful methods, eliminating cross-tenant data leaks and IDOR vulnerabilities."
+  >}}
+  {{< hextra/feature-card
+    title="PostgreSQL & In-Memory Stores"
+    subtitle="Production-ready jackc/pgx/v5 adapters with embedded migrations, and zero-dependency in-memory stores for testing."
+  >}}
+{{< /hextra/feature-grid >}}

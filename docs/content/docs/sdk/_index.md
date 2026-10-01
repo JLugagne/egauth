@@ -1,7 +1,6 @@
 ---
 title: "Developer Manual"
 weight: 20
-bookCollapseSection: false
 ---
 
 # `egauth` Developer Manual

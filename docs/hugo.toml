@@ -1,8 +1,47 @@
 baseURL = "https://jlugagne.github.io/egauth/"
-locale = "en-us"
-title = "egauth Documentation"
-theme = "hugo-book"
+title = "egauth"
+theme = "hextra"
+
+defaultContentLanguage = "en"
+enableRobotsTXT = true
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.highlight]
+    noClasses = false
+
+[menu]
+  [[menu.main]]
+    name = "Docs"
+    pageRef = "/docs"
+    weight = 1
+  [[menu.main]]
+    name = "SDK Reference"
+    pageRef = "/docs/sdk"
+    weight = 2
+  [[menu.main]]
+    name = "Search"
+    weight = 3
+    [menu.main.params]
+      type = "search"
+  [[menu.main]]
+    name = "GitHub"
+    weight = 4
+    url = "https://github.com/JLugagne/egauth"
+    [menu.main.params]
+      icon = "github"
 
 [params]
-  BookTheme = "auto"
-  BookToC = true
+  [params.navbar]
+    displayTitle = true
+    displayLogo = false
+  [params.footer]
+    displayCopyright = true
+    displayPoweredBy = false
+  [params.theme]
+    default = "system"
+    displayToggle = true
+  [params.editURL]
+    enable = false
