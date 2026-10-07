@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.16.1] — 2026-10-07
+
 ### Fixed
 
 - **Passkeys enrolled by egauth now work with usernameless login.** Registration options only
