@@ -67,6 +67,7 @@ type Config struct {
     RPDisplayName            string                               // shown by authenticator UI
     RPOrigins                []string                             // allowed origins e.g. ["https://example.com"]
     UserVerification         protocol.UserVerificationRequirement // zero value = VerificationRequired (secure default)
+    ResidentKey              protocol.ResidentKeyRequirement      // zero value = ResidentKeyRequirementRequired (discoverable passkeys, usernameless login works)
     CookieKey                []byte                               // HMAC-SHA256 key, >= 32 bytes; REQUIRED; shared policy refuses trivial/published keys
     ChallengeStore           ChallengeStore                       // single-use replay protection; REQUIRED unless InsecureNoChallengeStore
     InsecureNoChallengeStore bool                                 // opt-out of ChallengeStore requirement (NOT for passwordless)
@@ -255,6 +256,7 @@ HTTP error mapping (via `fail`):
 ## Security notes
 
 - **UserVerification**: zero value of `Config.UserVerification` = `protocol.VerificationRequired`. UV-cleared assertions rejected at Finish. Explicitly set `VerificationPreferred`/`VerificationDiscouraged` to relax.
+- **ResidentKey**: zero value of `Config.ResidentKey` = `protocol.ResidentKeyRequirementRequired` (`residentKey: "required"`, `requireResidentKey: true`), so every enrolled credential is discoverable and `BeginDiscoverableLogin` can find it. Relax to `Preferred`/`Discouraged` only for username-first (`BeginLogin`) deployments; credentials enrolled that way never show up in usernameless login.
 - **Cookie authentication**: ceremony cookie is HMAC-SHA256 signed with `CookieKey` (prepended 32-byte tag + base64url). Tampered or missing cookies → `ErrSessionInvalid`. Cookie is single-use: cleared on every `loadSession` call regardless of outcome.
 - **Cookie key policy**: `CookieKey` (and a per-tenant `WithTenantCookieKeys` resolver value) is validated by the shared credential policy: shorter than `MinCookieKeyLength`, all-zero / repeated-byte, published-example literals and marker-bearing near-copies are all refused. `csrf_test.go`-style test fixtures must use a non-trivial 32-byte key.
 - **Credential enrollment gate (fail-closed)**: registration Begin/Finish refuse `403 assurance_required` unless `WithCredentialAssurance(...)` is wired; wire `tokens.DenyInterim` so an interim (pre-MFA) session cannot enroll a credential. Opting out is explicit (`WithInsecureNoAssuranceCheck`).

@@ -60,6 +60,17 @@ type Config struct {
 	// is propagated into the ceremony options and the SessionData, so go-webauthn enforces the UV
 	// bit at FinishRegistration, FinishLogin and FinishDiscoverableLogin.
 	UserVerification protocol.UserVerificationRequirement
+	// ResidentKey controls whether registration asks the authenticator for a discoverable
+	// credential (a passkey stored on the authenticator together with the user handle).
+	//
+	// The zero value means protocol.ResidentKeyRequirementRequired: usernameless login
+	// (BeginDiscoverableLogin) sends no allowCredentials, so the browser only offers
+	// credentials created as discoverable — anything else surfaces as "no passkeys found".
+	// Set protocol.ResidentKeyRequirementPreferred or ResidentKeyRequirementDiscouraged only when
+	// every login is username-first (BeginLogin) and old security keys without resident-key
+	// storage must still enroll. Credentials enrolled under a weaker setting stay unusable for
+	// discoverable login and must be re-registered.
+	ResidentKey protocol.ResidentKeyRequirement
 	// CookieKey is the secret key used to HMAC-authenticate the short-lived ceremony cookie that
 	// carries the WebAuthn challenge and the user-verification requirement between Begin and
 	// Finish. It is REQUIRED and validated at construction (NewService fails fast with
@@ -130,6 +141,8 @@ const ceremonyTimeout = 5 * time.Minute
 //   - User verification defaults to protocol.VerificationRequired when Config.UserVerification
 //     is the zero value, so a UV-cleared assertion is rejected at Finish unless the caller
 //     explicitly relaxes it.
+//   - Registration requires a discoverable credential (residentKey "required") when
+//     Config.ResidentKey is the zero value, so every enrolled passkey works for usernameless login.
 //   - A ceremony-cookie HMAC key is required: NewService returns ErrCookieKeyMissing if
 //     Config.CookieKey is unset or shorter than MinCookieKeyLength. An all-zero key (e.g.
 //     make([]byte, 32)) or a key matching one published in this repo's examples/docs is
@@ -167,6 +180,10 @@ func NewService(store Store, cfg Config) (*Service, error) {
 	if uv == "" {
 		uv = protocol.VerificationRequired
 	}
+	rk := cfg.ResidentKey
+	if rk == "" {
+		rk = protocol.ResidentKeyRequirementRequired
+	}
 
 	waCfg := &webauthn.Config{
 		RPID:          cfg.RPID,
@@ -177,7 +194,9 @@ func NewService(store Store, cfg Config) (*Service, error) {
 		// shouldVerifyUser is derived from SessionData.UserVerification == VerificationRequired,
 		// so wiring it here enforces the UV flag across register, login and discoverable login.
 		AuthenticatorSelection: protocol.AuthenticatorSelection{
-			UserVerification: uv,
+			UserVerification:   uv,
+			ResidentKey:        rk,
+			RequireResidentKey: new(rk == protocol.ResidentKeyRequirementRequired),
 		},
 		Timeouts: webauthn.TimeoutsConfig{
 			Login:        webauthn.TimeoutConfig{Enforce: true, Timeout: ceremonyTimeout, TimeoutUVD: ceremonyTimeout},
