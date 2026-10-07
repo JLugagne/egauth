@@ -1,6 +1,9 @@
 package core
 
 import (
+	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -28,6 +31,38 @@ type ForTestAttrs struct {
 	Provider        string
 	CreatedAt       time.Time
 	ClaimsFetchedAt time.Time
+}
+
+// String renders f with passkey credential ids replaced by their count, matching the redaction
+// contract of every credential-bearing type.
+func (f ForTestAttrs) String() string {
+	return fmt.Sprintf("ForTestAttrs{Lineage:%s Tenant:%s User:%s Factors:[%s] Credentials:%d Epoch:%d MustChange:%t "+
+		"RememberMe:%t Transport:%d Provider:%s}",
+		f.Lineage, f.Subject.Tenant, f.Subject.User, forTestFactorCodes(f.Factors), len(f.Credentials), f.Epoch,
+		f.MustChange, f.RememberMe, f.Transport, f.Provider)
+}
+
+// GoString renders f for %#v with credential ids redacted.
+func (f ForTestAttrs) GoString() string { return f.String() }
+
+// LogValue renders f for slog with credential ids redacted.
+func (f ForTestAttrs) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("lineage", f.Lineage.String()),
+		slog.String("tenant", f.Subject.Tenant.String()),
+		slog.String("user", f.Subject.User.String()),
+		slog.String("factors", forTestFactorCodes(f.Factors)),
+		slog.Int("credentials", len(f.Credentials)),
+		slog.Uint64("epoch", f.Epoch),
+	)
+}
+
+func forTestFactorCodes(fs []Factor) string {
+	codes := make([]string, len(fs))
+	for i, f := range fs {
+		codes[i] = f.Code()
+	}
+	return strings.Join(codes, " ")
 }
 
 // ForTestSessionAttrs builds SessionAttrs without any transition rule, so tests can reach any
