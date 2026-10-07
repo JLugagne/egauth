@@ -166,6 +166,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 			TenantID:           tenantA,
 			AuthTime:           authTime,
 			MustChangePassword: true,
+			RememberMe:         true,
 			ExpiresAt:          expiresAt,
 			CreatedAt:          time.Now().Truncate(time.Second),
 		}
@@ -180,6 +181,7 @@ func StoreContractTesting[C any](t *testing.T, store tokens.Store[C], useMultiTe
 		assert.WithinDuration(t, expiresAt, found.ExpiresAt, time.Second)
 		assert.WithinDuration(t, authTime, found.AuthTime, time.Second, "auth_time must round-trip (step-up freshness)")
 		assert.True(t, found.MustChangePassword, "must_change_password must round-trip (forced-change gate carried across refresh)")
+		assert.True(t, found.RememberMe, "remember_me must round-trip (refresh cookie persistence carried across rotation)")
 		assert.Nil(t, found.ConsumedAt, "freshly saved token must not be consumed")
 
 		// Consume once succeeds.

@@ -132,6 +132,11 @@ type Claims[C any] struct {
     // for the access token to expire. JWT claim name: "must_change_password" (omitempty). Lives
     // here, not in Custom, so the middleware can enforce it generically regardless of C.
     MustChangePassword bool
+    // RememberMe is the login's "remember me" choice. Recorded on the refresh family and replayed
+    // verbatim by Rotate (the ClaimsProvider cannot change it), so the tokens refresh handler and
+    // auto-refresh keep the refresh cookie persistent, or session-only, for the whole family.
+    // JWT claim name: "remember_me" (omitempty). Set it via issuance.Request.RememberMe.
+    RememberMe bool
     Custom             C
 }
 
@@ -166,6 +171,7 @@ type RefreshToken struct {
     // Rotate falls back to it when the ClaimsProvider returns no AMR, so step-up assurance
     // survives silent rotation instead of decaying to an empty list. nil for legacy rows.
     AMR        []string
+    RememberMe bool       // family's remember_me choice, copied onto every descendant (pgx migration 009)
     ExpiresAt  time.Time
     CreatedAt  time.Time
     ConsumedAt *time.Time // non-nil = consumed (single-use enforced)
@@ -509,7 +515,7 @@ func (a Actor) HasAnyScope(scopes ...string) bool  // true iff at least one scop
 | `WithCookieAuth[C](Cookies)` | Also read access token from cookie |
 | `WithoutHeaderAuth[C]()` | Disable Authorization header read |
 | `WithAutoRefresh[C](rotator, cookies)` | Transparent rotation on expired/missing access token (implies cookie read) |
-| `WithPersistentAutoRefresh[C]()` | Auto-refresh writes persistent (Max-Age) refresh cookie |
+| `WithPersistentAutoRefresh[C]()` | Force a persistent (Max-Age) refresh cookie on auto-refresh for everyone; without it the family's recorded `Claims.RememberMe` decides |
 | `WithAuthTenantResolver[C](func(*http.Request) string)` | Tenant-aware mode: resolve tenantID per request; verify via `VerifyAccessTokenForTenant` and scope auto-refresh. `""` return → 401 (fail-closed) |
 | `WithRefreshTenantResolver[C](func(*http.Request) string)` | DEPRECATED alias of `WithAuthTenantResolver` |
 | `WithRequiredAMR[C](values ...string)` | Require all AMR values present in token (RFC 8176 step-up) |
@@ -574,7 +580,7 @@ func NewRevocationTracker(bus revocation.Bus) *RevocationTracker // implements t
 | `WithTrustedOrigins(hosts ...string)` | Widen the default-on CSRF origin allowlist. Accepts bare hosts (`app.example.com`) and full origins (`https://app.example.com`); entries are normalized to the bare host, matching stays exact. |
 | `WithSuccessRedirect(url)` | 303 on success instead of 204 |
 | `WithFailureRedirect(url)` | 303 to url?error=<code> on failure |
-| `WithPersistentRefresh()` | Re-issue persistent refresh cookie |
+| `WithPersistentRefresh()` | Force a persistent rotated refresh cookie for everyone; without it the family's recorded `Claims.RememberMe` decides |
 | `WithEventSink(sink event.Sink)` | Register audit sink: `LogoutHandler` emits `event.Logout` (Reason=`"token_logout"`) on successful family revocation; also gates the `WithInsecureCookies` misuse warning. Nil sink is a no-op. (`WithHandlerEventSink` is a deprecated alias.) |
 
 ### Cookie helpers (on `Cookies`)

@@ -70,6 +70,7 @@ func (m *JWTMinter[C]) Mint(ctx context.Context, w http.ResponseWriter, r *http.
 		Method:             flow.PrimaryFactor,
 		AMR:                append([]string{}, flow.AMR...),
 		MustChangePassword: flow.MustChangePassword,
+		RememberMe:         m.persistRefresh || flow.RememberMe,
 		// The engine only reaches Mint after account validation and, when MFA is required,
 		// after ProcessStepUp completed the second factor; a completed flow is never gated again.
 		MFAVerified: true,
@@ -80,7 +81,7 @@ func (m *JWTMinter[C]) Mint(ctx context.Context, w http.ResponseWriter, r *http.
 
 	if w != nil {
 		m.cookies.SetAccess(w, res.Pair.AccessToken)
-		m.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, m.persistRefresh || flow.RememberMe)
+		m.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, res.Pair.Claims.RememberMe)
 	}
 	return nil
 }

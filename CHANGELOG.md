@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **"Remember me" no longer lost on the first silent refresh.** The refresh cookie written at a
+  `remember_me` login was persistent, but the tokens refresh handler and the auto-refresh
+  middleware re-issued it as a session cookie on the first rotation, so users had to sign in
+  again after closing the browser. The choice is now recorded on the refresh family
+  (`tokens.RefreshToken.RememberMe`) and replayed verbatim by `Rotate` onto
+  `tokens.Claims.RememberMe` (the `ClaimsProvider` cannot change it). Every egauth cookie writer
+  uses it: identity login, register and magic link; `mfa.StepUpHandler`, which inherits the choice
+  from the interim token; `identity.ChangePasswordWithReissueHandler`, which keeps the current
+  session's choice; the `oauth` callback; `authflow.JWTMinter`; the tokens refresh handler; and
+  auto-refresh.
+
+### Added
+
+- `tokens.Claims.RememberMe` (JWT claim `remember_me`, omitempty), `tokens.RefreshToken.RememberMe`
+  and `issuance.Request.RememberMe`.
+- PGX migration `009_add_refresh_token_remember_me.sql` (`remember_me BOOLEAN NOT NULL DEFAULT
+  false`). Existing rows keep the previous session-cookie behavior.
+
+### Changed
+
+- `tokens.WithPersistentRefresh`, `tokens.WithPersistentAutoRefresh` and
+  `oauth.WithPersistentRefresh` now *force* persistence for everyone. Without them, the family's
+  recorded choice decides. `oauth.WithPersistentRefresh` is also recorded on the family, so OAuth
+  sessions stay persistent across rotation without the tokens-side options.
+
 ## [v0.15.0] — 2026-10-01
 
 ### Security

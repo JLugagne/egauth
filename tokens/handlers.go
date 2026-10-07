@@ -112,10 +112,11 @@ func WithFailureRedirect(url string) HandlerOption {
 	return func(h *handlerConfig) { h.failureURL = url }
 }
 
-// WithPersistentRefresh re-issues the rotated refresh cookie as a PERSISTENT cookie
-// (Max-Age aligned to the refresh expiry). By default the rotated refresh cookie is a
-// session cookie, since this endpoint cannot recover the original remember_me choice from
-// the request and must not silently upgrade a session-only cookie to a persistent one.
+// WithPersistentRefresh forces every rotated refresh cookie to be PERSISTENT (Max-Age aligned
+// to the refresh expiry), whatever the user chose at login. Without it the rotated cookie
+// follows the family's recorded remember_me choice (Claims.RememberMe): persistent for a
+// "remember me" login, a session cookie otherwise. Enable it only when the deployment wants
+// persistent sessions for everyone.
 func WithPersistentRefresh() HandlerOption {
 	return func(h *handlerConfig) { h.persistRefresh = true }
 }
@@ -206,7 +207,7 @@ func RefreshHandler[C any](rotator Rotator[C], opts ...HandlerOption) http.Handl
 		}
 
 		cfg.cookies.SetAccess(w, pair.AccessToken)
-		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+		cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh || pair.Claims.RememberMe)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }

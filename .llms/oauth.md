@@ -139,7 +139,7 @@ WithStateTTL(d time.Duration) HandlerOption                 // default: 10m
 WithoutPKCE() HandlerOption                                 // disable PKCE (non-compliant providers only)
 WithSuccessRedirect(url string) HandlerOption               // 303 redirect on success instead of 204
 WithFailureRedirect(url string) HandlerOption               // 303 redirect on failure with ?error=<code>
-WithPersistentRefresh() HandlerOption                       // persistent refresh cookie ("remember me")
+WithPersistentRefresh() HandlerOption                       // persistent refresh cookie ("remember me"), recorded on the family so rotation keeps it
 WithTenantResolver(f func(*http.Request) string) HandlerOption // derive tenantID from request
 WithAllowUnverifiedEmail() HandlerOption                    // allow unverified emails (off by default)
 ```

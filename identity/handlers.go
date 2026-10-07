@@ -395,18 +395,19 @@ func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBu
 		// refresh cookie) to be completed via mfa.StepUpHandler. Login itself is never a lockout:
 		// a flagged user still receives a fully renewable pair carrying Claims.MustChangePassword.
 		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
-			TenantID: tenant,
-			UserID:   user.ID,
-			Claims:   claimsOf(user),
-			Method:   "password",
-			AMR:      []string{tokens.AMRPassword},
+			TenantID:   tenant,
+			UserID:     user.ID,
+			Claims:     claimsOf(user),
+			Method:     "password",
+			AMR:        []string{tokens.AMRPassword},
+			RememberMe: remember,
 		})
 		if err != nil {
 			status, code := mapIssuanceError(err)
 			cfg.fail(w, r, status, code)
 			return
 		}
-		setSessionCookies(cfg, w, res, remember)
+		setSessionCookies(cfg, w, res)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -448,18 +449,19 @@ func RegisterHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf Claim
 		// Auto-login through the same pipeline as every other login path: the freshly registered
 		// account is re-loaded authoritatively before the pair is minted.
 		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
-			TenantID: tenant,
-			UserID:   user.ID,
-			Claims:   claimsOf(user),
-			Method:   "register",
-			AMR:      []string{tokens.AMRPassword},
+			TenantID:   tenant,
+			UserID:     user.ID,
+			Claims:     claimsOf(user),
+			Method:     "register",
+			AMR:        []string{tokens.AMRPassword},
+			RememberMe: remember,
 		})
 		if err != nil {
 			status, code := mapIssuanceError(err)
 			cfg.fail(w, r, status, code)
 			return
 		}
-		setSessionCookies(cfg, w, res, remember)
+		setSessionCookies(cfg, w, res)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -493,12 +495,17 @@ func newSessionPipeline[C any](svc Service, issuer tokens.Issuer[C], cfg handler
 // setSessionCookies writes the cookies for a pipeline result. An interim issuance (MFA-enrolled
 // user, second factor not yet verified) writes ONLY the access cookie: the refresh token is
 // withheld so the pre-step-up state is not an indefinitely renewable session. A full issuance
-// writes both, making the refresh cookie persistent when remember is true.
-func setSessionCookies[C any](cfg handlerConfig, w http.ResponseWriter, res *issuance.Result[C], remember bool) {
+// writes both, making the refresh cookie persistent when the pair carries remember_me.
+func setSessionCookies[C any](cfg handlerConfig, w http.ResponseWriter, res *issuance.Result[C]) {
 	cfg.cookies.SetAccess(w, res.Pair.AccessToken)
 	if !res.Interim {
-		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, remember)
+		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, res.Pair.Claims.RememberMe)
 	}
+}
+
+func isRememberedSession[C any](r *http.Request) bool {
+	claims, ok := tokens.ClaimsFromContext[C](r.Context())
+	return ok && claims != nil && claims.RememberMe
 }
 
 // mapIssuanceError maps a rejected issuance to the client-visible status and error code. The
@@ -981,13 +988,14 @@ func MagicLinkLoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf
 			Method:             "magic_link",
 			AMR:                []string{tokens.AMROTP},
 			MustChangePassword: mustChange,
+			RememberMe:         remember,
 		})
 		if err != nil {
 			status, code := mapIssuanceError(err)
 			cfg.fail(w, r, status, code)
 			return
 		}
-		setSessionCookies(cfg, w, res, remember)
+		setSessionCookies(cfg, w, res)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }
@@ -1064,8 +1072,9 @@ func ChangePasswordHandler(svc Service, opts ...HandlerOption) http.HandlerFunc 
 // normal login flow (it returns 204/redirect and writes no new cookies).
 //
 // The new pair is issued AFTER svc.ChangePassword returns, so it is never caught by the
-// AccountErasers that revoke prior refresh-token families. remember is always false for the
-// re-issued refresh cookie: a password change is not a "remember me" affirmation.
+// AccountErasers that revoke prior refresh-token families. The re-issued pair keeps the
+// remember_me choice of the session that changed the password (read from the verified claims on
+// the request context), so a remembered session is not downgraded to a session cookie.
 func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc {
 	cfg := newHandlerConfig(opts)
 	pipe := newSessionPipeline(svc, issuer, cfg)
@@ -1142,13 +1151,14 @@ func ChangePasswordWithReissueHandler[C any](svc Service, issuer tokens.Issuer[C
 			Method:      "password_change",
 			AMR:         amr,
 			MFAVerified: mfaVerified,
+			RememberMe:  isRememberedSession[C](r),
 		})
 		if err != nil {
 			status, code := mapIssuanceError(err)
 			cfg.fail(w, r, status, code)
 			return
 		}
-		setSessionCookies(cfg, w, res, false)
+		setSessionCookies(cfg, w, res)
 		httputil.RedirectOrStatus(w, r, cfg.successURL, http.StatusNoContent)
 	}
 }

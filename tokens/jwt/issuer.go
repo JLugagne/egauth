@@ -32,8 +32,9 @@ type claimsWrapper[C any] struct {
 	MustChangePassword bool                 `json:"must_change_password,omitempty"`
 	// Interim marks an access token minted before a second factor was presented. It is omitted for
 	// ordinary sessions so the wire format of a normal login is unchanged.
-	Interim bool `json:"interim,omitempty"`
-	Custom  C    `json:"custom"`
+	Interim    bool `json:"interim,omitempty"`
+	RememberMe bool `json:"remember_me,omitempty"`
+	Custom     C    `json:"custom"`
 }
 
 // DefaultReuseGracePeriod is the window after a refresh token is consumed during which a
@@ -482,6 +483,7 @@ func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], fami
 		AMR:                claims.AMR,
 		MustChangePassword: claims.MustChangePassword,
 		Interim:            claims.Interim,
+		RememberMe:         claims.RememberMe,
 		Custom:             claims.Custom,
 	}
 
@@ -525,6 +527,7 @@ func (s *Service[C]) mintPair(ctx context.Context, claims tokens.Claims[C], fami
 		AuthTime:           authTime,
 		MustChangePassword: claims.MustChangePassword,
 		AMR:                append([]string(nil), claims.AMR...),
+		RememberMe:         claims.RememberMe,
 		ExpiresAt:          refreshExpiresAt,
 		CreatedAt:          now,
 	}
@@ -765,6 +768,7 @@ func (s *Service[C]) verifyAccessToken(ctx context.Context, tenantID string, tok
 		AMR:                wrapper.AMR,
 		MustChangePassword: wrapper.MustChangePassword,
 		Interim:            wrapper.Interim,
+		RememberMe:         wrapper.RememberMe,
 		Custom:             wrapper.Custom,
 	}
 	if wrapper.IssuedAt != nil {
@@ -929,6 +933,7 @@ func (s *Service[C]) Rotate(ctx context.Context, tenantID string, refreshToken s
 	if len(claims.AMR) == 0 && len(rt.AMR) > 0 {
 		claims.AMR = append([]string(nil), rt.AMR...)
 	}
+	claims.RememberMe = rt.RememberMe
 
 	// Mint the new pair within the SAME family to preserve the rotation chain. initial=false:
 	// a rotation never manufactures a fresh auth_time — claims.AuthTime (set above from the

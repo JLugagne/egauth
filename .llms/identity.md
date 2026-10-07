@@ -161,7 +161,7 @@ unaffected. Override the gate with `WithCredentialAssurance`, or opt out with
 ---
 
 `func LoginHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf ClaimsBuilder[C], opts ...HandlerOption) http.HandlerFunc`
-- POST — reads `email`, `password`, `remember_me` from form
+- POST — reads `email`, `password`, `remember_me` from form (`remember_me` is recorded on the refresh family: rotation keeps the cookie persistent)
 - Success: issues access+refresh token pair, sets auth cookies → 204
 - Errors: `401 invalid_credentials`, `429 account_locked`, `500 login_failed`
 

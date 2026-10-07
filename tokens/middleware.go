@@ -95,13 +95,12 @@ func WithoutHeaderAuth[C any]() AuthOption[C] {
 	return func(a *authConfig[C]) { a.readHeader = false }
 }
 
-// WithPersistentAutoRefresh makes auto-refresh re-issue a PERSISTENT refresh cookie.
+// WithPersistentAutoRefresh forces auto-refresh to re-issue a PERSISTENT refresh cookie,
+// whatever the user chose at login.
 //
-// By default auto-refresh writes a SESSION refresh cookie: the middleware cannot recover
-// the per-user remember_me choice from a bare request (browsers never echo a cookie's
-// Max-Age), so the conservative default never silently upgrades a session-only cookie into
-// a persistent one. Enable this only when the deployment uses persistent "remember me"
-// refresh cookies globally.
+// Without it auto-refresh follows the family's recorded remember_me choice
+// (Claims.RememberMe): persistent for a "remember me" login, a session cookie otherwise.
+// Enable this only when the deployment wants persistent sessions for everyone.
 func WithPersistentAutoRefresh[C any]() AuthOption[C] {
 	return func(a *authConfig[C]) { a.persistRefresh = true }
 }
@@ -323,7 +322,7 @@ func serveAuthenticated[C any](w http.ResponseWriter, r *http.Request, verifier 
 				return
 			}
 			cfg.cookies.SetAccess(w, pair.AccessToken)
-			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+			cfg.cookies.SetRefresh(w, pair.RefreshToken, pair.RefreshTokenExpiresAt, cfg.persistRefresh || pair.Claims.RememberMe)
 			if cfg.accessTokenRevoked(r.Context(), &pair.Claims) {
 				cfg.cookies.Clear(w)
 				unauthorized(w)

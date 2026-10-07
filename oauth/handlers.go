@@ -216,7 +216,9 @@ func WithFailureRedirect(url string) HandlerOption {
 }
 
 // WithPersistentRefresh issues the refresh cookie as a persistent ("remember me") cookie.
-// By default the OAuth flow sets a session refresh cookie.
+// By default the OAuth flow sets a session refresh cookie. The choice is recorded on the
+// refresh family, so the tokens refresh handler and auto-refresh middleware keep the cookie
+// persistent across rotation without their own persistence options.
 func WithPersistentRefresh() HandlerOption {
 	return func(h *handlerConfig) { h.persistRefresh = true }
 }
@@ -521,6 +523,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 			Method:             "oauth:" + p.Name(),
 			AMR:                []string{"oauth"},
 			MustChangePassword: mustChange,
+			RememberMe:         cfg.persistRefresh,
 		})
 		if err != nil {
 			status, code := mapIssuanceError(err)
@@ -529,7 +532,7 @@ func CallbackHandler[C any](p *Provider, linker IdentityLinker, issuer tokens.Is
 		}
 		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
 		if !res.Interim {
-			cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, cfg.persistRefresh)
+			cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, res.Pair.Claims.RememberMe)
 		}
 		// An interim result stops here on purpose: the subject has the first factor only, so the
 		// refresh token is deliberately not delivered. The access cookie carries the short-lived

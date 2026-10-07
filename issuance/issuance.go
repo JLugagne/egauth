@@ -119,6 +119,10 @@ type Request[C any] struct {
 	// The pipeline does not park such a request: the MFA gate is skipped and the full pair is
 	// issued.
 	MFAVerified bool
+	// RememberMe is the user's "remember me" choice. It is stamped on the claims and the refresh
+	// family, so rotation keeps the refresh cookie persistent; callers read it back from
+	// Result.Pair.Claims.RememberMe when writing the cookie. It is ORed with Claims.RememberMe.
+	RememberMe bool
 	// InterimTTL overrides the interim token lifetime for this request. Zero selects the
 	// pipeline default.
 	InterimTTL time.Duration
@@ -210,6 +214,7 @@ func (p *Pipeline[C]) Issue(ctx context.Context, req Request[C]) (*Result[C], er
 	claims.Subject = req.UserID
 	claims.TenantID = state.TenantID
 	claims.MustChangePassword = mustChange
+	claims.RememberMe = claims.RememberMe || req.RememberMe
 	if req.AMR != nil {
 		claims.AMR = append([]string(nil), req.AMR...)
 	}

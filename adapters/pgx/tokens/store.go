@@ -328,22 +328,22 @@ func (s *Store[C]) SaveRefreshToken(ctx context.Context, tenantID string, rt *to
 	}
 
 	query := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, amr, expires_at, created_at, consumed_at, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, amr, remember_me, expires_at, created_at, consumed_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
 		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
-			must_change_password = EXCLUDED.must_change_password, amr = EXCLUDED.amr,
+			must_change_password = EXCLUDED.must_change_password, amr = EXCLUDED.amr, remember_me = EXCLUDED.remember_me,
 			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at,
 			revoked_at = EXCLUDED.revoked_at
 	`
-	_, err = s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.MustChangePassword, amr, rt.ExpiresAt, createdAt, rt.ConsumedAt, rt.RevokedAt)
+	_, err = s.db.Exec(ctx, query, tenantID, rt.Hash, rt.UserID, rt.FamilyID, authTime, rt.MustChangePassword, amr, rt.RememberMe, rt.ExpiresAt, createdAt, rt.ConsumedAt, rt.RevokedAt)
 	return err
 }
 
 // FindRefreshToken retrieves a refresh token by its hash, including its ConsumedAt state.
 func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenHash string) (*tokens.RefreshToken, error) {
 	query := `
-		SELECT token_hash, family_id, user_id, tenant_id, auth_time, must_change_password, amr, expires_at, created_at, consumed_at, revoked_at
+		SELECT token_hash, family_id, user_id, tenant_id, auth_time, must_change_password, amr, remember_me, expires_at, created_at, consumed_at, revoked_at
 		FROM tokens
 		WHERE tenant_id = $1 AND token_hash = $2 AND claims IS NULL
 	`
@@ -353,7 +353,7 @@ func (s *Store[C]) FindRefreshToken(ctx context.Context, tenantID string, tokenH
 	var authTime *time.Time
 	var revokedAt *time.Time
 	var amrJSON []byte
-	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.MustChangePassword, &amrJSON, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt, &revokedAt)
+	err := row.Scan(&rt.Hash, &rt.FamilyID, &rt.UserID, &rt.TenantID, &authTime, &rt.MustChangePassword, &amrJSON, &rt.RememberMe, &rt.ExpiresAt, &rt.CreatedAt, &rt.ConsumedAt, &revokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, tokens.ErrRefreshTokenNotFound
@@ -436,15 +436,15 @@ func (s *Store[C]) RotateRefreshToken(ctx context.Context, tenantID string, oldT
 	}
 
 	insertQuery := `
-		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, amr, expires_at, created_at, consumed_at, revoked_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+		INSERT INTO tokens (tenant_id, token_hash, user_id, family_id, auth_time, must_change_password, amr, remember_me, expires_at, created_at, consumed_at, revoked_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		ON CONFLICT (tenant_id, token_hash) DO UPDATE
 		SET user_id = EXCLUDED.user_id, family_id = EXCLUDED.family_id, auth_time = EXCLUDED.auth_time,
-			must_change_password = EXCLUDED.must_change_password, amr = EXCLUDED.amr,
+			must_change_password = EXCLUDED.must_change_password, amr = EXCLUDED.amr, remember_me = EXCLUDED.remember_me,
 			expires_at = EXCLUDED.expires_at, created_at = EXCLUDED.created_at, consumed_at = EXCLUDED.consumed_at,
 			revoked_at = EXCLUDED.revoked_at
 	`
-	if _, err := tx.Exec(ctx, insertQuery, tenantID, newRT.Hash, newRT.UserID, newRT.FamilyID, authTime, newRT.MustChangePassword, amr, newRT.ExpiresAt, createdAt, newRT.ConsumedAt, newRT.RevokedAt); err != nil {
+	if _, err := tx.Exec(ctx, insertQuery, tenantID, newRT.Hash, newRT.UserID, newRT.FamilyID, authTime, newRT.MustChangePassword, amr, newRT.RememberMe, newRT.ExpiresAt, createdAt, newRT.ConsumedAt, newRT.RevokedAt); err != nil {
 		return err
 	}
 

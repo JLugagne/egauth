@@ -98,7 +98,12 @@ type Claims[C any] struct {
 	// The zero value is false, so tokens minted before this field existed and tokens from issuers
 	// that do not model interim sessions keep their previous meaning.
 	Interim bool
-	Custom  C
+	// RememberMe records the subject's "remember me" choice at login. It is set at issuance, stamped
+	// on the refresh family and replayed verbatim by Rotate, so every rotated refresh cookie keeps the
+	// persistence the user picked instead of reverting to a session cookie. ClaimsProvider values
+	// are ignored on rotation: only a fresh login can change it.
+	RememberMe bool
+	Custom     C
 }
 
 // IsInterim reports whether the token was minted before a second factor was presented (see
@@ -183,7 +188,11 @@ type RefreshToken struct {
 	// minted before the field existed (legacy records keep their previous meaning), and it
 	// never extends step-up freshness — auth_time remains the family's preserved
 	// authentication time.
-	AMR        []string
+	AMR []string
+	// RememberMe records whether the family was minted with "remember me". Rotate copies it onto
+	// every descendant and onto the rotated claims, so the refresh cookie stays persistent (or
+	// session-only) for the whole life of the family. Legacy records read back as false.
+	RememberMe bool
 	ExpiresAt  time.Time
 	CreatedAt  time.Time
 	ConsumedAt *time.Time

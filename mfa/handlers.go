@@ -578,6 +578,10 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		} else if interim, ok := tokens.ClaimsFromContext[C](r.Context()); ok {
 			mustChange = interim.MustChangePassword
 		}
+		remember := false
+		if interim, ok := tokens.ClaimsFromContext[C](r.Context()); ok && interim != nil {
+			remember = interim.RememberMe
+		}
 		// Re-issue the full pair through the unified issuance pipeline: it enforces the tenant
 		// binding, OR-s the authoritative must-change state and emits the uniform audit event.
 		res, err := pipe.Issue(r.Context(), issuance.Request[C]{
@@ -588,6 +592,7 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 			AMR:                amr,
 			MustChangePassword: mustChange,
 			MFAVerified:        true,
+			RememberMe:         remember,
 		})
 		if err != nil {
 			cfg.fail(w, r, http.StatusInternalServerError, "token_issuance_failed")
@@ -595,7 +600,7 @@ func StepUpHandler[C any](svc Service, issuer tokens.Issuer[C], claimsOf StepUpC
 		}
 		// Upgrade the interim access-only state to a full renewable pair, writing both cookies.
 		cfg.cookies.SetAccess(w, res.Pair.AccessToken)
-		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, false)
+		cfg.cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, res.Pair.Claims.RememberMe)
 		cfg.ok(w, r)
 	})
 }
