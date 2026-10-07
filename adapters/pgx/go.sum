@@ -4,8 +4,8 @@ github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6 h1:He8af
 github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6/go.mod h1:8o94RPi1/7XTJvwPpRSzSUedZrtlirdB3r9Z20bi2f8=
 github.com/Azure/go-ansiterm v0.0.0-20260917205352-e937bb47801a h1:4hxax9ktNjSDoFn1tZSeL6gXMTRMpO0FzjdKfT01jgY=
 github.com/Azure/go-ansiterm v0.0.0-20260917205352-e937bb47801a/go.mod h1:3EWSSOZ50kb+arhww0qIaEXHToib/3FjBj9Jj5lcP5g=
-github.com/JLugagne/egauth v0.15.0 h1:ImAAYxDqJeaXQDSFSotrtXgUSymoAUZM3+79q1aIPzU=
-github.com/JLugagne/egauth v0.15.0/go.mod h1:wA5VrmQyhOQFufsPKjGKxmsTmk0DM0MEzyhpjawaOrU=
+github.com/JLugagne/egauth v0.16.0 h1:HfTF3nuCok5kK0+DxkPVUqBpd51VBbN0nSHR0pJCcB8=
+github.com/JLugagne/egauth v0.16.0/go.mod h1:Z5Ssn697G+sUlQR7wlJrC21GOkujzw8MaHGXbY1ABWg=
 github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
 github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
 github.com/cenkalti/backoff/v4 v4.3.0 h1:MyRJ/UdXutAwSAT+s3wNd7MfTIcy71VQueUuFK343L8=
