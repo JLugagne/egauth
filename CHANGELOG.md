@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.16.0] — 2026-10-07
+
 ### Fixed
 
 - **"Remember me" no longer lost on the first silent refresh.** The refresh cookie written at a
