@@ -23,6 +23,7 @@ package event
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -86,14 +87,17 @@ type Event struct {
 	// Type is the event kind (required).
 	Type Type
 	// TenantID and UserID scope the event when known ("" otherwise). UserID is a UUID string;
-	// the package avoids importing uuid so any module can emit without coupling.
+	// the package avoids importing uuid so any module can emit without coupling. UserID is
+	// personal data, classified PII like the "created_by" attribute: NewSlogSink omits it and the
+	// otel adapter exports it only when cleared for PII.
 	TenantID string
 	UserID   string
 	// Reason is a short machine code for an outcome or failure (e.g. "invalid_credentials",
 	// "account_locked", "reuse_after_grace"). Keep it free of secrets and raw user input.
 	Reason string
 	// Err is the underlying error for failure/outage events (e.g. a swallowed mailer or store
-	// error), so an otherwise-invisible outage is observable.
+	// error), so an otherwise-invisible outage is observable. Its text may embed personal data (a
+	// rejected mailbox, a phone number) and is classified PII: NewSlogSink logs only its type.
 	Err error
 	// Attrs carries extra structured context. Never put secrets, tokens or passwords here.
 	Attrs map[string]any
@@ -111,8 +115,9 @@ type SinkFunc func(ctx context.Context, e Event)
 // EmitEvent implements Sink.
 func (f SinkFunc) EmitEvent(ctx context.Context, e Event) { f(ctx, e) }
 
-// Emit sends e to sink when sink is non-nil. Services call it so a nil (unconfigured) sink is a
-// cheap no-op and call sites stay free of nil checks. A panic in the sink is recovered (see
+// Emit sends e to sink when sink is non-nil, so a nil (unconfigured) sink is a cheap no-op. It is
+// meant for applications emitting their own events: library code emits through internal/audit,
+// which enforces the attribute registry, and a guard test rejects any other library emitter. A panic in the sink is recovered (see
 // safeEmit) so a misbehaving audit sink can never change a handler's client-visible behavior — the
 // invariant this package documents.
 func Emit(ctx context.Context, sink Sink, e Event) {
@@ -137,9 +142,13 @@ func safeEmit(ctx context.Context, sink Sink, e Event) {
 type multiSink []Sink
 
 // MultiSink returns a Sink that fans every event out to each of sinks (nil entries are skipped).
+// Members receive Event.Public(): PII, Secret and unregistered attributes (including "ip",
+// "user_agent" and "previous_email") never reach them, so a member that needs PII must be
+// installed directly instead of behind MultiSink.
 func MultiSink(sinks ...Sink) Sink { return multiSink(sinks) }
 
 func (m multiSink) EmitEvent(ctx context.Context, e Event) {
+	e = e.Public()
 	for _, s := range m {
 		if s != nil {
 			// Contain each member's panic so one misbehaving sink cannot stop the fan-out to the
@@ -152,9 +161,9 @@ func (m multiSink) EmitEvent(ctx context.Context, e Event) {
 type slogSink struct{ logger *slog.Logger }
 
 // NewSlogSink returns a Sink that logs events to logger (slog.Default() when nil). An event
-// carrying an Err is logged at Error; known failure/anomaly events (failed login, lockout,
-// refresh reuse, family revoke, MFA verification failure, API-key auth failure, delivery
-// failure, insecure-cookie misuse) at Warn; the rest at Info.
+// carrying an Err is logged at Error; otherwise the level follows Type.Severity. Only public data
+// is logged: Event.PublicAttrs, the tenant, the reason and the dynamic type of Err ("error_type").
+// The user id and the error text are PII and are never logged.
 func NewSlogSink(logger *slog.Logger) Sink {
 	if logger == nil {
 		logger = slog.Default()
@@ -163,22 +172,19 @@ func NewSlogSink(logger *slog.Logger) Sink {
 }
 
 func (s *slogSink) EmitEvent(ctx context.Context, e Event) {
-	attrs := make([]slog.Attr, 0, 5+len(e.Attrs))
+	attrs := make([]slog.Attr, 0, 4+len(e.Attrs))
 	attrs = append(attrs, slog.String("event", string(e.Type)))
 	if e.TenantID != "" {
 		attrs = append(attrs, slog.String("tenant_id", e.TenantID))
 	}
-	if e.UserID != "" {
-		attrs = append(attrs, slog.String("user_id", e.UserID))
-	}
 	if e.Reason != "" {
 		attrs = append(attrs, slog.String("reason", e.Reason))
 	}
-	for k, v := range e.Attrs {
+	for k, v := range e.PublicAttrs() {
 		attrs = append(attrs, slog.Any(k, v))
 	}
 	if e.Err != nil {
-		attrs = append(attrs, slog.Any("error", e.Err))
+		attrs = append(attrs, slog.String("error_type", fmt.Sprintf("%T", e.Err)))
 	}
 	s.logger.LogAttrs(ctx, levelFor(e), "egauth security event", attrs...)
 }
@@ -187,13 +193,25 @@ func levelFor(e Event) slog.Level {
 	if e.Err != nil {
 		return slog.LevelError
 	}
-	switch e.Type {
-	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked, MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse, RedirectFallbackMisuse:
+	switch e.Type.Severity() {
+	case SeverityError:
+		return slog.LevelError
+	case SeverityWarn:
 		return slog.LevelWarn
-	default:
-		return slog.LevelInfo
 	}
+	return slog.LevelInfo
 }
+
+// DiscardSink drops every event, for deployments that disable emission explicitly instead of
+// passing a nil Sink. It has a single, zero-size value, so Discard cannot be rebound to a sink
+// that does anything else.
+type DiscardSink struct{}
+
+// EmitEvent implements Sink and does nothing.
+func (DiscardSink) EmitEvent(context.Context, Event) {}
+
+// Discard is the conventional DiscardSink, kept a variable so existing callers compile.
+var Discard DiscardSink
 
 // RequestContext carries optional, caller-supplied transport metadata about the request that
 // triggered an authentication event — the client IP and User-Agent. The library cannot discover
@@ -227,7 +245,9 @@ const (
 // consumer's sink can alert the address that LOST access, not only report the new state: changing
 // the account email or adding a recovery channel needs only a live session, so the outgoing
 // address is often the only party still able to notice and object. The values are contact
-// identifiers, never credentials — a token or code is never carried on an event.
+// identifiers, never credentials — a token or code is never carried on an event. They are
+// classified PII: MultiSink, NewSlogSink and the default otel sink drop them, so the alerting
+// sink must be installed directly and read Event.AttrsUpTo(PII).
 const (
 	// AttrPreviousEmail is the account email before an EmailChanged event.
 	AttrPreviousEmail = "previous_email"

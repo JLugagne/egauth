@@ -77,11 +77,12 @@ func TestSlogSink_LevelsAndAttrs(t *testing.T) {
 	sink := event.NewSlogSink(logger)
 
 	type record struct {
-		Level  string `json:"level"`
-		Event  string `json:"event"`
-		UserID string `json:"user_id"`
-		Reason string `json:"reason"`
-		Error  string `json:"error"`
+		Level     string `json:"level"`
+		Event     string `json:"event"`
+		UserID    string `json:"user_id"`
+		Reason    string `json:"reason"`
+		Error     string `json:"error"`
+		ErrorType string `json:"error_type"`
 	}
 	decodeLast := func() record {
 		t.Helper()
@@ -101,7 +102,7 @@ func TestSlogSink_LevelsAndAttrs(t *testing.T) {
 		r := decodeLast()
 		assert.Equal(t, "INFO", r.Level)
 		assert.Equal(t, "login.succeeded", r.Event)
-		assert.Equal(t, "u1", r.UserID)
+		assert.Empty(t, r.UserID, "the user id is PII and must not be logged")
 	})
 
 	t.Run("warn for failure/anomaly events", func(t *testing.T) {
@@ -117,7 +118,8 @@ func TestSlogSink_LevelsAndAttrs(t *testing.T) {
 		sink.EmitEvent(context.Background(), event.Event{Type: event.DeliveryFailed, Err: errors.New("smtp down")})
 		r := decodeLast()
 		assert.Equal(t, "ERROR", r.Level)
-		assert.Contains(t, r.Error, "smtp down")
+		assert.Empty(t, r.Error, "the error text is PII and must not be logged")
+		assert.Equal(t, "*errors.errorString", r.ErrorType)
 	})
 }
 

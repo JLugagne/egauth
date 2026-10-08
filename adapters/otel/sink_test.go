@@ -3,6 +3,7 @@ package otel_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -49,7 +50,9 @@ func TestSpanSink_EmitsSpanPerEvent(t *testing.T) {
 	attrs := attrMap(s.Attributes())
 	assertAttr(t, attrs, "egauth.event.type", "login.succeeded")
 	assertAttr(t, attrs, "egauth.tenant_id", "tenant-1")
-	assertAttr(t, attrs, "egauth.user_id", "user-abc")
+	if _, ok := attrs["egauth.user_id"]; ok {
+		t.Error("user id must not be exported without ExportPII")
+	}
 }
 
 func TestSpanSink_ErrorSetsStatusAndRecordsError(t *testing.T) {
@@ -120,25 +123,99 @@ func TestSpanSink_SecurityEventMapping(t *testing.T) {
 
 func TestSpanSink_ExtraAttrs(t *testing.T) {
 	rec, tp := newRecorder()
-	tracer := tp.Tracer("test")
-	sink := egauthotel.NewSpanSink(tracer)
+	sink := egauthotel.NewSpanSink(tp.Tracer("test"))
 
 	sink.EmitEvent(context.Background(), event.Event{
 		Type:  event.LoginFailed,
-		Attrs: map[string]any{"ip": "192.0.2.1", "attempt": 3},
+		Attrs: map[string]any{"ip": "192.0.2.1", "attempt": 3, "method": "password"},
 	})
 
-	spans := rec.Ended()
-	if len(spans) != 1 {
-		t.Fatalf("expected 1 span, got %d", len(spans))
+	attrs := attrMap(rec.Ended()[0].Attributes())
+	assertAttr(t, attrs, "egauth.method", "password")
+	for _, k := range []string{"egauth.ip", "egauth.attempt"} {
+		if _, ok := attrs[k]; ok {
+			t.Errorf("%s must be dropped", k)
+		}
 	}
-	attrs := attrMap(spans[0].Attributes())
-	// Extra attrs are emitted as "egauth.<key>"
-	if _, ok := attrs["egauth.ip"]; !ok {
-		t.Error("expected egauth.ip attribute")
+}
+
+func newSink(t *testing.T, o egauthotel.Options) (*tracetest.SpanRecorder, event.Sink) {
+	t.Helper()
+	rec, tp := newRecorder()
+	sink, err := egauthotel.NewSink(tp, o)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, ok := attrs["egauth.attempt"]; !ok {
-		t.Error("expected egauth.attempt attribute")
+	return rec, sink
+}
+
+func TestNewSink_RequiresProvider(t *testing.T) {
+	if _, err := egauthotel.NewSink(nil, egauthotel.Options{}); !errors.Is(err, egauthotel.ErrNilTracerProvider) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestNewSink_StatusFollowsSeverity(t *testing.T) {
+	for typ, want := range map[event.Type]codes.Code{
+		event.LoginSucceeded:    codes.Unset,
+		event.IdentifierChanged: codes.Unset,
+		event.LoginFailed:       codes.Error,
+		event.SystemCallerUsed:  codes.Error,
+		event.MountMismatch:     codes.Error,
+	} {
+		rec, sink := newSink(t, egauthotel.Options{})
+		sink.EmitEvent(context.Background(), event.Event{Type: typ})
+		if got := rec.Ended()[0].Status().Code; got != want {
+			t.Errorf("%s: status %v, want %v", typ, got, want)
+		}
+	}
+}
+
+func TestNewSink_DropsPIIAndSecretsByDefault(t *testing.T) {
+	rec, sink := newSink(t, egauthotel.Options{})
+	sink.EmitEvent(context.Background(), event.Event{
+		Type: event.LoginFailed, UserID: "u-1", TenantID: "t-1", Err: errors.New("mailbox jane@example.com"),
+		Attrs: map[string]any{
+			string(event.KeyMethod): "password", string(event.KeyIP): "192.0.2.1",
+			string(event.KeyCaptchaToken): "tok-secret", "rogue": "x",
+		},
+	})
+	s := rec.Ended()[0]
+	attrs := attrMap(s.Attributes())
+	assertAttr(t, attrs, "egauth.method", "password")
+	assertAttr(t, attrs, "egauth.tenant_id", "t-1")
+	for _, k := range []string{"egauth.ip", "egauth.captcha_token", "egauth.rogue", "egauth.user_id"} {
+		if _, ok := attrs[k]; ok {
+			t.Errorf("%s exported", k)
+		}
+	}
+	if strings.Contains(s.Status().Description, "jane@example.com") {
+		t.Error("error text leaked into the status")
+	}
+	for _, ev := range s.Events() {
+		for _, kv := range ev.Attributes {
+			if strings.Contains(kv.Value.Emit(), "jane@example.com") {
+				t.Error("error text leaked into a span event")
+			}
+		}
+	}
+}
+
+func TestNewSink_ExportPIIKeepsPIINeverSecrets(t *testing.T) {
+	rec, sink := newSink(t, egauthotel.Options{ExportPII: true})
+	sink.EmitEvent(context.Background(), event.Event{
+		Type: event.LoginFailed, UserID: "u-1",
+		Attrs: map[string]any{
+			string(event.KeyIP): "192.0.2.1", string(event.KeyCaptchaToken): "tok-secret", "rogue": "x",
+		},
+	})
+	attrs := attrMap(rec.Ended()[0].Attributes())
+	assertAttr(t, attrs, "egauth.ip", "192.0.2.1")
+	assertAttr(t, attrs, "egauth.user_id", "u-1")
+	for _, k := range []string{"egauth.captcha_token", "egauth.rogue"} {
+		if _, ok := attrs[k]; ok {
+			t.Errorf("%s exported", k)
+		}
 	}
 }
 
