@@ -1,0 +1,13 @@
+package foreignok
+
+import (
+	"context"
+
+	"github.com/JLugagne/egauth/tools/archtest/testdata/g12/root/shared"
+	"github.com/JLugagne/egauth/tools/archtest/testdata/g12/root/store"
+)
+
+type Store interface {
+	store.Base
+	Put(ctx context.Context, p shared.Plain) error
+}

@@ -1,0 +1,1 @@
+CREATE TABLE IF NOT EXISTS d (id int);

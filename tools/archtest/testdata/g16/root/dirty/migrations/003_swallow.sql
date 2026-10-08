@@ -1,0 +1,10 @@
+DO $$ BEGIN CREATE TABLE t3 (a int); EXCEPTION WHEN others THEN NULL; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT pg_terminate_backend(pid) FROM pg_stat_activity) THEN NULL; END IF; END $$;
+CREATE TABLE IF NOT EXISTS t4 AS SELECT lo_unlink(1);
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM my_view) THEN NULL; END IF; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1) THEN CREATE TABLE t5 AS SELECT lo_unlink(1); END IF; END $$;
+CREATE TABLE IF NOT EXISTS t6 (a) AS SELECT 1;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = lo_unlink(1)) THEN NULL; END IF; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE "pg_terminate_backend"(pid)) THEN NULL; END IF; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'x' AND pg_catalog."lo_unlink"(1) = 1) THEN CREATE TABLE IF NOT EXISTS x (a int); END IF; END $$;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE "evil".to_regclass('x') IS NULL) THEN NULL; END IF; END $$;

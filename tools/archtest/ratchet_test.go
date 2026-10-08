@@ -139,6 +139,11 @@ func TestRatchetNewGuardListIsBaselinedUnderItsTestdata(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	repoBaseline, err := archtest.LoadBaseline(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline = append(baseline, repoBaseline...)
 	entries := append(archtest.LegacyExemptions(guardG07a), typed)
 	lists := append(archtest.Lists(), archtest.ExemptionList{Guard: guardG07a, MaxEntries: len(entries), Entries: entries})
 	if msgs := archtest.CheckBaseline(archtest.BaselineLines(lists), baseline); len(msgs) != 0 {
