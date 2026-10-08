@@ -1,0 +1,6 @@
+package egauthtest
+
+import (
+	_ "github.com/JLugagne/egauth/tools/archtest/testdata/g15/root"
+	_ "github.com/JLugagne/egauth/tools/archtest/testdata/g15/root/internal/core"
+)
