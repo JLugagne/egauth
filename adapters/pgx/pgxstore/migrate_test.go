@@ -2,6 +2,8 @@ package pgxstore_test
 
 import (
 	"context"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -63,15 +65,21 @@ func (r *recorder) Exec(_ context.Context, sql string, args ...any) (pgconn.Comm
 	if strings.HasPrefix(sql, "INSERT INTO egauth_schema_migrations") && len(args) == 2 {
 		return pgconn.CommandTag{}, nil
 	}
-	if strings.Contains(sql, "-- ") || strings.Contains(sql, "CREATE ") {
+	if m := appliedFile.FindStringSubmatch(sql); m != nil {
 		r.executed = append(r.executed, sql)
-		for _, m := range []string{"ceremony", "deployment", "limiter"} {
-			if strings.Contains(sql, "VALUES ('"+m+"', '001_create.sql')") {
-				r.applied[m] = append(r.applied[m], "001_create.sql")
-			}
-		}
+		r.applied[m[1]] = append(r.applied[m[1]], m[2])
 	}
 	return pgconn.CommandTag{}, nil
+}
+
+var appliedFile = regexp.MustCompile(`INSERT INTO egauth_schema_migrations \(module, version\) VALUES \('([a-z0-9_]+)', '([^']+)'\)`)
+
+func (r *recorder) files() int {
+	n := 0
+	for _, files := range r.applied {
+		n += len(files)
+	}
+	return n
 }
 
 func (r *recorder) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
@@ -91,14 +99,25 @@ func TestMigrateAppliesEveryRegisteredModuleOnce(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	var created int
-	for _, sql := range db.executed {
-		if strings.Contains(sql, "CREATE") && strings.Contains(sql, "INSERT INTO egauth_schema_migrations") {
-			created++
+	if len(db.executed) != db.files() {
+		t.Fatalf("applied %d migration files, recorded %d", len(db.executed), db.files())
+	}
+	for module, files := range db.applied {
+		seen := map[string]bool{}
+		for _, f := range files {
+			if seen[f] {
+				t.Fatalf("%s/%s applied twice", module, f)
+			}
+			seen[f] = true
 		}
 	}
-	if created != 3 {
-		t.Fatalf("applied %d migration files, want 3 (ceremony, deployment, limiter) exactly once", created)
+	for _, module := range []string{"ceremony", "deployment", "limiter", "identity"} {
+		if len(db.applied[module]) == 0 {
+			t.Fatalf("module %s applied no migration", module)
+		}
+	}
+	if !slices.Contains(db.applied["identity"], "009_security_epoch.sql") {
+		t.Fatalf("identity applied %v, want 009_security_epoch.sql among them", db.applied["identity"])
 	}
 	if db.begun != 2 || db.commits != 2 {
 		t.Fatalf("each run must hold one transaction: begun %d, committed %d", db.begun, db.commits)
@@ -143,7 +162,9 @@ func TestMigrateConcurrentCallsAgainstPostgres(t *testing.T) {
 	for err := range errs {
 		require.NoError(t, err)
 	}
+	want := &recorder{applied: map[string][]string{}}
+	require.NoError(t, pgxstore.Migrate(ctx, want))
 	var n int
 	require.NoError(t, pool.QueryRow(ctx, `SELECT count(*) FROM egauth_schema_migrations`).Scan(&n))
-	require.Equal(t, 3, n)
+	require.Equal(t, want.files(), n)
 }
