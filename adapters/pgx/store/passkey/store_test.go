@@ -15,7 +15,15 @@ import (
 	"github.com/JLugagne/egauth/store/passkey/storetest"
 )
 
+func seedV016(t *testing.T, _ passkey.Store, c passkey.Credential) {
+	t.Helper()
+	_, err := shared.pool.Exec(context.Background(), `INSERT INTO passkey_credentials (tenant_id, user_id, credential_id, public_key, sign_count, data, created_at, nickname)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, c.Subject.Tenant.String(), c.Subject.User, []byte(c.ID), c.PublicKey, int64(c.SignCount), c.Data, c.CreatedAt, c.Nickname)
+	require.NoError(t, err)
+}
+
 func TestStoreConformance(t *testing.T) {
+	storetest.Seed(t, storetest.Fixtures{SeedV016: seedV016})
 	storetest.Run(t, func(t *testing.T) passkey.Store { return passkeystore.New(cleanPool(t)) })
 }
 
@@ -64,7 +72,7 @@ func TestSuspendedAtKeepsTheFirstInstantAgainstPostgres(t *testing.T) {
 	require.NoError(t, err)
 	sub := principal.Subject{Tenant: tn, User: uuid.New()}
 	first := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
-	require.NoError(t, s.Save(ctx, passkey.Credential{Subject: sub, ID: passkey.CredentialID("a"), PublicKey: []byte("k"), CreatedAt: first}))
+	require.NoError(t, s.Save(ctx, passkey.Credential{Subject: sub, ID: passkey.CredentialID("a"), PublicKey: []byte("k"), CreatedAt: first, Discoverable: passkey.Confirmed}))
 	require.NoError(t, s.Suspend(ctx, sub, passkey.CredentialID("a"), first))
 	require.NoError(t, s.Suspend(ctx, sub, passkey.CredentialID("a"), first.Add(time.Hour)))
 	got, err := s.Get(ctx, tn, passkey.CredentialID("a"))

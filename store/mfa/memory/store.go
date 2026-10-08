@@ -328,6 +328,13 @@ func (s *Store) ConfirmEnrollment(ctx context.Context, e mfa.Enrollment, codeHas
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if cur, ok := s.totp[e.Subject]; ok {
+		e.LastUsedStep = max(e.LastUsedStep, cur.LastUsedStep)
+		e.FailedAttempts, e.LastAttemptAt = cur.FailedAttempts, cur.LastAttemptAt
+		if e.CreatedAt.IsZero() {
+			e.CreatedAt = cur.CreatedAt
+		}
+	}
 	s.put(e)
 	s.replaceCodes(e.Subject, codeHashes)
 	return nil
@@ -477,17 +484,4 @@ func (s *Store) ReplaceSealed(ctx context.Context, r mfa.Reseal) (bool, error) {
 	row.Sealed = bytes.Clone(r.New)
 	row.AADVersion = mfa.AADVersionCurrent
 	return true, nil
-}
-
-func (s *Store) addV016(sub principal.Subject, sealed []byte, createdAt time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.seq++
-	s.totp[sub] = &totpRow{
-		seq: s.seq,
-		Enrollment: mfa.Enrollment{
-			Subject: sub, Sealed: bytes.Clone(sealed), AADVersion: mfa.AADVersionLegacy,
-			CreatedAt: createdAt.UTC().Truncate(time.Microsecond),
-		},
-	}
 }

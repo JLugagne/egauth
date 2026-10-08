@@ -155,8 +155,17 @@ SET secret = EXCLUDED.secret,
     last_attempt_at = EXCLUDED.last_attempt_at,
     created_at = EXCLUDED.created_at`
 
-func upsertTOTP(ctx context.Context, q migrate.Querier, e contract.Enrollment) error {
-	_, err := q.Exec(ctx, upsertTOTPSQL, e.Subject.Tenant.String(), e.Subject.User,
+const confirmTOTPSQL = `INSERT INTO mfa_totp (tenant_id, user_id, secret, aad_version, confirmed_at, last_used_step, failed_attempts, last_attempt_at, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, coalesce($9, statement_timestamp()))
+ON CONFLICT (tenant_id, user_id) DO UPDATE
+SET secret = EXCLUDED.secret,
+    aad_version = EXCLUDED.aad_version,
+    confirmed_at = EXCLUDED.confirmed_at,
+    last_used_step = GREATEST(mfa_totp.last_used_step, EXCLUDED.last_used_step),
+    created_at = coalesce($9, mfa_totp.created_at)`
+
+func writeTOTP(ctx context.Context, q migrate.Querier, sql string, e contract.Enrollment) error {
+	_, err := q.Exec(ctx, sql, e.Subject.Tenant.String(), e.Subject.User,
 		base64.StdEncoding.EncodeToString(e.Sealed), int16(e.AADVersion), utc(e.ConfirmedAt), e.LastUsedStep,
 		int32(e.FailedAttempts), optional(e.LastAttemptAt), optional(e.CreatedAt))
 	if err != nil {
@@ -169,7 +178,7 @@ func (s *Store) SaveTOTP(ctx context.Context, e contract.Enrollment) error {
 	if err := checkEnrollment(e); err != nil {
 		return err
 	}
-	return upsertTOTP(ctx, s.db, e)
+	return writeTOTP(ctx, s.db, upsertTOTPSQL, e)
 }
 
 func (s *Store) GetTOTP(ctx context.Context, sub principal.Subject) (contract.Enrollment, error) {
@@ -333,7 +342,7 @@ func (s *Store) ConfirmEnrollment(ctx context.Context, e contract.Enrollment, co
 		if err := lockSubject(ctx, tx, e.Subject); err != nil {
 			return err
 		}
-		if err := upsertTOTP(ctx, tx, e); err != nil {
+		if err := writeTOTP(ctx, tx, confirmTOTPSQL, e); err != nil {
 			return err
 		}
 		return replaceCodes(ctx, tx, e.Subject, codeHashes)

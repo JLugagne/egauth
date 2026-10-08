@@ -56,28 +56,30 @@ func Run(t *testing.T, newStore func(*testing.T) mfa.Store) {
 		t.Fatal("storetest: Fixtures.SeedV016 is required")
 	}
 	suites := map[string]func(*testing.T, *harness){
-		"Base":                 baseSuite,
-		"TOTPRoundTrip":        totpRoundTrip,
-		"SaveRefusals":         saveRefusals,
-		"HasConfirmedTOTP":     hasConfirmed,
-		"EnrolledCounts":       enrolledCounts,
-		"ConfirmEnrollment":    confirmEnrollment,
-		"ConfirmAtomic":        confirmAtomic,
-		"ReplayGuard":          replayGuard,
-		"ReplayGuardConcurent": replayConcurrent,
-		"TOTPLockout":          totpLockout,
-		"TOTPLockoutDecay":     totpLockoutDecay,
-		"TOTPLockoutRefusals":  lockoutRefusals,
-		"TOTPLockoutParallel":  totpLockoutParallel,
-		"RecoveryLockout":      recoveryLockout,
-		"LockoutsAreIsolated":  lockoutsIsolated,
-		"RecoveryCodes":        recoveryCodes,
-		"RecoveryConsumeRace":  recoveryConsumeRace,
-		"DeleteForSubject":     deleteForSubject,
-		"EraseTenant":          eraseTenant,
-		"SealedOpaque":         sealedOpaque,
-		"LegacyUpgrade":        legacyUpgrade,
-		"ReplaceSealedCAS":     replaceSealedCAS,
+		"Base":                  baseSuite,
+		"TOTPRoundTrip":         totpRoundTrip,
+		"SaveRefusals":          saveRefusals,
+		"HasConfirmedTOTP":      hasConfirmed,
+		"EnrolledCounts":        enrolledCounts,
+		"ConfirmEnrollment":     confirmEnrollment,
+		"ConfirmAtomic":         confirmAtomic,
+		"ConfirmKeepsGuards":    confirmKeepsGuards,
+		"ReplayGuard":           replayGuard,
+		"ReplayGuardConcurrent": replayConcurrent,
+		"TOTPLockout":           totpLockout,
+		"TOTPLockoutDecay":      totpLockoutDecay,
+		"TOTPLockoutRefusals":   lockoutRefusals,
+		"TOTPLockoutParallel":   totpLockoutParallel,
+		"RecoveryLockout":       recoveryLockout,
+		"LockoutsAreIsolated":   lockoutsIsolated,
+		"RecoveryCodes":         recoveryCodes,
+		"RecoveryConsumeRace":   recoveryConsumeRace,
+		"DeleteForSubject":      deleteForSubject,
+		"EraseTenant":           eraseTenant,
+		"SingleTenant":          singleTenant,
+		"SealedOpaque":          sealedOpaque,
+		"LegacyUpgrade":         legacyUpgrade,
+		"ReplaceSealedCAS":      replaceSealedCAS,
 	}
 	for name, fn := range suites {
 		t.Run(name, func(t *testing.T) { fn(t, &harness{s: newStore(t), f: f}) })
@@ -294,6 +296,43 @@ func confirmAtomic(t *testing.T, h *harness) {
 
 	require.Error(t, h.s.ReplaceRecoveryCodes(ctx, sub, []string{"a", "a"}))
 	require.Error(t, h.s.ReplaceRecoveryCodes(ctx, principal.Subject{}, []string{"a"}))
+}
+
+func confirmKeepsGuards(t *testing.T, h *harness) {
+	ctx := context.Background()
+	sub := subjectIn(t, "tenant-a")
+	require.NoError(t, h.s.SaveTOTP(ctx, enrollment(sub, "x")))
+	read := h.get(t, sub)
+	ok, err := h.s.MarkTOTPUsed(ctx, sub, 100)
+	require.NoError(t, err)
+	require.True(t, ok)
+	read.ConfirmedAt = new(base.Add(time.Minute))
+	require.NoError(t, h.s.ConfirmEnrollment(ctx, read, []string{"c1"}))
+	got := h.get(t, sub)
+	require.True(t, got.Confirmed())
+	require.EqualValues(t, 100, got.LastUsedStep, "confirming a stale read never rolls the replay guard back")
+	ok, err = h.s.MarkTOTPUsed(ctx, sub, 100)
+	require.NoError(t, err)
+	require.False(t, ok, "the code that confirmed the enrollment is never accepted twice")
+
+	ahead := h.get(t, sub)
+	ahead.LastUsedStep = 500
+	require.NoError(t, h.s.ConfirmEnrollment(ctx, ahead, []string{"c2"}))
+	require.EqualValues(t, 500, h.get(t, sub).LastUsedStep, "the guard keeps the greatest step")
+
+	locked := subjectIn(t, "tenant-a")
+	require.NoError(t, h.s.SaveTOTP(ctx, enrollment(locked, "y")))
+	stale := h.get(t, locked)
+	for i := range 3 {
+		h.inc(t, lockout(locked, base.Add(time.Duration(i)*time.Second), 3, time.Hour))
+	}
+	before := h.get(t, locked)
+	stale.ConfirmedAt = new(base.Add(time.Minute))
+	require.NoError(t, h.s.ConfirmEnrollment(ctx, stale, []string{"c1"}))
+	after := h.get(t, locked)
+	require.Equal(t, 3, after.FailedAttempts, "confirming a stale read never resets the lockout")
+	require.True(t, before.LastAttemptAt.Equal(after.LastAttemptAt))
+	require.Equal(t, 4, h.inc(t, lockout(locked, base.Add(time.Minute), 3, time.Hour)), "the factor stays locked")
 }
 
 func replayGuard(t *testing.T, h *harness) {
@@ -576,6 +615,31 @@ func eraseTenant(t *testing.T, h *harness) {
 	require.EqualValues(t, 1, n, "only the erased tenant's subject left the count")
 }
 
+func singleTenant(t *testing.T, h *harness) {
+	ctx := context.Background()
+	single := principal.Subject{User: uuid.New()}
+	tenanted := principal.Subject{Tenant: tenant(t, "tenant-a"), User: single.User}
+	populate(t, h, single)
+	populate(t, h, tenanted)
+	ok, err := h.s.HasConfirmedTOTP(ctx, single)
+	require.NoError(t, err)
+	require.True(t, ok)
+	for _, sub := range []principal.Subject{single, tenanted} {
+		ok, err := h.s.MarkTOTPUsed(ctx, sub, 10)
+		require.NoError(t, err)
+		require.True(t, ok, "the replay guard is per subject, the single tenant included")
+	}
+	_, n := h.enrolled(t)
+	require.EqualValues(t, 2, n, "the same user in the single tenant and in a tenant is two subjects")
+
+	require.NoError(t, h.s.EraseTenant(ctx, principal.TenantID{}))
+	_, err = h.s.GetTOTP(ctx, single)
+	require.ErrorIs(t, err, store.ErrNotFound)
+	require.ErrorIs(t, h.s.ConsumeRecoveryCode(ctx, single, "c1"), store.ErrNotFound)
+	require.True(t, h.get(t, tenanted).Confirmed(), "erasing the single tenant leaves the others")
+	require.NoError(t, h.s.ConsumeRecoveryCode(ctx, tenanted, "c1"))
+}
+
 func newKEK(t *testing.T, seed string) *kek.Local {
 	t.Helper()
 	sum := sha256.Sum256([]byte("egauth/storetest/" + seed))
@@ -603,6 +667,12 @@ func sealedOpaque(t *testing.T, h *harness) {
 	require.Equal(t, plain, opened.Plaintext)
 	require.False(t, opened.Stale)
 
+	require.True(t, bytes.Contains(ref.AAD(), []byte(sub.Tenant.String())), "the associated data names the tenant")
+	require.True(t, bytes.Contains(ref.AAD(), []byte(sub.User.String())), "and the user")
+	single, err := sealing.TOTPSecret(principal.Subject{User: sub.User})
+	require.NoError(t, err)
+	_, err = sealing.Open(ctx, k, single, got.Sealed)
+	require.Error(t, err, "the single tenant's associated data fails")
 	elsewhere, err := sealing.TOTPSecret(principal.Subject{Tenant: tenant(t, "tenant-b"), User: sub.User})
 	require.NoError(t, err)
 	_, err = sealing.Open(ctx, k, elsewhere, got.Sealed)
@@ -654,6 +724,7 @@ func seedLegacy(t *testing.T, h *harness) []legacyRow {
 	rows := []legacyRow{
 		{sub: principal.Subject{Tenant: tenant(t, "tenant-a"), User: fixtureUser}, blob: cases["mfa_totp tenant:user"][0], plaintext: cases["mfa_totp tenant:user"][1]},
 		{sub: subjectIn(t, "tenant-z"), blob: cases["no aad"][0], plaintext: cases["no aad"][1]},
+		{sub: principal.Subject{User: uuid.New()}, blob: cases["no aad"][0], plaintext: cases["no aad"][1]},
 		{sub: subjectIn(t, "tenant-a"), blob: bytes.Repeat([]byte{7}, 64)},
 	}
 	for _, r := range rows {
@@ -723,6 +794,11 @@ func legacyUpgrade(t *testing.T, h *harness) {
 		opened, err := sealing.Open(ctx, k, ref, now.Sealed)
 		require.NoError(t, err)
 		require.Equal(t, want.plaintext, opened.Plaintext, "the converted secret opens under the v0.17 AAD")
+		require.False(t, bytes.Contains(now.Sealed, want.plaintext), "the converted ciphertext is never the plaintext")
+		moved, err := sealing.TOTPSecret(principal.Subject{Tenant: tenant(t, "tenant-moved"), User: want.sub.User})
+		require.NoError(t, err)
+		_, err = sealing.Open(ctx, k, moved, now.Sealed)
+		require.Error(t, err, "the converted secret is bound to its tenant")
 	}
 	require.Equal(t, 1, reported)
 	n, err = h.s.CountLegacySealed(ctx)

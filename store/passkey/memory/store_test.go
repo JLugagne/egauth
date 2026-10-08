@@ -10,6 +10,12 @@ import (
 )
 
 func TestStoreConformance(t *testing.T) {
+	storetest.Seed(t, storetest.Fixtures{
+		SeedV016: func(t *testing.T, s passkey.Store, c passkey.Credential) {
+			t.Helper()
+			s.(*memory.Store).AddV016(c)
+		},
+	})
 	storetest.Run(t, func(*testing.T) passkey.Store { return memory.New() })
 }
 

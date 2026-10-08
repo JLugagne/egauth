@@ -23,10 +23,34 @@ import (
 
 const goroutines = 16
 
+// Fixtures is what the store implementation's test hands the suite through Seed.
+type Fixtures struct {
+	// SeedV016 inserts c with DiscoverableState Legacy, the way a v0.16 deployment left it. Stores
+	// refuse a Legacy credential through Save, so each implementation provides its own.
+	SeedV016 func(t *testing.T, s passkey.Store, c passkey.Credential)
+}
+
+var fixtures sync.Map
+
+// Seed hands Run, for t and its subtests, the fixtures it needs. Call it before Run on the same t.
+func Seed(t *testing.T, f Fixtures) {
+	t.Helper()
+	fixtures.Store(t, f)
+	t.Cleanup(func() { fixtures.Delete(t) })
+}
+
 // Run exercises the passkey.Store contract against stores returned by newStore. Each subtest gets a
-// fresh, empty store.
+// fresh, empty store. Run fails t unless Seed was called on it.
 func Run(t *testing.T, newStore func(*testing.T) passkey.Store) {
 	t.Helper()
+	v, ok := fixtures.Load(t)
+	if !ok {
+		t.Fatal("storetest: call Seed(t, Fixtures{...}) before Run")
+	}
+	f := v.(Fixtures)
+	if f.SeedV016 == nil {
+		t.Fatal("storetest: Fixtures.SeedV016 is required")
+	}
 	suites := map[string]func(*testing.T, passkey.Store){
 		"Base":                  baseSuite,
 		"CredentialIDJSON":      credentialIDJSON,
@@ -36,6 +60,8 @@ func Run(t *testing.T, newStore func(*testing.T) passkey.Store) {
 		"SaveConflictRace":      saveConflictRace,
 		"RawIDsRoundTrip":       rawIDs,
 		"DiscoverableState":     discoverableState,
+		"LegacyRows":            func(t *testing.T, s passkey.Store) { legacyRows(t, s, f) },
+		"SingleTenant":          singleTenant,
 		"Update":                update,
 		"UpdateSignCount":       updateSignCount,
 		"SignCountRace":         signCountRace,
@@ -235,6 +261,7 @@ func saveRefusals(t *testing.T, s passkey.Store) {
 		}(),
 		"no public key": func() passkey.Credential { c := cred(sub, "a"); c.PublicKey = nil; return c }(),
 		"unknown state": func() passkey.Credential { c := cred(sub, "a"); c.Discoverable = 9; return c }(),
+		"legacy state":  func() passkey.Credential { c := cred(sub, "a"); c.Discoverable = passkey.Legacy; return c }(),
 	} {
 		err := s.Save(ctx, c)
 		require.Error(t, err, name)
@@ -267,10 +294,6 @@ func saveConflictRace(t *testing.T, s passkey.Store) {
 	require.EqualValues(t, goroutines-1, conflicts.Load())
 }
 
-func errorsIs(err, target error) bool {
-	return err != nil && strings.Contains(err.Error(), target.Error())
-}
-
 func rawIDs(t *testing.T, s passkey.Store) {
 	ctx := context.Background()
 	sub := subjectIn(t, "tenant-a")
@@ -292,21 +315,85 @@ func rawIDs(t *testing.T, s passkey.Store) {
 func discoverableState(t *testing.T, s passkey.Store) {
 	ctx := context.Background()
 	sub := subjectIn(t, "tenant-a")
-	for _, st := range []passkey.DiscoverableState{passkey.Legacy, passkey.Confirmed, passkey.Inferred} {
+	for _, st := range []passkey.DiscoverableState{passkey.Confirmed, passkey.Inferred} {
 		c := cred(sub, st.String())
 		c.Discoverable = st
 		require.NoError(t, s.Save(ctx, c))
 		require.Equal(t, st, get(t, s, sub, st.String()).Discoverable)
 	}
-	require.True(t, get(t, s, sub, "legacy").Discoverable.NeedsReregistration())
 
-	c := get(t, s, sub, "legacy")
+	fresh := cred(sub, "legacy")
+	fresh.Discoverable = passkey.Legacy
+	err := s.Save(ctx, fresh)
+	require.Error(t, err, "Legacy is reserved for v0.16 rows, never written for a new credential")
+	require.NotErrorIs(t, err, store.ErrConflict)
+	_, err = s.Get(ctx, sub.Tenant, fresh.ID)
+	require.ErrorIs(t, err, store.ErrNotFound, "a refused save leaves nothing behind")
+
+	c := get(t, s, sub, "inferred")
 	c.Discoverable = passkey.Confirmed
 	require.NoError(t, s.Update(ctx, c))
-	require.Equal(t, passkey.Confirmed, get(t, s, sub, "legacy").Discoverable)
+	require.Equal(t, passkey.Confirmed, get(t, s, sub, "inferred").Discoverable)
+	c.Discoverable = passkey.Legacy
+	c.Nickname = "downgrade"
+	require.NoError(t, s.Update(ctx, c))
+	got := get(t, s, sub, "inferred")
+	require.Equal(t, passkey.Confirmed, got.Discoverable, "Update never downgrades a credential to Legacy")
+	require.Equal(t, "downgrade", got.Nickname)
 	c.Discoverable = 9
 	require.Error(t, s.Update(ctx, c))
-	require.Equal(t, passkey.Confirmed, get(t, s, sub, "legacy").Discoverable)
+	require.Equal(t, passkey.Confirmed, get(t, s, sub, "inferred").Discoverable)
+}
+
+func legacyRows(t *testing.T, s passkey.Store, f Fixtures) {
+	ctx := context.Background()
+	for name, sub := range map[string]principal.Subject{
+		"tenant":        subjectIn(t, "tenant-a"),
+		"single tenant": {User: uuid.New()},
+	} {
+		c := cred(sub, "v016-"+name)
+		c.Discoverable = passkey.Legacy
+		f.SeedV016(t, s, c)
+		got := get(t, s, sub, string(c.ID))
+		require.Equal(t, sub, got.Subject, name)
+		require.Equal(t, passkey.Legacy, got.Discoverable, name)
+		require.True(t, got.Discoverable.NeedsReregistration(), name)
+		ok, err := s.HasActive(ctx, sub)
+		require.NoError(t, err)
+		require.True(t, ok, "%s: a v0.16 credential still authenticates until re-registered", name)
+
+		got.Nickname = "renamed"
+		require.NoError(t, s.Update(ctx, got), "%s: a v0.16 credential can be renamed as read", name)
+		got = get(t, s, sub, string(c.ID))
+		require.Equal(t, "renamed", got.Nickname, name)
+		require.Equal(t, passkey.Legacy, got.Discoverable, name)
+
+		got.Discoverable = passkey.Confirmed
+		require.NoError(t, s.Update(ctx, got))
+		require.Equal(t, passkey.Confirmed, get(t, s, sub, string(c.ID)).Discoverable, name)
+	}
+}
+
+func singleTenant(t *testing.T, s passkey.Store) {
+	ctx := context.Background()
+	single := principal.Subject{User: uuid.New()}
+	tenanted := principal.Subject{Tenant: tenant(t, "tenant-a"), User: single.User}
+	require.NoError(t, s.Save(ctx, cred(single, "same")))
+	require.NoError(t, s.Save(ctx, cred(tenanted, "same")), "the single tenant is a tenant of its own")
+	requireCred(t, cred(single, "same"), get(t, s, single, "same"))
+	list, err := s.List(ctx, single)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	require.Equal(t, single, list[0].Subject)
+	ok, err := s.UpdateSignCount(ctx, single, passkey.CredentialID("same"), 3)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Zero(t, get(t, s, tenanted, "same").SignCount, "the same user under a tenant is another subject")
+
+	require.NoError(t, s.EraseTenant(ctx, principal.TenantID{}))
+	_, err = s.Get(ctx, principal.TenantID{}, passkey.CredentialID("same"))
+	require.ErrorIs(t, err, store.ErrNotFound)
+	get(t, s, tenanted, "same")
 }
 
 func update(t *testing.T, s passkey.Store) {

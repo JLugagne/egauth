@@ -59,7 +59,7 @@ func checkCredential(c passkey.Credential) error {
 	if len(c.PublicKey) == 0 {
 		return errInvalid("public key")
 	}
-	if !c.Discoverable.Valid() {
+	if !c.Discoverable.Valid() || c.Discoverable == passkey.Legacy {
 		return errInvalid("discoverable state")
 	}
 	return nil
@@ -164,7 +164,9 @@ func (s *Store) Update(ctx context.Context, c passkey.Credential) error {
 	cur.Transports = v.Transports
 	cur.BackupEligible = v.BackupEligible
 	cur.BackupState = v.BackupState
-	cur.Discoverable = v.Discoverable
+	if v.Discoverable != passkey.Legacy {
+		cur.Discoverable = v.Discoverable
+	}
 	return nil
 }
 

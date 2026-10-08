@@ -68,7 +68,7 @@ func checkCredential(c contract.Credential) error {
 		return errors.New("passkey: invalid credential id")
 	case len(c.PublicKey) == 0:
 		return errors.New("passkey: invalid credential public key")
-	case !c.Discoverable.Valid():
+	case !c.Discoverable.Valid() || c.Discoverable == contract.Legacy:
 		return errors.New("passkey: invalid credential discoverable state")
 	}
 	return nil
@@ -176,7 +176,8 @@ func (s *Store) Update(ctx context.Context, c contract.Credential) error {
 		return errors.New("passkey: invalid credential discoverable state")
 	}
 	tag, err := s.db.Exec(ctx, `UPDATE passkey_credentials
-SET nickname = $4, last_used_at = $5, transports = $6, backup_eligible = $7, backup_state = $8, discoverable = $9
+SET nickname = $4, last_used_at = $5, transports = $6, backup_eligible = $7, backup_state = $8,
+    discoverable = CASE WHEN $9::smallint = 0 THEN discoverable ELSE $9::smallint END
 WHERE tenant_id = $1 AND user_id = $2 AND credential_id = $3`,
 		c.Subject.Tenant.String(), c.Subject.User, []byte(c.ID), c.Nickname, utc(c.LastUsedAt), c.Transports,
 		c.BackupEligible, c.BackupState, int16(c.Discoverable))
