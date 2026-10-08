@@ -340,10 +340,10 @@ func checkOrigins[C any](cfg *Config[C], v *problems) {
 		switch {
 		case strings.Contains(a, tenantLabel):
 			v.add(field, "must be a fixed origin, without "+tenantLabel)
-		case a != "" && a == cfg.PublicOrigin:
-			v.add(field, "must not equal PublicOrigin: session tokens are never accepted by resource servers")
-		case a != "" && slices.Contains(cfg.ExtraOrigins, a):
-			v.add(field, "must not equal an ExtraOrigins entry: session tokens are never accepted by resource servers")
+		case a != "" && sameOrTenantOf(cfg.PublicOrigin, a):
+			v.add(field, "must not equal PublicOrigin or one of its tenant origins: session tokens are never accepted by resource servers")
+		case a != "" && slices.ContainsFunc(cfg.ExtraOrigins, func(o string) bool { return sameOrTenantOf(o, a) }):
+			v.add(field, "must not equal an ExtraOrigins entry or one of its tenant origins: session tokens are never accepted by resource servers")
 		}
 	}
 	if cfg.BasePath == wellKnownRoot || strings.HasPrefix(cfg.BasePath, wellKnownRoot+"/") {
@@ -352,6 +352,22 @@ func checkOrigins[C any](cfg *Config[C], v *problems) {
 	if s := cfg.Insecure.SharedCookieDomain; s != nil {
 		checkSharedDomain(cfg, s.Domain, v)
 	}
+}
+
+func sameOrTenantOf(pattern, origin string) bool {
+	if pattern == origin {
+		return true
+	}
+	prefix, suffix, ok := strings.Cut(pattern, tenantLabel)
+	if !ok {
+		return false
+	}
+	label, ok := strings.CutPrefix(strings.ToLower(origin), prefix)
+	if !ok {
+		return false
+	}
+	label, ok = strings.CutSuffix(label, suffix)
+	return ok && label != "" && !strings.ContainsAny(label, "./:@")
 }
 
 func checkSharedDomain[C any](cfg *Config[C], domain string, v *problems) {

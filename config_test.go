@@ -453,6 +453,24 @@ func TestConfigOrigins(t *testing.T) {
 			c.Audiences = []string{"https://{tenant}.api.example.com"}
 		}, "Audiences[0]"},
 		{"audience equals extra origin", func(c *egauth.Config[struct{}]) { c.Audiences = []string{c.ExtraOrigins[0]} }, "Audiences[0]"},
+		{"audience is a tenant of public origin", func(c *egauth.Config[struct{}]) {
+			c.Tenancy = egauth.TenantBySubdomain()
+			c.PublicOrigin = "https://{tenant}.example.com"
+			c.ExtraOrigins = nil
+			c.Audiences = []string{"https://acme.example.com"}
+		}, "Audiences[0]"},
+		{"audience is a tenant of public origin with port", func(c *egauth.Config[struct{}]) {
+			c.Tenancy = egauth.TenantBySubdomain()
+			c.PublicOrigin = "https://{tenant}.example.com:8443"
+			c.ExtraOrigins = nil
+			c.Audiences = []string{"https://api.example.com", "https://acme.example.com:8443"}
+		}, "Audiences[1]"},
+		{"audience is a tenant of an extra origin", func(c *egauth.Config[struct{}]) {
+			c.Tenancy = egauth.TenantBySubdomain()
+			c.PublicOrigin = "https://{tenant}.example.com"
+			c.ExtraOrigins = []string{"https://{tenant}.example.com:8443"}
+			c.Audiences = []string{"https://acme.example.com:8443"}
+		}, "Audiences[0]"},
 		{"base path trailing slash", func(c *egauth.Config[struct{}]) { c.BasePath = "/auth/" }, "BasePath"},
 		{"base path well-known", func(c *egauth.Config[struct{}]) { c.BasePath = "/.well-known" }, "BasePath"},
 		{"base path under well-known", func(c *egauth.Config[struct{}]) { c.BasePath = "/.well-known/auth" }, "BasePath"},
@@ -471,7 +489,16 @@ func TestConfigOrigins(t *testing.T) {
 		cfg.Tenancy = egauth.TenantBySubdomain()
 		cfg.PublicOrigin = "https://{tenant}.example.com"
 		cfg.ExtraOrigins = nil
+		cfg.Audiences = []string{"https://api.example.net"}
 		cfg.Pages.AfterLogin = "https://{tenant}.example.com/home"
+		require.NoError(t, newErr(t, cfg))
+	})
+	t.Run("audience outside every tenant pattern", func(t *testing.T) {
+		cfg := fullConfig(t)
+		cfg.Tenancy = egauth.TenantBySubdomain()
+		cfg.PublicOrigin = "https://{tenant}.example.com"
+		cfg.ExtraOrigins = nil
+		cfg.Audiences = []string{"https://api.example.net", "https://a.b.example.com", "https://example.com"}
 		require.NoError(t, newErr(t, cfg))
 	})
 	t.Run("absolute page on an allowed origin", func(t *testing.T) {

@@ -103,6 +103,15 @@ func TestRoutesDeclRejectsInvalidDeclarations(t *testing.T) {
 			return r.Protect("GET /x", noop, egauth.SessionRequirement{})
 		}},
 		{"nil option", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] { return r.Protect("GET /x", noop, nil) }},
+		{"typed nil session requirement", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] {
+			return r.Protect("GET /x", noop, (*egauth.SessionRequirement)(nil))
+		}},
+		{"typed nil claim requirement on optional", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] {
+			return r.Optional("GET /x", noop, (*egauth.ClaimRequirement)(nil))
+		}},
+		{"typed nil claim requirement on api", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] {
+			return r.ProtectAPI("GET /x", noop, egauth.Kinds("service"), (*egauth.ClaimRequirement)(nil))
+		}},
 		{"nil principal handler", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] { return r.Protect("GET /x", nil) }},
 		{"nil public handler", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] { return r.Public("GET /x", nil) }},
 		{"undeclared api kind", func(r *egauth.Routes[struct{}]) *egauth.Routes[struct{}] {

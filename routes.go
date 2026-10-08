@@ -59,7 +59,7 @@ func (rt *Routes[C]) ProtectAPI(pattern string, h PrincipalHandler[C], kinds API
 		}
 	}
 	for i, o := range opts {
-		if o == nil {
+		if !present(o) {
 			rt.fail(pattern, "option "+strconv.Itoa(i)+" is nil")
 			continue
 		}
@@ -86,7 +86,7 @@ func (rt *Routes[C]) Public(pattern string, h http.Handler) *Routes[C] {
 func (rt *Routes[C]) session(kind routes.Kind, pattern string, h PrincipalHandler[C], opts []RouteOption) *Routes[C] {
 	d := routes.Declaration{Pattern: pattern, Kind: kind}
 	for i, o := range opts {
-		if o == nil {
+		if !present(o) {
 			rt.fail(pattern, "option "+strconv.Itoa(i)+" is nil")
 			continue
 		}

@@ -20,9 +20,18 @@ import (
 )
 
 type guardRoot struct {
-	name   string
-	typ    reflect.Type
-	prefix []string
+	name      string
+	typ       reflect.Type
+	prefix    []string
+	full      func(t *testing.T) reflect.Value
+	check     func(t *testing.T, root reflect.Value) error
+	resolve   func(root reflect.Value) (*configcheck.Resolved, []*configcheck.Error)
+	options   func(t *testing.T) configcheck.Options
+	setModule func(t *testing.T, root reflect.Value, path string, on bool)
+}
+
+func configRoot(root reflect.Value) egauth.Config[struct{}] {
+	return root.Interface().(egauth.Config[struct{}])
 }
 
 var guardRoots = []guardRoot{
@@ -33,7 +42,30 @@ var guardRoots = []guardRoot{
 			"Storage.", "Policy.", "Pages.", "Modules.Password.", "Modules.Passkey.", "Modules.OAuth.",
 			"Modules.External.", "Modules.MFA.", "Modules.APIKeys.",
 		},
+		full: func(t *testing.T) reflect.Value {
+			cfg := fullConfig(t)
+			return reflect.ValueOf(&cfg).Elem()
+		},
+		check: func(t *testing.T, root reflect.Value) error { return newErr(t, configRoot(root)) },
+		resolve: func(root reflect.Value) (*configcheck.Resolved, []*configcheck.Error) {
+			return egauth.Resolve(configRoot(root))
+		},
+		options: func(t *testing.T) configcheck.Options { return egauth.ConfigOptions(fullConfig(t)) },
+		setModule: func(t *testing.T, root reflect.Value, path string, on bool) {
+			setModule(t, root.Addr().Interface().(*egauth.Config[struct{}]), path, on)
+		},
 	},
+}
+
+func forEachGuardRoot(t *testing.T, run func(t *testing.T, root guardRoot)) {
+	for _, root := range guardRoots {
+		t.Run(root.name, func(t *testing.T) {
+			require.True(t, root.full != nil && root.check != nil && root.resolve != nil && root.options != nil && root.setModule != nil,
+				"guardRoots entry %s needs every hook so the G5 variants run on its fields", root.name)
+			require.Equal(t, root.typ, root.full(t).Type(), "full of %s builds another type", root.name)
+			run(t, root)
+		})
+	}
 }
 
 func TestG05EveryTaggedStructIsReachedFromARoot(t *testing.T) {
@@ -113,62 +145,71 @@ func taggedStructs(t *testing.T) []string {
 	return out
 }
 
-func guardFields(t *testing.T) ([]configcheck.Field, configcheck.Options) {
+func guardFields(t *testing.T, root guardRoot) ([]configcheck.Field, configcheck.Options) {
 	t.Helper()
-	opts := egauth.ConfigOptions(fullConfig(t))
-	fields, errs := configcheck.Fields(reflect.TypeFor[egauth.Config[struct{}]](), opts)
-	require.Empty(t, errs, "the egauth tags of Config are inconsistent")
+	opts := root.options(t)
+	fields, errs := configcheck.Fields(root.typ, opts)
+	require.Empty(t, errs, "the egauth tags of %s are inconsistent", root.name)
 	return fields, opts
 }
 
 func TestG05EveryRootSpecIsConsistent(t *testing.T) {
-	opts := egauth.ConfigOptions(fullConfig(t))
-	for _, root := range guardRoots {
-		t.Run(root.name, func(t *testing.T) {
-			fields, errs := configcheck.Fields(root.typ, opts)
-			require.Empty(t, errs)
-			for _, p := range root.prefix {
-				require.True(t, slices.ContainsFunc(fields, func(f configcheck.Field) bool { return strings.HasPrefix(f.Path, p) }),
-					"no tagged field under %s: the guard does not reach that struct", p)
-			}
-		})
-	}
+	forEachGuardRoot(t, func(t *testing.T, root guardRoot) {
+		fields, _ := guardFields(t, root)
+		for _, p := range root.prefix {
+			require.True(t, slices.ContainsFunc(fields, func(f configcheck.Field) bool { return strings.HasPrefix(f.Path, p) }),
+				"no tagged field under %s: the guard does not reach that struct", p)
+		}
+	})
 }
 
 func TestG05DefaultsRegistryMatchesTagsOneToOne(t *testing.T) {
-	fields, opts := guardFields(t)
-	var tagged []string
-	for _, f := range fields {
-		if f.Tag.Requirement == configcheck.Defaulted && !slices.Contains(tagged, f.Tag.Default) {
-			tagged = append(tagged, f.Tag.Default)
+	forEachGuardRoot(t, func(t *testing.T, root guardRoot) {
+		fields, opts := guardFields(t, root)
+		var tagged []string
+		for _, f := range fields {
+			if f.Tag.Requirement == configcheck.Defaulted && !slices.Contains(tagged, f.Tag.Default) {
+				tagged = append(tagged, f.Tag.Default)
+			}
 		}
-	}
-	var registry []string
-	for k := range opts.Defaults {
-		registry = append(registry, k)
-	}
-	sort.Strings(tagged)
-	sort.Strings(registry)
-	require.Equal(t, registry, tagged)
+		var registry []string
+		for k := range opts.Defaults {
+			registry = append(registry, k)
+		}
+		sort.Strings(tagged)
+		sort.Strings(registry)
+		require.Equal(t, registry, tagged)
+	})
 }
 
 func TestG05EveryFieldVariantFailsAtItsPath(t *testing.T) {
-	fields, opts := guardFields(t)
-	for _, f := range fields {
-		t.Run(f.Path, func(t *testing.T) {
-			require.NotContains(t, f.Path, "[]", "extend the G5 guard to reach fields nested in slices")
-			zeroVariant(t, f)
-			kindVariants(t, f)
-			for _, p := range f.Tag.Predicates {
-				predicateVariant(t, f, p, opts)
-			}
-		})
-	}
+	forEachGuardRoot(t, func(t *testing.T, root guardRoot) {
+		fields, opts := guardFields(t, root)
+		require.NotEmpty(t, fields)
+		for _, f := range fields {
+			t.Run(f.Path, func(t *testing.T) {
+				require.NotContains(t, f.Path, "[]", "extend the G5 guard to reach fields nested in slices")
+				zeroVariant(t, root, f)
+				kindVariants(t, root, f)
+				for _, p := range f.Tag.Predicates {
+					predicateVariant(t, root, f, p, opts)
+				}
+			})
+		}
+	})
 }
 
-func fieldAt(t *testing.T, cfg *egauth.Config[struct{}], path string) reflect.Value {
+func TestG05GuardRootHooksSeeTheirOwnRoot(t *testing.T) {
+	forEachGuardRoot(t, func(t *testing.T, root guardRoot) {
+		require.NoError(t, root.check(t, root.full(t)), "the full %s must be valid", root.name)
+		_, errs := root.resolve(root.full(t))
+		require.Empty(t, errs)
+	})
+}
+
+func fieldAt(t *testing.T, root reflect.Value, path string) reflect.Value {
 	t.Helper()
-	v := reflect.ValueOf(cfg).Elem()
+	v := root
 	for _, seg := range strings.Split(path, ".") {
 		for v.Kind() == reflect.Pointer {
 			require.False(t, v.IsNil(), "%s crosses a nil pointer in the full config", path)
@@ -180,29 +221,39 @@ func fieldAt(t *testing.T, cfg *egauth.Config[struct{}], path string) reflect.Va
 	return v
 }
 
-func variant(t *testing.T, path string, set func(reflect.Value), mods ...func(*egauth.Config[struct{}])) error {
+type rootMod func(t *testing.T, root reflect.Value)
+
+func variant(t *testing.T, g guardRoot, path string, set func(reflect.Value), mods ...rootMod) error {
 	t.Helper()
-	cfg := fullConfig(t)
+	root := g.full(t)
 	for _, m := range mods {
-		m(&cfg)
+		m(t, root)
 	}
-	set(fieldAt(t, &cfg, path))
-	return newErr(t, cfg)
+	set(fieldAt(t, root, path))
+	return g.check(t, root)
+}
+
+func modules(g guardRoot, paths []string, on bool) rootMod {
+	return func(t *testing.T, root reflect.Value) {
+		for _, m := range paths {
+			g.setModule(t, root, m, on)
+		}
+	}
 }
 
 func zero(v reflect.Value) { v.Set(reflect.Zero(v.Type())) }
 
-func zeroVariant(t *testing.T, f configcheck.Field) {
+func zeroVariant(t *testing.T, g guardRoot, f configcheck.Field) {
 	switch f.Tag.Requirement {
 	case configcheck.Required:
-		requireField(t, variant(t, f.Path, zero), f.Path)
+		requireField(t, variant(t, g, f.Path, zero), f.Path)
 	case configcheck.Optional:
-		requireNoField(t, variant(t, f.Path, zero), f.Path)
+		requireNoField(t, variant(t, g, f.Path, zero), f.Path)
 	case configcheck.Defaulted:
-		require.NoError(t, variant(t, f.Path, zero))
-		cfg := fullConfig(t)
-		zero(fieldAt(t, &cfg, f.Path))
-		r, errs := egauth.Resolve(cfg)
+		require.NoError(t, variant(t, g, f.Path, zero))
+		root := g.full(t)
+		zero(fieldAt(t, root, f.Path))
+		r, errs := g.resolve(root)
 		require.Empty(t, errs)
 		require.True(t, r.Defaulted(f.Path))
 		got, ok := r.Get(f.Path)
@@ -210,66 +261,49 @@ func zeroVariant(t *testing.T, f configcheck.Field) {
 		require.False(t, reflect.ValueOf(got).IsZero(), "default of %s is zero", f.Path)
 	case configcheck.ModuleDependent:
 		for _, m := range f.Tag.Modules {
-			only := func(c *egauth.Config[struct{}]) {
-				for _, other := range f.Tag.Modules {
-					setModule(t, c, other, false)
-				}
-				setModule(t, c, m, true)
-			}
-			requireField(t, variant(t, f.Path, zero, only), f.Path)
+			requireField(t, variant(t, g, f.Path, zero, modules(g, f.Tag.Modules, false), modules(g, []string{m}, true)), f.Path)
 		}
-		none := func(c *egauth.Config[struct{}]) {
-			for _, m := range f.Tag.Modules {
-				setModule(t, c, m, false)
-			}
-		}
-		requireNoField(t, variant(t, f.Path, zero, none), f.Path)
+		requireNoField(t, variant(t, g, f.Path, zero, modules(g, f.Tag.Modules, false)), f.Path)
 	default:
 		t.Fatalf("no G5 variant for requirement %v", f.Tag.Requirement)
 	}
 }
 
-func kindVariants(t *testing.T, f configcheck.Field) {
+func kindVariants(t *testing.T, g guardRoot, f configcheck.Field) {
 	switch {
 	case f.Type.Kind() == reflect.String:
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.SetString(" \t ") }), f.Path)
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.SetString(" \t ") }), f.Path)
 	case f.Type.Kind() == reflect.Slice:
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.Set(reflect.MakeSlice(v.Type(), 0, 0)) }), f.Path)
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.Set(reflect.MakeSlice(v.Type(), 1, 1)) }), f.Path+"[0]")
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.Set(reflect.MakeSlice(v.Type(), 0, 0)) }), f.Path)
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.Set(reflect.MakeSlice(v.Type(), 1, 1)) }), f.Path+"[0]")
 	case f.Type == reflect.TypeFor[time.Duration]():
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.SetInt(-1) }), f.Path)
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.SetInt(-1) }), f.Path)
 	}
 }
 
-func predicateVariant(t *testing.T, f configcheck.Field, p configcheck.Predicate, opts configcheck.Options) {
+func predicateVariant(t *testing.T, g guardRoot, f configcheck.Field, p configcheck.Predicate, opts configcheck.Options) {
 	switch p.Kind {
 	case configcheck.NonEmpty:
-		requireField(t, variant(t, f.Path, zero), f.Path)
+		requireField(t, variant(t, g, f.Path, zero), f.Path)
 	case configcheck.Origin, configcheck.Path, configcheck.Token:
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.Set(reflect.ValueOf(invalidFor(t, p.Kind))) }), f.Path)
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.Set(reflect.ValueOf(invalidFor(t, p.Kind))) }), f.Path)
 	case configcheck.Each:
 		bad := func(v reflect.Value) {
 			s := reflect.MakeSlice(v.Type(), 1, 1)
 			s.Index(0).Set(reflect.ValueOf(invalidFor(t, p.Elem.Kind)))
 			v.Set(s)
 		}
-		requireField(t, variant(t, f.Path, bad), f.Path+"[0]")
+		requireField(t, variant(t, g, f.Path, bad), f.Path+"[0]")
 	case configcheck.OneOfPrimary:
-		noPrimary := func(c *egauth.Config[struct{}]) {
-			for _, m := range opts.Primary {
-				setModule(t, c, m, false)
-			}
-		}
-		requireField(t, variant(t, f.Path, func(reflect.Value) {}, noPrimary), f.Path)
+		requireField(t, variant(t, g, f.Path, func(reflect.Value) {}, modules(g, opts.Primary, false)), f.Path)
 	case configcheck.BoundMax:
-		requireField(t, variant(t, f.Path, func(v reflect.Value) { v.SetInt(int64(p.Max + time.Nanosecond)) }), f.Path)
+		requireField(t, variant(t, g, f.Path, func(v reflect.Value) { v.SetInt(int64(p.Max + time.Nanosecond)) }), f.Path)
 	case configcheck.BoundLE:
 		over := func(v reflect.Value) {
-			cfg := fullConfig(t)
-			ref := fieldAt(t, &cfg, strings.TrimSuffix(f.Path, lastSegment(f.Path))+p.Ref)
+			ref := fieldAt(t, g.full(t), strings.TrimSuffix(f.Path, lastSegment(f.Path))+p.Ref)
 			v.SetInt(ref.Int() + int64(time.Hour))
 		}
-		requireField(t, variant(t, f.Path, over), f.Path)
+		requireField(t, variant(t, g, f.Path, over), f.Path)
 	default:
 		t.Fatalf("no G5 variant for predicate %v", p.Kind)
 	}
