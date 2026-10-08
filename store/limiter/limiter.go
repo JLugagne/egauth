@@ -40,8 +40,10 @@ type Budget struct {
 }
 
 // PerInstance returns the share of b one of n live instances enforces when each keeps its own
-// buckets: Burst divided by n, never below one, and Refill multiplied by n, so n instances together
-// never exceed b. An n below 2 returns b unchanged.
+// buckets: Burst divided by n, never below one, and Refill multiplied by n. n instances together
+// never refill faster than b, and their combined burst stays within b.Burst while n <= b.Burst; past
+// that each instance still holds one token, so the combined burst is n. An n below 2 returns b
+// unchanged.
 func (b Budget) PerInstance(n int) Budget {
 	if n < 2 {
 		return b
