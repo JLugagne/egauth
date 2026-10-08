@@ -1,0 +1,3 @@
+ALTER TABLE passkey_credentials ADD COLUMN IF NOT EXISTS discoverable SMALLINT NOT NULL DEFAULT 0;
+
+ALTER TABLE passkey_credentials ADD COLUMN IF NOT EXISTS suspended_at TIMESTAMPTZ NULL;
