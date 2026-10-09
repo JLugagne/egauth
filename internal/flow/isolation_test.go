@@ -39,7 +39,7 @@ var flowRefs = []flowRef{
 	{pkg: modulePath + "/internal/cookie", name: "Flow", allowed: []string{"internal/flow"}},
 	{pkg: modulePath + "/internal/ceremonycodec", name: "MFAFlow", allowed: []string{"internal/flow", "internal/issuance"}},
 	{pkg: modulePath + "/store/ceremony", name: "MFAFlow", allowed: []string{
-		"internal/flow", "internal/issuance", "internal/ceremonycodec", "store/ceremony/", "adapters/pgx/store/ceremony/",
+		"internal/flow", "internal/issuance", "internal/ceremonycodec", "internal/lifecycle", "store/ceremony/", "adapters/pgx/store/ceremony/",
 	}},
 }
 
@@ -104,7 +104,8 @@ func importNames(f *ast.File) map[string]string {
 // TestOnlyTheFlowReadsParkedLogins closes T-06 (and I-01, W-06) statically: outside internal/flow no
 // non-test code names the flow cookie, and outside internal/flow and internal/issuance (which only
 // writes the record) no code names the MFAFlow kind or codec, except the ceremony store contract and
-// its implementations. The bypasses of a selector match are closed too: a dot import of those
+// its implementations and internal/lifecycle, which only deletes parked flows and never reads one.
+// The bypasses of a selector match are closed too: a dot import of those
 // packages, the flow cookie's name as a literal outside internal/cookie, and a conversion to
 // ceremony.Kind. Session gates, /session and every other endpoint therefore cannot read a parked
 // login.
