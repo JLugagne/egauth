@@ -108,6 +108,9 @@ func (s *Service) sendAccountExists(ctx context.Context, m NoticeMessage) {
 }
 
 func (s *Service) sendReset(ctx context.Context, p core.Pending, u identity.User, st core.AccountState) {
+	if s.noReset {
+		return
+	}
 	id := uuid.New()
 	s.mail.enqueue(ctx, u.Subject.Tenant, id, func(c context.Context) error {
 		m, err := s.putReset(c, p, u, st)

@@ -122,10 +122,12 @@ type Config struct {
 	// OpenRegistration mounts /register and /register/confirm (RegistrationOpen).
 	OpenRegistration bool
 	// LoginPage is where a browser form is redirected after a password reset (Pages.Login).
-	LoginPage  redirect.Target
-	Dispatcher OutboxDispatcher
-	Clock      clock.Clock
-	Audit      httpx.Audit
+	LoginPage redirect.Target
+	// NoPasswordReset marks a deployment with no password-reset page: no reset link is ever built or sent, a security revert included.
+	NoPasswordReset bool
+	Dispatcher      OutboxDispatcher
+	Clock           clock.Clock
+	Audit           httpx.Audit
 }
 
 // Service is the identity service. It is safe for concurrent use; Close stops its delivery workers.
@@ -142,6 +144,7 @@ type Service struct {
 	scopes     ScopeKey
 	register   bool
 	loginPage  redirect.Target
+	noReset    bool
 	dispatcher OutboxDispatcher
 	clock      clock.Clock
 	audit      httpx.Audit
@@ -200,6 +203,7 @@ func New(cfg Config) (*Service, error) {
 		scopes:     scopes,
 		register:   cfg.OpenRegistration,
 		loginPage:  cfg.LoginPage,
+		noReset:    cfg.NoPasswordReset,
 		dispatcher: cfg.Dispatcher,
 		clock:      cfg.Clock,
 		audit:      cfg.Audit,

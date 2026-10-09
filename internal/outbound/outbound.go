@@ -10,6 +10,7 @@ package outbound
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"net/http"
@@ -64,6 +65,9 @@ type Config struct {
 	Static   Allowance
 	Tenant   Allowance
 	Observer Observer
+	// RootCAs replaces the system roots for the TLS handshake; nil keeps them. It exists so that a
+	// test can trust a self-signed provider; the SSRF dial guard still applies.
+	RootCAs *x509.CertPool
 }
 
 // Clients holds one Client per allowance scope. It is safe for concurrent use.
@@ -76,8 +80,8 @@ type Clients struct {
 // clients that reach public addresses only.
 func New(c Config) *Clients {
 	return &Clients{
-		static: newClient(c.Static, c.Observer),
-		tenant: newClient(c.Tenant, c.Observer),
+		static: newClient(c.Static, c.Observer, c.RootCAs),
+		tenant: newClient(c.Tenant, c.Observer, c.RootCAs),
 	}
 }
 
@@ -104,7 +108,7 @@ type Client struct {
 	allow        Allowance
 }
 
-func newClient(a Allowance, obs Observer) Client {
+func newClient(a Allowance, obs Observer, roots *x509.CertPool) Client {
 	dialer := &net.Dialer{
 		Timeout:   dialTimeout,
 		KeepAlive: keepAlive,
@@ -114,7 +118,7 @@ func newClient(a Allowance, obs Observer) Client {
 		Proxy:                  nil,
 		DialContext:            dialer.DialContext,
 		ForceAttemptHTTP2:      true,
-		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: roots},
 		TLSHandshakeTimeout:    tlsHandshakeTimeout,
 		ResponseHeaderTimeout:  responseHeaderTimeout,
 		ExpectContinueTimeout:  expectContinueTimeout,

@@ -19,9 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/egauthtest"
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/federation"
 	"github.com/JLugagne/egauth/kek"
+	"github.com/JLugagne/egauth/memstore"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/signing"
 	"github.com/JLugagne/egauth/store"
@@ -31,10 +33,14 @@ import (
 	"github.com/JLugagne/egauth/store/identity"
 	"github.com/JLugagne/egauth/store/keys"
 	"github.com/JLugagne/egauth/store/limiter"
+	limitermem "github.com/JLugagne/egauth/store/limiter/memory"
 	"github.com/JLugagne/egauth/store/mfa"
+	mfamem "github.com/JLugagne/egauth/store/mfa/memory"
 	"github.com/JLugagne/egauth/store/passkey"
+	passkeymem "github.com/JLugagne/egauth/store/passkey/memory"
 	"github.com/JLugagne/egauth/store/sessions"
 	"github.com/JLugagne/egauth/store/tokens"
+	tokensmem "github.com/JLugagne/egauth/store/tokens/memory"
 )
 
 type base struct {
@@ -123,18 +129,23 @@ func (s keysStub) Ping(context.Context) error   { return s.b.err }
 func (s keysStub) Durability() store.Durability { return s.b.d }
 
 func storage(d store.Durability) egauth.Storage {
+	m := memstore.New(nil)
 	return egauth.Storage{
-		Identity:   identityStub{b: &base{d: d}},
-		Ceremonies: ceremonyStub{b: &base{d: d}},
-		Deployment: deploymentStub{b: &base{d: d}},
-		Limiter:    limiterStub{b: &base{d: d}},
-		Tokens:     tokensStub{b: &base{d: d}},
-		Sessions:   sessionsStub{b: &base{d: d}},
-		MFA:        mfaStub{b: &base{d: d}},
-		Passkeys:   passkeyStub{b: &base{d: d}},
-		Federation: federationStub{b: &base{d: d}},
-		Keys:       keysStub{b: &base{d: d}},
+		Identity:   identityStub{Store: m.Identity, b: &base{d: d}},
+		Ceremonies: ceremonyStub{Store: m.Ceremonies, b: &base{d: d}},
+		Deployment: deploymentStub{Store: m.Deployment, b: &base{d: d}},
+		Limiter:    memLimiter(d),
+		Tokens:     tokensStub{Store: m.Tokens, b: &base{d: d}},
+		Sessions:   sessionsStub{Store: m.Sessions, b: &base{d: d}},
+		MFA:        mfaStub{Store: m.MFA, b: &base{d: d}},
+		Passkeys:   passkeyStub{Store: m.Passkeys, b: &base{d: d}},
+		Federation: federationStub{Store: m.Federation, b: &base{d: d}},
+		Keys:       keysStub{Store: m.Keys, b: &base{d: d}},
 	}
+}
+
+func memLimiter(d store.Durability) limiterStub {
+	return limiterStub{Limiter: limitermem.New(), b: &base{d: d}}
 }
 
 type emailStub struct{ egauth.EmailDeliverer }
@@ -245,7 +256,7 @@ func fullConfig(t testing.TB) egauth.Config[struct{}] {
 			VerifyEmail: "/verify", ConfirmEmailChange: "/email/confirm", SecurityRevert: "/revert",
 		},
 		Modules:   fullModules(),
-		RateLimit: limiterStub{b: &base{d: store.Shared}},
+		RateLimit: memLimiter(store.Shared),
 		Outbound:  observerStub{},
 		Hooks:     egauth.Hooks{BeforeEndpoint: func(context.Context, egauth.EndpointRequest) error { return nil }},
 	}
@@ -405,6 +416,15 @@ func TestConfigSealedPolicies(t *testing.T) {
 		{"proxy nat64 host", func(c *egauth.Config[struct{}]) {
 			c.Proxy = egauth.TrustedProxies(netip.MustParsePrefix("64:ff9b::a00:1/128"))
 		}, "Proxy"},
+		{"proxy inside the ipv4-compatible block", func(c *egauth.Config[struct{}]) {
+			c.Proxy = egauth.TrustedProxies(netip.MustParsePrefix("::/100"))
+		}, "Proxy"},
+		{"proxy 6to4 prefix", func(c *egauth.Config[struct{}]) {
+			c.Proxy = egauth.TrustedProxies(netip.MustParsePrefix("2002::/16"))
+		}, "Proxy"},
+		{"proxy 6to4 host", func(c *egauth.Config[struct{}]) {
+			c.Proxy = egauth.TrustedProxies(netip.MustParsePrefix("2002:c000:204::/48"))
+		}, "Proxy"},
 		{"proxy nat64 local-use prefix", func(c *egauth.Config[struct{}]) {
 			c.Proxy = egauth.TrustedProxies(netip.MustParsePrefix("64:ff9b:1::/48"))
 		}, "Proxy"},
@@ -552,15 +572,15 @@ func TestConfigPasskeyRPIDCoversEveryOrigin(t *testing.T) {
 func TestConfigDurability(t *testing.T) {
 	t.Run("mixed", func(t *testing.T) {
 		cfg := fullConfig(t)
-		cfg.Storage.Tokens = tokensStub{b: &base{d: store.Ephemeral}}
+		cfg.Storage.Tokens = tokensStub{Store: tokensmem.New(), b: &base{d: store.Ephemeral}}
 		requireField(t, newErr(t, cfg), "Storage.Tokens")
 	})
 	t.Run("invalid", func(t *testing.T) {
 		cfg := fullConfig(t)
-		cfg.Storage.MFA = mfaStub{b: &base{}}
+		cfg.Storage.MFA = mfaStub{Store: mfamem.New(), b: &base{}}
 		requireField(t, newErr(t, cfg), "Storage.MFA")
 		cfg = fullConfig(t)
-		cfg.RateLimit = limiterStub{b: &base{d: 7}}
+		cfg.RateLimit = memLimiter(7)
 		requireField(t, newErr(t, cfg), "RateLimit")
 	})
 	t.Run("ephemeral off loopback", func(t *testing.T) {
@@ -609,7 +629,7 @@ func TestConfigDurability(t *testing.T) {
 	})
 	t.Run("ephemeral limiter beside shared stores", func(t *testing.T) {
 		cfg := fullConfig(t)
-		cfg.Storage.Limiter = limiterStub{b: &base{d: store.Ephemeral}}
+		cfg.Storage.Limiter = memLimiter(store.Ephemeral)
 		cfg.RateLimit = nil
 		require.NoError(t, newErr(t, cfg))
 	})
@@ -677,6 +697,8 @@ func TestConfigModules(t *testing.T) {
 			KEK:          testKEK(t),
 			Sessions:     egauth.Stateful(),
 			Admin:        egauth.SelfServiceOnly(),
+			Email:        &egauthtest.Mailbox{},
+			Pages:        egauth.Pages{SecurityRevert: "/revert"},
 			Modules:      egauth.Modules{Passkey: &egauth.PasskeyModule{DisplayName: "Example"}},
 		}
 		require.NoError(t, newErr(t, cfg))
@@ -689,7 +711,7 @@ func TestConfigReportsEveryProblemAtOnce(t *testing.T) {
 	cfg.Admin = nil
 	cfg.Modules.APIKeys.Kinds = []string{"svc", "svc"}
 	cfg.Insecure.NoRateLimit = egauth.Acknowledge("")
-	cfg.Storage.Tokens = tokensStub{b: &base{d: store.Ephemeral}}
+	cfg.Storage.Tokens = tokensStub{Store: tokensmem.New(), b: &base{d: store.Ephemeral}}
 	err := newErr(t, cfg)
 	for _, f := range []string{"PublicOrigin", "Admin", "Modules.APIKeys.Kinds[1]", "Insecure.NoRateLimit", "Storage.Tokens"} {
 		requireField(t, err, f)
@@ -809,9 +831,12 @@ func TestConfigNewKeepsItsOwnProviderSlices(t *testing.T) {
 func TestConfigReadyAndClose(t *testing.T) {
 	cfg := fullConfig(t)
 	failing := errors.New("schema missing")
-	cfg.Storage.Passkeys = passkeyStub{b: &base{d: store.Shared, err: failing}}
+	b := &base{d: store.Shared}
+	cfg.Storage.Passkeys = passkeyStub{Store: passkeymem.New(), b: b}
 	a, err := egauth.New(cfg)
 	require.NoError(t, err)
+	require.NoError(t, a.Ready(context.Background()))
+	b.err = failing
 	err = a.Ready(context.Background())
 	require.ErrorIs(t, err, failing)
 	require.Contains(t, err.Error(), "Storage.Passkeys")

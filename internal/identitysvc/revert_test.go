@@ -256,3 +256,83 @@ func savePasskey(t *testing.T, w *acctWorld, sub core.Subject, id string, at tim
 		t.Fatal(err)
 	}
 }
+
+func identifierKinds() []ceremony.Kind {
+	var kinds []ceremony.Kind
+	for _, k := range ceremony.All() {
+		if k.Scope() == ceremony.Identifier {
+			kinds = append(kinds, k)
+		}
+	}
+	return kinds
+}
+
+func eraseRevertScopes(t *testing.T, w *acctWorld, sub core.Subject, current string) (total int64) {
+	t.Helper()
+	id, err := identitysvc.NormalizeAs(identity.IdentifierEmail, current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	scopes, err := w.accounts.RevertScopes(ctx, sub, []identity.Identifier{id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range scopes {
+		n, err := w.ceremonies.DeleteForScope(ctx, sub.Tenant, s.Hash(), identifierKinds()...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		total += n
+	}
+	return total
+}
+
+func TestRevertScopesLeavePreviousAddressLinksToTheirTTL(t *testing.T) {
+	w := newAcctWorld(t, nil)
+	sub := w.createVerified("owner@example.com", goodPass)
+	w.clock.Advance(time.Hour)
+	hijackEmail(t, w, sub, "hijacker@example.com")
+	ownerNotice := noticeTo(t, w, "owner@example.com", identitysvc.SecurityIdentifierChanged)
+	if eraseRevertScopes(t, w, sub, "hijacker@example.com") == 0 {
+		t.Fatal("the tenure, anchor and span bookkeeping was not reachable")
+	}
+	if got := revert(w, ownerNotice.RevertLink); got != http.StatusOK {
+		t.Fatalf("the link at the previous address is per address, not per subject, and must survive: %d", got)
+	}
+}
+
+func TestDeletingAnAccountKeepsTheRevertLinkOfAnotherAccountAtAReusedAddress(t *testing.T) {
+	w := newAcctWorld(t, nil)
+	a := w.createVerified("shared@example.com", goodPass)
+	w.clock.Advance(time.Hour)
+	hijackEmail(t, w, a, "a-new@example.com")
+	w.clock.Advance(time.Hour)
+	b := w.createVerified("shared@example.com", goodPass)
+	hijackEmail(t, w, b, "hijacker@example.com")
+	link := noticeTo(t, w, "shared@example.com", identitysvc.SecurityIdentifierChanged).RevertLink
+	eraseRevertScopes(t, w, a, "a-new@example.com")
+	if got := revert(w, link); got != http.StatusOK {
+		t.Fatalf("deleting account A erased the revert link of account B: %d", got)
+	}
+}
+
+func TestRevertInADeploymentWithoutPasswordResetSendsNoResetAndNoFailure(t *testing.T) {
+	w := newAcctWorld(t, nil)
+	w.noReset = true
+	w.build()
+	sub := w.createVerified("owner@example.com", goodPass)
+	hijackEmail(t, w, sub, "hijacker@example.com")
+	notice := noticeTo(t, w, "owner@example.com", identitysvc.SecurityIdentifierChanged)
+
+	if got := revert(w, notice.RevertLink); got != http.StatusOK {
+		t.Fatalf("revert answered %d", got)
+	}
+	_ = w.svc.Close()
+	if n := len(w.mailsOf("reset")); n != 0 {
+		t.Fatalf("%d reset links sent by a deployment that has no reset page", n)
+	}
+	if w.sink.has(event.DeliveryFailed) {
+		t.Fatal("a revert raised delivery.failed in a deployment without password reset")
+	}
+}

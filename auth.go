@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/net/publicsuffix"
 
 	"github.com/JLugagne/egauth/federation"
@@ -34,37 +35,27 @@ const StartupTimeout = 30 * time.Second
 type Auth[C any] struct {
 	cfg        Config[C]
 	durability store.Durability
+	owned      *owned
 	closed     atomic.Bool
 	closeOnce  sync.Once
 }
 
-// Posture is the security posture of a running Auth, for operators and for the golden-config
-// assertion of the journey suite.
-type Posture struct {
-	// OptOuts lists the set InsecureOptOuts fields in declaration order; it is empty for a
-	// production configuration.
-	OptOuts []OptOut
-	// Durability is the common durability of the security stores.
-	Durability store.Durability
-	// Instances is the live instance count.
-	Instances int
-}
-
-// OptOut is one acknowledged InsecureOptOuts field.
-type OptOut struct {
-	Name   string
-	Reason string
-}
-
-// New validates the whole wiring and returns every problem at once as an errors.Join of
-// *ConfigError, each naming the exact field path. It checks the egauth tags of Config, the
-// origins, the passkey relying party id against the origins, the store durabilities, the modules
-// and the InsecureOptOuts acknowledgements. New bounds its own blocking calls with StartupTimeout;
-// it takes no context so that no caller deadline can end background work.
+// New validates the whole wiring and the deployment it points at, then starts the background work
+// that Close stops. It returns every problem at once as an errors.Join of *ConfigError, each naming
+// the exact field path. It checks the egauth tags of Config, the origins, the passkey relying party
+// id against the origins, the store durabilities, the modules and the InsecureOptOuts
+// acknowledgements, then the deployment: the schema of every store, the KEK canary, v0.16 secrets
+// left in place, second-factor enrollments whose module is absent, OAuth discovery, the limiter and
+// the auth route table. New bounds its own blocking calls with StartupTimeout; it takes no context
+// so that no caller deadline can end background work.
 func New[C any](cfg Config[C]) (*Auth[C], error) {
+	return newWith(cfg, seams{})
+}
+
+func newWith[C any](cfg Config[C], sm seams) (*Auth[C], error) {
 	cfg = snapshot(cfg)
 	v := &problems{}
-	_, errs := configcheck.Validate(&cfg, configOptions(&cfg))
+	res, errs := configcheck.Validate(&cfg, configOptions(&cfg))
 	for _, e := range errs {
 		v.add(e.Field, e.Problem)
 	}
@@ -74,43 +65,62 @@ func New[C any](cfg Config[C]) (*Auth[C], error) {
 	durability := checkDurability(&cfg, v)
 	checkModules(&cfg, v)
 	checkInsecure(&cfg, v)
+	checkNoticePath(&cfg, v)
+	checkRecoveryPage(&cfg, v)
+	checkExtraOriginLabels(&cfg, v)
 	if err := v.err(); err != nil {
 		return nil, err
 	}
-	return &Auth[C]{cfg: cfg, durability: durability}, nil
+	pol := buildPolicies(&cfg, v)
+	if err := v.err(); err != nil {
+		return nil, err
+	}
+	o := &owned{instance: uuid.New(), sharedLimit: res.Defaulted("RateLimit"), seams: sm}
+	if err := bringUp(&cfg, pol, o, durability, v); err != nil {
+		_ = o.closeAll()
+		return nil, err
+	}
+	return &Auth[C]{cfg: cfg, durability: durability, owned: o}, nil
 }
 
-// Close stops background work and waits for it. Close is idempotent. Requests served after Close
-// keep their security properties because every revocation check falls back to the store.
+func bringUp[C any](cfg *Config[C], pol *policies, o *owned, durability store.Durability, v *problems) error {
+	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
+	defer cancel()
+	checkSchema(ctx, cfg, o.sharedLimit, v)
+	if err := v.err(); err != nil {
+		return err
+	}
+	o.dataKey = openDataKey(ctx, cfg, v)
+	checkLegacySecrets(ctx, cfg, v)
+	checkEnrollments(ctx, cfg, v)
+	if err := v.err(); err != nil {
+		return err
+	}
+	o.scaleLimit = scalesLimiter(cfg, durability)
+	assemble(ctx, cfg, pol, o, v)
+	if err := v.err(); err != nil {
+		return err
+	}
+	if err := finish(ctx, cfg, o, v); err != nil {
+		return err
+	}
+	startWork(cfg, o)
+	return nil
+}
+
+// Close stops background work and waits for it, returning the errors of the services it closed.
+// Close is idempotent: only the first call stops anything and returns an error. Requests served
+// after Close keep their security properties because every revocation check falls back to the
+// store.
 func (a *Auth[C]) Close() error {
-	a.closeOnce.Do(func() { a.closed.Store(true) })
-	return nil
-}
-
-// Ready reports the first unmet readiness condition: ErrClosed after Close, or the first store
-// whose Ping fails, joined with the Storage field that names it.
-func (a *Auth[C]) Ready(ctx context.Context) error {
-	if a.closed.Load() {
-		return ErrClosed
-	}
-	for _, s := range a.stores() {
-		if err := s.base.Ping(ctx); err != nil {
-			return errors.Join(errors.New("egauth: "+s.field+" is not ready"), err)
+	var err error
+	a.closeOnce.Do(func() {
+		a.closed.Store(true)
+		if a.owned != nil {
+			err = a.owned.stop()
 		}
-	}
-	return nil
-}
-
-// Posture lists the set InsecureOptOuts with their acknowledged reasons, the storage durability
-// and the live instance count.
-func (a *Auth[C]) Posture() Posture {
-	var out []OptOut
-	for _, o := range optOuts(&a.cfg.Insecure) {
-		if o.set {
-			out = append(out, OptOut{Name: o.name, Reason: o.ack.Reason()})
-		}
-	}
-	return Posture{OptOuts: out, Durability: a.durability, Instances: 1}
+	})
+	return err
 }
 
 func (a *Auth[C]) deployment() routes.Deployment {
@@ -127,7 +137,11 @@ type namedStore struct {
 }
 
 func (a *Auth[C]) stores() []namedStore {
-	return presentStores(&a.cfg.Storage, true)
+	all := presentStores(&a.cfg.Storage, true)
+	if a.owned != nil && !a.owned.sharedLimit && present(a.cfg.RateLimit) {
+		all = append(all, namedStore{"RateLimit", a.cfg.RateLimit})
+	}
+	return all
 }
 
 func presentStores(s *Storage, withLimiter bool) []namedStore {
@@ -250,7 +264,7 @@ func proxyPrefixProblem(p netip.Prefix) string {
 		return "is shorter than /16"
 	}
 	for _, r := range ipv4Embeddings {
-		if p.Overlaps(r.prefix) && (r.anyOverlap || p.Bits() <= r.prefix.Bits()) {
+		if p != r.except && p.Overlaps(r.prefix) && (r.anyOverlap || p.Bits() <= r.prefix.Bits()) {
 			return "overlaps " + r.prefix.String() + ", where IPv6 addresses stand for IPv4 hosts; use the IPv4 form"
 		}
 	}
@@ -260,11 +274,13 @@ func proxyPrefixProblem(p netip.Prefix) string {
 var ipv4Embeddings = []struct {
 	prefix     netip.Prefix
 	anyOverlap bool
+	except     netip.Prefix
 }{
-	{netip.MustParsePrefix("::/96"), false},
-	{netip.MustParsePrefix("::ffff:0:0/96"), true},
-	{netip.MustParsePrefix("64:ff9b::/96"), true},
-	{netip.MustParsePrefix("64:ff9b:1::/48"), true},
+	{netip.MustParsePrefix("::/96"), true, netip.MustParsePrefix("::1/128")},
+	{netip.MustParsePrefix("::ffff:0:0/96"), true, netip.Prefix{}},
+	{netip.MustParsePrefix("64:ff9b::/96"), true, netip.Prefix{}},
+	{netip.MustParsePrefix("64:ff9b:1::/48"), true, netip.Prefix{}},
+	{netip.MustParsePrefix("2002::/16"), true, netip.Prefix{}},
 }
 
 func checkBackend(b SessionBackend, v *problems) {
@@ -559,12 +575,7 @@ func checkExternal(m *ExternalModule, v *problems) {
 }
 
 func checkPages[C any](cfg *Config[C], v *problems) {
-	sample := func(s string) string { return strings.ReplaceAll(s, tenantLabel, sampleTenant) }
-	extra := []string{sample(cfg.PublicOrigin)}
-	for _, o := range cfg.ExtraOrigins {
-		extra = append(extra, sample(o))
-	}
-	origins, err := redirect.NewOrigins(sample(cfg.PublicOrigin), extra)
+	origins, err := sampleOrigins(cfg)
 	if err != nil {
 		return
 	}
@@ -574,7 +585,7 @@ func checkPages[C any](cfg *Config[C], v *problems) {
 		if strings.TrimSpace(page) == "" {
 			continue
 		}
-		if _, err := redirect.Parse(sample(page), origins); err != nil {
+		if _, err := redirect.Parse(samplePage(page), origins); err != nil {
 			v.add("Pages."+pv.Type().Field(i).Name, "must be a relative path or an absolute URL on PublicOrigin or ExtraOrigins")
 		}
 	}

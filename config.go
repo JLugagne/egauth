@@ -53,7 +53,7 @@ type Config[C any] struct {
 	Admin        AdminPolicy      `egauth:"required"`
 	Claims       ClaimsSource[C]  `egauth:"default=empty_claims"`
 	Events       event.Sink       `egauth:"default=slog_default"`
-	Email        EmailDeliverer   `egauth:"module=Password|MagicLink|LoginCode.Email|Verification.Email|Verification.RecoveryEmail"`
+	Email        EmailDeliverer   `egauth:"required"`
 	SMS          SMSDeliverer     `egauth:"module=LoginCode.SMS|Verification.Phone"`
 	Pages        Pages            `egauth:"optional"`
 	Modules      Modules          `egauth:"required,oneof_primary"`
@@ -129,8 +129,13 @@ func (*emptyClaims[C]) ClaimsFor(context.Context, principal.Subject) (AppClaims[
 }
 
 // Pages are the application pages the library links or redirects to: relative paths on the public
-// origin, or absolute URLs on PublicOrigin or an ExtraOrigins entry. An enabled module that links to
-// a page makes that entry required; Login is the 303 target of a completed password reset.
+// origin, or absolute URLs on PublicOrigin or an ExtraOrigins entry. AfterLogin, MFA and Reauth
+// must be paths on PublicOrigin (or absolute URLs reducing to one): a login lands on them through
+// issuance, which serves no other origin. An enabled module that links to a page makes that entry
+// required. SecurityRevert is required in every deployment, because every account can hold a verified
+// email and so receives security notices; Email is required for the same reason. Login is the 303
+// target of a completed password reset; under TenantBySubdomain an absolute Login on PublicOrigin is
+// reduced to its path so it stays on the tenant's own host.
 type Pages struct {
 	Login               string `egauth:"module=Password"`
 	AfterLogin          string `egauth:"module=OAuth"`
@@ -142,7 +147,7 @@ type Pages struct {
 	PasswordReset       string `egauth:"module=Password"`
 	VerifyEmail         string `egauth:"module=Verification.Email"`
 	ConfirmEmailChange  string `egauth:"module=Verification.Email"`
-	SecurityRevert      string `egauth:"module=Password|MagicLink|LoginCode.Email|LoginCode.SMS|Verification.Email|Verification.Phone|Verification.RecoveryEmail"`
+	SecurityRevert      string `egauth:"required"`
 }
 
 // Hooks lets the application add checks and react to lifecycle events. BeforeEndpoint runs last in

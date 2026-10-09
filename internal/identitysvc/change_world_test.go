@@ -238,6 +238,7 @@ type acctWorld struct {
 	router   *outboxRouter
 	accounts *identitysvc.Accounts
 	sealer   *ceremonycodec.Sealer
+	noReset  bool
 }
 
 func newAcctWorld(t *testing.T, wrap func(identity.Store) identity.Store) *acctWorld {
@@ -298,6 +299,7 @@ func (w *acctWorld) build() {
 		Cookies:          cp,
 		DataKey:          testDataKey(9),
 		OpenRegistration: true,
+		NoPasswordReset:  w.noReset,
 		Dispatcher:       w.router,
 		Clock:            w.clock.Clock(),
 		Audit:            httpx.SinkAudit(w.sink),
