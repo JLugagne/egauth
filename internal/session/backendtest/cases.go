@@ -209,6 +209,10 @@ func failsClosedOnOutage(t *testing.T, e *env) {
 }
 
 func revokesOnReuse(t *testing.T, e *env) {
+	if e.fx.StableCredentials {
+		keepsCredentialAcrossRenewal(t, e)
+		return
+	}
 	type scenario struct {
 		name      string
 		wait      time.Duration
@@ -243,7 +247,31 @@ func revokesOnReuse(t *testing.T, e *env) {
 	}
 }
 
+func keepsCredentialAcrossRenewal(t *testing.T, e *env) {
+	for _, tr := range []core.Transport{core.TransportCookies, core.TransportBearer} {
+		s := e.newUser()
+		c := e.start(principaltest.Attrs(e.passwordSpec(s, tr)))
+		e.advance(e.fx.Lifetimes.RecheckEvery + time.Second)
+		old := c.clone()
+		res := c.expect(statusOK, "renewal")
+		if !c.sameCredentials(old) {
+			t.Fatalf("transport %v: renewal changed a credential declared stable", tr)
+		}
+		e.advance(tokens.ReuseGrace + time.Second)
+		old.expect(statusOK, "copy of a stable credential")
+		if err := e.b.OnSessionEnded(t.Context(), lifecycle.SessionEnded{Subject: s, Family: res.Handle().ID()}); err != nil {
+			t.Fatal(err)
+		}
+		old.expect(statusUnauth, "copy of an ended session, never polled")
+		c.expect(statusUnauth, "ended session, never polled")
+	}
+}
+
 func servesRacingRequests(t *testing.T, e *env) {
+	if e.fx.StableCredentials {
+		servesRacingRenewals(t, e)
+		return
+	}
 	for _, tr := range []core.Transport{core.TransportCookies, core.TransportBearer} {
 		s := e.newUser()
 		c := e.start(principaltest.Attrs(e.passwordSpec(s, tr)))
@@ -282,6 +310,43 @@ func servesRacingRequests(t *testing.T, e *env) {
 		}
 		e.advance(tokens.ReuseGrace + time.Second)
 		winner.expect(statusOK, "family after a race within ReuseGrace")
+	}
+}
+
+func servesRacingRenewals(t *testing.T, e *env) {
+	for _, tr := range []core.Transport{core.TransportCookies, core.TransportBearer} {
+		s := e.newUser()
+		c := e.start(principaltest.Attrs(e.passwordSpec(s, tr)))
+		e.fx.Claims.Set([]byte(`{"roles":["raced"]}`))
+		e.advance(e.fx.Lifetimes.RecheckEvery + time.Second)
+		racers := make([]*client, rotationRacers)
+		answers := make([]int, rotationRacers)
+		for i := range racers {
+			racers[i] = c.clone()
+		}
+		var wg sync.WaitGroup
+		gate := make(chan struct{})
+		for i, r := range racers {
+			wg.Go(func() {
+				<-gate
+				_, err := r.resume()
+				answers[i] = status(err)
+			})
+		}
+		close(gate)
+		wg.Wait()
+		for i, r := range racers {
+			if answers[i] != statusOK {
+				t.Fatalf("transport %v: racer %d answered %d on a live session", tr, i, answers[i])
+			}
+			if !r.sameCredentials(c) {
+				t.Fatalf("transport %v: racer %d received a new credential", tr, i)
+			}
+		}
+		e.advance(tokens.ReuseGrace + time.Second)
+		if res := c.expect(statusOK, "session after racing renewals"); string(res.Claims().Bytes()) != `{"roles":["raced"]}` {
+			t.Fatalf("transport %v: racing renewals lost the renewed claims: %s", tr, res.Claims().Bytes())
+		}
 	}
 }
 

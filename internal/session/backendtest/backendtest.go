@@ -69,19 +69,26 @@ type CarryFunc func(resp http.Header, next http.Header)
 // the factory passed to Run sets Identity, Start, Reissue, Poll, Forge and Carry before it
 // returns the backend, which must read Clock, Claims, Enrollment and Events and consult its
 // revocation sources through Outage.
+//
+// StableCredentials declares a backend whose credential survives renewal and changes only on
+// Reissue, and that reads its session store on every request (the stateful backend): the reuse
+// and rotation-race cases then assert that the credential is kept and that ending the session
+// refuses every copy of it at once. The zero value expects rotating refresh credentials with reuse
+// detection (the JWT backend).
 type Fixture struct {
-	Clock      *clock.Test
-	Lifetimes  session.Lifetimes
-	Claims     *Claims
-	Enrollment *Enrollment
-	Events     *Events
-	Outage     *Outage
-	Identity   identity.Store
-	Start      StartFunc
-	Reissue    ReissueFunc
-	Poll       PollFunc
-	Forge      Forger
-	Carry      CarryFunc
+	Clock             *clock.Test
+	Lifetimes         session.Lifetimes
+	Claims            *Claims
+	Enrollment        *Enrollment
+	Events            *Events
+	Outage            *Outage
+	Identity          identity.Store
+	Start             StartFunc
+	Reissue           ReissueFunc
+	Poll              PollFunc
+	Forge             Forger
+	Carry             CarryFunc
+	StableCredentials bool
 }
 
 var fixtures sync.Map
