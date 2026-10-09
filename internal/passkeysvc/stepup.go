@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -27,9 +28,10 @@ type StepUpChallenge struct {
 
 // BeginStepUp stores an MFAPasskey record sealing p, scoped to its bound subject, and returns the
 // request options for that subject's active credentials with user verification required. The
-// record dies with p and lasts at most ceremony.MFAPasskey.TTL(). It returns ErrPasskeyRejected for
-// an unbound p, ErrNoPasskey when the subject has no active credential, and a 503 problem on store
-// failure.
+// record dies with p and lasts at most ceremony.MFAPasskey.TTL(). A login p is finished by
+// FinishStepUp, a reauthentication p (core.PendingForReauth) by FinishReauth. It returns
+// ErrPasskeyRejected for an unbound p, ErrNoPasskey when the subject has no active credential, and
+// a 503 problem on store failure.
 func (s *Service) BeginStepUp(ctx context.Context, p core.Pending) (StepUpChallenge, error) {
 	sub, ok := p.Subject()
 	if !ok {
@@ -77,31 +79,43 @@ func (s *Service) BeginStepUp(ctx context.Context, p core.Pending) (StepUpChalle
 // both to Issuer.Complete, whose Pending.Add refuses the credential of a primary passkey of the same
 // Pending (C-28), the caller must consume the MFAFlow record the step-up was begun from and refuse
 // the result unless that consume succeeds: the MFAPasskey record is independent of it, so skipping
-// the consume lets one flow complete twice (once per factor). It returns ErrPasskeyRejected or a
-// 503 problem.
+// the consume lets one flow complete twice (once per factor). A record begun for /reauth is
+// refused. It returns ErrPasskeyRejected or a 503 problem.
 func (s *Service) FinishStepUp(ctx context.Context, t core.TenantID, handle string, assertionJSON []byte) (core.Pending, core.Verified, error) {
-	p, sub, session, err := s.consumeSubjectCeremony(ctx, t, ceremony.MFAPasskey, handle, ErrPasskeyRejected)
-	if err != nil {
-		s.stepUpFailed(ctx, t, err)
-		return core.Pending{}, core.Verified{}, err
+	return s.finishSubjectAssertion(ctx, t, handle, assertionJSON, false)
+}
+
+func (s *Service) finishSubjectAssertion(ctx context.Context, t core.TenantID, handle string, assertionJSON []byte, reauth bool) (core.Pending, core.Verified, error) {
+	f, mint := core.FactorPasskeyStepUp, factors.PasskeyStepUp
+	if reauth {
+		f, mint = core.FactorPasskey, factors.Passkey
 	}
-	v, err := s.verifyStepUp(ctx, sub, session, assertionJSON)
+	p, sub, session, err := s.consumeSubjectCeremony(ctx, t, ceremony.MFAPasskey, handle, ErrPasskeyRejected)
+	if _, isReauth := p.ReauthOf(); err == nil && isReauth != reauth {
+		err = ErrPasskeyRejected
+	}
+	var v core.Verified
+	if err == nil {
+		v, err = s.verifySubjectAssertion(ctx, sub, session, assertionJSON, mint)
+	}
 	if err != nil {
-		s.stepUpFailed(ctx, t, err)
+		s.stepUpFailed(ctx, t, f, err)
 		return core.Pending{}, core.Verified{}, err
 	}
 	return p, v, nil
 }
 
-func (s *Service) stepUpFailed(ctx context.Context, t core.TenantID, err error) {
+func (s *Service) stepUpFailed(ctx context.Context, t core.TenantID, f core.Factor, err error) {
 	if !errors.Is(err, ErrPasskeyRejected) {
 		return
 	}
 	_ = s.audit.Emit(ctx, event.MFAVerificationFailed, audit.Scope{TenantID: t.String()},
-		audit.Detail{Reason: ErrPasskeyRejected.Code()}, nil, audit.A(event.KeyFactor, core.FactorPasskeyStepUp.Code()))
+		audit.Detail{Reason: ErrPasskeyRejected.Code()}, nil, audit.A(event.KeyFactor, f.Code()))
 }
 
-func (s *Service) verifyStepUp(ctx context.Context, sub core.Subject, session ceremonycodec.WebAuthn, body []byte) (core.Verified, error) {
+type passkeyMint func(factors.PasskeyCredential, factors.AuthenticatorFlags, time.Time) (core.Verified, error)
+
+func (s *Service) verifySubjectAssertion(ctx context.Context, sub core.Subject, session ceremonycodec.WebAuthn, body []byte, mint passkeyMint) (core.Verified, error) {
 	sd, err := sessionOf(session)
 	if err != nil {
 		return core.Verified{}, errors.Join(ErrPasskeyRejected, err)
@@ -127,7 +141,7 @@ func (s *Service) verifyStepUp(ctx context.Context, sub core.Subject, session ce
 	if err := s.recordUse(ctx, cred, parsed); err != nil {
 		return core.Verified{}, err
 	}
-	v, err := factors.PasskeyStepUp(factorCredential(cred), flagsOf(parsed), s.clock.Now())
+	v, err := mint(factorCredential(cred), flagsOf(parsed), s.clock.Now())
 	if err != nil {
 		return core.Verified{}, errors.Join(ErrPasskeyRejected, err)
 	}

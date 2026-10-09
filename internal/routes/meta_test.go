@@ -111,7 +111,7 @@ func TestEveryMutationIsCheckedForCSRFWhenItCanSetCookies(t *testing.T) {
 }
 
 func TestBodyCaps(t *testing.T) {
-	webauthn := set(routes.PasskeyLoginFinish, routes.PasskeyRegisterFinish, routes.MFAPasskeyFinish)
+	webauthn := set(routes.PasskeyLoginFinish, routes.PasskeyRegisterFinish, routes.MFAPasskeyFinish, routes.Reauth)
 	if got := pathsWhere(func(m routes.EndpointMeta) bool { return m.BodyCap == httpx.WebAuthnBodyCap }); !slices.Equal(got, webauthn) {
 		t.Fatalf("WebAuthn caps %v", got)
 	}

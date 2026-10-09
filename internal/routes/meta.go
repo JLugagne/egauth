@@ -100,7 +100,7 @@ func sessionAction(path string) bool {
 
 func webAuthn(path string) bool {
 	switch path {
-	case PasskeyLoginFinish, PasskeyRegisterFinish, MFAPasskeyFinish:
+	case PasskeyLoginFinish, PasskeyRegisterFinish, MFAPasskeyFinish, Reauth:
 		return true
 	}
 	return false
