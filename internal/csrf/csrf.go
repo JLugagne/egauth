@@ -23,6 +23,15 @@ const (
 	bearerScheme        = "bearer"
 )
 
+// Request header names the gate reads. They are exported so that the test harness, which must send
+// them, never spells them as literals.
+const (
+	HeaderOrigin    = headerOrigin
+	HeaderReferer   = headerReferer
+	HeaderFetchSite = headerFetchSite
+	HeaderFetchMode = headerFetchMode
+)
+
 // HeaderTransport mirrors routes.HeaderTransport; a guard test keeps them equal.
 const HeaderTransport = "X-Egauth-Transport"
 
