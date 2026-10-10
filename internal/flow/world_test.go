@@ -535,7 +535,7 @@ func (c *client) attrs() core.SessionAttrs {
 	for _, ck := range c.cookies {
 		hr.AddCookie(&http.Cookie{Name: ck.Name, Value: ck.Value})
 	}
-	res, err := c.w.backend.Resume(context.Background(), httptest.NewRecorder(), hr)
+	res, err := c.w.backend.Resume(context.Background(), httptest.NewRecorder(), hr, core.TenantID{})
 	must(c.w.t, err)
 	return res.Attrs()
 }

@@ -235,8 +235,9 @@ func (b *Backend) load(ctx context.Context, tok string) (loaded, error) {
 // carries a readable session cookie (exactly one, non-empty), Bearer otherwise; a session cookie
 // beside a Bearer credential is refused (ErrAmbiguousTransport). Errors joined with
 // httpx.ErrUnavailable are outages (503); every other error refuses the request (401) and nothing
-// is written on w.
-func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Request) (session.Resumed, error) {
+// is written on w. A token sealed for another tenant than tenant returns session.ErrTenantMismatch
+// before the row is touched or renewed.
+func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) (session.Resumed, error) {
 	p := b.read(r)
 	if p.ambiguous {
 		return session.Resumed{}, ErrAmbiguousTransport
@@ -249,6 +250,9 @@ func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Req
 		return session.Resumed{}, err
 	}
 	a := l.attrs
+	if l.rec.Tenant() != tenant || a.Subject().Tenant != tenant {
+		return session.Resumed{}, session.ErrTenantMismatch
+	}
 	if a.Transport() != p.transport {
 		return session.Resumed{}, ErrTransportMismatch
 	}

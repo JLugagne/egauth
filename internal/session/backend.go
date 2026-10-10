@@ -21,10 +21,12 @@ import (
 type Backend interface {
 	// Start persists a new session for a and its claims c and writes its credentials to w.
 	Start(ctx context.Context, w http.ResponseWriter, a core.SessionAttrs, c core.SealedClaims) error
-	// Resume authenticates r: it checks the credential, the live family or row, the subject's
-	// current epoch and the absolute lifetime, renews when due, and rewrites credentials on w when
-	// they changed. Any failure returns an error and no session.
-	Resume(ctx context.Context, w http.ResponseWriter, r *http.Request) (Resumed, error)
+	// Resume authenticates r for tenant, the tenant the request resolved to: it checks the
+	// credential, its sealed tenant, the live family or row, the subject's current epoch and the
+	// absolute lifetime, renews when due, and rewrites credentials on w when they changed. A
+	// credential sealed for another tenant returns ErrTenantMismatch before anything is renewed,
+	// consumed or written (DESIGN §6.10). Any failure returns an error and no session.
+	Resume(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) (Resumed, error)
 	// Reissue atomically replaces the session cur with one for a, which must keep cur's subject and
 	// lineage; it returns store.ErrConflict, and issues nothing, once cur is no longer live (C-33).
 	// cur.ID() is all the store needs: tokens.ReissueRequest.Family or sessions.ReplaceRequest.Previous.
@@ -35,6 +37,10 @@ type Backend interface {
 	Durability() store.Durability
 	lifecycle.Subscriber
 }
+
+// ErrTenantMismatch reports a credential sealed for another tenant than the resolved one. Nothing
+// was consumed, so the caller refuses the request without clearing the credential.
+var ErrTenantMismatch = errors.New("session: credential sealed for another tenant")
 
 // ErrHandleMismatch reports a Handle or Resumed whose parts do not describe the same session.
 var ErrHandleMismatch = errors.New("session: handle does not match the session attributes")

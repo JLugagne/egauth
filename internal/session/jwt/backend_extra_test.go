@@ -111,7 +111,7 @@ func TestResourceToken(t *testing.T) {
 	ctx := t.Context()
 	s := mustUser(t, w)
 	access, _ := startPair(t, w, passwordAttrs(t, w, s, core.TransportBearer))
-	res, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, access, ""))
+	res, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, access, ""), tenant(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestResourceToken(t *testing.T) {
 	if _, err := w.codec.VerifySession(ctx, raw, w.keys); !errors.Is(err, jwt.ErrInvalidToken) {
 		t.Fatalf("a resource token passed as a session token: %v", err)
 	}
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, raw, "")); err == nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, raw, ""), tenant(t)); err == nil {
 		t.Fatal("a resource token resumed a session")
 	}
 	if _, err := w.codec.VerifyResource(ctx, access, w.keys, resourceAud); !errors.Is(err, jwt.ErrInvalidToken) {
@@ -175,7 +175,7 @@ func TestRenewalRefusesCrossedCredentials(t *testing.T) {
 	}
 	for name, r := range cases {
 		rec := httptest.NewRecorder()
-		if _, err := w.backend.Resume(ctx, rec, r); err == nil || errors.Is(err, httpx.ErrUnavailable) {
+		if _, err := w.backend.Resume(ctx, rec, r, tenant(t)); err == nil || errors.Is(err, httpx.ErrUnavailable) {
 			t.Errorf("%s: %v", name, err)
 		}
 		if len(rec.Header()) != 0 {
@@ -186,7 +186,7 @@ func TestRenewalRefusesCrossedCredentials(t *testing.T) {
 		"cookie session": cookieRequest(t, w, cookieAccess, cookieRefresh),
 		"Bearer session": bearerRequest(t, bearerAccess, bearerRefresh),
 	} {
-		if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), r); err != nil {
+		if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), r, tenant(t)); err != nil {
 			t.Errorf("%s after refused crossings: %v", name, err)
 		}
 	}
@@ -209,7 +209,7 @@ func TestRefreshTokenIsBoundToItsTenant(t *testing.T) {
 	}
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery + time.Second)
 	for _, forged := range []string{handle, handle + ".other", handle + "x.acme", "." + tn} {
-		if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, "", forged)); err == nil {
+		if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, "", forged), tenant(t)); err == nil {
 			t.Fatalf("refresh token %q accepted", forged)
 		}
 	}
@@ -224,7 +224,7 @@ func TestEndWithAccessTokenOnly(t *testing.T) {
 	if err := w.backend.End(t.Context(), httptest.NewRecorder(), bearerRequest(t, access, "")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, "", refresh)); err == nil {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, "", refresh), tenant(t)); err == nil {
 		t.Fatal("End through an expired access token left the family live")
 	}
 }
@@ -292,7 +292,7 @@ func TestRenewalThatOutgrowsTheCookieIsAnOutage(t *testing.T) {
 	fx.Claims.Set(claimsOfSize(t, session.MaxAppClaimsBytes).Bytes())
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery + time.Second)
 	rec := httptest.NewRecorder()
-	_, err = w.backend.Resume(ctx, rec, cookieRequest(t, w, access, refresh))
+	_, err = w.backend.Resume(ctx, rec, cookieRequest(t, w, access, refresh), tenant(t))
 	if !errors.Is(err, core.ErrClaimsTooLarge) || !errors.Is(err, httpx.ErrUnavailable) {
 		t.Fatalf("renewal with claims that do not fit the cookie: %v, want ClaimsTooLarge as an outage", err)
 	}
@@ -303,7 +303,7 @@ func TestRenewalThatOutgrowsTheCookieIsAnOutage(t *testing.T) {
 		t.Fatal("no ClaimsTooLarge event")
 	}
 	fx.Claims.Set([]byte(`{"roles":["user"]}`))
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh)); err != nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh), tenant(t)); err != nil {
 		t.Fatalf("the family did not survive the refused renewal: %v", err)
 	}
 }

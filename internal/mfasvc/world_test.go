@@ -101,7 +101,7 @@ type sessionTable struct {
 	identity identity.Store
 }
 
-func (s *sessionTable) Resume(ctx context.Context, _ http.ResponseWriter, r *http.Request) (session.Resumed, error) {
+func (s *sessionTable) Resume(ctx context.Context, _ http.ResponseWriter, r *http.Request, _ core.TenantID) (session.Resumed, error) {
 	tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		return session.Resumed{}, errors.New("no session")

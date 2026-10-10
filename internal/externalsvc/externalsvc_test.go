@@ -59,7 +59,7 @@ func (allowAll) Allow(context.Context, limiter.Key) (limiter.Decision, error) {
 
 type noSession struct{}
 
-func (noSession) Resume(context.Context, http.ResponseWriter, *http.Request) (session.Resumed, error) {
+func (noSession) Resume(context.Context, http.ResponseWriter, *http.Request, core.TenantID) (session.Resumed, error) {
 	return session.Resumed{}, errors.New("no session")
 }
 

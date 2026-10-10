@@ -161,12 +161,12 @@ func TestAccessTokenClaimsAreIssuerOwnedAcrossRenewal(t *testing.T) {
 	for range 3 {
 		fx.Clock.Advance(fx.Lifetimes.RecheckEvery + time.Second)
 		rec := httptest.NewRecorder()
-		if _, err := w.backend.Resume(ctx, rec, bearerRequest(t, access, refresh)); err != nil {
+		if _, err := w.backend.Resume(ctx, rec, bearerRequest(t, access, refresh), tenant(t)); err != nil {
 			t.Fatal(err)
 		}
 		access, refresh = rec.Header().Get(jwt.HeaderAccessToken), rec.Header().Get(jwt.HeaderRefreshToken)
 		check(access)
-		if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, access, "")); err != nil {
+		if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, access, ""), tenant(t)); err != nil {
 			t.Fatalf("rotated access token refused by the next request: %v", err)
 		}
 	}

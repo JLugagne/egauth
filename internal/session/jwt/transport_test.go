@@ -29,12 +29,12 @@ func TestBearerSessionIgnoresUnrelatedCookies(t *testing.T) {
 	s := mustUser(t, w)
 	access, refresh := startPair(t, w, passwordAttrs(t, w, s, core.TransportBearer))
 	sticky := &http.Cookie{Name: "AWSALB", Value: "sticky"}
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), withCookies(bearerRequest(t, access, refresh), sticky)); err != nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), withCookies(bearerRequest(t, access, refresh), sticky), tenant(t)); err != nil {
 		t.Fatalf("Bearer session carrying an unrelated cookie: %v", err)
 	}
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery + time.Second)
 	rec := httptest.NewRecorder()
-	if _, err := w.backend.Resume(ctx, rec, withCookies(bearerRequest(t, access, refresh), sticky)); err != nil {
+	if _, err := w.backend.Resume(ctx, rec, withCookies(bearerRequest(t, access, refresh), sticky), tenant(t)); err != nil {
 		t.Fatalf("renewal of a Bearer session carrying an unrelated cookie: %v", err)
 	}
 	if rec.Header().Get(jwt.HeaderAccessToken) == "" || len(rec.Header().Values("Set-Cookie")) != 0 {
@@ -49,7 +49,7 @@ func TestCookieSessionKeepsCookieTransportBesideUnrelatedCookies(t *testing.T) {
 	access, refresh := startPair(t, w, passwordAttrs(t, w, s, core.TransportCookies))
 	r := withCookies(cookieRequest(t, w, access, refresh), &http.Cookie{Name: "AWSALB", Value: "sticky"})
 	r.Header.Set("Authorization", "Basic c3RhZ2luZzpzdGFnaW5n")
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), r); err != nil {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), r, tenant(t)); err != nil {
 		t.Fatalf("cookie session beside an unrelated cookie and Basic authorization: %v", err)
 	}
 }
@@ -76,7 +76,7 @@ func TestBothTransportsAreRefused(t *testing.T) {
 		}
 		for name, r := range cases {
 			rec := httptest.NewRecorder()
-			_, err := w.backend.Resume(ctx, rec, r.Clone(ctx))
+			_, err := w.backend.Resume(ctx, rec, r.Clone(ctx), tenant(t))
 			if err == nil || errors.Is(err, httpx.ErrUnavailable) {
 				t.Fatalf("%s (renewing %t): %v, want a refusal", name, renewing, err)
 			}
@@ -85,10 +85,10 @@ func TestBothTransportsAreRefused(t *testing.T) {
 			}
 		}
 	}
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, bearerAccess, bearerRefresh)); err != nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, bearerAccess, bearerRefresh), tenant(t)); err != nil {
 		t.Fatalf("Bearer session after refused mixes: %v", err)
 	}
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, cookieAccess, cookieRefresh)); err != nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, cookieAccess, cookieRefresh), tenant(t)); err != nil {
 		t.Fatalf("cookie session after refused mixes: %v", err)
 	}
 }
@@ -109,20 +109,20 @@ func TestRefreshOnlyRequestRacingARotationIsRetryable(t *testing.T) {
 	access, refresh := startPair(t, w, passwordAttrs(t, w, s, core.TransportBearer))
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery + time.Second)
 	rec := httptest.NewRecorder()
-	if _, err := w.backend.Resume(ctx, rec, bearerRequest(t, access, refresh)); err != nil {
+	if _, err := w.backend.Resume(ctx, rec, bearerRequest(t, access, refresh), tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	next, nextRefresh := rec.Header().Get(jwt.HeaderAccessToken), rec.Header().Get(jwt.HeaderRefreshToken)
 	fx.Clock.Advance(time.Second)
 	rec = httptest.NewRecorder()
-	_, err := w.backend.Resume(ctx, rec, bearerRequest(t, "", refresh))
+	_, err := w.backend.Resume(ctx, rec, bearerRequest(t, "", refresh), tenant(t))
 	if !errors.Is(err, httpx.ErrUnavailable) {
 		t.Fatalf("refresh-only request racing a rotation: %v, want a retryable refusal", err)
 	}
 	if len(rec.Header()) != 0 {
 		t.Fatalf("racing request wrote %v", rec.Header())
 	}
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, next, nextRefresh)); err != nil {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), bearerRequest(t, next, nextRefresh), tenant(t)); err != nil {
 		t.Fatalf("family after the race: %v", err)
 	}
 }
@@ -134,7 +134,7 @@ func TestReissueRevokesTheFamilyOfAnUnknownSubject(t *testing.T) {
 	s := mustUser(t, w)
 	a := passwordAttrs(t, w, s, core.TransportCookies)
 	access, refresh := startPair(t, w, a)
-	res, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh))
+	res, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh), tenant(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,7 +151,7 @@ func TestReissueRevokesTheFamilyOfAnUnknownSubject(t *testing.T) {
 		t.Fatal("no TokenFamilyRevoked event")
 	}
 	fx.Claims.Recover()
-	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh)); err == nil || errors.Is(err, httpx.ErrUnavailable) {
+	if _, err := w.backend.Resume(ctx, httptest.NewRecorder(), cookieRequest(t, w, access, refresh), tenant(t)); err == nil || errors.Is(err, httpx.ErrUnavailable) {
 		t.Fatalf("the family of an unknown subject survived Reissue: %v", err)
 	}
 }

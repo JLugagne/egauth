@@ -227,7 +227,7 @@ func (l *recordingLimiter) identifierKeys() []string {
 
 type noSession struct{}
 
-func (noSession) Resume(context.Context, http.ResponseWriter, *http.Request) (session.Resumed, error) {
+func (noSession) Resume(context.Context, http.ResponseWriter, *http.Request, core.TenantID) (session.Resumed, error) {
 	return session.Resumed{}, errors.New("no session")
 }
 

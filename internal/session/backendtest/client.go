@@ -240,7 +240,11 @@ func (c *client) request() *http.Request {
 func (c *client) resume() (session.Resumed, error) {
 	c.e.t.Helper()
 	rec := httptest.NewRecorder()
-	res, err := c.e.b.Resume(c.e.t.Context(), rec, c.request())
+	tenant, err := principal.ParseTenantID(tenantName)
+	if err != nil {
+		c.e.t.Fatal(err)
+	}
+	res, err := c.e.b.Resume(c.e.t.Context(), rec, c.request(), tenant)
 	if err != nil {
 		c.e.mustNotWrite(rec, "a refused Resume")
 		return session.Resumed{}, err

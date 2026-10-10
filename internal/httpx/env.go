@@ -38,7 +38,7 @@ type Limiter interface {
 
 // Authenticator resumes the session presented by a request: session.Backend.Resume.
 type Authenticator interface {
-	Resume(ctx context.Context, w http.ResponseWriter, r *http.Request) (session.Resumed, error)
+	Resume(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) (session.Resumed, error)
 }
 
 // IdentifierNormalizer is identitysvc.Normalize, the only identifier normaliser; the preamble uses

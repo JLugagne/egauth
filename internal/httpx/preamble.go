@@ -274,7 +274,7 @@ func (g *gate) charge(req *Request, k limiter.Key) error {
 }
 
 func (g *gate) authenticate(w http.ResponseWriter, req *Request, bearerChannel bool) error {
-	res, err := g.p.env.Authenticator.Resume(req.Context(), w, req.http)
+	res, err := g.p.env.Authenticator.Resume(req.Context(), w, req.http, req.tenant)
 	if err != nil {
 		if errors.Is(err, ErrUnavailable) {
 			return errors.Join(ErrServiceUnavailable, err)

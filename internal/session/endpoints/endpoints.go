@@ -158,7 +158,7 @@ func (h handlers) refresh(w http.ResponseWriter, r *httpx.Request) {
 		return
 	}
 	held := &heldHeaders{h: http.Header{}}
-	res, err := h.backend.Resume(r.Context(), held, r.HTTP())
+	res, err := h.backend.Resume(r.Context(), held, r.HTTP(), r.Tenant())
 	if err != nil {
 		r.Fail(w, failure(err))
 		return

@@ -99,7 +99,7 @@ type fakeAuth struct {
 	setCookie string
 }
 
-func (f *fakeAuth) Resume(_ context.Context, w http.ResponseWriter, _ *http.Request) (session.Resumed, error) {
+func (f *fakeAuth) Resume(_ context.Context, w http.ResponseWriter, _ *http.Request, _ core.TenantID) (session.Resumed, error) {
 	f.rec.add("resume")
 	if f.setCookie != "" {
 		w.Header().Add("Set-Cookie", f.setCookie)

@@ -83,7 +83,7 @@ func TestBackendContract(t *testing.T) {
 	}
 	want := map[string]string{
 		"Start":      "func(context.Context, http.ResponseWriter, core.SessionAttrs, core.SealedClaims) error",
-		"Resume":     "func(context.Context, http.ResponseWriter, *http.Request) (session.Resumed, error)",
+		"Resume":     "func(context.Context, http.ResponseWriter, *http.Request, core.TenantID) (session.Resumed, error)",
 		"Reissue":    "func(context.Context, http.ResponseWriter, session.Handle, core.SessionAttrs) error",
 		"End":        "func(context.Context, http.ResponseWriter, *http.Request) error",
 		"Durability": "func() store.Durability",

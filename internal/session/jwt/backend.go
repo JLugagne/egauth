@@ -259,10 +259,11 @@ func (b *Backend) Reissue(ctx context.Context, w http.ResponseWriter, cur sessio
 // is served from the renewed attributes and writes nothing. The transport is cookies when r
 // carries a readable session cookie (exactly one, non-empty), Bearer otherwise, so unrelated
 // cookies never hide a Bearer credential; a session cookie beside a Bearer credential is refused
-// (ErrAmbiguousTransport).
+// (ErrAmbiguousTransport). An access or refresh token sealed for another tenant than tenant
+// returns session.ErrTenantMismatch before the refresh token is consumed.
 // Errors joined with httpx.ErrUnavailable are outages (503); every other error refuses the request
 // (401).
-func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Request) (session.Resumed, error) {
+func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) (session.Resumed, error) {
 	p := b.read(r)
 	if p.ambiguous {
 		return session.Resumed{}, ErrAmbiguousTransport
@@ -278,6 +279,8 @@ func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Req
 			return session.Resumed{}, err
 		case err != nil && p.refresh == "":
 			return session.Resumed{}, err
+		case err == nil && tok.attrs.Subject().Tenant != tenant:
+			return session.Resumed{}, session.ErrTenantMismatch
 		case err == nil && tok.attrs.Transport() != p.transport:
 			return session.Resumed{}, ErrTransportMismatch
 		case err == nil && !expired:
@@ -289,7 +292,7 @@ func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Req
 	if p.refresh == "" {
 		return session.Resumed{}, ErrExpired
 	}
-	return b.renew(ctx, w, r, p, prior)
+	return b.renew(ctx, w, r, p, prior, tenant)
 }
 
 func (b *Backend) resumeLive(ctx context.Context, tok Token) (session.Resumed, error) {
@@ -343,10 +346,13 @@ func (b *Backend) load(ctx context.Context, refresh string) (tokens.RefreshRecor
 	return rec, a, hash, nil
 }
 
-func (b *Backend) renew(ctx context.Context, w http.ResponseWriter, r *http.Request, p presented, prior *Token) (session.Resumed, error) {
+func (b *Backend) renew(ctx context.Context, w http.ResponseWriter, r *http.Request, p presented, prior *Token, tenant core.TenantID) (session.Resumed, error) {
 	rec, a, hash, err := b.load(ctx, p.refresh)
 	if err != nil {
 		return session.Resumed{}, err
+	}
+	if rec.Tenant() != tenant || a.Subject().Tenant != tenant {
+		return session.Resumed{}, session.ErrTenantMismatch
 	}
 	if a.Transport() != p.transport {
 		return session.Resumed{}, ErrTransportMismatch

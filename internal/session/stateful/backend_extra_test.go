@@ -96,7 +96,7 @@ func TestRowStoresTheSealedAttributes(t *testing.T) {
 	if string(rec.AppClaims()) != string(w.fx.Claims.Value().Bytes()) {
 		t.Fatalf("stored claims %s", rec.AppClaims())
 	}
-	res, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok))
+	res, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok), tenant(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +122,7 @@ func TestCookieTracksServerExpiry(t *testing.T) {
 		for w.fx.Clock.Now().Add(step).Before(end) {
 			w.fx.Clock.Advance(step)
 			rr := httptest.NewRecorder()
-			if _, err := w.backend.Resume(t.Context(), rr, cookieRequest(t, w, tok)); err != nil {
+			if _, err := w.backend.Resume(t.Context(), rr, cookieRequest(t, w, tok), tenant(t)); err != nil {
 				t.Fatal(err)
 			}
 			now := w.fx.Clock.Now()
@@ -138,7 +138,7 @@ func TestCookieTracksServerExpiry(t *testing.T) {
 		}
 	}
 	w.fx.Clock.Set(end)
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok)); err == nil {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok), tenant(t)); err == nil {
 		t.Fatal("session served at its absolute end")
 	}
 
@@ -148,7 +148,7 @@ func TestCookieTracksServerExpiry(t *testing.T) {
 		if rr == nil {
 			w.fx.Clock.Advance(life.RecheckEvery)
 			rr = httptest.NewRecorder()
-			if _, err := w.backend.Resume(t.Context(), rr, cookieRequest(t, w, tok)); err != nil {
+			if _, err := w.backend.Resume(t.Context(), rr, cookieRequest(t, w, tok), tenant(t)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -168,7 +168,7 @@ func TestBearerResumeWritesNothing(t *testing.T) {
 	for _, d := range []time.Duration{time.Second, w.fx.Lifetimes.RecheckEvery} {
 		w.fx.Clock.Advance(d)
 		rr := httptest.NewRecorder()
-		if _, err := w.backend.Resume(t.Context(), rr, bearerRequest(t, tok)); err != nil {
+		if _, err := w.backend.Resume(t.Context(), rr, bearerRequest(t, tok), tenant(t)); err != nil {
 			t.Fatal(err)
 		}
 		if len(rr.Header()) != 0 {
@@ -186,7 +186,7 @@ func TestBothTransportsAreRefused(t *testing.T) {
 		r := cookieRequest(t, w, ctok)
 		r.Header.Set("Authorization", auth)
 		rr := httptest.NewRecorder()
-		if _, err := w.backend.Resume(t.Context(), rr, r); !errors.Is(err, stateful.ErrAmbiguousTransport) {
+		if _, err := w.backend.Resume(t.Context(), rr, r, tenant(t)); !errors.Is(err, stateful.ErrAmbiguousTransport) {
 			t.Fatalf("%s: %v", name, err)
 		}
 		if len(rr.Header()) != 0 {
@@ -209,10 +209,10 @@ func TestEndRevokesEveryPresentedToken(t *testing.T) {
 	if ck := sessionCookie(t, w, rr); ck == nil || ck.MaxAge >= 0 {
 		t.Fatalf("End did not clear the cookie: %+v", ck)
 	}
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, ctok)); !errors.Is(err, stateful.ErrInvalidToken) {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, ctok), tenant(t)); !errors.Is(err, stateful.ErrInvalidToken) {
 		t.Fatalf("cookie session after End: %v", err)
 	}
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, btok)); !errors.Is(err, stateful.ErrInvalidToken) {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, btok), tenant(t)); !errors.Is(err, stateful.ErrInvalidToken) {
 		t.Fatalf("Bearer session after End: %v", err)
 	}
 }
@@ -237,7 +237,7 @@ func TestTokenIsBoundToItsTenant(t *testing.T) {
 	tok, _ := start(t, w, attrsFor(t, w, s, core.TransportBearer, true))
 	raw, _, _ := strings.Cut(tok, ".")
 	for _, forged := range []string{raw, raw + ".other", raw + ".BAD"} {
-		if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, forged)); !errors.Is(err, stateful.ErrInvalidToken) {
+		if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, forged), tenant(t)); !errors.Is(err, stateful.ErrInvalidToken) {
 			t.Fatalf("token %q of another tenant: %v", forged, err)
 		}
 	}
@@ -248,11 +248,11 @@ func TestStoreOutageIsUnavailable(t *testing.T) {
 	s := mustUser(t, w)
 	tok, _ := start(t, w, attrsFor(t, w, s, core.TransportBearer, true))
 	w.fx.Outage.Set(true)
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok)); !errors.Is(err, httpx.ErrUnavailable) {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok), tenant(t)); !errors.Is(err, httpx.ErrUnavailable) {
 		t.Fatalf("Resume during a store outage: %v", err)
 	}
 	w.fx.Outage.Set(false)
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok)); err != nil {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok), tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -262,7 +262,7 @@ func TestReissueRevokesTheSessionOfAnUnknownSubject(t *testing.T) {
 	s := mustUser(t, w)
 	a := attrsFor(t, w, s, core.TransportCookies, true)
 	tok, _ := start(t, w, a)
-	res, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok))
+	res, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok), tenant(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +278,7 @@ func TestReissueRevokesTheSessionOfAnUnknownSubject(t *testing.T) {
 		t.Fatal("no Logout event for the revoked session")
 	}
 	w.fx.Claims.Recover()
-	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok)); !errors.Is(err, stateful.ErrInvalidToken) {
+	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), cookieRequest(t, w, tok), tenant(t)); !errors.Is(err, stateful.ErrInvalidToken) {
 		t.Fatalf("session of an unknown subject survived: %v", err)
 	}
 }
@@ -306,12 +306,12 @@ func TestRenewalKeepsTheAbsoluteEndOfItsRow(t *testing.T) {
 	end := a.CreatedAt().Add(fx.Lifetimes.MaxLifetime)
 	for fx.Clock.Now().Add(fx.Lifetimes.IdleTimeout / 2).Before(end) {
 		fx.Clock.Advance(fx.Lifetimes.IdleTimeout / 2)
-		if _, err := b.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok)); err != nil {
+		if _, err := b.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok), tenant(t)); err != nil {
 			t.Fatalf("renewal under a longer MaxLifetime: %v", err)
 		}
 	}
 	fx.Clock.Set(end)
-	if _, err := b.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok)); err == nil {
+	if _, err := b.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, tok), tenant(t)); err == nil {
 		t.Fatal("a longer MaxLifetime extended a live session")
 	}
 }

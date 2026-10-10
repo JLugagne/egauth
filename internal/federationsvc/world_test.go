@@ -119,7 +119,7 @@ type sessions struct {
 	ids  identity.Store
 }
 
-func (s *sessions) Resume(ctx context.Context, _ http.ResponseWriter, r *http.Request) (session.Resumed, error) {
+func (s *sessions) Resume(ctx context.Context, _ http.ResponseWriter, r *http.Request, _ core.TenantID) (session.Resumed, error) {
 	s.mu.Lock()
 	a, ok := s.byID[r.Header.Get(sessHdr)]
 	s.mu.Unlock()
