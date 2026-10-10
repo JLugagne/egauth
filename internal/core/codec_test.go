@@ -68,7 +68,7 @@ func TestCodecRoundTripOfTransitions(t *testing.T) {
 	require.True(t, reflect.DeepEqual(unbound, backU))
 
 	monotonic := clock.Clock{}.Now()
-	a := admitSession(t, add(t, pending(t), v(factors.Password(alice, t0)), active), active, noMFA, monotonic)
+	a := admitSession(t, add(t, pendingAt(t, monotonic), v(factors.Password(alice, monotonic)), active), active, noMFA, monotonic)
 	sa, err := core.Seal(a)
 	require.NoError(t, err)
 	backA, err := core.Unseal(sa)

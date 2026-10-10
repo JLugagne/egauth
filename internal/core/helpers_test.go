@@ -44,11 +44,21 @@ func pending(t *testing.T) core.Pending {
 
 func pendingWith(t *testing.T, intent core.RememberIntent, pol core.RememberMePolicy) core.Pending {
 	t.Helper()
+	return pendingWithAt(t, intent, pol, t0)
+}
+
+func pendingAt(t *testing.T, now time.Time) core.Pending {
+	t.Helper()
+	return pendingWithAt(t, core.RememberRequested, core.RememberUserChoice, now)
+}
+
+func pendingWithAt(t *testing.T, intent core.RememberIntent, pol core.RememberMePolicy, now time.Time) core.Pending {
+	t.Helper()
 	o, err := redirect.NewOrigins("https://app.example.com", nil)
 	require.NoError(t, err)
 	rt, err := redirect.Parse("/after", o)
 	require.NoError(t, err)
-	p, err := core.NewPending(tenantA, intent, rt, core.TransportCookies, pol, t0)
+	p, err := core.NewPending(tenantA, intent, rt, core.TransportCookies, pol, now)
 	require.NoError(t, err)
 	return p
 }
