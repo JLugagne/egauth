@@ -16,6 +16,7 @@ type discoveryDocument struct {
 	JWKSURI           string   `json:"jwks_uri,omitempty"`
 	Audiences         []string `json:"audiences"`
 	ClaimsFingerprint string   `json:"claims_fingerprint"`
+	Tenant            string   `json:"tenant,omitempty"`
 }
 
 func (a *Auth[C]) publishesJWKS() bool {
@@ -78,7 +79,7 @@ func (a *Auth[C]) discoveryDocument(w http.ResponseWriter, r *httpx.Request) {
 		r.Fail(w, errors.Join(httpx.ErrUnauthenticated, err))
 		return
 	}
-	doc := discoveryDocument{Issuer: issuer, Audiences: nonNil(a.cfg.Audiences), ClaimsFingerprint: o.fingerprint}
+	doc := discoveryDocument{Issuer: issuer, Audiences: nonNil(a.cfg.Audiences), ClaimsFingerprint: o.fingerprint, Tenant: r.Tenant().String()}
 	if a.publishesJWKS() {
 		doc.JWKSURI = issuer + a.cfg.BasePath + routes.JWKS
 	}

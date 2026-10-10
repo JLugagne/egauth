@@ -22,3 +22,15 @@ func New[C any](cfg egauth.Config[C], clk *Clock, idp *IdP) (*egauth.Auth[C], er
 	}
 	return egauth.TestHookNew(cfg, s)
 }
+
+// NewResourceServer is egauth.NewResourceServer for a journey: the server reads clk, trusts the
+// certificates in roots, and may reach an Auth on loopback, as an httptest Auth is. Either may be
+// nil to keep the wall clock or the system roots.
+func NewResourceServer[C any](cfg egauth.ResourceConfig, clk *Clock, roots *x509.CertPool) (*egauth.ResourceServer[C], error) {
+	var s egauth.TestResourceSeams
+	if clk != nil {
+		s.Clock = clk.Library()
+	}
+	s.RootCAs = roots
+	return egauth.TestHookNewResourceServer[C](cfg, s)
+}

@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/JLugagne/egauth"
+	"github.com/JLugagne/egauth/egauthtest"
 	"github.com/JLugagne/egauth/federation"
 	"github.com/JLugagne/egauth/internal/configcheck"
 )
@@ -55,6 +56,33 @@ var guardRoots = []guardRoot{
 			setModule(t, root.Addr().Interface().(*egauth.Config[struct{}]), path, on)
 		},
 	},
+	{
+		name: "ResourceConfig",
+		typ:  reflect.TypeFor[egauth.ResourceConfig](),
+		full: func(t *testing.T) reflect.Value {
+			cfg := fullResourceConfig(t)
+			return reflect.ValueOf(&cfg).Elem()
+		},
+		check: func(t *testing.T, root reflect.Value) error {
+			rs, err := egauth.NewLoopbackResourceServer[struct{}](root.Interface().(egauth.ResourceConfig), egauthtest.NewClock(time.Time{}).Library())
+			if err == nil {
+				require.NoError(t, rs.Close())
+			}
+			return err
+		},
+		resolve: func(root reflect.Value) (*configcheck.Resolved, []*configcheck.Error) {
+			return egauth.ResolveResource(root.Interface().(egauth.ResourceConfig))
+		},
+		options:   func(*testing.T) configcheck.Options { return egauth.ResourceOptions() },
+		setModule: func(*testing.T, reflect.Value, string, bool) {},
+	},
+}
+
+func fullResourceConfig(t *testing.T) egauth.ResourceConfig {
+	t.Helper()
+	s := newStubAuth(t)
+	s.doc["claims_fingerprint"] = egauth.ClaimsFingerprint[struct{}]()
+	return s.config(t)
 }
 
 func forEachGuardRoot(t *testing.T, run func(t *testing.T, root guardRoot)) {
