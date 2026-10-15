@@ -168,12 +168,11 @@ var legacyRelPrefixes = []string{
 	"adapters/pgx/identity", "adapters/pgx/sessions", "adapters/pgx/tokens", "adapters/pgx/mfa",
 	"adapters/pgx/otp", "adapters/pgx/passkey", "adapters/pgx/oauth", "adapters/pgx/keystore",
 	"adapters/pgx/internal/pgxmigrate",
-	"e2e-security",
 }
 
 // LegacyPrefixCount is the number of legacy package prefixes of DESIGN.md section 10.1 still
 // exempt. It may only decrease, down to zero at the WP16 cutover.
-const LegacyPrefixCount = 31
+const LegacyPrefixCount = 30
 
 // LegacyRelPrefixes returns the legacy package prefixes, relative to the module path, that are
 // exempt until WP16.

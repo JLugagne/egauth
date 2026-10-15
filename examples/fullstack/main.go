@@ -1,51 +1,28 @@
-// Package main is a runnable reference application that wires the full egauth stack:
-// identity + tokens with custom claims + MFA (TOTP) + passkey + admin operations + audit
-// events — all over HTTP using only in-memory backends and the standard library mux.
+// Package main is a runnable reference application of egauth: password, magic link, passkey, TOTP
+// MFA, self-delete and API keys on in-memory storage, composed with New and Routes.
 //
-// This application is intentionally self-contained: it imports only the published egauth
-// module (github.com/JLugagne/egauth) and builds with a plain "go build" from the module
-// proxy without requiring a local go.work workspace.
+// It imports only the egauth module and builds with a plain go build. Every secret comes from the
+// environment (EGAUTH_KEK, EGAUTH_SIGNING_SEED, 32 bytes each, hex encoded); when unset, a fresh
+// random key is generated, which is acceptable only because the storage is in memory and the
+// public origin is a loopback origin. The public origin comes from EGAUTH_PUBLIC_ORIGIN, default
+// http://localhost:8080, and the listen address is derived from it; the server speaks plain HTTP,
+// so only an http loopback origin is accepted.
+//
+// The email sink logs only the kind of each message: link and code values are redacted by the
+// library, so email flows (registration, password reset, magic link) cannot be completed by hand
+// against this binary, and no user id is surfaced for EGAUTH_ADMIN_USERS. Replace logEmail with a
+// real mailer to use those flows; the tests complete them against a build that captures the mail.
 //
 // # Routes
 //
-//	POST /auth/register          Register a new account (form: email, password)
-//	POST /auth/login             Authenticate and receive JWT access+refresh cookies (form: email, password)
-//	POST /auth/refresh           Rotate the refresh token (cookie-driven)
-//	POST /auth/logout            Revoke the current refresh-token family (cookie-driven)
+// The auth endpoints are served by egauth under /auth (see the library documentation). The
+// application adds:
 //
-//	POST /mfa/enroll             Begin TOTP enrollment for the authenticated user
-//	POST /mfa/confirm            Confirm TOTP enrollment with a live code (form: code)
-//	POST /mfa/verify             Verify a TOTP code as a step-up factor (form: code)
-//
-//	POST /passkey/register/begin    Begin passkey credential registration
-//	POST /passkey/register/finish   Finish passkey credential registration
-//	POST /passkey/login/begin       Begin passkey login ceremony
-//	POST /passkey/login/finish      Finish passkey login ceremony (triggers onLoginSuccess)
-//
-//	POST /admin/disable/:userID   Administratively disable an account (admin-only role check)
-//	POST /admin/enable/:userID    Re-enable a disabled account (admin-only role check)
-//	POST /admin/mfa/unlock/:userID Unlock a locked MFA enrollment (admin-only role check)
-//
-//	GET  /me                     Return authenticated user ID (protected route, demo only)
-//
-// # Custom claims
-//
-// The token custom-claims type carries a Role field ("user" or "admin"), demonstrating
-// the generic tokens/jwt API with C = AppClaims.
-//
-// # Credential assurance
-//
-// The credential-enrollment routes (/mfa/enroll, /mfa/confirm and the passkey register
-// begin/finish routes) are gated with tokens.DenyInterim: an interim (pre-second-factor)
-// session cannot install a new factor or passkey. Account deletion and password reset run the
-// registered AccountErasers, which revoke refresh-token families and evict passkey credentials,
-// so a credential an attacker installed while holding the password does not survive recovery.
-//
-// # Audit
-//
-// All modules are wired with an event.Sink backed by slog.Default(), so every
-// authentication event (login success/failure, TOTP verify, passkey verify, admin actions)
-// is written to structured logs.
+//	GET  /me                     the caller's subject and role (any established session)
+//	POST /admin/disable/{id}     disable an account (admin role and a completed second factor)
+//	POST /api/keys               issue an "automation" API key to the caller (?scope= grants a scope)
+//	GET  /api/report             an API-key route (kind "automation", scope "report:read")
+//	GET  /healthz                readiness probe
 package main
 
 import (
@@ -55,476 +32,286 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/event"
-	"github.com/JLugagne/egauth/identity"
-	identitymem "github.com/JLugagne/egauth/identity/memory"
-	"github.com/JLugagne/egauth/issuance"
-	"github.com/JLugagne/egauth/mfa"
-	mfamem "github.com/JLugagne/egauth/mfa/memory"
-	"github.com/JLugagne/egauth/passkey"
-	passkeymem "github.com/JLugagne/egauth/passkey/memory"
-	"github.com/JLugagne/egauth/passwords/argon2"
-	"github.com/JLugagne/egauth/passwords/policy"
-	"github.com/JLugagne/egauth/tokens"
-	"github.com/JLugagne/egauth/tokens/jwt"
-	tokenmem "github.com/JLugagne/egauth/tokens/memory"
-	"github.com/go-webauthn/webauthn/protocol"
-	"github.com/google/uuid"
+	"github.com/JLugagne/egauth/kek"
+	"github.com/JLugagne/egauth/memstore"
+	"github.com/JLugagne/egauth/principal"
+	"github.com/JLugagne/egauth/signing"
+	"github.com/JLugagne/egauth/store"
+	"github.com/JLugagne/egauth/store/identity"
+	"github.com/JLugagne/egauth/store/keys"
 )
 
-// AppClaims carries the application-specific data embedded in every JWT.
-// Using a named type instead of struct{} demonstrates the generic tokens/jwt API.
+// AppClaims is the application part of every session's claims.
 type AppClaims struct {
-	// Role is "user" or "admin". Admin routes require Role == "admin".
-	Role string `json:"role,omitempty"`
+	Plan string `json:"plan,omitempty"`
 }
 
-// isAdmin guards admin-only routes: requires the caller to carry an "admin" role in their
-// JWT custom claims. Returns 403 and false on failure.
-func isAdmin(claims *tokens.Claims[AppClaims], w http.ResponseWriter) bool {
-	if claims == nil || claims.Custom.Role != "admin" {
-		http.Error(w, "forbidden: admin role required", http.StatusForbidden)
-		return false
-	}
-	return true
+type claimsSource struct {
+	admins map[uuid.UUID]bool
 }
 
-// BuildServer wires the full egauth stack and returns the configured mux.
-// Extracted from main so it can be exercised by the smoke test.
-func BuildServer() (http.Handler, error) {
-	ctx := context.Background()
-	_ = ctx
-
-	// ------------------------------------------------------------------ audit
-	// All modules share a single slog-backed event sink so every auth event
-	// (login success/failure, TOTP verify, passkey verify, admin actions) lands
-	// in structured logs. Replace with your own Sink implementation for metrics,
-	// alerting, or a dedicated audit store.
-	audit := event.NewSlogSink(slog.Default())
-
-	// ------------------------------------------------------------------ identity store
-	idStore := identitymem.NewStore()
-	// The identity service itself is built after the token store and passkey service (see the
-	// eraser wiring below): its AccountErasers close the cross-module revocation loop.
-
-	// ------------------------------------------------------------------ tokens (custom claims)
-	// ClaimsProvider re-derives the user's role on every refresh, so a
-	// role change takes effect without waiting for the access token to expire.
-	tokenStore := tokenmem.NewStore[AppClaims]()
-	claimsProvider := tokens.ClaimsProviderFunc[AppClaims](
-		func(_ context.Context, userID uuid.UUID, tenantID string) (tokens.Claims[AppClaims], error) {
-			// In production, look up the user's role from your data store.
-			// Here every user is "user"; an admin would set Role: "admin".
-			return tokens.Claims[AppClaims]{
-				Subject:  userID,
-				TenantID: tenantID,
-				Custom:   AppClaims{Role: "user"},
-			}, nil
-		},
-	)
-	// The HS256 signing key is generated fresh at startup with crypto/rand: it is never
-	// committed to the repo, and jwt.New refuses any key copied from a published example.
-	// Random-per-boot means issued tokens do not survive a restart — acceptable for this
-	// demo and safer than a constant. In production, load the key from a secret manager
-	// (environment variable, vault) instead of generating one here.
-	signingKey := make([]byte, 32)
-	if _, err := rand.Read(signingKey); err != nil {
-		return nil, fmt.Errorf("generate HS256 signing key: %w", err)
+func (c claimsSource) ClaimsFor(_ context.Context, s principal.Subject) (egauth.AppClaims[AppClaims], error) {
+	roles := []string{"user"}
+	if c.admins[s.User] {
+		roles = append(roles, "admin")
 	}
-	issuer := jwt.New[AppClaims](jwt.Config[AppClaims]{
-		Store:          tokenStore,
-		Issuer:         "egauth-fullstack-example",
-		SecretKey:      hex.EncodeToString(signingKey),
-		AccessTTL:      15 * time.Minute,
-		RefreshTTL:     720 * time.Hour,
-		ClaimsProvider: claimsProvider,
-		EventSink:      audit,
-	})
+	return egauth.AppClaims[AppClaims]{
+		Roles:  roles,
+		Scopes: []string{"report:read"},
+		Custom: AppClaims{Plan: "demo"},
+	}, nil
+}
 
-	// claimsOf maps a freshly authenticated identity.User to the initial token claims.
-	claimsOf := func(u *identity.User) tokens.Claims[AppClaims] {
-		return tokens.Claims[AppClaims]{
-			Subject:  u.ID,
-			TenantID: u.TenantID,
-			Custom:   AppClaims{Role: "user"},
+type logEmail struct {
+	log *slog.Logger
+}
+
+func (l logEmail) note(kind string) error {
+	l.log.Info("email delivered", "kind", kind)
+	return nil
+}
+
+func (l logEmail) RegistrationLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("registration_link")
+}
+
+func (l logEmail) AccountExistsNotice(_ context.Context, m egauth.NoticeMessage) error {
+	return l.note("account_exists_notice")
+}
+
+func (l logEmail) PasswordResetLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("password_reset_link")
+}
+
+func (l logEmail) MagicLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("magic_link")
+}
+
+func (l logEmail) LoginCode(_ context.Context, m egauth.CodeMessage) error {
+	return l.note("login_code")
+}
+
+func (l logEmail) EmailVerificationLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("email_verification_link")
+}
+
+func (l logEmail) EmailChangeLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("email_change_link")
+}
+
+func (l logEmail) RecoveryEmailLink(_ context.Context, m egauth.LinkMessage) error {
+	return l.note("recovery_email_link")
+}
+
+func (l logEmail) SecurityNotice(_ context.Context, m egauth.SecurityNoticeMessage) error {
+	return l.note("security_notice")
+}
+
+func envKey(name string) ([]byte, error) {
+	raw := os.Getenv(name)
+	if raw == "" {
+		key := make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, errors.Join(errors.New("reading crypto/rand"), err)
 		}
+		return key, nil
 	}
-
-	// cookies configures JWT cookies: Secure + SameSite=Lax by default.
-	// WithInsecureCookies() is NOT set so the defaults are secure; for local
-	// HTTP development behind a TLS terminator this works as-is.
-	cookies := tokens.DefaultCookies()
-
-	// ------------------------------------------------------------------ MFA (TOTP)
-	mfaStore := mfamem.NewStore()
-
-	mfaSvc := mfa.NewService(
-		mfaStore,
-		mfa.WithIssuer("egauth-fullstack-example"),
-		mfa.WithEventSink(audit),
-	)
-
-	// ------------------------------------------------------------------ passkey
-	passkeyStore := passkeymem.NewStore()
-	challengeStore := passkeymem.NewChallengeStore()
-	// The ceremony-cookie HMAC key is generated fresh at startup with crypto/rand: it is
-	// never committed to the repo, and passkey.NewService refuses all-zero keys or any key
-	// copied from a published example. Random-per-boot means in-flight ceremonies do not
-	// survive a restart — acceptable for this demo. In production, load the key from a
-	// secret manager (environment variable, vault) instead of generating one here.
-	cookieKey := make([]byte, 32)
-	if _, err := rand.Read(cookieKey); err != nil {
-		return nil, fmt.Errorf("generate passkey cookie key: %w", err)
-	}
-	// Using InsecureNoChallengeStore is NOT set: we always supply a real challenge store.
-	// AccountGate wires the passkey login paths to the identity user store's lifecycle
-	// (identity.DisableUser / DeleteUser): a suspended or soft-deleted account is refused at
-	// BeginLogin (defense in depth) and at FinishLogin, instead of minting a session.
-	pkSvc, err := passkey.NewService(passkeyStore, passkey.Config{
-		RPID:             "localhost",
-		RPDisplayName:    "egauth fullstack example",
-		RPOrigins:        []string{"http://localhost:8080"},
-		UserVerification: protocol.VerificationRequired,
-		CookieKey:        cookieKey,
-		ChallengeStore:   challengeStore,
-		Events:           audit,
-		AccountGate:      passkey.NewIdentityAccountGate(idStore),
-	})
+	key, err := hex.DecodeString(raw)
 	if err != nil {
-		return nil, fmt.Errorf("passkey.NewService: %w", err)
+		return nil, errors.Join(errors.New(name+" is not hex"), err)
 	}
+	return key, nil
+}
 
-	// ------------------------------------------------------------------ identity service
-	// Built after the token store and passkey service because its cross-module revocation hooks
-	// close the dependency loop: DeleteAccount and ResetPassword run every registered
-	// AccountEraser, so the token revoker and the passkey eraser must already exist. Wiring both
-	// means an account recovery kills the refresh-token families AND evicts every passkey
-	// credential — including one an attacker enrolled while holding the password (F-COMP-002);
-	// without the passkey eraser that credential survives the reset and keeps minting sessions.
-	idSvc := identity.NewService(
-		idStore,
-		argon2.NewHasher(),
-		policy.NewDefaultPolicy(),
-		identity.WithEventSink(audit),
-		identity.WithAccountErasers(
-			tokens.NewAccountRevoker(tokenStore),
-			pkSvc.AccountEraser(),
-		),
-	)
-	// The identity service doubles as the authoritative account-state resolver: every issuance path
-	// re-loads the live account through it, so a disabled or deleted account cannot be minted a
-	// credential even if it was active when the ceremony started.
-	sessionResolver, ok := idSvc.(issuance.Resolver)
-	if !ok {
-		return nil, errors.New("identity service does not expose authoritative session state")
-	}
-
-	// ------------------------------------------------------------------ HTTP mux
-	mux := http.NewServeMux()
-
-	// -- auth: identity + tokens ------------------------------------------
-	//
-	// Register and login handlers use WithInsecureNoOriginCheck because this
-	// demo does not set up TrustedOrigins. In production, replace with:
-	//   identity.WithTrustedOrigins("app.example.com")
-	mux.Handle("POST /auth/register", identity.RegisterHandler[AppClaims](
-		idSvc, issuer, claimsOf,
-		identity.WithInsecureNoOriginCheck(),
-		identity.WithCookies(cookies),
-	))
-	mux.Handle("POST /auth/login", identity.LoginHandler[AppClaims](
-		idSvc, issuer, claimsOf,
-		identity.WithInsecureNoOriginCheck(),
-		identity.WithCookies(cookies),
-		// MFA IS A DEPLOYMENT DECISION. This example turns it ON, because a sample that mounts
-		// the second-factor handlers without requiring the factor would show a working-looking
-		// setup in which nobody is actually protected: a user could enrol a TOTP factor, confirm
-		// it, and still sign in with the password alone.
-		//
-		// Requiring it is a policy only you can set, so the library never chooses for you — drop
-		// this one option and the same handlers give users an OPTIONAL factor instead: they may
-		// enrol and confirm one, and a password login still yields a full pair. Both are supported;
-		// pick deliberately. mfa.Service satisfies identity.MFAEnrollmentChecker directly.
-		identity.WithMFAGate(mfaSvc),
-	))
-	mux.Handle("POST /auth/refresh", tokens.RefreshHandler[AppClaims](
-		issuer,
-		tokens.WithCookies(cookies),
-		// Omit WithTrustedOrigins in this demo; a real deployment should set it.
-		tokens.WithInsecureNoOriginCheck(),
-	))
-	mux.Handle("POST /auth/logout", tokens.LogoutHandler(
-		tokenStore,
-		tokens.WithCookies(cookies),
-		tokens.WithInsecureNoOriginCheck(),
-	))
-
-	// -- MFA (TOTP) -------------------------------------------------------
-	//
-	// Mount MFA handlers behind ContextMiddleware so the authenticated user is
-	// available to mfa.WithUserResolver(tokens.UserResolverFromContext) —
-	// the first-party wiring adapter that reads Actor from context.
-	mfaOpts := []mfa.HandlerOption{
-		mfa.WithUserResolver(tokens.UserResolverFromContext),
-		mfa.WithInsecureNoOriginCheck(),
-		// Enrolling or confirming a second factor is a credential-management action: refusing an
-		// interim (pre-second-factor) session here is what stops a password attacker from quietly
-		// installing their own factor and then completing step-up with it. tokens.DenyInterim is
-		// the canonical gate — it allows full sessions and requests with no token context at all.
-		mfa.WithCredentialAssurance(tokens.DenyInterim),
-	}
-	mux.Handle("POST /mfa/enroll", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		mfa.EnrollHandler(mfaSvc, mfaOpts...),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-	mux.Handle("POST /mfa/confirm", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		mfa.ConfirmHandler(mfaSvc, mfaOpts...),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-	mux.Handle("POST /mfa/verify", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		mfa.VerifyHandler(mfaSvc, mfaOpts...),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-	// The completion half of the gate wired on /auth/login: exchanges a correct second factor for
-	// the full access+refresh pair. It runs on the interim access cookie, so the claims builder
-	// only supplies subject, tenant and custom data — the handler stamps the authoritative AMR
-	// (primary factor + otp + mfa). sessionResolver re-checks the live account state before the
-	// renewable pair is minted, so an account disabled between the two factors stays blocked.
-	mux.Handle("POST /mfa/step-up", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		mfa.StepUpHandler[AppClaims](mfaSvc, issuer,
-			func(_ context.Context, userID uuid.UUID, tenant string) tokens.Claims[AppClaims] {
-				return tokens.Claims[AppClaims]{
-					Subject:  userID,
-					TenantID: tenant,
-					Roles:    []string{"user"},
-					Custom:   AppClaims{},
-				}
-			},
-			append(mfaOpts,
-				mfa.WithCookies(cookies),
-				mfa.WithSessionStateResolver(sessionResolver),
-			)...,
-		),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-
-	// -- passkey ----------------------------------------------------------
-	//
-	// Registration requires an authenticated user; login is unauthenticated.
-	// The UserResolver for registration reads the actor from context; the
-	// login-success callback issues a JWT token pair.
-	passkeyUserResolver := func(r *http.Request) (uuid.UUID, string, string, string, bool) {
-		a, ok := tokens.ActorFromContext(r.Context())
-		if !ok {
-			return uuid.Nil, "", "", "", false
+func adminSubjects() (map[uuid.UUID]bool, error) {
+	out := map[uuid.UUID]bool{}
+	for _, raw := range strings.Split(os.Getenv("EGAUTH_ADMIN_USERS"), ",") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
 		}
-		// name/displayName would come from your user profile in production.
-		return a.UserID, a.TenantID, a.UserID.String(), a.UserID.String(), true
-	}
-	// The passkey login callback mints through the same issuance pipeline as every other login
-	// path, so the account state is re-loaded, the tenant is bound, and the forced-change flag
-	// and MFA gate are applied before the JWT pair is issued.
-	sessionPipe, err := issuance.New[AppClaims](issuer,
-		issuance.WithResolver(sessionResolver),
-		issuance.WithEventSink(audit),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("issuance.New: %w", err)
-	}
-	passkeyLoginSuccess := passkey.LoginSuccessWithTenantFunc(func(w http.ResponseWriter, r *http.Request, userID uuid.UUID, tenant string) {
-		res, err := sessionPipe.Issue(r.Context(), issuance.Request[AppClaims]{
-			TenantID: tenant,
-			UserID:   userID,
-			Claims:   claimsOf(&identity.User{ID: userID, TenantID: tenant}),
-			Method:   "passkey",
-			AMR:      []string{tokens.AMRWebAuthn},
-		})
+		id, err := uuid.Parse(raw)
 		if err != nil {
-			http.Error(w, "token issuance failed", http.StatusInternalServerError)
+			return nil, errors.Join(errors.New("EGAUTH_ADMIN_USERS holds a value that is not a uuid"), err)
+		}
+		out[id] = true
+	}
+	return out, nil
+}
+
+// BuildServer composes the application on publicOrigin and returns its handler and the function
+// that closes it. The handler serves the auth endpoints, the application routes and nothing else.
+func BuildServer(logger *slog.Logger, publicOrigin string) (http.Handler, func() error, error) {
+	admins, err := adminSubjects()
+	if err != nil {
+		return nil, nil, err
+	}
+	return compose(logger, publicOrigin, logEmail{log: logger}, admins)
+}
+
+func compose(logger *slog.Logger, publicOrigin string, mailer egauth.EmailDeliverer, admins map[uuid.UUID]bool) (http.Handler, func() error, error) {
+	kekKey, err := envKey("EGAUTH_KEK")
+	if err != nil {
+		return nil, nil, err
+	}
+	k, err := kek.NewLocal(kekKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	seed, err := envKey("EGAUTH_SIGNING_SEED")
+	if err != nil {
+		return nil, nil, err
+	}
+	signer, err := signing.EdDSA("k1", seed)
+	if err != nil {
+		return nil, nil, err
+	}
+	auth, err := egauth.New(egauth.Config[AppClaims]{
+		PublicOrigin: publicOrigin,
+		Proxy:        egauth.DirectClients(),
+		Storage:      memstore.New(k),
+		KEK:          k,
+		Sessions:     egauth.JWT(egauth.StaticKeys(signer)),
+		Admin:        egauth.RoleAdmin("admin"),
+		Claims:       claimsSource{admins: admins},
+		Events:       event.NewSlogSink(logger),
+		Email:        mailer,
+		Pages: egauth.Pages{
+			Login: "/login", AfterLogin: "/", MFA: "/mfa", Reauth: "/reauth", Error: "/login",
+			ConfirmRegistration: "/register/confirm", PasswordReset: "/reset", MagicLink: "/magic",
+			SecurityRevert: "/revert",
+		},
+		Modules: egauth.Modules{
+			Password:   &egauth.PasswordModule{},
+			MagicLink:  &egauth.MagicLinkModule{},
+			Passkey:    &egauth.PasskeyModule{DisplayName: "egauth demo"},
+			MFA:        &egauth.MFAModule{},
+			SelfDelete: &egauth.SelfDeleteModule{},
+			APIKeys:    &egauth.APIKeyModule{Kinds: []string{"automation"}},
+		},
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	h, err := auth.Routes().
+		Protect("GET /me", me).
+		Protect("POST /admin/disable/{id}", adminDisable(auth), egauth.RequireAnyRole("admin"), egauth.RequireMFA()).
+		Protect("POST /api/keys", issueKey(auth)).
+		ProtectAPI("GET /api/report", report, egauth.Kinds("automation"), egauth.RequireAnyScope("report:read")).
+		Public("GET /healthz", healthz(auth)).
+		Build()
+	if err != nil {
+		return nil, nil, errors.Join(err, auth.Close())
+	}
+	return h, auth.Close, nil
+}
+
+func me(w http.ResponseWriter, _ *http.Request, p egauth.Principal[AppClaims]) {
+	_, _ = fmt.Fprintf(w, "user=%s roles=%s\n", p.Subject().User, strings.Join(p.Claims().Roles, ","))
+}
+
+func issueKey(auth *egauth.Auth[AppClaims]) egauth.PrincipalHandler[AppClaims] {
+	return func(w http.ResponseWriter, r *http.Request, p egauth.Principal[AppClaims]) {
+		req := egauth.APIKeyRequest{Kind: "automation", Name: "demo", Lifetime: keys.DefaultExpiry()}
+		if scope := r.URL.Query().Get("scope"); scope != "" {
+			req.Scopes = []string{scope}
+		}
+		secret, err := auth.APIKeys().Create(r.Context(), p.Caller(), req)
+		if err != nil {
+			http.Error(w, "cannot issue a key", http.StatusForbidden)
 			return
 		}
-		cookies.SetAccess(w, res.Pair.AccessToken)
-		if !res.Interim {
-			cookies.SetRefresh(w, res.Pair.RefreshToken, res.Pair.RefreshTokenExpiresAt, false)
+		_, _ = fmt.Fprint(w, secret.Reveal())
+	}
+}
+
+func report(w http.ResponseWriter, _ *http.Request, p egauth.Principal[AppClaims]) {
+	_, _ = fmt.Fprintf(w, "report for %s\n", p.Subject().User)
+}
+
+func adminDisable(auth *egauth.Auth[AppClaims]) egauth.PrincipalHandler[AppClaims] {
+	return func(w http.ResponseWriter, r *http.Request, p egauth.Principal[AppClaims]) {
+		id, err := uuid.Parse(r.PathValue("id"))
+		if err != nil {
+			http.Error(w, "invalid id", http.StatusBadRequest)
+			return
+		}
+		if err := auth.Accounts().Disable(r.Context(), p.Caller(), id); err != nil {
+			code, msg := disableStatus(err)
+			http.Error(w, msg, code)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func disableStatus(err error) (int, string) {
+	switch {
+	case errors.Is(err, egauth.ErrForbidden), errors.Is(err, egauth.ErrTenantMismatch), errors.Is(err, egauth.ErrAPIKeyCaller):
+		return http.StatusForbidden, "forbidden"
+	case errors.Is(err, egauth.ErrReauthRequired):
+		return http.StatusUnauthorized, "reauthentication required"
+	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrTombstoned):
+		return http.StatusNotFound, "not found"
+	}
+	return http.StatusInternalServerError, "internal error"
+}
+
+func healthz(auth *egauth.Auth[AppClaims]) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := auth.Ready(r.Context()); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-
-	mux.Handle("POST /passkey/register/begin", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		passkey.BeginRegistrationHandler(pkSvc,
-			passkey.WithUserResolver(passkeyUserResolver),
-			// Enrolling a passkey is a credential-management action: an interim session may not
-			// install one (same rationale as the MFA enrollment gate above).
-			passkey.WithCredentialAssurance(tokens.DenyInterim),
-			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
-			passkey.WithSessionCookieName("passkey_ceremony"),
-			passkey.WithInsecureCookies(),
-		),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-	mux.Handle("POST /passkey/register/finish", tokens.ContextMiddleware[AppClaims](
-		issuer,
-		passkey.FinishRegistrationHandler(pkSvc,
-			passkey.WithUserResolver(passkeyUserResolver),
-			// Enrolling a passkey is a credential-management action: an interim session may not
-			// install one (same rationale as the MFA enrollment gate above).
-			passkey.WithCredentialAssurance(tokens.DenyInterim),
-			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
-			passkey.WithSessionCookieName("passkey_ceremony"),
-			passkey.WithInsecureCookies(),
-		),
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-	mux.Handle("POST /passkey/login/begin",
-		passkey.BeginLoginHandler(pkSvc,
-			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
-			passkey.WithSessionCookieName("passkey_ceremony"),
-			passkey.WithInsecureCookies(),
-		),
-	)
-	mux.Handle("POST /passkey/login/finish",
-		passkey.FinishLoginHandler(pkSvc,
-			passkey.WithLoginSuccessWithTenant(passkeyLoginSuccess),
-			// Plaintext HTTP dev: opt out of the default __Host- ceremony cookie name.
-			passkey.WithSessionCookieName("passkey_ceremony"),
-			passkey.WithInsecureCookies(),
-		),
-	)
-
-	// -- admin ------------------------------------------------------------
-	//
-	// Admin routes are protected by RequireAuth with a Role==admin check.
-	// In a real app you would parse a UUID from the URL path; for brevity we
-	// use a query parameter (?id=<uuid>).
-	adminMiddleware := func(next func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, c AppClaims)) http.Handler {
-		return tokens.RequireAuth[AppClaims](issuer,
-			func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, c AppClaims) {
-				if !isAdmin(claimsFromActor(r), w) {
-					return
-				}
-				next(w, r, actor, c)
-			},
-			tokens.WithCookieAuth[AppClaims](cookies),
-		)
-	}
-
-	mux.Handle("POST /admin/disable", adminMiddleware(
-		func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ AppClaims) {
-			id, ok := parseUUIDParam(r, w)
-			if !ok {
-				return
-			}
-			if err := idSvc.DisableUser(r.Context(), "", id); err != nil {
-				if errors.Is(err, identity.ErrUserNotFound) {
-					http.Error(w, "user not found", http.StatusNotFound)
-					return
-				}
-				http.Error(w, "disable failed", http.StatusInternalServerError)
-				return
-			}
-			event.Emit(r.Context(), audit, event.Event{
-				Type:   "admin.disable_user",
-				UserID: id.String(),
-			})
-			w.WriteHeader(http.StatusNoContent)
-		},
-	))
-
-	mux.Handle("POST /admin/enable", adminMiddleware(
-		func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ AppClaims) {
-			id, ok := parseUUIDParam(r, w)
-			if !ok {
-				return
-			}
-			if err := idSvc.EnableUser(r.Context(), "", id); err != nil {
-				if errors.Is(err, identity.ErrUserNotFound) {
-					http.Error(w, "user not found", http.StatusNotFound)
-					return
-				}
-				http.Error(w, "enable failed", http.StatusInternalServerError)
-				return
-			}
-			event.Emit(r.Context(), audit, event.Event{
-				Type:   "admin.enable_user",
-				UserID: id.String(),
-			})
-			w.WriteHeader(http.StatusNoContent)
-		},
-	))
-
-	mux.Handle("POST /admin/mfa/unlock", adminMiddleware(
-		func(w http.ResponseWriter, r *http.Request, _ egauth.Actor, _ AppClaims) {
-			id, ok := parseUUIDParam(r, w)
-			if !ok {
-				return
-			}
-			if err := mfaSvc.UnlockMFA(r.Context(), "", id); err != nil {
-				http.Error(w, "unlock failed", http.StatusInternalServerError)
-				return
-			}
-			event.Emit(r.Context(), audit, event.Event{
-				Type:   "admin.unlock_mfa",
-				UserID: id.String(),
-			})
-			w.WriteHeader(http.StatusNoContent)
-		},
-	))
-
-	// -- protected demo route ---------------------------------------------
-	mux.Handle("GET /me", tokens.RequireAuth[AppClaims](issuer,
-		func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, c AppClaims) {
-			_, _ = fmt.Fprintf(w, "userID=%s role=%s\n", actor.UserID, c.Role)
-		},
-		tokens.WithCookieAuth[AppClaims](cookies),
-	))
-
-	return mux, nil
 }
 
-// claimsFromActor is a helper that extracts the token Claims from the request context so
-// the admin middleware can inspect the Role without threading the generic type through
-// a second argument.
-func claimsFromActor(r *http.Request) *tokens.Claims[AppClaims] {
-	c, ok := tokens.ClaimsFromContext[AppClaims](r.Context())
-	if !ok {
-		return nil
+func listenAddr(publicOrigin string) (string, error) {
+	u, err := url.Parse(publicOrigin)
+	if err != nil || u.Hostname() == "" {
+		return "", errors.Join(errors.New("public origin is not a URL with a host"), err)
 	}
-	return c
-}
-
-// parseUUIDParam reads the "id" query parameter as a UUID.
-func parseUUIDParam(r *http.Request, w http.ResponseWriter) (uuid.UUID, bool) {
-	raw := r.URL.Query().Get("id")
-	if raw == "" {
-		http.Error(w, "missing id parameter", http.StatusBadRequest)
-		return uuid.Nil, false
+	if u.Scheme != "http" {
+		return "", errors.New("public origin must be http: this example serves plain HTTP")
 	}
-	id, err := uuid.Parse(raw)
-	if err != nil {
-		http.Error(w, "invalid uuid", http.StatusBadRequest)
-		return uuid.Nil, false
+	port := u.Port()
+	if port == "" {
+		port = "80"
 	}
-	return id, true
+	return net.JoinHostPort(u.Hostname(), port), nil
 }
 
 func main() {
-	handler, err := BuildServer()
+	logger := slog.Default()
+	origin := os.Getenv("EGAUTH_PUBLIC_ORIGIN")
+	if origin == "" {
+		origin = "http://localhost:8080"
+	}
+	h, closeFn, err := BuildServer(logger, origin)
 	if err != nil {
-		slog.Error("failed to build server", "err", err)
-		return
+		logger.Error("failed to build server", "err", err)
+		os.Exit(1)
 	}
-	addr := ":8080"
-	slog.Info("egauth fullstack example listening", "addr", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		slog.Error("server stopped", "err", err)
+	addr, err := listenAddr(origin)
+	if err != nil {
+		logger.Error("invalid public origin", "err", errors.Join(err, closeFn()))
+		os.Exit(1)
 	}
+	logger.Info("egauth fullstack example listening", "addr", addr, "public_origin", origin)
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	serveErr := srv.ListenAndServe()
+	logger.Error("server stopped", "err", errors.Join(serveErr, closeFn()))
+	os.Exit(1)
 }

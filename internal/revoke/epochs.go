@@ -66,6 +66,16 @@ func (e *Epochs) Check(ctx context.Context, s principal.Subject, sealed uint64) 
 		}
 		return err
 	}
+	if cur < sealed {
+		e.forget(s)
+		cur, err = e.get(ctx, s)
+		if err != nil {
+			if errors.Is(err, store.ErrNotFound) {
+				return errors.Join(ErrStaleEpoch, err)
+			}
+			return err
+		}
+	}
 	if cur != sealed {
 		return errors.Join(ErrStaleEpoch, errors.New("revoke: sealed epoch "+strconv.FormatUint(sealed, 10)+", current "+strconv.FormatUint(cur, 10)))
 	}

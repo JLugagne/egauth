@@ -166,3 +166,18 @@ func TestEpochsHaveNoTimeCutoff(t *testing.T) {
 	require.NoError(t, e.cache.Poll(ctx))
 	require.NoError(t, e.cache.Check(ctx, s, bumped))
 }
+
+func TestEpochsAcceptASealedEpochNewerThanTheCacheBeforeThePoll(t *testing.T) {
+	ctx := context.Background()
+	e := newEpochEnv(t)
+	s, epoch := e.user(t, "carol@example.com")
+	require.NoError(t, e.cache.Poll(ctx))
+	require.NoError(t, e.cache.Check(ctx, s, epoch))
+
+	bumped := e.disable(t, s)
+	require.Greater(t, bumped, epoch)
+
+	require.NoError(t, e.cache.Check(ctx, s, bumped), "an epoch minted by a write the cache has not polled yet is current")
+	require.ErrorIs(t, e.cache.Check(ctx, s, epoch), revoke.ErrStaleEpoch)
+	require.ErrorIs(t, e.cache.Check(ctx, s, bumped+1), revoke.ErrStaleEpoch, "an epoch above the store's is never accepted")
+}

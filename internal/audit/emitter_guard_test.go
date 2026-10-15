@@ -17,7 +17,7 @@ const eventImportPath = "github.com/JLugagne/egauth/event"
 
 var emitterOwners = []string{"internal/audit", "event"}
 
-var applicationEmitters = []string{"examples"}
+var applicationEmitters = []string{}
 
 var legacyEmitters = []string{
 	"authflow", "identity", "issuance", "keystore", "mfa", "oauth", "otp", "passkey", "sessions",
