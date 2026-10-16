@@ -29,6 +29,11 @@ var (
 	// Modules.Password, key provisioning without TenantKeys, runtime providers without
 	// OAuthModule.PerTenant.
 	ErrFacadeUnavailable = errors.New("egauth: the deployment does not enable what this facade method needs")
+	// ErrProviderLinked is returned, joined with ErrInvalidRequest, by Tenants.SetOAuthProvider for a
+	// spec whose Issuer, JWKSURL, TokenURL or UserInfoURL differ from those the provider name's
+	// linked identities were made under: those links would stop resolving, and must not resolve to
+	// another provider. Register the new provider under a new name and let users link it.
+	ErrProviderLinked = errors.New("egauth: the provider name has identities linked under another configuration")
 	// ErrTenantNotServed is returned by System for a tenant the deployment's Tenancy can never serve:
 	// a non-zero tenant under SingleTenant, the zero tenant under multi-tenancy, or a tenant that
 	// cannot form a host label under TenantBySubdomain.

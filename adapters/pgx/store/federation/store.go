@@ -37,7 +37,12 @@ const (
 	passwordProvider = "password"
 	specColumns      = `tenant_id, provider_name, client_id, client_secret, aad_version, auth_url, token_url,
     user_info_url, scopes, issuer, jwks_url, domains, email_verification, updated_at`
-	linkColumns = `i.user_id, i.tenant_id, i.provider, i.provider_id, i.provider_email, i.provider_email_verified, i.created_at`
+	linkColumns   = `i.user_id, i.tenant_id, i.provider, i.provider_id, ` + linkAuthority + `, i.provider_email, i.provider_email_verified, i.created_at`
+	linkAuthority = `CASE WHEN i.authority <> '' THEN i.authority
+    WHEN p.provider_name IS NULL THEN 'static'
+    ELSE 'tenant:' || encode(sha256(convert_to(p.issuer || E'\n' || p.jwks_url || E'\n' || p.token_url || E'\n' || p.user_info_url, 'UTF8')), 'hex') END`
+	linkSource = `identities i JOIN users u ON u.id = i.user_id AND u.tenant_id = i.tenant_id
+LEFT JOIN oauth_oidc_providers p ON p.tenant_id = i.tenant_id AND p.provider_name = i.provider`
 )
 
 var (
@@ -246,7 +251,7 @@ func scanLink(row pgx.Row) (contract.LinkedIdentity, error) {
 		verified bool
 		linked   time.Time
 	)
-	if err := row.Scan(&l.Subject.User, &tenant, &l.Key.Provider, &l.Key.ProviderSubject, &email, &verified, &linked); err != nil {
+	if err := row.Scan(&l.Subject.User, &tenant, &l.Key.Provider, &l.Key.ProviderSubject, &l.Authority, &email, &verified, &linked); err != nil {
 		return contract.LinkedIdentity{}, err
 	}
 	var err error
@@ -266,7 +271,7 @@ func (s *Store) FindLinked(ctx context.Context, t principal.TenantID, k contract
 		return contract.LinkedIdentity{}, store.ErrNotFound
 	}
 	l, err := scanLink(s.db.QueryRow(ctx, `SELECT `+linkColumns+`
-FROM identities i JOIN users u ON u.id = i.user_id AND u.tenant_id = i.tenant_id
+FROM `+linkSource+`
 WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_id = $3 AND u.deleted_at IS NULL`,
 		t.String(), k.Provider, k.ProviderSubject))
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -278,9 +283,23 @@ WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_id = $3 AND u.deleted_
 	return l, nil
 }
 
+func (s *Store) HasLinksOutside(ctx context.Context, p contract.ProviderSpec) (bool, error) {
+	if p.Name == passwordProvider {
+		return false, nil
+	}
+	var found bool
+	err := s.db.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM `+linkSource+`
+WHERE i.tenant_id = $1 AND i.provider = $2 AND `+linkAuthority+` <> $3 AND u.deleted_at IS NULL)`,
+		p.Tenant.String(), p.Name, contract.RuntimeAuthority(p)).Scan(&found)
+	if err != nil {
+		return false, errors.Join(errors.New("federation: find links outside an authority"), err)
+	}
+	return found, nil
+}
+
 func (s *Store) LinkedFor(ctx context.Context, sub principal.Subject) ([]contract.LinkedIdentity, error) {
 	rows, err := s.db.Query(ctx, `SELECT `+linkColumns+`
-FROM identities i JOIN users u ON u.id = i.user_id AND u.tenant_id = i.tenant_id
+FROM `+linkSource+`
 WHERE i.user_id = $1 AND i.tenant_id = $2 AND i.provider <> 'password' AND u.deleted_at IS NULL
 ORDER BY i.created_at, i.provider COLLATE "C", i.provider_id COLLATE "C"`, sub.User, sub.Tenant.String())
 	if err != nil {

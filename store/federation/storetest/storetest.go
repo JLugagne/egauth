@@ -77,6 +77,7 @@ func Run(t *testing.T, newStore func(*testing.T) federation.Store) {
 		"DeleteProvider":        deleteProvider,
 		"EmailVerification":     emailVerification,
 		"Links":                 links,
+		"LinkAuthority":         linkAuthority,
 		"PasswordIsNeverALink":  passwordIsNeverALink,
 		"UnverifiedEmail":       unverifiedEmail,
 		"TombstonedAccount":     tombstonedAccount,
@@ -316,6 +317,7 @@ func link(sub principal.Subject, provider, subject, email string, verified bool,
 	return federation.LinkedIdentity{
 		Subject:               sub,
 		Key:                   federation.LinkKey{Provider: provider, ProviderSubject: subject},
+		Authority:             federation.StaticAuthority,
 		ProviderEmail:         email,
 		ProviderEmailVerified: verified,
 		LinkedAt:              at,
@@ -363,6 +365,43 @@ func links(t *testing.T, h *harness) {
 	none, err = h.s.LinkedFor(ctx, h.account(t, "tenant-a"))
 	require.NoError(t, err)
 	require.Empty(t, none, "an account without a provider has no links")
+}
+
+func linkAuthority(t *testing.T, h *harness) {
+	ctx := context.Background()
+	base := linkBase()
+	runtime := federation.RuntimeAuthority(spec(t, "tenant-a", "corp"))
+	alice, bob, gone := h.account(t, "tenant-a"), h.account(t, "tenant-a"), h.account(t, "tenant-a")
+	bound := link(alice, "corp", "c-1", "", false, base)
+	bound.Authority = runtime
+	h.seed(t, bound)
+	got, err := h.s.FindLinked(ctx, alice.Tenant, bound.Key)
+	require.NoError(t, err)
+	require.Equal(t, runtime, got.Authority, "the authority round-trips")
+
+	has := func(p federation.ProviderSpec) bool {
+		t.Helper()
+		ok, err := h.s.HasLinksOutside(ctx, p)
+		require.NoError(t, err)
+		return ok
+	}
+	corp := spec(t, "tenant-a", "corp")
+	moved := corp
+	moved.Issuer = "https://elsewhere.example"
+	require.False(t, has(corp), "every link of corp is under its authority")
+	require.True(t, has(moved), "a spec with another issuer is another authority")
+	require.False(t, has(spec(t, "tenant-b", "corp")), "links are scoped to their tenant")
+	require.False(t, has(spec(t, "tenant-a", "other")), "a provider without links has none outside")
+	require.False(t, has(spec(t, "tenant-a", "password")), "a password credential is never a link")
+
+	h.seed(t, link(bob, "corp", "c-2", "", false, base))
+	require.True(t, has(corp), "a static link under the runtime name is outside")
+	require.NoError(t, h.s.DeleteForSubject(ctx, bob))
+	require.False(t, has(corp), "a deleted link is not counted")
+
+	h.seed(t, link(gone, "corp", "c-3", "", false, base))
+	h.f.Tombstone(t, h.s, gone)
+	require.False(t, has(corp), "a tombstoned account's link is not counted")
 }
 
 func passwordIsNeverALink(t *testing.T, h *harness) {

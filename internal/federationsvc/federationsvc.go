@@ -57,6 +57,10 @@ var (
 	ErrAccountExists = httpx.NewProblem(http.StatusConflict, "account_exists")
 	// ErrIdentityLinked answers a link of a provider identity already linked to another account.
 	ErrIdentityLinked = httpx.NewProblem(http.StatusConflict, "identity_already_linked")
+	// ErrProviderChanged answers a sign-in whose provider identity is linked under another
+	// configuration of the provider name (a replaced runtime spec, or a static provider whose name a
+	// runtime one took): the owner signs in another way and links the identity again.
+	ErrProviderChanged = httpx.NewProblem(http.StatusConflict, "provider_changed")
 	// ErrEmailUnverified answers a sign-up without a provider email trusted as verified, and a link
 	// to an account whose own email is not verified (§6.9.5).
 	ErrEmailUnverified    = httpx.NewProblem(http.StatusForbidden, "email_unverified")

@@ -115,6 +115,7 @@ func TestSeverityValues(t *testing.T) {
 		event.SystemCallerUsed:      event.SeverityWarn,
 		event.InsecureConfiguration: event.SeverityWarn,
 		event.RefreshReuseDetected:  event.SeverityWarn,
+		event.OAuthProviderRejected: event.SeverityWarn,
 		event.MountMismatch:         event.SeverityError,
 		event.RevocationUnavailable: event.SeverityError,
 		event.Type("unknown"):       event.SeverityError,

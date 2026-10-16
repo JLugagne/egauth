@@ -7,7 +7,9 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/federation"
+	"github.com/JLugagne/egauth/internal/audit"
 	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/internal/federationsvc"
 	internalkeys "github.com/JLugagne/egauth/internal/keys"
@@ -143,7 +145,10 @@ func (t *Tenants) RevokeKeys(ctx context.Context, by principal.Caller, tenant pr
 // SetOAuthProvider registers req.Provider for req.Tenant. It returns ErrFacadeUnavailable unless
 // OAuthModule.PerTenant is set, ErrInvalidRequest for a name taken by a static provider or a spec
 // that is invalid or incomplete after discovery, federation.ErrDomainsSystemOnly when a session
-// caller sets Domains, and keys.ErrTenantTombstoned for a tenant Erase removed.
+// caller sets Domains, keys.ErrTenantTombstoned for a tenant Erase removed, and ErrProviderLinked when identities are linked to the name under another
+// configuration, a removed provider's included. A failed discovery is ErrInvalidRequest joined with
+// federationsvc.ErrDiscovery alone: its network cause, which can name internal addresses, goes only
+// to the event.OAuthProviderRejected Err. Returned errors are safe to show the calling tenant admin.
 func (t *Tenants) SetOAuthProvider(ctx context.Context, by principal.Caller, req SetProviderRequest) error {
 	if err := t.providerAccess(ctx, by, "Tenants.SetOAuthProvider", req.Tenant, req.Provider.Name); err != nil {
 		return err
@@ -157,11 +162,25 @@ func (t *Tenants) SetOAuthProvider(ctx context.Context, by principal.Caller, req
 	}
 	if p.NeedsDiscovery() {
 		if p, err = federationsvc.Discover(ctx, t.f.o.outbound.Tenant(), p); err != nil {
-			return errors.Join(ErrInvalidRequest, err)
+			return t.rejectDiscovery(ctx, req.Tenant, req.Provider.Name, err)
 		}
 	}
 	if err := p.Complete(); err != nil {
 		return errors.Join(ErrInvalidRequest, err)
+	}
+	spec := storefed.ProviderSpec{
+		Tenant: req.Tenant, Name: p.Name, ClientID: p.ClientID, AADVersion: storefed.AADVersionCurrent,
+		AuthURL: p.AuthURL, TokenURL: p.TokenURL, UserInfoURL: p.UserInfoURL, Scopes: p.Scopes, Issuer: p.Issuer, JWKSURL: p.JWKSURL,
+		Domains: p.Domains, EmailVerification: p.EmailVerification, UpdatedAt: t.f.o.clock.Now().UTC(),
+	}
+	foreign, err := t.f.storage.Federation.HasLinksOutside(ctx, spec)
+	switch {
+	case err != nil:
+		return err
+	case foreign:
+		_ = audit.Emit(ctx, t.f.o.events, event.OAuthProviderRejected, audit.Scope{TenantID: req.Tenant.String()},
+			audit.Detail{Reason: "linked"}, nil, audit.A(event.KeyProvider, p.Name))
+		return errors.Join(ErrInvalidRequest, ErrProviderLinked)
 	}
 	var sealed []byte
 	if !p.ClientSecret.IsZero() {
@@ -173,15 +192,25 @@ func (t *Tenants) SetOAuthProvider(ctx context.Context, by principal.Caller, req
 			return err
 		}
 	}
-	return t.f.storage.Federation.PutProvider(ctx, storefed.ProviderSpec{
-		Tenant: req.Tenant, Name: p.Name, ClientID: p.ClientID, SealedSecret: sealed, AADVersion: storefed.AADVersionCurrent,
-		AuthURL: p.AuthURL, TokenURL: p.TokenURL, UserInfoURL: p.UserInfoURL, Scopes: p.Scopes, Issuer: p.Issuer, JWKSURL: p.JWKSURL,
-		Domains: p.Domains, EmailVerification: p.EmailVerification, UpdatedAt: t.f.o.clock.Now().UTC(),
-	})
+	spec.SealedSecret = sealed
+	return t.f.storage.Federation.PutProvider(ctx, spec)
+}
+
+func (t *Tenants) rejectDiscovery(ctx context.Context, tenant principal.TenantID, name string, cause error) error {
+	_ = audit.Emit(ctx, t.f.o.events, event.OAuthProviderRejected, audit.Scope{TenantID: tenant.String()},
+		audit.Detail{Reason: "discovery"}, cause, audit.A(event.KeyProvider, name))
+	for _, safe := range []error{federationsvc.ErrIssuerNotPinned, federation.ErrInvalidProvider} {
+		if errors.Is(cause, safe) && !errors.Is(cause, federationsvc.ErrDiscovery) {
+			return errors.Join(ErrInvalidRequest, federationsvc.ErrDiscovery, safe)
+		}
+	}
+	return errors.Join(ErrInvalidRequest, federationsvc.ErrDiscovery)
 }
 
 // RemoveOAuthProvider removes the runtime provider req.Name of req.Tenant; sign-ins through it fail
-// at once. Identities already linked to it stay linked. Removing an unknown provider is a no-op.
+// at once. Identities already linked to it stay linked to its configuration: registering the same
+// Issuer, JWKSURL, TokenURL and UserInfoURL again restores them, and any other configuration under
+// the name is ErrProviderLinked. Removing an unknown provider is a no-op.
 func (t *Tenants) RemoveOAuthProvider(ctx context.Context, by principal.Caller, req RemoveProviderRequest) error {
 	if err := t.providerAccess(ctx, by, "Tenants.RemoveOAuthProvider", req.Tenant, req.Name); err != nil {
 		return err

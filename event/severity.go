@@ -36,7 +36,8 @@ func (t Type) Severity() Severity {
 		APIKeyAuthSucceeded, IdentifierChanged, LimiterPerInstance:
 		return SeverityInfo
 	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked,
-		MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, SystemCallerUsed, InsecureConfiguration, ClaimsStale, ProxyHeadersIgnored:
+		MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, SystemCallerUsed, InsecureConfiguration, ClaimsStale, ProxyHeadersIgnored,
+		OAuthProviderRejected:
 		return SeverityWarn
 	case MountMismatch, ClaimsUnavailable, ClaimsTooLarge, MFAModuleMissing, LifecycleRetry,
 		RevocationUnavailable:

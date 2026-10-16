@@ -75,6 +75,7 @@ func Run(t *testing.T, newStore func(*testing.T) identity.Store) {
 		"ApplyRefusals":          applyRefusals,
 		"IdentifierUniqueness":   identifierUniqueness,
 		"FederatedLinks":         federatedLinks,
+		"FederatedRebind":        federatedRebind,
 		"EffectsAreAtomic":       effectsAreAtomic,
 		"ApplyEffects":           applyEffects,
 		"EpochFeed":              epochFeed,
@@ -150,6 +151,7 @@ func (h *harness) federated(provider string) identity.FederatedIdentity {
 	return identity.FederatedIdentity{
 		Provider:              provider,
 		ProviderSubject:       fmt.Sprintf("sub-%d", next()),
+		Authority:             "static",
 		ProviderEmail:         h.email(),
 		ProviderEmailVerified: true,
 	}

@@ -75,6 +75,7 @@ func seedLink(t *testing.T, s federation.Store, l federation.LinkedIdentity) {
 		Identity: identity.FederatedIdentity{
 			Provider:              l.Key.Provider,
 			ProviderSubject:       l.Key.ProviderSubject,
+			Authority:             l.Authority,
 			ProviderEmail:         email(t, l.ProviderEmail),
 			ProviderEmailVerified: l.ProviderEmailVerified && l.ProviderEmail != "",
 		},
@@ -112,7 +113,7 @@ func TestLinksWrittenByTheIdentityStoreAreVisible(t *testing.T) {
 	s := memory.New(ids)
 	tn, err := principal.ParseTenantID("tenant-a")
 	require.NoError(t, err)
-	google := identity.FederatedIdentity{Provider: "google", ProviderSubject: "g-1", ProviderEmail: email(t, "alice@example.com"), ProviderEmailVerified: true}
+	google := identity.FederatedIdentity{Provider: "google", ProviderSubject: "g-1", Authority: federation.StaticAuthority, ProviderEmail: email(t, "alice@example.com"), ProviderEmailVerified: true}
 	applied, err := ids.Apply(ctx, identity.CreateVerified{Tenant: tn, Email: email(t, "alice@example.com"), Federated: google})
 	require.NoError(t, err)
 
@@ -139,7 +140,7 @@ func TestErasedLinksStayHiddenUntilRelinked(t *testing.T) {
 	tn, err := principal.ParseTenantID("tenant-a")
 	require.NoError(t, err)
 	key := federation.LinkKey{Provider: "google", ProviderSubject: "g-1"}
-	fed := identity.FederatedIdentity{Provider: key.Provider, ProviderSubject: key.ProviderSubject}
+	fed := identity.FederatedIdentity{Provider: key.Provider, ProviderSubject: key.ProviderSubject, Authority: federation.StaticAuthority}
 	applied, err := ids.Apply(ctx, identity.CreateVerified{Tenant: tn, Email: email(t, "alice@example.com"), Federated: fed})
 	require.NoError(t, err)
 
@@ -173,6 +174,10 @@ func (r rawLinks) FindFederated(context.Context, identity.FederatedKey) (identit
 }
 
 func (r rawLinks) ListFederated(context.Context, principal.Subject) ([]identity.FederatedLink, error) {
+	return []identity.FederatedLink{r.link}, nil
+}
+
+func (r rawLinks) ListFederatedTo(context.Context, principal.TenantID, string) ([]identity.FederatedLink, error) {
 	return []identity.FederatedLink{r.link}, nil
 }
 

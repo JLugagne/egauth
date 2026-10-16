@@ -286,7 +286,7 @@ WHERE user_id = $1 AND tenant_id = $2 AND provider = 'password'
 	return nil
 }
 
-const linkColumns = `i.user_id, i.tenant_id, i.provider, i.provider_id, i.provider_email, i.provider_email_verified, i.created_at`
+const linkColumns = `i.user_id, i.tenant_id, i.provider, i.provider_id, i.authority, i.provider_email, i.provider_email_verified, i.created_at`
 
 func scanLink(row scanner) (contract.FederatedLink, error) {
 	var (
@@ -296,7 +296,7 @@ func scanLink(row scanner) (contract.FederatedLink, error) {
 		verified bool
 		linked   time.Time
 	)
-	err := row.Scan(&l.Subject.User, &tenant, &l.Identity.Provider, &l.Identity.ProviderSubject, &email, &verified, &linked)
+	err := row.Scan(&l.Subject.User, &tenant, &l.Identity.Provider, &l.Identity.ProviderSubject, &l.Identity.Authority, &email, &verified, &linked)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contract.FederatedLink{}, store.ErrNotFound
 	}

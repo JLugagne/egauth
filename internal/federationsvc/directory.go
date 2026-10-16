@@ -48,11 +48,14 @@ type Accounts interface {
 
 // ProviderIdentity is an account at an identity provider as the provider proved it. Provider is the
 // federation provider name, or "external:" and the external factor name; Subject is the provider's
-// stable id of the account. EmailVerified is the caller's final decision that Email may become an
-// account email (federation.Provider.Verified for a federated provider).
+// stable id of the account. Authority is the store/federation StaticAuthority or RuntimeAuthority
+// of the configuration that proved it: a link resolves only under the Authority it was made with.
+// EmailVerified is the caller's final decision that Email may become an account email
+// (federation.Provider.Verified for a federated provider).
 type ProviderIdentity struct {
 	Provider      string
 	Subject       string
+	Authority     string
 	Email         string
 	EmailVerified bool
 }
@@ -62,7 +65,12 @@ func (p ProviderIdentity) key() storefed.LinkKey {
 }
 
 func (p ProviderIdentity) valid() bool {
-	return p.Provider != "" && p.Subject != "" && len(p.Provider) <= identity.MaxProviderLen && len(p.Subject) <= identity.MaxProviderLen
+	for _, f := range []string{p.Provider, p.Subject, p.Authority} {
+		if f == "" || len(f) > identity.MaxProviderLen {
+			return false
+		}
+	}
+	return true
 }
 
 func (p ProviderIdentity) email() (identity.Identifier, bool) {
@@ -111,10 +119,11 @@ func NewDirectory(cfg DirectoryConfig) (*Directory, error) {
 	return &Directory{users: cfg.Users, links: cfg.Links, accounts: cfg.Accounts, registration: cfg.Registration, audit: cfg.Audit}, nil
 }
 
-// SignIn returns the subject of tenant t that id signs in as. An identity already linked signs in
-// to its account. Otherwise, under RegistrationOpen, a new account is created whose email is
-// id.Email, which must be verified, with the identity linked and its email stored as the verified
-// provider email (O-04). It returns ErrRegistrationClosed, ErrEmailUnverified, ErrAccountExists
+// SignIn returns the subject of tenant t that id signs in as. An identity linked under id.Authority
+// signs in to its account. One linked through another provider configuration under that name is
+// ErrProviderChanged and never falls through to registration. Otherwise, under RegistrationOpen, a
+// new account is created whose email is id.Email, which must be verified, with the identity linked
+// and its email stored as the verified provider email (O-04). It returns ErrRegistrationClosed, ErrEmailUnverified, ErrAccountExists
 // when the email belongs to another account (never linked to it, D6), ErrInvalidIdentity for an
 // empty or oversized identity, and httpx.ErrServiceUnavailable joined with a store failure. An
 // unverified email is never looked up, so it reveals nothing about existing accounts.
@@ -122,8 +131,8 @@ func (d *Directory) SignIn(ctx context.Context, t core.TenantID, id ProviderIden
 	if !id.valid() {
 		return core.Subject{}, ErrInvalidIdentity
 	}
-	if sub, ok, err := d.linked(ctx, t, id); err != nil || ok {
-		return sub, err
+	if l, ok, err := d.linked(ctx, t, id); err != nil || ok {
+		return d.resolve(ctx, t, id, l, err)
 	}
 	if d.registration != RegistrationOpen {
 		return core.Subject{}, d.refuse(ctx, t, ErrRegistrationClosed)
@@ -143,12 +152,12 @@ func (d *Directory) SignIn(ctx context.Context, t core.TenantID, id ProviderIden
 		Tenant: t,
 		Email:  email,
 		Federated: identity.FederatedIdentity{
-			Provider: id.Provider, ProviderSubject: id.Subject, ProviderEmail: email, ProviderEmailVerified: true,
+			Provider: id.Provider, ProviderSubject: id.Subject, Authority: id.Authority, ProviderEmail: email, ProviderEmailVerified: true,
 		},
 	})
 	if errors.Is(err, identity.ErrIdentifierTaken) {
-		if sub, ok, lerr := d.linked(ctx, t, id); lerr != nil || ok {
-			return sub, lerr
+		if l, ok, lerr := d.linked(ctx, t, id); lerr != nil || ok {
+			return d.resolve(ctx, t, id, l, lerr)
 		}
 		return core.Subject{}, d.refuse(ctx, t, ErrAccountExists)
 	}
@@ -159,17 +168,29 @@ func (d *Directory) SignIn(ctx context.Context, t core.TenantID, id ProviderIden
 	return a.Subject, nil
 }
 
-func (d *Directory) linked(ctx context.Context, t core.TenantID, id ProviderIdentity) (core.Subject, bool, error) {
+func (d *Directory) linked(ctx context.Context, t core.TenantID, id ProviderIdentity) (storefed.LinkedIdentity, bool, error) {
 	l, err := d.links.FindLinked(ctx, t, id.key())
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		return core.Subject{}, false, nil
+		return storefed.LinkedIdentity{}, false, nil
 	case err != nil:
-		return core.Subject{}, false, unavailable(err)
+		return storefed.LinkedIdentity{}, false, unavailable(err)
 	case l.Subject.Tenant != t || l.Subject.IsZero() || l.Key != id.key():
-		return core.Subject{}, false, unavailable(errors.New("federationsvc: link of another tenant or identity"))
+		return storefed.LinkedIdentity{}, false, unavailable(errors.New("federationsvc: link of another tenant or identity"))
 	}
-	return l.Subject, true, nil
+	return l, true, nil
+}
+
+func (d *Directory) resolve(ctx context.Context, t core.TenantID, id ProviderIdentity, l storefed.LinkedIdentity, err error) (core.Subject, error) {
+	switch {
+	case err != nil:
+		return core.Subject{}, err
+	case l.Authority != id.Authority:
+		_ = d.audit.Emit(ctx, event.LoginFailed, scopeOf(l.Subject), audit.Detail{Reason: ErrProviderChanged.Code()}, nil,
+			audit.A(event.KeyProvider, id.Provider))
+		return core.Subject{}, ErrProviderChanged
+	}
+	return l.Subject, nil
 }
 
 func (d *Directory) refuse(ctx context.Context, t core.TenantID, p *httpx.Problem) error {
@@ -178,7 +199,9 @@ func (d *Directory) refuse(ctx context.Context, t core.TenantID, p *httpx.Proble
 }
 
 // Link attaches id to sub, the subject a sensitive link request sealed at epoch. It is a no-op when
-// id is already linked to sub. The link ends every session of sub (the epoch bump keeps no lineage).
+// id is already linked to sub under id.Authority; a link of sub made under another Authority is
+// re-bound to id.Authority, which notifies sub like any new link. The link ends every session of
+// sub (the epoch bump keeps no lineage).
 // It returns ErrIdentityLinked when id is linked to another account, ErrEmailUnverified when sub's
 // own email is not verified (§6.9.5), httpx.ErrUnauthenticated when sub is unusable or its epoch
 // moved since the link began, ErrInvalidIdentity for an empty or oversized identity, and
@@ -187,14 +210,14 @@ func (d *Directory) Link(ctx context.Context, sub core.Subject, epoch uint64, id
 	if !id.valid() {
 		return ErrInvalidIdentity
 	}
-	owner, ok, err := d.linked(ctx, sub.Tenant, id)
+	l, ok, err := d.linked(ctx, sub.Tenant, id)
 	switch {
 	case err != nil:
 		return err
-	case ok && owner == sub:
-		return nil
-	case ok:
+	case ok && l.Subject != sub:
 		return ErrIdentityLinked
+	case ok && l.Authority == id.Authority:
+		return nil
 	}
 	st, err := d.accounts.AccountState(ctx, sub)
 	switch {
@@ -205,7 +228,7 @@ func (d *Directory) Link(ctx context.Context, sub core.Subject, epoch uint64, id
 	case !st.EmailVerified():
 		return ErrEmailUnverified
 	}
-	fed := identity.FederatedIdentity{Provider: id.Provider, ProviderSubject: id.Subject}
+	fed := identity.FederatedIdentity{Provider: id.Provider, ProviderSubject: id.Subject, Authority: id.Authority}
 	if email, ok := id.email(); ok {
 		fed.ProviderEmail, fed.ProviderEmailVerified = email, id.EmailVerified
 	}

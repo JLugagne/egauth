@@ -62,7 +62,7 @@ func TestFederationReadsLinksFromTheSameIdentityStore(t *testing.T) {
 	require.NoError(t, err)
 	applied, err := s.Identity.Apply(ctx, identity.CreateVerified{
 		Tenant: tn, Email: mail,
-		Federated: identity.FederatedIdentity{Provider: "google", ProviderSubject: "g-1", ProviderEmail: mail, ProviderEmailVerified: true},
+		Federated: identity.FederatedIdentity{Provider: "google", ProviderSubject: "g-1", Authority: "static", ProviderEmail: mail, ProviderEmailVerified: true},
 	})
 	require.NoError(t, err)
 	got, err := s.Federation.FindLinked(ctx, tn, federation.LinkKey{Provider: "google", ProviderSubject: "g-1"})

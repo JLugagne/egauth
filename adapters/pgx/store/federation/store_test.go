@@ -67,9 +67,9 @@ func seedLink(t *testing.T, _ federation.Store, l federation.LinkedIdentity) {
 		email = &l.ProviderEmail
 	}
 	_, err := shared.pool.Exec(context.Background(), `INSERT INTO identities
-    (id, user_id, tenant_id, provider, provider_id, provider_email, provider_email_verified, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)`,
-		uuid.New(), l.Subject.User, l.Subject.Tenant.String(), l.Key.Provider, l.Key.ProviderSubject, email,
+    (id, user_id, tenant_id, provider, provider_id, authority, provider_email, provider_email_verified, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)`,
+		uuid.New(), l.Subject.User, l.Subject.Tenant.String(), l.Key.Provider, l.Key.ProviderSubject, l.Authority, email,
 		l.ProviderEmailVerified, l.LinkedAt)
 	require.NoError(t, err)
 }
@@ -183,4 +183,42 @@ func TestPingRequiresTheIdentitySchema(t *testing.T) {
 	require.Error(t, federationstore.New(pool).Ping(ctx), "links are read from the identity tables, so a missing identity schema fails Ping")
 	require.NoError(t, migrate.Run(ctx, pool, []migrate.Module{{Name: "identity", FS: identitystore.Migrations}}))
 	require.NoError(t, federationstore.New(pool).Ping(ctx))
+}
+
+func TestV016LinksResolveUnderTheProviderTheyWereMadeThrough(t *testing.T) {
+	ctx := context.Background()
+	pool := emptyDatabase(t)
+	require.NoError(t, migrate.Run(ctx, pool, []migrate.Module{{Name: "identity", FS: identitystore.Migrations}, {Name: "federation", FS: legacyOnly(t)}}))
+	_, err := pool.Exec(ctx, `INSERT INTO oauth_oidc_providers
+    (tenant_id, provider_name, client_id, client_secret, auth_url, token_url, issuer, jwks_url, scopes)
+VALUES ('tenant-a', 'corp', 'cid', 'c2VjcmV0', 'https://a', 'https://t', 'https://i', 'https://j', 'openid email')`)
+	require.NoError(t, err)
+	alice := principal.Subject{Tenant: tenant(t, "tenant-a"), User: uuid.New()}
+	_, err = pool.Exec(ctx, `INSERT INTO users (id, tenant_id, email, created_at, updated_at) VALUES ($1, 'tenant-a', 'alice@example.com', now(), now())`, alice.User)
+	require.NoError(t, err)
+	for _, l := range [][2]string{{"corp", "c-1"}, {"google", "g-1"}, {"password", alice.User.String()}} {
+		_, err = pool.Exec(ctx, `INSERT INTO identities (id, user_id, tenant_id, provider, provider_id, created_at, updated_at)
+VALUES ($1, $2, 'tenant-a', $3, $4, now(), now())`, uuid.New(), alice.User, l[0], l[1])
+		require.NoError(t, err)
+	}
+	require.NoError(t, migrate.Run(ctx, pool, []migrate.Module{{Name: "identity", FS: identitystore.Migrations}, {Name: "federation", FS: federationstore.Migrations}}))
+
+	s := federationstore.New(pool)
+	corp, err := s.FindLinked(ctx, alice.Tenant, federation.LinkKey{Provider: "corp", ProviderSubject: "c-1"})
+	require.NoError(t, err)
+	want := federation.RuntimeAuthority(federation.ProviderSpec{Issuer: "https://i", JWKSURL: "https://j", TokenURL: "https://t"})
+	require.Equal(t, want, corp.Authority, "a link to a tenant provider is bound to that provider's spec, computed as in Go")
+	google, err := s.FindLinked(ctx, alice.Tenant, federation.LinkKey{Provider: "google", ProviderSubject: "g-1"})
+	require.NoError(t, err)
+	require.Equal(t, federation.StaticAuthority, google.Authority, "a link to no tenant provider came from the static configuration")
+	stored, err := s.GetProvider(ctx, alice.Tenant, "corp")
+	require.NoError(t, err)
+	require.Equal(t, federation.RuntimeAuthority(stored), corp.Authority, "the SQL authority is the Go one of the stored spec")
+	outside, err := s.HasLinksOutside(ctx, stored)
+	require.NoError(t, err)
+	require.False(t, outside, "the provider's own spec may be stored again")
+	stored.Issuer = "https://elsewhere.example"
+	outside, err = s.HasLinksOutside(ctx, stored)
+	require.NoError(t, err)
+	require.True(t, outside, "another issuer would take over the v0.16 link")
 }

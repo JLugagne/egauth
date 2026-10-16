@@ -30,6 +30,7 @@ type Links interface {
 	GetUser(ctx context.Context, s principal.Subject) (identity.User, error)
 	FindFederated(ctx context.Context, k identity.FederatedKey) (identity.FederatedLink, error)
 	ListFederated(ctx context.Context, s principal.Subject) ([]identity.FederatedLink, error)
+	ListFederatedTo(ctx context.Context, t principal.TenantID, provider string) ([]identity.FederatedLink, error)
 }
 
 type providerRef struct {
@@ -247,6 +248,7 @@ func linked(l identity.FederatedLink) federation.LinkedIdentity {
 	return federation.LinkedIdentity{
 		Subject:               l.Subject,
 		Key:                   federation.LinkKey{Provider: l.Identity.Provider, ProviderSubject: l.Identity.ProviderSubject},
+		Authority:             l.Identity.Authority,
 		ProviderEmail:         email,
 		ProviderEmailVerified: l.Identity.ProviderEmailVerified && email != "",
 		LinkedAt:              l.LinkedAt.UTC().Truncate(time.Microsecond),
@@ -283,6 +285,31 @@ func (s *Store) FindLinked(ctx context.Context, t principal.TenantID, k federati
 		return federation.LinkedIdentity{}, store.ErrNotFound
 	}
 	return linked(l), nil
+}
+
+func (s *Store) HasLinksOutside(ctx context.Context, p federation.ProviderSpec) (bool, error) {
+	t, provider, authority := p.Tenant, p.Name, federation.RuntimeAuthority(p)
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if s.links == nil {
+		return false, errNoLinks
+	}
+	if provider == passwordProvider {
+		return false, nil
+	}
+	list, err := s.links.ListFederatedTo(ctx, t, provider)
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range list {
+		if l.Subject.Tenant == t && l.Identity.Provider == provider && l.Identity.Authority != authority && !s.hidden(l) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (s *Store) live(ctx context.Context, sub principal.Subject) ([]identity.FederatedLink, error) {

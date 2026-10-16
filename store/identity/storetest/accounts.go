@@ -131,6 +131,7 @@ func applyRefusals(h *harness) {
 		identity.BumpEpoch{Subject: s},
 		identity.CreateVerified{Tenant: acme},
 		identity.LinkFederated{Subject: s, Identity: identity.FederatedIdentity{Provider: "google"}},
+		identity.LinkFederated{Subject: s, Identity: identity.FederatedIdentity{Provider: "google", ProviderSubject: "no-authority"}},
 		identity.LinkFederated{Subject: s, Identity: identity.FederatedIdentity{Provider: "password", ProviderSubject: s.User.String()}},
 		identity.CreateVerified{Tenant: acme, Email: h.email(), Federated: identity.FederatedIdentity{Provider: "password", ProviderSubject: "x"}},
 	}

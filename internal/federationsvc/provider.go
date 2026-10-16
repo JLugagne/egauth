@@ -15,13 +15,15 @@ import (
 )
 
 type resolved struct {
-	spec   federation.Provider
-	client doer
+	spec      federation.Provider
+	client    doer
+	scope     string
+	authority string
 }
 
 func (s *Service) provider(ctx context.Context, t core.TenantID, name string) (resolved, error) {
 	if p, ok := s.static[name]; ok {
-		return resolved{spec: p, client: s.http.static}, nil
+		return resolved{spec: p, client: s.http.static, scope: storefed.StaticAuthority, authority: storefed.StaticAuthority}, nil
 	}
 	if !s.perTenant || name == "" {
 		return resolved{}, ErrUnknownProvider
@@ -46,7 +48,7 @@ func (s *Service) provider(ctx context.Context, t core.TenantID, name string) (r
 	if err := p.Complete(); err != nil {
 		return resolved{}, unavailable(err)
 	}
-	return resolved{spec: p, client: s.http.tenant}, nil
+	return resolved{spec: p, client: s.http.tenant, scope: "tenant:" + t.String(), authority: storefed.RuntimeAuthority(spec)}, nil
 }
 
 func (s *Service) openSecret(ctx context.Context, spec storefed.ProviderSpec) (string, error) {

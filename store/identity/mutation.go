@@ -328,7 +328,10 @@ func (m CreateVerified) LogValue() slog.Value {
 }
 
 // LinkFederated links a provider account to an existing subject. It is an authenticated action and
-// never follows from a matching email (D6). Keep is the lineage that survives.
+// never follows from a matching email (D6). Keep is the lineage that survives. When the subject
+// already holds the provider account under another Authority, the link is re-bound to Identity,
+// with the same epoch bump and FactorsChanged notice; under the same Authority it is
+// store.ErrConflict.
 type LinkFederated struct {
 	Subject  principal.Subject
 	Identity FederatedIdentity
@@ -359,19 +362,30 @@ func (m UnlinkFederated) validate() error {
 	if m.Subject.IsZero() {
 		return errNoSubject
 	}
-	return checkFederated(FederatedIdentity{Provider: m.Provider, ProviderSubject: m.ProviderSubject})
+	return checkFederatedKey(m.Provider, m.ProviderSubject)
 }
 
 func (UnlinkFederated) effects() Effects {
 	return Effects{BumpsEpoch: true, Event: EventFactorsChanged}
 }
 
-func checkFederated(f FederatedIdentity) error {
+func checkFederatedKey(provider, subject string) error {
 	switch {
-	case f.Provider == "" || len(f.Provider) > MaxProviderLen:
+	case provider == "" || len(provider) > MaxProviderLen:
 		return errors.New("provider is required and bounded")
-	case f.ProviderSubject == "" || len(f.ProviderSubject) > MaxProviderLen:
+	case subject == "" || len(subject) > MaxProviderLen:
 		return errors.New("provider subject is required and bounded")
+	}
+	return nil
+}
+
+func checkFederated(f FederatedIdentity) error {
+	if err := checkFederatedKey(f.Provider, f.ProviderSubject); err != nil {
+		return err
+	}
+	switch {
+	case f.Authority == "" || len(f.Authority) > MaxProviderLen:
+		return errors.New("authority is required and bounded")
 	case !f.ProviderEmail.IsZero() && f.ProviderEmail.Kind() != IdentifierEmail:
 		return errors.New("provider email must be an email identifier")
 	case f.ProviderEmailVerified && f.ProviderEmail.IsZero():

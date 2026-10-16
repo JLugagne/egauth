@@ -106,9 +106,12 @@ type Lockout struct {
 
 // FederatedIdentity is an account at an external identity provider. ProviderEmail is the address
 // the provider asserted, zero when none, and is never used to link an existing account (D6).
+// Authority is the federation.StaticAuthority or federation.RuntimeAuthority of the provider
+// configuration that proved the account; it is required and at most MaxProviderLen bytes.
 type FederatedIdentity struct {
 	Provider              string
 	ProviderSubject       string
+	Authority             string
 	ProviderEmail         Identifier
 	ProviderEmailVerified bool
 }

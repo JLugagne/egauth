@@ -59,7 +59,7 @@ func (s *Service) verifyIDToken(ctx context.Context, r resolved, raw, nonce stri
 	if err != nil {
 		return nil, ErrInvalidIdentity
 	}
-	v, err := s.jwks.key(ctx, r.client, p.JWKSURL, h.Kid)
+	v, err := s.jwks.key(ctx, r.client, r.scope+"\n"+p.JWKSURL, p.JWKSURL, h.Kid)
 	if err != nil {
 		return nil, err
 	}
@@ -159,10 +159,10 @@ func newJWKSCache(c clock.Clock) *jwksCache {
 	return &jwksCache{clock: c, entries: map[string]jwksEntry{}}
 }
 
-func (c *jwksCache) key(ctx context.Context, d doer, url, kid string) (signing.Verifier, error) {
+func (c *jwksCache) key(ctx context.Context, d doer, entry, url, kid string) (signing.Verifier, error) {
 	now := c.clock.Now()
 	c.mu.Lock()
-	e, ok := c.entries[url]
+	e, ok := c.entries[entry]
 	c.mu.Unlock()
 	if ok && now.Before(e.fetched.Add(jwksTTL)) {
 		if v, found := pick(e.keys, kid); found {
@@ -177,13 +177,13 @@ func (c *jwksCache) key(ctx context.Context, d doer, url, kid string) (signing.V
 		return signing.Verifier{}, errors.Join(ErrProviderUnavailable, err)
 	}
 	c.mu.Lock()
-	if _, present := c.entries[url]; !present && len(c.entries) >= maxJWKSEntries {
+	if _, present := c.entries[entry]; !present && len(c.entries) >= maxJWKSEntries {
 		for k := range c.entries {
 			delete(c.entries, k)
 			break
 		}
 	}
-	c.entries[url] = jwksEntry{keys: keys, fetched: now}
+	c.entries[entry] = jwksEntry{keys: keys, fetched: now}
 	c.mu.Unlock()
 	v, found := pick(keys, kid)
 	if !found {

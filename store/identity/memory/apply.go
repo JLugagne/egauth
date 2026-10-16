@@ -210,7 +210,7 @@ func (tx *txn) link(f identity.FederatedIdentity) error {
 	if owner, ok := tx.s.linkOwner(tx.subject.Tenant, f.Provider, f.ProviderSubject); ok {
 		switch {
 		case owner.user.Subject == tx.subject:
-			return errors.Join(store.ErrConflict, errors.New("identity: provider account already linked to this subject"))
+			return tx.rebind(f)
 		case owner.user.DeletedAt.IsZero():
 			return identity.ErrIdentifierTaken
 		}
@@ -220,6 +220,17 @@ func (tx *txn) link(f identity.FederatedIdentity) error {
 		})
 	}
 	tx.acc.links = append(tx.acc.links, identity.FederatedLink{Subject: tx.subject, Identity: f, LinkedAt: tx.now})
+	return nil
+}
+
+func (tx *txn) rebind(f identity.FederatedIdentity) error {
+	i := slices.IndexFunc(tx.acc.links, func(l identity.FederatedLink) bool {
+		return l.Identity.Provider == f.Provider && l.Identity.ProviderSubject == f.ProviderSubject
+	})
+	if i < 0 || tx.acc.links[i].Identity.Authority == f.Authority {
+		return errors.Join(store.ErrConflict, errors.New("identity: provider account already linked to this subject"))
+	}
+	tx.acc.links[i] = identity.FederatedLink{Subject: tx.subject, Identity: f, LinkedAt: tx.now}
 	return nil
 }
 

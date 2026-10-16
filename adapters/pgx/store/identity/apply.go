@@ -238,15 +238,21 @@ VALUES ($1, $2, $3, 'password', $4, $5, now(), $6, now(), now())`,
 func link(ctx context.Context, tx pgx.Tx, sub principal.Subject, f contract.FederatedIdentity) error {
 	var (
 		rowID, owner uuid.UUID
+		authority    string
 		tombstoned   bool
 	)
-	err := tx.QueryRow(ctx, `SELECT i.id, i.user_id, u.deleted_at IS NOT NULL
+	err := tx.QueryRow(ctx, `SELECT i.id, i.user_id, i.authority, u.deleted_at IS NOT NULL
 FROM identities i LEFT JOIN users u ON u.id = i.user_id AND u.tenant_id = i.tenant_id
 WHERE i.tenant_id = $1 AND i.provider = $2 AND i.provider_id = $3
-FOR UPDATE OF i`, sub.Tenant.String(), f.Provider, f.ProviderSubject).Scan(&rowID, &owner, &tombstoned)
+FOR UPDATE OF i`, sub.Tenant.String(), f.Provider, f.ProviderSubject).Scan(&rowID, &owner, &authority, &tombstoned)
 	switch {
-	case err == nil && owner == sub.User:
+	case err == nil && owner == sub.User && authority == f.Authority:
 		return errors.Join(store.ErrConflict, errors.New("identity: provider account already linked to this subject"))
+	case err == nil && owner == sub.User:
+		_, err = exec(ctx, tx, "rebind link", `UPDATE identities
+SET authority = $2, provider_email = $3, provider_email_verified = $4, created_at = now(), updated_at = now()
+WHERE id = $1`, rowID, f.Authority, nullIdent(f.ProviderEmail), f.ProviderEmailVerified)
+		return err
 	case err == nil && !tombstoned:
 		return contract.ErrIdentifierTaken
 	case err == nil:
@@ -261,9 +267,9 @@ FOR UPDATE OF i`, sub.Tenant.String(), f.Provider, f.ProviderSubject).Scan(&rowI
 		return errors.Join(errors.New("identity: link id"), err)
 	}
 	_, err = exec(ctx, tx, "link", `INSERT INTO identities
-    (id, user_id, tenant_id, provider, provider_id, provider_email, provider_email_verified, created_at, updated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, now(), now())`,
-		rowID, sub.User, sub.Tenant.String(), f.Provider, f.ProviderSubject, nullIdent(f.ProviderEmail), f.ProviderEmailVerified)
+    (id, user_id, tenant_id, provider, provider_id, authority, provider_email, provider_email_verified, created_at, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), now())`,
+		rowID, sub.User, sub.Tenant.String(), f.Provider, f.ProviderSubject, f.Authority, nullIdent(f.ProviderEmail), f.ProviderEmailVerified)
 	return err
 }
 

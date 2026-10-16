@@ -218,3 +218,32 @@ func markEmailVerified(h *harness) {
 	_, err = h.st.Apply(h.ctx, identity.MarkEmailVerified{Subject: v})
 	require.ErrorIs(h.t, err, store.ErrConflict, "CreateVerified accounts are already verified")
 }
+
+func federatedRebind(h *harness) {
+	acme := h.tenant("acme")
+	s := h.create(acme)
+	g := h.federated("google")
+	h.apply(identity.LinkFederated{Subject: s, Identity: g})
+	key := identity.FederatedKey{Tenant: acme, Provider: g.Provider, ProviderSubject: g.ProviderSubject}
+	before := h.epoch(s)
+	pending := len(h.pending())
+
+	rebound := g
+	rebound.Authority = "tenant:" + g.ProviderSubject
+	rebound.ProviderEmail, rebound.ProviderEmailVerified = identity.Identifier{}, false
+	a := h.apply(identity.LinkFederated{Subject: s, Identity: rebound})
+	require.Greater(h.t, a.NewEpoch, before, "a re-bound link bumps the epoch")
+	require.Greater(h.t, len(h.pending()), pending, "a re-bound link notifies the owner")
+	link, err := h.st.FindFederated(h.ctx, key)
+	require.NoError(h.t, err)
+	require.Equal(h.t, rebound, link.Identity, "the link carries its new authority")
+	links, err := h.st.ListFederated(h.ctx, s)
+	require.NoError(h.t, err)
+	require.Len(h.t, links, 1, "a re-bind replaces the link, it adds none")
+
+	_, err = h.st.Apply(h.ctx, identity.LinkFederated{Subject: s, Identity: rebound})
+	require.ErrorIs(h.t, err, store.ErrConflict, "the same link under the same authority is a conflict")
+	other := h.create(acme)
+	_, err = h.st.Apply(h.ctx, identity.LinkFederated{Subject: other, Identity: g})
+	require.ErrorIs(h.t, err, identity.ErrIdentifierTaken, "another subject never re-binds a link")
+}

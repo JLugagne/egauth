@@ -21,7 +21,9 @@ import (
 )
 
 var (
-	// ErrBlockedAddress is returned when the dial guard refuses the resolved address.
+	// ErrBlockedAddress is returned when the dial guard refuses the resolved address. It never names
+	// the address, so that its text is no resolution oracle; the net.OpError around it still does, and
+	// callers relaying errors to a tenant must not pass that on.
 	ErrBlockedAddress = errors.New("outbound: blocked address (SSRF guard)")
 	// ErrRedirect is returned instead of following a 3xx response.
 	ErrRedirect = errors.New("outbound: redirect refused")
@@ -208,25 +210,14 @@ func (a Allowance) control(network, address string, _ syscall.RawConn) error {
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 	default:
-		return blockedAddress("network " + network)
+		return ErrBlockedAddress
 	}
 	ap, err := netip.ParseAddrPort(address)
-	if err != nil {
-		return blockedAddress(err.Error())
-	}
-	if !a.Permits(ap.Addr()) {
-		return blockedAddress(ap.Addr().String())
+	if err != nil || !a.Permits(ap.Addr()) {
+		return ErrBlockedAddress
 	}
 	return nil
 }
-
-type blockedError string
-
-func (e blockedError) Error() string { return ErrBlockedAddress.Error() + ": " + string(e) }
-
-func (blockedError) Is(target error) bool { return target == ErrBlockedAddress }
-
-func blockedAddress(reason string) error { return blockedError(reason) }
 
 type observed struct {
 	base     *http.Transport

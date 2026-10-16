@@ -302,6 +302,28 @@ func (s *Store) ListFederated(ctx context.Context, sub principal.Subject) ([]ide
 	return slices.Clone(a.links), nil
 }
 
+// ListFederatedTo returns every link to provider held by a live account of tenant t, for
+// federation.Store.HasLinksOutside.
+func (s *Store) ListFederatedTo(ctx context.Context, t principal.TenantID, provider string) ([]identity.FederatedLink, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var out []identity.FederatedLink
+	for k, a := range s.accounts {
+		if k.Tenant != t || !a.user.DeletedAt.IsZero() {
+			continue
+		}
+		for _, l := range a.links {
+			if l.Identity.Provider == provider {
+				out = append(out, l)
+			}
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) CurrentEpoch(ctx context.Context, sub principal.Subject) (uint64, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err

@@ -64,6 +64,9 @@ before deploying: **every user logs in again**.
 - `kek.NewLocal` refuses every key committed to this repository (test fixtures and the keys former
   test helpers derived from string literals). `egauthtest.Config` draws a fresh KEK per call, and
   its opt-outs are refused by `New` once an origin or audience is not loopback.
+- A federated link resolves only through the provider configuration it was made with (issuer,
+  JWKS, token and userinfo URLs). `Tenants.SetOAuthProvider` returns `ErrProviderLinked` instead of
+  re-pointing a name that holds links, and a failed discovery no longer reports resolved addresses.
 - Passkeys are registered with `residentKey: required` and user verification required, and
   usernameless login works for every passkey enrolled by v0.17. Passkeys enrolled by an earlier
   release may be non-discoverable and are reported as needing re-registration.

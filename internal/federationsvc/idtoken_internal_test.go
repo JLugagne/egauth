@@ -47,11 +47,11 @@ func TestUnknownKidRefetchesAtMostOncePerMinRefresh(t *testing.T) {
 	cache := newJWKSCache(clk.Clock())
 	ctx := context.Background()
 
-	if _, err := cache.key(ctx, d, "https://idp.example/jwks", "known"); err != nil {
+	if _, err := cache.key(ctx, d, "scope\nhttps://idp.example/jwks", "https://idp.example/jwks", "known"); err != nil {
 		t.Fatal(err)
 	}
 	for i := range 50 {
-		_, err := cache.key(ctx, d, "https://idp.example/jwks", "unknown-"+string(rune('a'+i%26)))
+		_, err := cache.key(ctx, d, "scope\nhttps://idp.example/jwks", "https://idp.example/jwks", "unknown-"+string(rune('a'+i%26)))
 		if !errors.Is(err, ErrInvalidIdentity) {
 			t.Fatalf("attempt %d: err = %v, want ErrInvalidIdentity", i, err)
 		}
@@ -61,10 +61,10 @@ func TestUnknownKidRefetchesAtMostOncePerMinRefresh(t *testing.T) {
 	}
 
 	clk.Advance(jwksMinRefresh + time.Second)
-	if _, err := cache.key(ctx, d, "https://idp.example/jwks", "unknown"); !errors.Is(err, ErrInvalidIdentity) {
+	if _, err := cache.key(ctx, d, "scope\nhttps://idp.example/jwks", "https://idp.example/jwks", "unknown"); !errors.Is(err, ErrInvalidIdentity) {
 		t.Fatalf("err = %v, want ErrInvalidIdentity", err)
 	}
-	if _, err := cache.key(ctx, d, "https://idp.example/jwks", "unknown2"); !errors.Is(err, ErrInvalidIdentity) {
+	if _, err := cache.key(ctx, d, "scope\nhttps://idp.example/jwks", "https://idp.example/jwks", "unknown2"); !errors.Is(err, ErrInvalidIdentity) {
 		t.Fatalf("err = %v, want ErrInvalidIdentity", err)
 	}
 	if d.calls != 2 {

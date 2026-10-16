@@ -114,6 +114,7 @@ func (h *handlers) authorized(r *httpx.Request, q url.Values, rp resolved, o cer
 	return ProviderIdentity{
 		Provider:      rp.spec.Name,
 		Subject:       prof.subject,
+		Authority:     rp.authority,
 		Email:         prof.email,
 		EmailVerified: rp.spec.Verified(prof.email, prof.emailVerified),
 	}, nil

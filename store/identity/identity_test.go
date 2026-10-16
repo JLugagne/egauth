@@ -41,7 +41,7 @@ func ident(t *testing.T, k identity.IdentifierKind, v string) identity.Identifie
 
 func google(t *testing.T) identity.FederatedIdentity {
 	return identity.FederatedIdentity{
-		Provider: "google", ProviderSubject: "1234567890",
+		Provider: "google", ProviderSubject: "1234567890", Authority: "static",
 		ProviderEmail: ident(t, identity.IdentifierEmail, "alice@gmail.com"), ProviderEmailVerified: true,
 	}
 }

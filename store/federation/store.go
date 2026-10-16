@@ -5,6 +5,8 @@ package federation
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"time"
 
@@ -79,11 +81,31 @@ type LinkKey struct {
 	ProviderSubject string
 }
 
+// StaticAuthority is the Authority of a link made through a provider of the static configuration
+// or an external factor: the operator owns those specs, so their name identifies them.
+const StaticAuthority = "static"
+
+// RuntimeAuthority returns the Authority of a link made through the runtime spec p: "tenant:" and
+// the hex SHA-256 of Issuer, JWKSURL, TokenURL and UserInfoURL joined by newlines, the fields that
+// decide who asserts a provider subject. A spec changing any of them is another authority, under
+// which the links of the previous one do not resolve (AUTHZ-02). The format is frozen: the
+// PostgreSQL store computes it in SQL for v0.16 links.
+func RuntimeAuthority(p ProviderSpec) string {
+	sum := sha256.Sum256([]byte(p.Issuer + "\n" + p.JWKSURL + "\n" + p.TokenURL + "\n" + p.UserInfoURL))
+	return "tenant:" + hex.EncodeToString(sum[:])
+}
+
 // LinkedIdentity is the link between a subject and a provider account. ProviderEmail is the email
-// as the provider returned it; it never becomes the account email by itself (C-05).
+// as the provider returned it; it never becomes the account email by itself (C-05). Authority is
+// the StaticAuthority or RuntimeAuthority of the provider configuration the link was made through;
+// a sign-in resolves the link only through that same configuration. A v0.16 link, stored without
+// one, reports the RuntimeAuthority of the tenant provider of the same name, or StaticAuthority
+// when the tenant has none; since HasLinksOutside then refuses any spec of another authority, a
+// v0.16 link keeps the authority it was made under.
 type LinkedIdentity struct {
 	Subject               principal.Subject
 	Key                   LinkKey
+	Authority             string
 	ProviderEmail         string
 	ProviderEmailVerified bool
 	LinkedAt              time.Time
@@ -126,6 +148,9 @@ type Store interface {
 
 	// FindLinked returns the identity linked to the provider account, or store.ErrNotFound.
 	FindLinked(ctx context.Context, t principal.TenantID, k LinkKey) (LinkedIdentity, error)
+	// HasLinksOutside reports whether a live account of p.Tenant holds an identity linked to p.Name
+	// under an Authority other than RuntimeAuthority(p).
+	HasLinksOutside(ctx context.Context, p ProviderSpec) (bool, error)
 	// LinkedFor returns every identity linked to the subject.
 	LinkedFor(ctx context.Context, s principal.Subject) ([]LinkedIdentity, error)
 	// DeleteForSubject removes every link of the subject. It is idempotent.

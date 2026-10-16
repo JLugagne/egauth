@@ -222,6 +222,8 @@ type world struct {
 	t          *testing.T
 	clock      *clock.Test
 	idp        *fakeIdP
+	attacker   *fakeIdP
+	browser    *http.Client
 	ids        identity.Store
 	accounts   *accounts
 	fed        storefed.Store
@@ -244,6 +246,9 @@ type config struct {
 	tenant       string
 	discover     bool
 	perTenant    bool
+	attacker     bool
+	tenantToo    bool
+	tenantBlocks string
 }
 
 func defaults() config {
@@ -284,12 +289,27 @@ func newWorld(t *testing.T, mods ...func(*config)) *world {
 	}
 	static := []federation.Provider{spec}
 	var k kek.KEK
-	if c.perTenant {
+	switch {
+	case c.tenantToo:
+		tenantSpec := spec
+		tenantSpec.Name = "corp"
+		k = w.storeProvider(tenantSpec)
+	case c.perTenant:
 		static, k = nil, w.storeProvider(spec)
 	}
-	svc, err := federationsvc.NewWithHTTPClient(context.Background(), federationsvc.Config{
+	client := w.idp.client()
+	if c.attacker {
+		w.attacker = newIdP(t, clk, true, "")
+		client = trustingClient(w.idp, w.attacker)
+	}
+	w.browser = client
+	tenantClient := client
+	if c.tenantBlocks != "" {
+		tenantClient = &http.Client{Transport: blockPath{inner: client.Transport, path: c.tenantBlocks}, CheckRedirect: client.CheckRedirect}
+	}
+	svc, err := federationsvc.NewWithHTTPClients(context.Background(), federationsvc.Config{
 		Providers:    static,
-		PerTenant:    c.perTenant,
+		PerTenant:    c.perTenant || c.tenantToo,
 		KEK:          k,
 		Federation:   w.fed,
 		Users:        ids,
@@ -302,7 +322,7 @@ func newWorld(t *testing.T, mods ...func(*config)) *world {
 		Registration: c.registration,
 		Clock:        clk.Clock(),
 		Audit:        httpx.SinkAudit(w.sink),
-	}, w.idp.client())
+	}, client, tenantClient)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +434,7 @@ func (w *world) begin(fields map[string]string) *httptest.ResponseRecorder {
 
 func (w *world) authorize(authURL string) string {
 	w.t.Helper()
-	resp, err := w.idp.client().Get(authURL)
+	resp, err := w.browser.Get(authURL)
 	if err != nil {
 		w.t.Fatal(err)
 	}

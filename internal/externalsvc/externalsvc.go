@@ -22,6 +22,7 @@ import (
 	"github.com/JLugagne/egauth/internal/federationsvc"
 	"github.com/JLugagne/egauth/internal/httpx"
 	"github.com/JLugagne/egauth/internal/routes"
+	storefed "github.com/JLugagne/egauth/store/federation"
 )
 
 const (
@@ -192,7 +193,8 @@ func (h *handlers) login(w http.ResponseWriter, r *httpx.Request) {
 		return
 	}
 	sub, err := h.directory.SignIn(ctx, r.Tenant(), federationsvc.ProviderIdentity{
-		Provider: factors.ExternalProviderPrefix + name, Subject: id.ExternalID, Email: id.Email, EmailVerified: id.EmailVerified,
+		Provider: factors.ExternalProviderPrefix + name, Subject: id.ExternalID, Authority: storefed.StaticAuthority,
+		Email: id.Email, EmailVerified: id.EmailVerified,
 	})
 	if err != nil {
 		r.Fail(w, err)
