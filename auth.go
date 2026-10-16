@@ -634,15 +634,21 @@ func optOuts(in *InsecureOptOuts) []optOut {
 
 func checkInsecure[C any](cfg *Config[C], v *problems) {
 	in := &cfg.Insecure
+	public := !loopbackOnly(cfg)
 	for _, o := range optOuts(in) {
-		if !o.set || o.ack.valid() {
+		if !o.set {
 			continue
 		}
 		field := "Insecure." + o.name
 		if o.name == "SharedCookieDomain" || strings.HasSuffix(o.name, "PrivateNetwork") {
 			field += ".Ack"
 		}
-		v.add(field, "needs Acknowledge with a non-empty reason")
+		switch {
+		case !o.ack.valid():
+			v.add(field, "needs Acknowledge with a non-empty reason")
+		case o.ack.development && public:
+			v.add(field, "carries the egauthtest development acknowledgement, refused once an origin or audience is not loopback; acknowledge it with your own reason")
+		}
 	}
 	for _, a := range []struct {
 		field string

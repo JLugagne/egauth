@@ -4,7 +4,7 @@ package storetest
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -640,17 +640,19 @@ func singleTenant(t *testing.T, h *harness) {
 	require.NoError(t, h.s.ConsumeRecoveryCode(ctx, tenanted, "c1"))
 }
 
-func newKEK(t *testing.T, seed string) *kek.Local {
+func newKEK(t *testing.T) *kek.Local {
 	t.Helper()
-	sum := sha256.Sum256([]byte("egauth/storetest/" + seed))
-	k, err := kek.NewLocal(sum[:])
+	key := make([]byte, kek.KeyLength)
+	_, err := rand.Read(key)
+	require.NoError(t, err)
+	k, err := kek.NewLocal(key)
 	require.NoError(t, err)
 	return k
 }
 
 func sealedOpaque(t *testing.T, h *harness) {
 	ctx := context.Background()
-	k := newKEK(t, "current")
+	k := newKEK(t)
 	sub := subjectIn(t, "tenant-a")
 	ref, err := sealing.TOTPSecret(sub)
 	require.NoError(t, err)
@@ -768,7 +770,7 @@ func legacyUpgrade(t *testing.T, h *harness) {
 	}
 	require.NotContains(t, byUser, fresh)
 
-	k := newKEK(t, "current")
+	k := newKEK(t)
 	reported := 0
 	for _, want := range rows {
 		got, ok := byUser[want.sub]

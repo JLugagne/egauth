@@ -1,6 +1,6 @@
 # Testing applications
 
-- `egauthtest.Config[C]()` returns a development configuration with every opt-out acknowledged by `egauthtest.TestOptOutReason`; `egauthtest.New(cfg, clock, idp)` builds an `egauth.Auth` on a controllable `egauthtest.Clock`.
+- `egauthtest.Config[C]()` returns a loopback development configuration with a fresh random KEK and every opt-out acknowledged by `egauthtest.TestOptOutReason`, which `New` refuses once an origin or audience is not loopback; `egauthtest.New(cfg, clock, idp)` builds an `egauth.Auth` on a controllable `egauthtest.Clock`.
 - `egauthtest.NewPrincipal[C](spec)` builds an `egauth.Principal` to call a handler directly.
 - `egauthtest.Mailbox` records deliveries so a test can read emailed links and codes.
 - `egauthtest.NewIdP(t, clock)` is an in-process OIDC provider for OAuth journeys.

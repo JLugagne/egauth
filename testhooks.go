@@ -38,6 +38,16 @@ func TestHookAPIKeyPrincipal[C any](info APIKeyInfo, claims AppClaims[C]) (Princ
 	return apiKeyPrincipal(info, claims)
 }
 
+// TestHookDevelopmentAck returns an acknowledgement that New accepts only when every origin and
+// audience is loopback, so the opt-outs of egauthtest.Config cannot reach a public deployment. It
+// returns nil, which New refuses, unless called from package egauthtest.
+func TestHookDevelopmentAck(reason string) *Ack {
+	if !calledByEgauthtest() {
+		return nil
+	}
+	return &Ack{reason: reason, development: true}
+}
+
 // TestHookResolve applies the defaults registry to a copy of cfg and returns the resolved view with
 // every validation error. Called from outside package egauthtest it returns no view and a single
 // error.

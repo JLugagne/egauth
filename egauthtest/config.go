@@ -1,7 +1,7 @@
 package egauthtest
 
 import (
-	"crypto/sha256"
+	"crypto/rand"
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/kek"
@@ -17,12 +17,12 @@ const TestOptOutReason = "egauthtest development configuration; never use in pro
 //	cfg := egauthtest.Config[struct{}]()
 //	cfg.Storage = memstore.New(cfg.KEK)
 //
-// Read captured mail back with cfg.Email.(*egauthtest.Mailbox). The KEK derives from a fixed public string, so it protects nothing. Every opt-out carries
-// TestOptOutReason, and egauthtest is importable from test files only, which keeps them out of
-// production code.
+// Read captured mail back with cfg.Email.(*egauthtest.Mailbox). Every call draws a fresh KEK from
+// crypto/rand, so data sealed under one Config is unreadable under another: keep cfg.KEK to reopen
+// a store. Every opt-out carries TestOptOutReason and is accepted by New only while every origin
+// and audience is loopback; a public deployment must acknowledge it with its own reason.
 func Config[C any]() egauth.Config[C] {
-	sum := sha256.Sum256([]byte("egauthtest development kek, public and worthless"))
-	k, _ := kek.NewLocal(sum[:])
+	k, _ := kek.NewLocal(randomKey())
 	return egauth.Config[C]{
 		PublicOrigin: "http://localhost:8080",
 		Proxy:        egauth.DirectClients(),
@@ -38,7 +38,13 @@ func Config[C any]() egauth.Config[C] {
 		},
 		Modules: egauth.Modules{Password: &egauth.PasswordModule{}},
 		Insecure: egauth.InsecureOptOuts{
-			NoRateLimit: egauth.Acknowledge(TestOptOutReason),
+			NoRateLimit: egauth.TestHookDevelopmentAck(TestOptOutReason),
 		},
 	}
+}
+
+func randomKey() []byte {
+	key := make([]byte, kek.KeyLength)
+	_, _ = rand.Read(key)
+	return key
 }

@@ -2,6 +2,7 @@ package kek
 
 import (
 	"bytes"
+	"encoding/hex"
 	"errors"
 	"strconv"
 )
@@ -18,6 +19,13 @@ var publishedKeys = map[string]bool{
 	"kek-fixture-0123456789abcdefghij":                     true,
 }
 
+var committedKeys = map[string]bool{
+	"02507154933166867c21b0da53f65f95b8cdc9434a1b51a173f1a2a69a95968e": true,
+	"1cab18f6c032b810ff7cfbd713b7889bdfd960a6889b09adb312627e96353aeb": true,
+	"a3ed98077850c0aa0933937b797977a8efd606948a045fe22735232fd9884685": true,
+	"f4c82ee01d7f60e407f586442870fe6d57f2347771f31cc5cec2d8007d76d39d": true,
+}
+
 var publishedMarkers = []string{
 	"minimum-hs256-signing-secret",
 }
@@ -28,6 +36,9 @@ func checkKey(key []byte) error {
 	}
 	if distinctBytes(key) < minDistinct {
 		return errors.New("key is trivially guessable; generate it with crypto/rand")
+	}
+	if committedKeys[hex.EncodeToString(key)] {
+		return errors.New("key is committed to egauth's public repository; generate it with crypto/rand")
 	}
 	return nil
 }

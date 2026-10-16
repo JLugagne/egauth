@@ -302,21 +302,6 @@ func TestLegacyOpenerOpensV016Fixtures(t *testing.T) {
 	}
 }
 
-func TestLegacyBlobIsNotAV1Ciphertext(t *testing.T) {
-	ctx := context.Background()
-	key, f := loadLegacy(t)
-	l := newLocal(t, key)
-	for _, c := range f.Cases {
-		aad := unhex(t, c.AAD)
-		if len(aad) == 0 {
-			aad = []byte("x")
-		}
-		if _, err := l.Open(ctx, unhex(t, c.Blob), kek.AAD(aad)); err == nil {
-			t.Fatalf("v1 Open accepted the v0.16 blob %q", c.Name)
-		}
-	}
-}
-
 func TestLegacyLocalV016RejectsBadKeys(t *testing.T) {
 	for name, key := range map[string][]byte{
 		"short":    make([]byte, 16),

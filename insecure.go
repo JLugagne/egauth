@@ -29,7 +29,8 @@ type InsecureOptOuts struct {
 
 // Ack records why an opt-out is acceptable. Build it with Acknowledge.
 type Ack struct {
-	reason string
+	reason      string
+	development bool
 }
 
 // Acknowledge records why an opt-out is acceptable; New rejects an empty or blank reason.

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -187,7 +188,7 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 
 	salt := make([]byte, h.saltLen)
 	if _, err := rand.Read(salt); err != nil {
-		return "", fmt.Errorf("%w: %v", passwords.ErrHashFailed, err)
+		return "", errors.Join(passwords.ErrHashFailed, err)
 	}
 
 	hash := argon2.IDKey([]byte(password), salt, h.time, h.memory, h.threads, h.keyLen)

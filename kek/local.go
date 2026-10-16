@@ -69,6 +69,10 @@ func newLocalKey(key []byte) (*localKey, error) {
 	if err := checkKey(key); err != nil {
 		return nil, err
 	}
+	return deriveLocalKey(key)
+}
+
+func deriveLocalKey(key []byte) (*localKey, error) {
 	id, err := keyID(key)
 	if err != nil {
 		return nil, err

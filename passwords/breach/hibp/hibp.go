@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -145,12 +146,12 @@ func scanForSuffix(r io.Reader, suffix string) (int, error) {
 		}
 		count, err := strconv.Atoi(strings.TrimSpace(cnt))
 		if err != nil {
-			return 0, fmt.Errorf("hibp: malformed count for suffix: %w", err)
+			return 0, errors.Join(errors.New("hibp: malformed count for suffix"), err)
 		}
 		return count, nil
 	}
 	if err := sc.Err(); err != nil {
-		return 0, fmt.Errorf("hibp: reading response: %w", err)
+		return 0, errors.Join(errors.New("hibp: reading response"), err)
 	}
 	return 0, nil
 }

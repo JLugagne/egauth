@@ -5,6 +5,7 @@ package journeytest
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"net/http"
@@ -340,8 +341,11 @@ func BuildWorld(t testing.TB, s Settings) (*World, error) {
 		}
 	}
 	clk := egauthtest.NewClock(time.Time{})
-	sum := sha256.Sum256([]byte("journeytest kek, public and worthless"))
-	k, err := kek.NewLocal(sum[:])
+	key := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(key); err != nil {
+		return nil, errors.Join(errors.New("journeytest: kek"), err)
+	}
+	k, err := kek.NewLocal(key)
 	if err != nil {
 		return nil, errors.Join(errors.New("journeytest: kek"), err)
 	}

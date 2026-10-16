@@ -61,6 +61,9 @@ before deploying: **every user logs in again**.
 - A security-revert link only removes what changed during the window of the notice it came from.
   When that removes the account's last second factor, the account is disabled instead of mailing a
   password reset: mailbox access alone never yields a session past the second factor.
+- `kek.NewLocal` refuses every key committed to this repository (test fixtures and the keys former
+  test helpers derived from string literals). `egauthtest.Config` draws a fresh KEK per call, and
+  its opt-outs are refused by `New` once an origin or audience is not loopback.
 - Passkeys are registered with `residentKey: required` and user verification required, and
   usernameless login works for every passkey enrolled by v0.17. Passkeys enrolled by an earlier
   release may be non-discoverable and are reported as needing re-registration.

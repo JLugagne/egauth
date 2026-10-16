@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"strconv"
@@ -50,7 +51,7 @@ func LoadHashesAtLeast(r io.Reader, minCount int) (*Checker, error) {
 		if h, cnt, found := strings.Cut(line, ":"); found {
 			count, err := strconv.Atoi(strings.TrimSpace(cnt))
 			if err != nil {
-				return nil, fmt.Errorf("offline: malformed count in %q: %w", line, err)
+				return nil, errors.Join(errors.New("offline: malformed count in "+strconv.Quote(line)), err)
 			}
 			if count < minCount {
 				continue
@@ -64,7 +65,7 @@ func LoadHashesAtLeast(r io.Reader, minCount int) (*Checker, error) {
 		c.hashes[norm] = struct{}{}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("offline: reading hashes: %w", err)
+		return nil, errors.Join(errors.New("offline: reading hashes"), err)
 	}
 	return c, nil
 }
@@ -82,7 +83,7 @@ func LoadPasswords(r io.Reader) (*Checker, error) {
 		c.hashes[hashUpper(pw)] = struct{}{}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("offline: reading passwords: %w", err)
+		return nil, errors.Join(errors.New("offline: reading passwords"), err)
 	}
 	return c, nil
 }
@@ -110,7 +111,7 @@ func normalizeHash(s string) (string, error) {
 		return "", fmt.Errorf("offline: invalid SHA-1 hash %q: want 40 hex chars", s)
 	}
 	if _, err := hex.DecodeString(s); err != nil {
-		return "", fmt.Errorf("offline: invalid SHA-1 hash %q: %w", s, err)
+		return "", errors.Join(errors.New("offline: invalid SHA-1 hash "+strconv.Quote(s)), err)
 	}
 	return strings.ToUpper(s), nil
 }

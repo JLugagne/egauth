@@ -3,7 +3,7 @@ package secretpolicy
 import (
 	"bytes"
 	"errors"
-	"fmt"
+	"strconv"
 )
 
 // Sentinel errors let every key-loading path map a refusal onto its own public error while
@@ -89,7 +89,7 @@ func Reason(key []byte) string {
 // so callers can map it onto their own sentinels with errors.Is.
 func Validate(purpose string, key []byte, minLen int) error {
 	if minLen > 0 && len(key) < minLen {
-		return fmt.Errorf("%s: %w (%d bytes, want at least %d)", purpose, ErrTooShort, len(key), minLen)
+		return errors.Join(ErrTooShort, errors.New(purpose+": "+strconv.Itoa(len(key))+" bytes, want at least "+strconv.Itoa(minLen)))
 	}
 	if reason := Reason(key); reason != "" {
 		err := ErrPublished
@@ -98,7 +98,7 @@ func Validate(purpose string, key []byte, minLen int) error {
 		} else if !Denied[string(key)] {
 			err = ErrNearCopy
 		}
-		return fmt.Errorf("%s %s: %w; generate a unique key with crypto/rand or load one from a secret manager", purpose, reason, err)
+		return errors.Join(err, errors.New(purpose+" "+reason+"; generate a unique key with crypto/rand or load one from a secret manager"))
 	}
 	return nil
 }
