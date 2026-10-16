@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -82,6 +83,7 @@ func sessionPayload(sd *webauthn.SessionData) (ceremonycodec.WebAuthn, error) {
 	}
 	cp := *sd
 	cp.AllowedCredentialIDs = nil
+	cp.Expires = cp.Expires.UTC().Truncate(time.Second)
 	b, err := json.Marshal(cp)
 	if err != nil {
 		return ceremonycodec.WebAuthn{}, err
