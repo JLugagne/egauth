@@ -69,13 +69,13 @@ func TestRequiredFieldsReportTheirExactPath(t *testing.T) {
 	c := validConfig()
 	c.PublicOrigin = ""
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "PublicOrigin")
+	_ = requireOnly(t, errs, "PublicOrigin")
 
 	c = validConfig()
 	c.Storage.Identity = nil
 	c.Storage.Tokens = &memStore{}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Storage.Identity")
+	_ = requireOnly(t, errs, "Storage.Identity")
 }
 
 func TestTypedNilInInterfaceIsZero(t *testing.T) {
@@ -84,7 +84,7 @@ func TestTypedNilInInterfaceIsZero(t *testing.T) {
 	c.Storage.Identity = nilStore
 	c.Storage.Tokens = &memStore{}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Storage.Identity")
+	_ = requireOnly(t, errs, "Storage.Identity")
 }
 
 func TestZeroRequiredStructReportsItselfAndItsFields(t *testing.T) {
@@ -98,31 +98,31 @@ func TestWhitespaceStringsAreRejected(t *testing.T) {
 	c := validConfig()
 	c.BasePath = "   "
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "BasePath")
+	_ = requireOnly(t, errs, "BasePath")
 
 	c = validConfig()
 	c.PublicOrigin = " \t"
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "PublicOrigin")
+	_ = requireOnly(t, errs, "PublicOrigin")
 }
 
 func TestEmptyNonNilSliceIsRejectedEvenWhenOptional(t *testing.T) {
 	c := validConfig()
 	c.ExtraOrigins = []string{}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "ExtraOrigins")
+	_ = requireOnly(t, errs, "ExtraOrigins")
 }
 
 func TestZeroSliceElementIsRejected(t *testing.T) {
 	c := validConfig()
 	c.ExtraOrigins = []string{"https://a.example.com", ""}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "ExtraOrigins[1]")
+	_ = requireOnly(t, errs, "ExtraOrigins[1]")
 
 	c = validConfig()
 	c.ExtraOrigins = []string{" "}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "ExtraOrigins[0]")
+	_ = requireOnly(t, errs, "ExtraOrigins[0]")
 }
 
 func TestZeroNestedSpecInSliceIsRejected(t *testing.T) {
@@ -130,14 +130,14 @@ func TestZeroNestedSpecInSliceIsRejected(t *testing.T) {
 	c.Modules.External = &externalModule{Factors: []externalFactor{{Name: "corp"}, {}}}
 	c.Storage.Federation = &memStore{}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Modules.External.Factors[1]")
+	_ = requireOnly(t, errs, "Modules.External.Factors[1]")
 }
 
 func TestEachPredicateReportsTheElementPath(t *testing.T) {
 	c := validConfig()
 	c.ExtraOrigins = []string{"https://a.example.com", "ftp://b.example.com"}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "ExtraOrigins[1]")
+	_ = requireOnly(t, errs, "ExtraOrigins[1]")
 }
 
 func TestProviderAndExternalPredicatesCallTheirValidators(t *testing.T) {
@@ -152,31 +152,31 @@ func TestProviderAndExternalPredicatesCallTheirValidators(t *testing.T) {
 	c.Storage.Federation = &memStore{}
 	c.Modules.External = &externalModule{Factors: []externalFactor{{Name: " "}}}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Modules.External.Factors[0]")
+	_ = requireOnly(t, errs, "Modules.External.Factors[0]")
 }
 
 func TestNonEmptyPredicate(t *testing.T) {
 	c := validConfig()
 	c.Modules.Passkey = &passkeyModule{DisplayName: "\t"}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Modules.Passkey.DisplayName")
+	_ = requireOnly(t, errs, "Modules.Passkey.DisplayName")
 
 	c = validConfig()
 	c.Modules.Passkey = &passkeyModule{}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Modules.Passkey.DisplayName")
+	_ = requireOnly(t, errs, "Modules.Passkey.DisplayName")
 
 	c = validConfig()
 	c.Storage.Tokens = &memStore{}
 	c.Modules.APIKeys = &apiKeyModule{Kinds: []string{}}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Modules.APIKeys.Kinds")
+	_ = requireOnly(t, errs, "Modules.APIKeys.Kinds")
 
 	c = validConfig()
 	c.Storage.Tokens = &memStore{}
 	c.Modules.APIKeys = &apiKeyModule{}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Modules.APIKeys.Kinds")
+	_ = requireOnly(t, errs, "Modules.APIKeys.Kinds")
 }
 
 func TestTokenPredicate(t *testing.T) {
@@ -194,7 +194,7 @@ func TestTokenPredicate(t *testing.T) {
 		c.Storage.Tokens = &memStore{}
 		c.Modules.APIKeys = &apiKeyModule{Kinds: []string{"ok", k}}
 		_, errs := validate(t, &c, options())
-		requireOnly(t, errs, "Modules.APIKeys.Kinds[1]")
+		_ = requireOnly(t, errs, "Modules.APIKeys.Kinds[1]")
 	}
 }
 
@@ -248,7 +248,7 @@ func TestOriginPredicate(t *testing.T) {
 		c := validConfig()
 		c.PublicOrigin = o
 		_, errs := validate(t, &c, options())
-		requireOnly(t, errs, "PublicOrigin")
+		_ = requireOnly(t, errs, "PublicOrigin")
 	}
 }
 
@@ -265,7 +265,7 @@ func TestPathPredicate(t *testing.T) {
 		c := validConfig()
 		c.BasePath = p
 		_, errs := validate(t, &c, options())
-		requireOnly(t, errs, "BasePath")
+		_ = requireOnly(t, errs, "BasePath")
 	}
 }
 
@@ -273,7 +273,7 @@ func TestBoundMax(t *testing.T) {
 	c := validConfig()
 	c.Policy.RecheckEvery = 16 * time.Minute
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Policy.RecheckEvery")
+	_ = requireOnly(t, errs, "Policy.RecheckEvery")
 
 	c = validConfig()
 	c.Policy.RecheckEvery = 15 * time.Minute
@@ -283,14 +283,14 @@ func TestBoundMax(t *testing.T) {
 	c = validConfig()
 	c.Policy.MaxLifetime = 2161 * time.Hour
 	_, errs = validate(t, &c, options())
-	requireField(t, errs, "Policy.MaxLifetime")
+	_ = requireField(t, errs, "Policy.MaxLifetime")
 }
 
 func TestNegativeDurationIsRejected(t *testing.T) {
 	c := validConfig()
 	c.Policy.RecheckEvery = -time.Second
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Policy.RecheckEvery")
+	_ = requireOnly(t, errs, "Policy.RecheckEvery")
 }
 
 func TestRaisedBoundOnlyRaises(t *testing.T) {
@@ -303,7 +303,7 @@ func TestRaisedBoundOnlyRaises(t *testing.T) {
 
 	c.Policy.MaxLifetime = 9601 * time.Hour
 	_, errs = validate(t, &c, o)
-	requireField(t, errs, "Policy.MaxLifetime")
+	_ = requireField(t, errs, "Policy.MaxLifetime")
 
 	o.Raised = map[string]time.Duration{"Policy.MaxLifetime": time.Hour}
 	c = validConfig()
@@ -315,13 +315,13 @@ func TestBoundLE(t *testing.T) {
 	c := validConfig()
 	c.Policy.IdleTimeout = 721 * time.Hour
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Policy.IdleTimeout")
+	_ = requireOnly(t, errs, "Policy.IdleTimeout")
 
 	c = validConfig()
 	c.Policy.IdleTimeout = 2 * time.Hour
 	c.Policy.MaxLifetime = time.Hour
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Policy.IdleTimeout")
+	_ = requireOnly(t, errs, "Policy.IdleTimeout")
 }
 
 func TestModuleDependencyRequiresOnlyWhenEnabled(t *testing.T) {
@@ -348,7 +348,7 @@ func TestModuleDependencyRequiresOnlyWhenEnabled(t *testing.T) {
 	c.Modules.Passkey = &passkeyModule{DisplayName: "App"}
 	c.Modules.Verification = &verificationModule{Email: true}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Email")
+	_ = requireOnly(t, errs, "Email")
 }
 
 func TestModuleDependencyThroughSwitches(t *testing.T) {
@@ -365,18 +365,18 @@ func TestModuleDependencyThroughSwitches(t *testing.T) {
 	o.Switches["Sessions.JWT"] = false
 	c.Modules.APIKeys = &apiKeyModule{Kinds: []string{"ci"}}
 	_, errs = validate(t, &c, o)
-	requireOnly(t, errs, "Storage.Tokens")
+	_ = requireOnly(t, errs, "Storage.Tokens")
 }
 
 func TestOneOfPrimary(t *testing.T) {
 	c := validConfig()
 	c.Modules = modules{Verification: &verificationModule{Email: true}}
 	_, errs := validate(t, &c, options())
-	requireOnly(t, errs, "Modules")
+	_ = requireOnly(t, errs, "Modules")
 
 	c.Modules.LoginCode = &loginCodeModule{}
 	_, errs = validate(t, &c, options())
-	requireOnly(t, errs, "Modules")
+	_ = requireOnly(t, errs, "Modules")
 
 	c.Modules.LoginCode.SMS = true
 	_, errs = validate(t, &c, options())
@@ -416,17 +416,17 @@ func TestDefaultMustMatchTheFieldType(t *testing.T) {
 	o.Defaults["basepath"] = func(*configcheck.Resolved) any { return 42 }
 	c := validConfig()
 	_, errs := validate(t, &c, o)
-	requireOnly(t, errs, "BasePath")
+	_ = requireOnly(t, errs, "BasePath")
 
 	o.Defaults["basepath"] = func(*configcheck.Resolved) any { return nil }
 	c = validConfig()
 	_, errs = validate(t, &c, o)
-	requireOnly(t, errs, "BasePath")
+	_ = requireOnly(t, errs, "BasePath")
 
 	o.Defaults["basepath"] = func(*configcheck.Resolved) any { return "" }
 	c = validConfig()
 	_, errs = validate(t, &c, o)
-	requireOnly(t, errs, "BasePath")
+	_ = requireOnly(t, errs, "BasePath")
 }
 
 func TestDefaultedValueStillPassesPredicates(t *testing.T) {
@@ -434,5 +434,5 @@ func TestDefaultedValueStillPassesPredicates(t *testing.T) {
 	o.Defaults["basepath"] = func(*configcheck.Resolved) any { return "auth/" }
 	c := validConfig()
 	_, errs := validate(t, &c, o)
-	requireOnly(t, errs, "BasePath")
+	_ = requireOnly(t, errs, "BasePath")
 }

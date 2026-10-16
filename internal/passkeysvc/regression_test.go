@@ -20,7 +20,7 @@ import (
 )
 
 func leaks(s string, key []byte) bool {
-	decimal := strings.Trim(fmt.Sprint(key), "[]")
+	decimal := strings.Trim(fmt.Sprintf("%d", key), "[]")
 	gosyntax := strings.TrimSuffix(strings.TrimPrefix(fmt.Sprintf("%#v", key), "[]byte{"), "}")
 	for _, form := range []string{string(key), decimal, gosyntax, hex.EncodeToString(key), base64.StdEncoding.EncodeToString(key), base64.RawURLEncoding.EncodeToString(key)} {
 		if strings.Contains(s, form) {
@@ -83,7 +83,7 @@ func TestLoginKeepsAConcurrentRename(t *testing.T) {
 	rename := func() {
 		cur := w.credentials(sub)[0]
 		cur.Nickname = "renamed meanwhile"
-		if err := w.hooks.Store.Update(context.Background(), cur); err != nil {
+		if err := w.hooks.Update(context.Background(), cur); err != nil {
 			t.Error(err)
 		}
 	}

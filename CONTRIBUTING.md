@@ -100,7 +100,8 @@ unpublished `tools` module that holds the guards. A committed `go.work` resolves
 maintainer drops it, and any `replace` directive, at release (see RELEASING.md).
 
 1. **Go version.** The latest stable release.
-2. **Tests.** `GOWORK=off go test ./...` runs the core suite without a daemon. `adapters/pgx` uses
+2. **Tests.** `GOWORK=off go test -timeout 40m ./...` runs the core suite without a daemon (the full journey
+   matrix exceeds go test's 10 minute default; add `-short` for the quick pass). `adapters/pgx` uses
    `testcontainers-go`, so `cd adapters/pgx && go test ./...` needs Docker; add `-short` to skip the
    database tests.
 3. **Checks.** `make check` runs vet, vulnerability scan, lint, version sync, the static guards

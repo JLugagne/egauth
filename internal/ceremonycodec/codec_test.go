@@ -16,7 +16,6 @@ import (
 
 	"github.com/JLugagne/egauth/internal/ceremonycodec"
 	"github.com/JLugagne/egauth/internal/clock"
-	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/internal/principaltest"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store/ceremony"
@@ -484,7 +483,7 @@ func TestOpenedPendingKeepsItsTenant(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var want core.TenantID = p.Tenant()
+	want := p.Tenant()
 	if opened.Pending.Tenant() != want {
 		t.Fatal("opened Pending is of another tenant")
 	}

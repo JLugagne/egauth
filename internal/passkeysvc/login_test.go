@@ -239,7 +239,7 @@ func TestSuspendedCredentialIsRefused(t *testing.T) {
 	}
 	c, cookies := w.beginLogin(nil)
 	expect(t, w.finishLogin(c, cookies, a.DiscoverableLogin(t, c.Options)), http.StatusUnauthorized)
-	c, cookies = w.beginLogin(map[string]any{routes.FieldIdentifier: "alice@example.com"})
+	c, _ = w.beginLogin(map[string]any{routes.FieldIdentifier: "alice@example.com"})
 	if _, err := a.Get(c.Options); err == nil {
 		t.Fatal("a suspended credential was offered in the allow list")
 	}

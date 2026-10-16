@@ -179,7 +179,7 @@ verify the certificate identity too:
 ```sh
 # Pinned: the verifier must be a version you have reviewed. Keep in sync with GITSIGN_VERSION in
 # the Makefile.
-go install github.com/sigstore/gitsign@v0.13.0   # or: brew install gitsign
+go install github.com/sigstore/gitsign@v0.17.1   # or: brew install gitsign
 git config --global gpg.x509.program gitsign
 git config --global gpg.format x509
 

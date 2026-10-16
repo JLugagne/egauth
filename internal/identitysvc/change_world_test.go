@@ -224,12 +224,6 @@ func (o *outboxRouter) DispatchOutbox(ctx context.Context, items []identity.Outb
 	}
 }
 
-func (o *outboxRouter) failures() []error {
-	o.mu.Lock()
-	defer o.mu.Unlock()
-	return append([]error(nil), o.errs...)
-}
-
 type acctWorld struct {
 	*world
 	amailer  *acctMailer

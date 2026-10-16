@@ -47,17 +47,17 @@ func TestZeroOptionalNestedSpecIsAbsentLikeANilPointer(t *testing.T) {
 func TestPartlySetOptionalNestedSpecStillNeedsItsRequiredFields(t *testing.T) {
 	c := absentOuter{Req: absentInner{Name: "x"}, Opt: absentInner{Timeout: time.Second}}
 	_, errs := configcheck.Validate(&c, absentOptions())
-	requireOnly(t, errs, "Opt.Name")
+	require.NotNil(t, requireOnly(t, errs, "Opt.Name"))
 
 	c = absentOuter{Req: absentInner{Name: "x"}, OptPtr: &absentInner{}}
 	_, errs = configcheck.Validate(&c, absentOptions())
-	requireOnly(t, errs, "OptPtr.Name")
+	require.NotNil(t, requireOnly(t, errs, "OptPtr.Name"))
 }
 
 func TestZeroRequiredNestedSpecIsNotAbsent(t *testing.T) {
 	c := absentOuter{}
 	_, errs := configcheck.Validate(&c, absentOptions())
-	requireOnly(t, errs, "Req.Name")
+	require.NotNil(t, requireOnly(t, errs, "Req.Name"))
 }
 
 func TestPointerToZeroStructIsAZeroElement(t *testing.T) {
@@ -76,7 +76,7 @@ func TestTenantOriginNeedsALeftmostLabelUnderAParentDomain(t *testing.T) {
 		c := validConfig()
 		c.PublicOrigin = o
 		_, errs := validate(t, &c, options())
-		requireOnly(t, errs, "PublicOrigin")
+		require.NotNil(t, requireOnly(t, errs, "PublicOrigin"))
 	}
 	for _, o := range []string{"https://{tenant}.example.com", "http://{tenant}.localhost:8080"} {
 		c := validConfig()
@@ -145,12 +145,12 @@ func TestTagsBehindAnUnexportedFieldAreRefused(t *testing.T) {
 
 func TestTagsReachableOnlyThroughAnUntaggedStructAreRefused(t *testing.T) {
 	_, errs := fieldsOf(t, &deepOuter{}, noRegistry())
-	requireOnly(t, errs, "M.Leaf")
+	require.NotNil(t, requireOnly(t, errs, "M.Leaf"))
 }
 
 func TestTagsBehindAMapAreRefused(t *testing.T) {
 	_, errs := fieldsOf(t, &specMap{}, noRegistry())
-	requireOnly(t, errs, "M")
+	require.NotNil(t, requireOnly(t, errs, "M"))
 }
 
 func TestOriginRejectsHostsBrowsersRewrite(t *testing.T) {
@@ -169,7 +169,7 @@ func TestOriginRejectsHostsBrowsersRewrite(t *testing.T) {
 		c := validConfig()
 		c.PublicOrigin = o
 		_, errs := validate(t, &c, options())
-		requireOnly(t, errs, "PublicOrigin")
+		require.NotNil(t, requireOnly(t, errs, "PublicOrigin"))
 	}
 	for _, o := range []string{"https://203.0.113.7", "https://[2001:db8::1]", "http://[::1]:8080", "https://a1.example.com"} {
 		c := validConfig()
@@ -178,3 +178,8 @@ func TestOriginRejectsHostsBrowsersRewrite(t *testing.T) {
 		require.Empty(t, errs, o)
 	}
 }
+
+var (
+	_ = hiddenField{}.inner
+	_ = hiddenSlice{}.inner
+)

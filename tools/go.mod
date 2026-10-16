@@ -2,6 +2,8 @@ module github.com/JLugagne/egauth/tools
 
 go 1.26.7
 
+toolchain go1.26.9
+
 require golang.org/x/tools v0.51.0
 
 require (

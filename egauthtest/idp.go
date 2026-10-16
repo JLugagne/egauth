@@ -125,9 +125,11 @@ func (p *IdP) Provider(name string) federation.Provider {
 	}
 }
 
-// HTTPClient returns a client that trusts the provider's certificate and follows no redirect.
+// HTTPClient returns a client that trusts the provider's certificate, follows no redirect and gives up
+// after 60 seconds.
 func (p *IdP) HTTPClient() *http.Client {
 	c := p.server.Client()
+	c.Timeout = 60 * time.Second
 	c.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return c
 }

@@ -115,7 +115,7 @@ func New(cfg Config) (*Service, error) {
 	byName := make(map[string]Verifier, len(cfg.Verifiers))
 	for _, v := range cfg.Verifiers {
 		if !present(v) {
-			errs = append(errs, errors.New("Verifiers: nil verifier"))
+			errs = append(errs, errors.Join(errors.New("Verifiers"), errors.New("nil verifier")))
 			continue
 		}
 		name := v.Name()

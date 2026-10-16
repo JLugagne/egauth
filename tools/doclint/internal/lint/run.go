@@ -111,11 +111,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 	if fl.NArg() > 0 {
-		fmt.Fprintln(stderr, "doclint: unexpected arguments:", strings.Join(fl.Args(), " "))
+		_, _ = fmt.Fprintln(stderr, "doclint: unexpected arguments:", strings.Join(fl.Args(), " "))
 		return 2
 	}
 	if *write && *check {
-		fmt.Fprintln(stderr, "doclint: -write and -check are mutually exclusive")
+		_, _ = fmt.Fprintln(stderr, "doclint: -write and -check are mutually exclusive")
 		return 2
 	}
 	if !*docs && !*code {
@@ -125,19 +125,19 @@ func Main(args []string, stdout, stderr io.Writer) int {
 	if dir == "" {
 		found, err := archtest.FindRepoRoot()
 		if err != nil {
-			fmt.Fprintln(stderr, errors.Join(errors.New("doclint: no -root given"), err))
+			_, _ = fmt.Fprintln(stderr, errors.Join(errors.New("doclint: no -root given"), err))
 			return 2
 		}
 		dir = found
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
-		fmt.Fprintln(stderr, errors.Join(errors.New("doclint: resolve -root"), err))
+		_, _ = fmt.Fprintln(stderr, errors.Join(errors.New("doclint: resolve -root"), err))
 		return 2
 	}
 	gowork := filepath.Join(abs, "go.work")
 	if _, err := os.Stat(gowork); err != nil {
-		fmt.Fprintln(stderr, errors.Join(errors.New("doclint: "+abs+" holds no go.work"), err))
+		_, _ = fmt.Fprintln(stderr, errors.Join(errors.New("doclint: "+abs+" holds no go.work"), err))
 		return 2
 	}
 	findings, err := Run(Options{
@@ -150,11 +150,11 @@ func Main(args []string, stdout, stderr io.Writer) int {
 		Env:      []string{"GOWORK=" + gowork},
 	})
 	if err != nil {
-		fmt.Fprintln(stderr, err)
+		_, _ = fmt.Fprintln(stderr, err)
 		return 2
 	}
 	for _, f := range findings {
-		fmt.Fprintln(stdout, f)
+		_, _ = fmt.Fprintln(stdout, f)
 	}
 	if len(findings) > 0 {
 		return 1

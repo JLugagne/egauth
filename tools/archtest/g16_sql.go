@@ -111,7 +111,7 @@ func escapeStringPrefix(before string) bool {
 		return true
 	}
 	c := before[n-2]
-	return !(c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= 0x80)
+	return c != '_' && c != '$' && (c < '0' || c > '9') && (c < 'A' || c > 'Z') && (c < 'a' || c > 'z') && c < 0x80
 }
 
 const duplicateCondition = `DUPLICATE_(OBJECT|TABLE|COLUMN|SCHEMA|FUNCTION)`

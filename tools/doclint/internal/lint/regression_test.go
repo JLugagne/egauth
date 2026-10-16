@@ -97,7 +97,7 @@ func TestBurdenHiddenByMarkupOrUnicodeSpacesFails(t *testing.T) {
 		"Remember <b>to</b> rotate.",
 		"Remember to rotate.",
 		"Remember to rotate.",
-		"Remem​ber to rotate.",
+		"Remem\u200bber to rotate.",
 		"Remember&nbsp;to rotate.",
 		"You `must also` set it.",
 		"Donʼt forget it.",

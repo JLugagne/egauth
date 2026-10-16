@@ -11,7 +11,6 @@ import (
 type resourceEnv struct {
 	rw *journeytest.ResourceWorld
 	w  *journeytest.World
-	c  *journeytest.Client
 }
 
 func (r *resourceEnv) token(c *journeytest.Client, audience string) string {

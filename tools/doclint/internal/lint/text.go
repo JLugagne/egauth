@@ -43,15 +43,20 @@ var (
 	backtickRe    = regexp.MustCompile("`([^`]+)`")
 	codeTagRe     = regexp.MustCompile(`(?i)<code\b[^>]*>([^<\n]+)</code>`)
 	docLinkRe     = regexp.MustCompile(`\[(\*?[a-z][a-z0-9_]*\.[A-Z]\w*(?:\.\w+)*)\]`)
-	symbolRe      = regexp.MustCompile(`(?:^-?|\.\.\.|<-|[^\w./:@#$<-]-?)([a-z][a-z0-9_]*)\.([A-Z]\w*(?:(?:\(\))?\)?\.\w+)*)`)
+	symbolRe      = regexp.MustCompile(`(?:^-?|\.\.\.|<-|[^\w./:@#$<-]-?)([a-z][a-z0-9_]*)\.([A-Z]\w*(?:(?:\(\))?\)?(?:\{[^{}]*\})?\.\w+)*)`)
+	glueSymbolRe  = regexp.MustCompile(`\w[-/:<]([a-z][a-z0-9_]*)\.([A-Z]\w*(?:(?:\(\))?\)?(?:\{[^{}]*\})?\.\w+)*)`)
+	braceRe       = regexp.MustCompile(`\{[^{}]*\}`)
 	selectorRe    = regexp.MustCompile(`^(\w+)(\(\))?(\))?`)
 	bannedLinkRe  = regexp.MustCompile(`(?i)(?:^|[^\w-])(SECURITY-FINDINGS\.md|AUDIT-[^\s)\]>"'` + "`" + `]*\.md|GLOBAL_REVIEW\.md|\.tasks)(?:[^\w-]|$)`)
 	bannedClaim   = regexp.MustCompile(`(?i)signatures\s+verified\s+against\s+source`)
 	spaceRe       = regexp.MustCompile(`\s+`)
 	blockStartRe  = regexp.MustCompile(`^\s*(?:[-*+]\s|\d+[.)]\s|#)`)
-	htmlTagRe     = regexp.MustCompile(`</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:[^<>"']|"[^"]*"|'[^']*')*)?/?>`)
+	htmlTagRe     = regexp.MustCompile(`</?[A-Za-z][A-Za-z0-9-]*(?:\s(?:[^<>"'\x00-\x02]|"[^"\x00-\x02]*"|'[^'\x00-\x02]*')*)?/?>`)
 	htmlCommentRe = regexp.MustCompile(`<!--(?:>|->|(?s:.*?)-->)`)
-	linkDestRe    = regexp.MustCompile(`\]\([^)]*\)|\]\[[^\]]*\]`)
+	linkDestRe    = regexp.MustCompile(`\]\([^)]*\)`)
+	linkRefRe     = regexp.MustCompile(`\]\[[^\]]*\]`)
+	footnoteRe    = regexp.MustCompile(`\[\^[^\]]*\]`)
+	angleDestRe   = regexp.MustCompile(`\]\(<[^>]*>`)
 	mdEscapeRe    = regexp.MustCompile("\\\\([!-/:-@\\[-`{-~])")
 	markupChars   = strings.NewReplacer("*", "", "_", "", "~", "", "`", "", "[", "", "]", "")
 	escapeOnly    = strings.NewReplacer("<!--", "", "-->", "")
@@ -86,8 +91,8 @@ type view struct {
 // and the banned claim are matched per paragraph (a run of non-blank lines, also broken before a
 // list item or heading) on every rendered reading of the text: Markdown emphasis, link
 // destinations, hard breaks and entities are dropped, look-alike and compatibility letters and
-// Unicode spaces fold to ASCII, and HTML comments and tags are each read both removed and replaced
-// by a space (comments also kept), so neither wrapping nor markup hides a sentence. A resolving
+// Unicode spaces fold to ASCII, and HTML comments and tags (which may wrap) are each read kept,
+// removed and replaced by a space, so neither wrapping nor markup hides a sentence. A resolving
 // doclint:enforced-by excuses one burden phrase: the last one of the sentence it ends (or, alone on
 // its line, the first one of the sentence on the next line). Code spans may wrap across the lines
 // of a paragraph. Lines inside the caller's fenced blocks must already have been blanked.
@@ -225,17 +230,18 @@ func sanitize(s string) string {
 }
 
 func views(lines []string) []view {
-	encoded := encode(lines)
+	raw, tagged := encode(lines, false), encode(lines, true)
 	var out []view
 	for _, comments := range []int{keepComments, dropComments, spaceComments} {
+		out = append(out, newView(project(raw, comments, false)))
 		for _, tagSpace := range []bool{false, true} {
-			out = append(out, newView(project(encoded, comments, tagSpace)))
+			out = append(out, newView(project(tagged, comments, tagSpace)))
 		}
 	}
 	return out
 }
 
-func encode(lines []string) string {
+func encode(lines []string, tags bool) string {
 	pre := make([]string, len(lines))
 	for i, l := range lines {
 		pre[i] = trimHardBreak(strings.TrimLeft(strings.TrimSpace(l), "> \t"))
@@ -247,6 +253,11 @@ func encode(lines []string) string {
 		}
 		return string(openMark) + inner + string(closeMark)
 	})
+	if tags {
+		joined = htmlTagRe.ReplaceAllStringFunc(joined, func(t string) string {
+			return string(tagMark) + strings.Repeat("\n", strings.Count(t, "\n"))
+		})
+	}
 	parts := strings.Split(joined, "\n")
 	for i, p := range parts {
 		parts[i] = rendered(p)
@@ -265,8 +276,18 @@ func trimHardBreak(s string) string {
 func project(s string, mode int, tagSpace bool) string {
 	var b strings.Builder
 	in := false
+	pending := 0
+	flush := func() {
+		b.WriteString(strings.Repeat("\n", pending))
+		pending = 0
+	}
 	for _, r := range s {
+		if pending > 0 && (r == ' ' || r == '\n') && !in {
+			flush()
+		}
 		switch {
+		case in && mode == dropComments && r == '\n':
+			pending++
 		case r == tagMark:
 			if tagSpace && (!in || mode == keepComments) {
 				b.WriteByte(' ')
@@ -286,6 +307,7 @@ func project(s string, mode int, tagSpace bool) string {
 			b.WriteRune(r)
 		}
 	}
+	flush()
 	return b.String()
 }
 
@@ -360,8 +382,9 @@ func (v view) nextContent(p int) int {
 }
 
 func rendered(s string) string {
-	s = htmlTagRe.ReplaceAllString(s, string(tagMark))
-	s = linkDestRe.ReplaceAllString(s, "")
+	s = footnoteRe.ReplaceAllString(s, "")
+	s = stripLinkDests(s)
+	s = linkRefRe.ReplaceAllString(s, "")
 	s = mdEscapeRe.ReplaceAllString(s, "$1")
 	s = markupChars.Replace(s)
 	s = html.UnescapeString(s)
@@ -426,8 +449,14 @@ func scanSymbols(w *Workspace, file string, first int, para []string) []Finding 
 	var out []Finding
 	seen := map[string]bool{}
 	for _, r := range refs {
-		for _, s := range symbolRe.FindAllStringSubmatchIndex(r.text, -1) {
-			pkg, chain := r.text[s[2]:s[3]], r.text[s[4]:s[5]]
+		matches := symbolRe.FindAllStringSubmatchIndex(r.text, -1)
+		for _, s := range glueSymbolRe.FindAllStringSubmatchIndex(r.text, -1) {
+			if w.HasPackage(r.text[s[2]:s[3]]) {
+				matches = append(matches, s)
+			}
+		}
+		for _, s := range matches {
+			pkg, chain := r.text[s[2]:s[3]], braceRe.ReplaceAllString(r.text[s[4]:s[5]], "")
 			sym := pkg + "." + chain
 			key := strconv.Itoa(r.line) + " " + sym
 			if seen[key] {
@@ -450,7 +479,7 @@ func parenthesized(before string) bool {
 		return false
 	}
 	r, _ := utf8.DecodeLastRuneInString(rest)
-	return rest == "" || !(unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == ']' || r == ')')
+	return rest == "" || (!unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' && r != ']' && r != ')')
 }
 
 func selectors(chain string, closes bool) []string {
@@ -477,7 +506,7 @@ func scanBannedLinks(file string, no int, line string) []Finding {
 	for range 2 {
 		next := slices.Clone(cands)
 		for _, c := range cands {
-			for _, d := range []string{html.UnescapeString(c), mdEscapeRe.ReplaceAllString(c, "$1"), percentDecode(c)} {
+			for _, d := range []string{html.UnescapeString(c), mdEscapeRe.ReplaceAllString(c, "$1"), percentDecode(c), htmlTagRe.ReplaceAllString(c, ""), spacedAngleDest(c)} {
 				if !slices.Contains(next, d) {
 					next = append(next, d)
 				}
@@ -512,3 +541,104 @@ func excerpt(s string) string {
 }
 
 func quote(s string) string { return "\"" + s + "\"" }
+
+func spacedAngleDest(s string) string {
+	return angleDestRe.ReplaceAllStringFunc(s, func(m string) string {
+		return strings.Map(func(r rune) rune {
+			if unicode.IsSpace(r) {
+				return '-'
+			}
+			return r
+		}, m)
+	})
+}
+
+func stripLinkDests(s string) string {
+	var b strings.Builder
+	for {
+		i := strings.Index(s, "](")
+		if i < 0 {
+			b.WriteString(s)
+			return b.String()
+		}
+		b.WriteString(s[:i])
+		end := linkDestEnd(s, i+2)
+		if end < 0 {
+			loc := linkDestRe.FindStringIndex(s[i:])
+			if loc == nil {
+				b.WriteString(s[i:])
+				return b.String()
+			}
+			end = i + loc[1]
+		}
+		s = s[end:]
+	}
+}
+
+func linkDestEnd(s string, i int) int {
+	i = skipSpaces(s, i)
+	if i < len(s) && s[i] == '<' {
+		i = scanTo(s, i+1, '>')
+		if i < 0 {
+			return -1
+		}
+	} else {
+		depth := 0
+	dest:
+		for ; i < len(s); i++ {
+			switch c := s[i]; {
+			case c == '\\':
+				i++
+			case c == '(':
+				depth++
+			case c == ')' && depth == 0:
+				return i + 1
+			case c == ')':
+				depth--
+			case c == ' ' || c == '\t':
+				break dest
+			}
+		}
+	}
+	i = skipSpaces(s, i)
+	if i >= len(s) {
+		return -1
+	}
+	switch s[i] {
+	case ')':
+		return i + 1
+	case '"', '\'':
+		i = scanTo(s, i+1, s[i])
+	case '(':
+		i = scanTo(s, i+1, ')')
+	default:
+		return -1
+	}
+	if i < 0 {
+		return -1
+	}
+	i = skipSpaces(s, i)
+	if i < len(s) && s[i] == ')' {
+		return i + 1
+	}
+	return -1
+}
+
+func skipSpaces(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+func scanTo(s string, i int, closer byte) int {
+	for ; i < len(s); i++ {
+		switch s[i] {
+		case '\\':
+			i++
+		case closer:
+			return i + 1
+		}
+	}
+	return -1
+}

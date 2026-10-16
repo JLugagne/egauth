@@ -79,10 +79,6 @@ func TestBasePathValidation(t *testing.T) {
 	}
 }
 
-type anyTenant struct{}
-
-func (anyTenant) ResolveTenant(*http.Request) (core.TenantID, error) { return core.TenantID{}, nil }
-
 type allowAll struct{}
 
 func (allowAll) Allow(context.Context, limiter.Key) (limiter.Decision, error) {

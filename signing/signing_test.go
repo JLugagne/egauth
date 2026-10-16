@@ -387,7 +387,7 @@ func TestKeysAreRedacted(t *testing.T) {
 	slog.New(slog.NewTextHandler(&buf, nil)).Info("keys", "s", s, "v", s.Verifier())
 	out := fmt.Sprintf("%v %+v %#v %v %+v %#v", s, s, s, s.Verifier(), s.Verifier(), s.Verifier()) + buf.String()
 	for _, secret := range [][]byte{key, derived} {
-		for _, enc := range []string{string(secret), hex.EncodeToString(secret), fmt.Sprint(secret), base64.StdEncoding.EncodeToString(secret)} {
+		for _, enc := range []string{string(secret), hex.EncodeToString(secret), fmt.Sprintf("%d", secret), base64.StdEncoding.EncodeToString(secret)} {
 			if strings.Contains(out, enc) {
 				t.Fatalf("formatted keys leak material: %s", out)
 			}

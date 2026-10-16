@@ -67,7 +67,7 @@ func (e *env) mustChange(bearer bool) []journeytest.Probe {
 			case t.kind == kOptional:
 				return anonymousOnly(t, r, o)
 			case t.kind == kAuth && t.meta.AcceptsMustChange:
-				return got(r, o), !(r.Status == http.StatusForbidden && r.Code() == "password_change_required") && !(r.Status == http.StatusUnauthorized && r.Code() == "unauthenticated")
+				return got(r, o), (r.Status != http.StatusForbidden || r.Code() != "password_change_required") && (r.Status != http.StatusUnauthorized || r.Code() != "unauthenticated")
 			}
 			return refused(http.StatusForbidden, "password_change_required")(t, r, o)
 		},

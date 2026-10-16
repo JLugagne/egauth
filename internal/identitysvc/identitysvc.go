@@ -257,12 +257,12 @@ func resolveBreach(c passwords.BreachChecker, client *outbound.Client) (password
 		return nil, nil
 	default:
 		if !present(c) {
-			return nil, errors.New("Breach: a typed nil checker")
+			return nil, errors.Join(errors.New("Breach"), errors.New("a typed nil checker"))
 		}
 		return c, nil
 	}
 	if client == nil {
-		return nil, errors.New("Outbound: a breach.Spec is fetched through the outbound client")
+		return nil, errors.Join(errors.New("Outbound"), errors.New("a breach.Spec is fetched through the outbound client"))
 	}
 	if spec.IsZero() {
 		return nil, errors.Join(errors.New("Breach"), breach.ErrUnresolved)

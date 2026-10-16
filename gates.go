@@ -154,7 +154,7 @@ func decodeClaims[C any](b []byte) (AppClaims[C], error) {
 	if err := json.Unmarshal(b, &wire); err != nil {
 		return AppClaims[C]{}, errors.Join(errors.New("egauth: sealed application claims do not decode"), err)
 	}
-	return AppClaims[C]{Roles: wire.Roles, Groups: wire.Groups, Scopes: wire.Scopes, Custom: wire.Custom}, nil
+	return AppClaims[C](wire), nil
 }
 
 func (a *Auth[C]) apiKeyLike(r *http.Request) bool {

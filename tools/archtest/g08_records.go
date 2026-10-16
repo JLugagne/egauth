@@ -210,7 +210,7 @@ func camelWords(name string) []string {
 	var out []string
 	start := 0
 	for i := 1; i < len(name); i++ {
-		if name[i] >= 'A' && name[i] <= 'Z' && !(name[i-1] >= 'A' && name[i-1] <= 'Z') {
+		if name[i] >= 'A' && name[i] <= 'Z' && (name[i-1] < 'A' || name[i-1] > 'Z') {
 			out = append(out, name[start:i])
 			start = i
 		}

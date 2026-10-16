@@ -212,7 +212,7 @@ func TestIdPCodeFlowIssuesAVerifiableIDToken(t *testing.T) {
 	req.Header.Set("Authorization", "Bearer "+tok["access_token"].(string))
 	resp, err := idp.HTTPClient().Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var info map[string]any
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&info))
 	require.Equal(t, "u7@idp.example", info["email"])
@@ -238,7 +238,7 @@ func TestIdPAuthorizeRefusesAnUnknownClient(t *testing.T) {
 	q := url.Values{"response_type": {"code"}, "client_id": {"other"}, "redirect_uri": {"https://app.example/cb"}}
 	resp, err := idp.HTTPClient().Get(idp.Issuer() + "/authorize?" + q.Encode())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
@@ -246,7 +246,7 @@ func getJSON(t *testing.T, idp *egauthtest.IdP, u string, v any) {
 	t.Helper()
 	resp, err := idp.HTTPClient().Get(u)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(v))
 }
@@ -259,7 +259,7 @@ func authorize(t *testing.T, idp *egauthtest.IdP, challenge string) (code, state
 	}
 	resp, err := idp.HTTPClient().Get(idp.Issuer() + "/authorize?" + q.Encode())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	loc, err := url.Parse(resp.Header.Get("Location"))
 	require.NoError(t, err)
@@ -275,7 +275,7 @@ func exchange(t *testing.T, idp *egauthtest.IdP, code, verifier string, want int
 	}
 	resp, err := idp.HTTPClient().PostForm(idp.Issuer()+"/token", form)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	require.Equal(t, want, resp.StatusCode, string(body))

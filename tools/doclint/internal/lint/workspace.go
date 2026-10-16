@@ -181,6 +181,15 @@ func (w *Workspace) Resolve(pkg string, path ...string) bool {
 	return false
 }
 
+// HasPackage reports whether pkg names a loaded module package or a standard library package.
+func (w *Workspace) HasPackage(pkg string) bool {
+	if len(w.api[pkg]) > 0 {
+		return true
+	}
+	w.stdOnce.Do(w.loadStd)
+	return len(w.std[pkg]) > 0
+}
+
 func (w *Workspace) indexVars() {
 	w.vars = map[string][]types.Object{}
 	seen := map[string]bool{}

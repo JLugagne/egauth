@@ -183,7 +183,7 @@ func TestRenameRefusals(t *testing.T) {
 		{map[string]any{routes.FieldCredentialID: b64(mallory.Credentials()[0].ID), routes.FieldNickname: "x"}, http.StatusNotFound, "credential_not_found"},
 		{map[string]any{routes.FieldCredentialID: id, routes.FieldNickname: "  "}, http.StatusBadRequest, "invalid_nickname"},
 		{map[string]any{routes.FieldCredentialID: id, routes.FieldNickname: strings.Repeat("é", passkeysvc.MaxNicknameRunes+1)}, http.StatusBadRequest, "invalid_nickname"},
-		{map[string]any{routes.FieldCredentialID: id, routes.FieldNickname: "bad‮name"}, http.StatusBadRequest, "invalid_nickname"},
+		{map[string]any{routes.FieldCredentialID: id, routes.FieldNickname: "bad\u202ename"}, http.StatusBadRequest, "invalid_nickname"},
 	}
 	for i, c := range cases {
 		rec := w.do(req{path: routes.PasskeyCredentialsRename, token: tok, fields: c.fields})

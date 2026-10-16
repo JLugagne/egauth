@@ -234,7 +234,7 @@ func TestFieldsRejectsBrokenSpecs(t *testing.T) {
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			_, errs := fieldsOf(t, tc.v, tc.o())
-			requireField(t, errs, tc.field)
+			require.NotNil(t, requireField(t, errs, tc.field))
 		})
 	}
 }
@@ -251,12 +251,12 @@ func TestFieldsRejectsPrimaryPathsThatDoNotResolve(t *testing.T) {
 	o := options()
 	o.Primary = append(o.Primary, "Telepathy")
 	_, errs := fieldsOf(t, config{}, o)
-	requireField(t, errs, "Modules")
+	require.NotNil(t, requireField(t, errs, "Modules"))
 
 	o = options()
 	o.Primary = nil
 	_, errs = fieldsOf(t, config{}, o)
-	requireField(t, errs, "Modules")
+	require.NotNil(t, requireField(t, errs, "Modules"))
 }
 
 func TestFieldsRejectsAModulesPathThatDoesNotResolve(t *testing.T) {
@@ -270,7 +270,7 @@ func TestValidateRefusesBrokenSpecsBeforeTouchingTheValue(t *testing.T) {
 	v := unknownKey{}
 	r, errs := configcheck.Validate(&v, noRegistry())
 	require.Nil(t, r)
-	requireOnly(t, errs, "A")
+	require.NotNil(t, requireOnly(t, errs, "A"))
 
 	c := validConfig()
 	o := options()
@@ -301,7 +301,7 @@ func TestRecursiveTypesTerminate(t *testing.T) {
 	require.Empty(t, errs)
 	v := node{Name: "a", Next: []node{{Name: "b"}, {Next: []node{{Name: "c"}}}}}
 	_, verrs := configcheck.Validate(&v, noRegistry())
-	requireOnly(t, verrs, "Next[1].Name")
+	require.NotNil(t, requireOnly(t, verrs, "Next[1].Name"))
 }
 
 func noRegistry() configcheck.Options { return configcheck.Options{} }
@@ -319,3 +319,5 @@ func ambiguousSwitch() configcheck.Options {
 func raisedElsewhere() configcheck.Options {
 	return configcheck.Options{Raised: map[string]time.Duration{"Nope": time.Hour}}
 }
+
+var _ = taggedUnexported{}.b

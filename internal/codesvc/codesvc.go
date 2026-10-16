@@ -174,7 +174,7 @@ func New(cfg Config) (*Service, error) {
 	need(present(cfg.Identity), "Identity")
 	need(present(cfg.Accounts), "Accounts")
 	need(present(cfg.Ceremonies), "Ceremonies")
-	need(!(cfg.MagicLink || cfg.EmailCodes) || present(cfg.Mailer), "Mailer")
+	need((!cfg.MagicLink && !cfg.EmailCodes) || present(cfg.Mailer), "Mailer")
 	need(!cfg.MagicLink || present(cfg.Links), "Links")
 	need(!cfg.SMSCodes || present(cfg.Texter), "Texter")
 	need(cfg.Cookies != (cookie.Policy{}), "Cookies")

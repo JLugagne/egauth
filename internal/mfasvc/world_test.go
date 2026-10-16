@@ -61,18 +61,6 @@ func (s *recordingSink) EmitEvent(_ context.Context, e event.Event) {
 	s.events = append(s.events, e)
 }
 
-func (s *recordingSink) count(t event.Type) int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	n := 0
-	for _, e := range s.events {
-		if e.Type == t {
-			n++
-		}
-	}
-	return n
-}
-
 func (s *recordingSink) last(t event.Type) (event.Event, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

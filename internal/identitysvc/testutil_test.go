@@ -250,7 +250,6 @@ type world struct {
 	svc        *identitysvc.Service
 	cookies    cookie.Policy
 	handler    http.Handler
-	closed     bool
 }
 
 type option func(*identitysvc.Config)

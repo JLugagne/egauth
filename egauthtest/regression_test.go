@@ -40,7 +40,7 @@ func authorizeStatus(t *testing.T, idp *egauthtest.IdP, q url.Values) int {
 	t.Helper()
 	resp, err := idp.HTTPClient().Get(idp.Issuer() + "/authorize?" + q.Encode())
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode
 }
 
@@ -73,7 +73,7 @@ func postToken(t *testing.T, idp *egauthtest.IdP, form url.Values, basicUser, ba
 	}
 	resp, err := idp.HTTPClient().Do(req)
 	require.NoError(t, err)
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return resp.StatusCode
 }
 

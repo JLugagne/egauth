@@ -92,7 +92,7 @@ func canonical(raw string, templated bool) (string, error) {
 	if strings.Contains(u.Hostname(), ":") {
 		host = "[" + host + "]"
 	}
-	if port := u.Port(); port != "" && !(s == "https" && port == "443") && !(s == "http" && port == "80") {
+	if port := u.Port(); port != "" && (s != "https" || port != "443") && (s != "http" || port != "80") {
 		host += ":" + port
 	}
 	if label != "" {

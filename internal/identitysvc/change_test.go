@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/JLugagne/egauth/event"
-	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/internal/identitysvc"
 	"github.com/JLugagne/egauth/internal/routes"
 	"github.com/JLugagne/egauth/store/identity"
@@ -163,17 +162,4 @@ func TestPasswordChangeRejectsWeakPasswordBeforeAnyChange(t *testing.T) {
 	if w.epoch(sub) != epoch {
 		t.Fatal("a refused password bumped the epoch")
 	}
-}
-
-func subjectOf(t *testing.T, w *acctWorld, email string) core.Subject {
-	t.Helper()
-	id, err := identitysvc.NormalizeAs(identity.IdentifierEmail, email)
-	if err != nil {
-		t.Fatal(err)
-	}
-	u, err := w.identity.FindUser(context.Background(), core.TenantID{}, id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return u.Subject
 }

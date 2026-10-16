@@ -95,7 +95,7 @@ func hostProblem(host string, tenant bool) string {
 	if placeholders != 1 || labels[0] != tenantPlaceholder {
 		return "must use " + tenantLabel + " as the whole leftmost host label"
 	}
-	if parent := labels[1:]; len(parent) < 2 && !(len(parent) == 1 && parent[0] == "localhost") {
+	if parent := labels[1:]; len(parent) < 2 && (len(parent) != 1 || parent[0] != "localhost") {
 		return "must put " + tenantLabel + " under a parent domain of at least two labels"
 	}
 	return ""

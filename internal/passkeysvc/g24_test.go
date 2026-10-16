@@ -23,13 +23,13 @@ func TestG24DiscouragedResidentKeyMakesDiscoverableLoginFail(t *testing.T) {
 	if reg.Credential.Discoverable != passkey.Inferred.String() {
 		t.Fatalf("stored %q, want inferred", reg.Credential.Discoverable)
 	}
-	c, cookies := w.beginLogin(nil)
+	c, _ := w.beginLogin(nil)
 	if _, err := a.Get(c.Options); err == nil {
 		t.Fatal("a credential created under residentKey discouraged answered a discoverable login")
 	}
 	honest := webauthntest.New(origin)
 	w.register(w.session(sub), honest)
-	c, cookies = w.beginLogin(nil)
+	c, cookies := w.beginLogin(nil)
 	expect(t, w.finishLogin(c, cookies, honest.DiscoverableLogin(t, c.Options)), http.StatusOK)
 }
 

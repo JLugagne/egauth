@@ -167,7 +167,7 @@ func (t *faultyTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Ro
 
 func (t *faultyTx) Commit(ctx context.Context) error {
 	if err := t.step(); err != nil {
-		_ = t.Tx.Rollback(ctx)
+		_ = t.Rollback(ctx)
 		return err
 	}
 	return t.Tx.Commit(ctx)
