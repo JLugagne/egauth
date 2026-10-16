@@ -1,466 +1,206 @@
-# recipes — common wiring stacks
+# Recipes
 
-Copy-pasteable composition patterns. Signatures verified against source. `ctx := context.Background()`,
-`const tenant = ""` (single-tenant default partition) unless multi-tenant. Swap any `*/memory` store for
-its `adapters/pgx/*` counterpart in production (see [storage-pgx.md](storage-pgx.md)).
+Every Go block is embedded from a compiled example. Search the root `example_test.go` and `adapters/pgx/pgxstore/example_test.go` for the originals.
 
----
+## Memory-backed service
 
-## 1. Password login + stateless JWT (the canonical stack)
-
-`identity` verifies credentials; `tokens/basic` issues the access+refresh pair. Most apps carry no
-custom claims → use `basic` (no `[struct{}]` type argument). For custom claims use generic `tokens`/`tokens/jwt`.
-
+<!-- embed: example_test.go#ExampleNew -->
 ```go
-import (
-    egauth "github.com/JLugagne/egauth"
-    "github.com/JLugagne/egauth/identity"
-    identitymem "github.com/JLugagne/egauth/identity/memory"
-    "github.com/JLugagne/egauth/passwords/argon2"
-    "github.com/JLugagne/egauth/passwords/policy"
-    "github.com/JLugagne/egauth/tokens/basic"
-)
+key := make([]byte, 32)
+_, _ = rand.Read(key)
+k, _ := kek.NewLocal(key)
+signer, _ := signing.EdDSA("k1", key)
+mail := inbox{links: make(chan string, 1)}
 
-idStore := identitymem.NewStore()
-svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
-
-// claimsProvider re-derives claims on every refresh → disabled/role-changed users re-evaluated, not frozen.
-claims := basic.ClaimsProviderFunc(func(_ context.Context, uid uuid.UUID, tid string) (basic.Claims, error) {
-    return basic.Claims{Subject: uid, TenantID: tid}, nil
+auth, err := egauth.New(egauth.Config[struct{}]{
+	PublicOrigin: "http://localhost:8080",
+	Proxy:        egauth.DirectClients(),
+	Storage:      memstore.New(k),
+	KEK:          k,
+	Sessions:     egauth.JWT(egauth.StaticKeys(signer)),
+	Transport:    egauth.Bearer,
+	Admin:        egauth.RoleAdmin("admin"),
+	Email:        mail,
+	Pages:        egauth.Pages{Login: "/login", AfterLogin: "/", ConfirmRegistration: "/confirm", PasswordReset: "/reset", SecurityRevert: "/revert"},
+	Modules:      egauth.Modules{Password: &egauth.PasswordModule{}},
 })
-issuer := basic.NewIssuer(basic.Config{
-    Store:          basic.NewMemoryStore(),
-    Issuer:         "example-app",
-    SecretKey:      secret,          // >= 32 bytes, from your secret store
-    AccessTTL:      15 * time.Minute,
-    RefreshTTL:     720 * time.Hour,
-    ClaimsProvider: claims,          // REQUIRED for Rotate
+if err != nil {
+	fmt.Println("new:", err)
+	return
+}
+defer func() { _ = auth.Close() }()
+
+h, err := auth.Routes().
+	Protect("GET /me", func(w http.ResponseWriter, _ *http.Request, _ egauth.Principal[struct{}]) {
+		_, _ = fmt.Fprintln(w, "hello")
+	}).
+	Build()
+if err != nil {
+	fmt.Println("routes:", err)
+	return
+}
+
+call := func(method, path, token string, body map[string]any, hdr ...string) (*httptest.ResponseRecorder, map[string]any) {
+	var payload strings.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		payload = *strings.NewReader(string(raw))
+	}
+	req := httptest.NewRequest(method, "http://localhost:8080"+path, &payload)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set(egauth.HeaderTransport, "bearer")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+const email, password = "ada@example.com", "tapir-granite-velvet-orbit-29"
+rec, begin := call("POST", "/auth"+egauth.PathRegister, "", map[string]any{egauth.FieldIdentifier: email, egauth.FieldPassword: password})
+fmt.Println("register:", rec.Code)
+
+link, _ := url.Parse(<-mail.links)
+bind, _ := begin[egauth.FieldBind].(string)
+rec, _ = call("POST", "/auth"+egauth.PathRegisterConfirm, "", map[string]any{egauth.FieldToken: link.Query().Get(egauth.FieldToken), egauth.FieldBind: bind})
+fmt.Println("confirm:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathLogin, "", map[string]any{egauth.FieldIdentifier: email, egauth.FieldPassword: password})
+access, refresh := rec.Header().Get("X-Egauth-Access-Token"), rec.Header().Get("X-Egauth-Refresh-Token")
+fmt.Println("login:", rec.Code)
+
+rec, _ = call("GET", "/me", access, nil)
+fmt.Println("me:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathRefresh, "", nil, "X-Egauth-Refresh-Token", refresh)
+access, refresh = rec.Header().Get("X-Egauth-Access-Token"), rec.Header().Get("X-Egauth-Refresh-Token")
+fmt.Println("refresh:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathLogout, access, nil)
+fmt.Println("logout:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathRefresh, "", nil, "X-Egauth-Refresh-Token", refresh)
+fmt.Println("refresh after logout:", rec.Code)
+// Output:
+// register: 202
+// confirm: 200
+// login: 200
+// me: 200
+// refresh: 200
+// logout: 200
+// refresh after logout: 401
+```
+
+## Application routes
+
+<!-- embed: example_test.go#ExampleRoutes -->
+```go
+var auth *egauth.Auth[struct{}]
+var page, report, adminDisable egauth.PrincipalHandler[struct{}]
+var health http.Handler
+
+h, err := auth.Routes().
+	Optional("GET /", page).
+	Protect("POST /admin/disable/{id}", adminDisable,
+		egauth.RequireAnyRole("admin"), egauth.RequireMFA(), egauth.RequireFreshAuth(egauth.Fresh5m)).
+	ProtectAPI("GET /api/report", report, egauth.Kinds("automation"), egauth.RequireAnyScope("report:read")).
+	Public("GET /healthz", health).
+	Build()
+if err != nil {
+	return
+}
+_ = http.ListenAndServe("localhost:8080", h)
+```
+
+## Administration through a facade
+
+<!-- embed: example_test.go#ExampleAccounts -->
+```go
+ctx := context.Background()
+var auth *egauth.Auth[struct{}]
+var admin principal.Caller
+var user uuid.UUID
+
+if err := auth.Accounts().Disable(ctx, admin, user); err != nil {
+	if errors.Is(err, egauth.ErrForbidden) || errors.Is(err, store.ErrNotFound) {
+		return
+	}
+}
+```
+
+## PostgreSQL
+
+<!-- embed: adapters/pgx/pgxstore/example_test.go#ExampleNew_postgres -->
+```go
+ctx := context.Background()
+pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+if err != nil {
+	log.Fatal(err)
+}
+defer pool.Close()
+
+if err := pgxstore.Migrate(ctx, pool); err != nil {
+	log.Fatal(err)
+}
+storage, err := pgxstore.New(ctx, pool)
+if err != nil {
+	log.Fatal(err)
+}
+
+auth, err := egauth.New(egauth.Config[struct{}]{
+	PublicOrigin: "https://auth.example.com",
+	Proxy:        egauth.DirectClients(),
+	Storage:      storage,
+	KEK:          kekFromEnv("EGAUTH_KEK"),
+	Sessions:     egauth.JWT(egauth.StaticKeys(signerFromEnv("EGAUTH_SIGNING_SEED"))),
+	Admin:        egauth.RoleAdmin("admin"),
+	Email:        mailer{},
+	Pages:        egauth.Pages{Login: "/login", AfterLogin: "/", ConfirmRegistration: "/confirm", PasswordReset: "/reset", SecurityRevert: "/revert"},
+	Modules:      egauth.Modules{Password: &egauth.PasswordModule{}},
 })
-
-// programmatic
-user, _ := svc.Register(ctx, tenant, "alice@example.com", password)
-pair, _ := issuer.IssueTokenPair(ctx, basic.Claims{Subject: user.ID, TenantID: tenant})
-next, _ := issuer.Rotate(ctx, tenant, pair.RefreshToken) // single-use; replay trips theft detection
-
-// HTTP
-claimsOf := func(u *identity.User) basic.Claims { return basic.Claims{Subject: u.ID, TenantID: u.TenantID} }
-mux := http.NewServeMux()
-mux.Handle("POST /login",   identity.LoginHandler(svc, issuer, claimsOf))
-mux.Handle("POST /refresh", basic.RefreshHandler(issuer)) // same-origin CSRF check on by default
-mux.Handle("POST /logout",  basic.LogoutHandler(basic.NewMemoryStore())) // revokes refresh family
-mux.Handle("GET /me", basic.RequireAuth(issuer,
-    func(w http.ResponseWriter, r *http.Request, actor egauth.Actor, _ struct{}) {
-        // actor.UserID / actor.TenantID authenticated
-    }))
-```
-
-`RefreshHandler`/`LogoutHandler` reject cross-origin POSTs by default (same-origin check); add `tokens.WithTrustedOrigins(...)` for extra front-end hosts, or `tokens.WithInsecureNoOriginCheck()` to disable it when CSRF is handled elsewhere.
-
-Details: [identity.md](identity.md), [tokens.md](tokens.md), [passwords.md](passwords.md).
-
----
-
-## 2. Password login + server-side sessions (revocable)
-
-Use `sessions` instead of `tokens` when you need server-side revocation, idle timeout, and fixation
-defense. `identity` still verifies credentials.
-
-```go
-import (
-    "github.com/JLugagne/egauth/sessions"
-    sessmem "github.com/JLugagne/egauth/sessions/memory"
-)
-
-sessSvc := sessions.NewService(sessmem.NewStore(), sessions.WithMaxLifetime(720*time.Hour))
-
-user, _ := svc.Authenticate(ctx, tenant, "password", "alice@example.com", password)
-sess, token, _ := sessSvc.CreateSession(ctx, tenant, user.ID, r.UserAgent(), clientIP, 24*time.Hour)
-// set `token` in a cookie yourself, or use the middleware:
-
-mux.Handle("GET /me", sessions.RequireSession(sessSvc,
-    func(w http.ResponseWriter, r *http.Request, s *sessions.Session) { /* s.UserID authenticated */ }))
-
-// idle-extend on activity: sessSvc.Touch(ctx, tenant, token, 24*time.Hour)
-// after privilege change (login): rotate the id to defeat fixation:
-newSess, newToken, _ := sessSvc.Rotate(ctx, tenant, token, 24*time.Hour)
-```
-
-Details: [sessions.md](sessions.md). The memory store is bounded by default; schedule `DeleteExpired` only for the explicit unbounded opt-in (recipe 8).
-
----
-
-## 3. Social login (OAuth2 / OIDC) + JIT identity linking
-
-`oauth` runs the authorization-code + PKCE flow and verifies the id_token; the callback links/creates
-an `identity.User` and issues tokens. Provider constructors live in `oauth/providers`.
-
-```go
-import (
-    "github.com/JLugagne/egauth/oauth"
-    "github.com/JLugagne/egauth/oauth/providers"
-)
-
-google := providers.Google(clientID, clientSecret, oauth.WithOIDC(oauth.OIDCConfig{Audience: clientID}))
-
-// REQUIRED: the state cookie is HMAC-signed; a missing/short/published key fails closed 500.
-stateKey := stateSigningKeyFromSecretStore // >= 32 bytes, random, never a published example
-beginOpts := []oauth.HandlerOption{
-    oauth.WithRedirectURL("https://app.example.com/auth/google/callback"),
-    oauth.WithStateSigningKey(stateKey),
+if err != nil {
+	log.Fatal(err)
 }
-mux.Handle("GET /auth/google",          oauth.BeginHandler(google, beginOpts...))
-mux.Handle("GET /auth/google/callback", oauth.CallbackHandler(google, svc /* identity.Service is the IdentityLinker */, issuer, claimsOf,
-    oauth.WithRedirectURL("https://app.example.com/auth/google/callback"),
-    oauth.WithStateSigningKey(stateKey)))
-// Begin mints state(CSRF)+PKCE(+nonce), redirects to provider. Callback validates state, exchanges code,
-// verifies UserInfo/id_token, JIT-links identity, sets auth cookies → 204.
-
-// Multi-tenant SSO (per-tenant providers): use a ProviderStore + Dynamic*Handler
-store := oauth.NewMemoryStore()
-store.AddProvider("tenant-a", providers.Okta(/* ... */))
-mux.Handle("GET /sso/begin",    oauth.DynamicBeginHandler(store, "okta", oauth.WithTenantResolver(tenantFromHost), oauth.WithStateSigningKey(stateKey)))
-mux.Handle("GET /sso/callback", oauth.DynamicCallbackHandler(store, "okta", svc, issuer, claimsOf, oauth.WithTenantResolver(tenantFromHost), oauth.WithStateSigningKey(stateKey)))
+defer func() { _ = auth.Close() }()
 ```
 
-12 providers: Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab(+SelfHosted), Google, Keycloak,
-LinkedIn, Microsoft, Okta, plus generic `providers.New(...)` for any OIDC issuer. Details: [oauth.md](oauth.md).
+## Upgrading v0.16 secrets
 
----
-
-## 4. Add TOTP MFA (second factor) + step-up
-
-`mfa` = TOTP (RFC 6238) + recovery codes. SMS is intentionally NOT an MFA factor. After verifying the
-second factor, mint tokens whose `AMR` includes `mfa` and gate sensitive routes with `Claims.FreshAuth`.
-
+<!-- embed: example_test.go#ExampleUpgradeSecretsV016 -->
 ```go
-import (
-    "github.com/JLugagne/egauth/issuance"
-    "github.com/JLugagne/egauth/mfa"
-    mfamem "github.com/JLugagne/egauth/mfa/memory"
-    "github.com/JLugagne/egauth/tokens"
-    "github.com/JLugagne/egauth/tokens/basic"
-)
+ctx := context.Background()
+var storage egauth.Storage
+var oldKey, newKey []byte
 
-mfaSvc := mfa.NewService(mfamem.NewStore(), mfa.WithIssuer("Example"))
-
-// The MFA handlers need the authenticated user. Don't hand-roll the
-// RequireAuth -> context -> resolver glue: front each handler with
-// tokens.ContextMiddleware (verifies the access token, injects the Actor into
-// the request context) and pass tokens.UserResolverFromContext, which reads it
-// back in mfa.WithUserResolver's (userID, tenant, ok) shape. `verifier` is the
-// tokens.Verifier[C] from §1 (a *jwtissuer issuer satisfies it).
-protect := func(h http.Handler) http.Handler { return tokens.ContextMiddleware(verifier, h) }
-
-// Enrollment handlers FAIL CLOSED: without an assurance gate they answer 403
-// assurance_required. tokens.DenyInterim is the canonical gate — it refuses only an
-// interim (pre-MFA) session, so a stolen password cannot enroll an attacker factor.
-enrollOpts := []mfa.HandlerOption{
-    mfa.WithUserResolver(tokens.UserResolverFromContext),
-    mfa.WithCredentialAssurance(tokens.DenyInterim),
+legacy, err := kek.LegacyLocalV016(oldKey)
+if err != nil {
+	return
 }
-mux.Handle("POST /mfa/enroll",  protect(mfa.EnrollHandler(mfaSvc, enrollOpts...)))  // → {secret, otpauth:// uri}
-mux.Handle("POST /mfa/confirm", protect(mfa.ConfirmHandler(mfaSvc, enrollOpts...))) // → {recovery_codes:[...]}
-mux.Handle("POST /mfa/verify",  protect(mfa.VerifyHandler(mfaSvc, mfa.WithUserResolver(tokens.UserResolverFromContext))))  // 204 / 429 too_many_attempts
-
-// Step-up FAILS CLOSED (500 misconfigured) without an authoritative account-state resolver:
-// the post-factor pair must not be minted from the interim token's own subject alone.
-// The identity.Service *interface* does not expose ResolveSessionState; the concrete service
-// returned by identity.NewService does, so type-assert it (or supply your own resolver).
-sessionResolver, ok := svc.(issuance.Resolver)
-if !ok {
-    panic("identity service does not expose authoritative session state")
+current, err := kek.NewLocal(newKey)
+if err != nil {
+	return
 }
-mfaClaimsOf := func(_ context.Context, uid uuid.UUID, tenant string) basic.Claims {
-    return basic.Claims{Subject: uid, TenantID: tenant}
+report, err := egauth.UpgradeSecretsV016(ctx, storage, legacy, current)
+if err != nil {
+	return
 }
-mux.Handle("POST /mfa/step-up", protect(mfa.StepUpHandler(mfaSvc, issuer, mfaClaimsOf,
-    mfa.WithUserResolver(tokens.UserResolverFromContext),
-    mfa.WithSessionStateResolver(sessionResolver),
-)))
-
-// step-up: issue access token with AMR after factor verified; protect route with FreshAuth:
-if !claims.FreshAuth(5 * time.Minute) { http.Error(w, "reauth_required", 401); return }
+fmt.Println(report)
 ```
 
-Details: [mfa.md](mfa.md), `AuthTime`/`AMR`/`FreshAuth` in [tokens.md](tokens.md).
+## Choosing options
 
----
-
-## 5. Passwordless: passkeys (WebAuthn)
-
-`passkey` runs WebAuthn register/login ceremonies, including discoverable (usernameless) login. RPID/origins
-MUST match the frontend. Pairs with tokens/sessions on the finish step.
-
-```go
-import (
-    "github.com/JLugagne/egauth/identity"
-    "github.com/JLugagne/egauth/passkey"
-    pkmem "github.com/JLugagne/egauth/passkey/memory"
-    "github.com/JLugagne/egauth/passwords/argon2"
-    "github.com/JLugagne/egauth/passwords/policy"
-    "github.com/JLugagne/egauth/tokens"
-)
-
-svc, _ := passkey.NewService(pkmem.NewStore(), passkey.Config{
-    RPID: "example.com", RPDisplayName: "Example", RPOrigins: []string{"https://example.com"},
-    CookieKey: cookieSecret /* >=32B; trivially-known/published keys are refused */,
-    ChallengeStore: pkmem.NewChallengeStore(),
-    AccountGate: passkey.NewIdentityAccountGate(idStore), // refuse disabled/deleted accounts
-})
-
-// Registration FAILS CLOSED: without an assurance gate it answers 403 assurance_required.
-// tokens.DenyInterim refuses only an interim (pre-MFA) session.
-regOpts := []passkey.HandlerOption{
-    passkey.WithUserResolver(resolver),
-    passkey.WithCredentialAssurance(tokens.DenyInterim),
-}
-mux.Handle("POST /passkey/register/begin",  passkey.BeginRegistrationHandler(svc, regOpts...))
-mux.Handle("POST /passkey/register/finish", passkey.FinishRegistrationHandler(svc, regOpts...))
-mux.Handle("POST /passkey/login/begin",     passkey.BeginLoginHandler(svc, passkey.WithUserResolver(resolver)))
-mux.Handle("POST /passkey/login/finish",    passkey.FinishLoginHandler(svc, passkey.WithUserResolver(resolver),
-    passkey.WithLoginSuccess(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID) { /* issue token */ })))
-
-// REQUIRED for account recovery: register the passkey eraser so a password reset or
-// account deletion evicts every credential the user enrolled (including an attacker's).
-identitySvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
-    identity.WithAccountErasers(
-        tokens.NewAccountRevoker(tokenStore), // refresh families + API keys
-        svc.AccountEraser(),                  // passkey credentials (structurally identity.AccountEraser)
-    ))
-```
-
-Details: [passkey.md](passkey.md).
-
----
-
-## 6. Passwordless: email/SMS one-time codes
-
-`otp` issues short-lived single-use codes; you own delivery. Handlers are enumeration-safe (Issue always 204;
-Verify collapses all failures to 401).
-
-```go
-import (
-    "github.com/JLugagne/egauth/otp"
-    otpmem "github.com/JLugagne/egauth/otp/memory"
-)
-
-otpSvc := otp.NewService(otpmem.NewStore(), otp.WithTTL(10*time.Minute))
-deliver := func(ctx context.Context, ch *otp.Challenge) error { return sendEmail(ch /* ch.Code */) }
-
-mux.Handle("POST /otp/issue",  otp.IssueHandler(otpSvc, deliver, otp.WithSubjectResolver(subjFromReq)))
-mux.Handle("POST /otp/verify", otp.VerifyHandler(otpSvc, otp.WithSubjectResolver(subjFromReq),
-    otp.WithOnVerified(func(w http.ResponseWriter, r *http.Request, uid uuid.UUID) { /* issue token/session */ })))
-```
-
-Details: [otp.md](otp.md). The memory store is bounded by default; schedule `DeleteExpired` only for the explicit unbounded opt-in (recipe 8).
-
----
-
-## 7. Password reset / email verification / magic link
-
-All `Request*` handlers are enumeration-safe (always 204) and dispatch delivery asynchronously off the
-response path. Wire your transport into `identity.Mailer` / `identity.SMSSender` (egauth never sends mail/SMS).
-
-```go
-mailer := identity.Mailer{
-    PasswordReset:     func(ctx context.Context, m identity.PasswordResetMail) error { return send(m.User.Email, resetURL(m.Token)) },
-    EmailVerification: func(ctx context.Context, m identity.EmailVerificationMail) error { return send(m.User.Email, verifyURL(m.Token)) },
-    MagicLink:         func(ctx context.Context, m identity.MagicLinkMail) error { return send(m.User.Email, magicURL(m.Token)) },
-}
-mux.Handle("POST /password-reset/request", identity.RequestPasswordResetHandler(svc, mailer))
-mux.Handle("POST /password-reset/confirm", identity.ResetPasswordHandler(svc))
-mux.Handle("POST /verify-email/request",   identity.RequestEmailVerificationHandler(svc, mailer, identity.WithUserResolver(userFromReq)))
-mux.Handle("POST /verify-email/confirm",   identity.VerifyEmailHandler(svc))
-mux.Handle("POST /magic-link/request",     identity.RequestMagicLinkHandler(svc, mailer))
-mux.Handle("POST /magic-link/login",       identity.MagicLinkLoginHandler(svc, issuer, claimsOf))
-```
-
-Tokens passed to delivery callbacks are plaintext secrets — never log them. Details: [identity.md](identity.md).
-
----
-
-## 8. Production hardening: pgx stores + eviction + events + rate limit + breach check
-
-```go
-import (
-    identitypgx "github.com/JLugagne/egauth/adapters/pgx/identity"
-    "github.com/JLugagne/egauth/event"
-    "github.com/JLugagne/egauth/janitor"
-    "github.com/JLugagne/egauth/passwords/breach/hibp"
-    "github.com/JLugagne/egauth/ratelimit"
-)
-
-// 1. pgx stores (separate module `go get github.com/JLugagne/egauth/adapters/pgx`)
-pool, _ := pgxpool.New(ctx, dsn)
-_ = identitypgx.Migrate(ctx, pool)           // once at startup; forward-only, idempotent
-idStore := identitypgx.NewStore(pool)
-
-// 2. security events → slog, and the credential-rotation erasers. The erasers run on
-//    ResetPassword / ChangePassword / SetTemporaryPassword / DeleteAccount, so a session
-//    hijack cannot leave a passkey or recovery channel behind. Register EVERY credential class
-//    (tokenStore and passkeySvc as in recipes 1 and 5):
-sink := event.NewSlogSink(slog.Default())
-svc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy(),
-    identity.WithEventSink(sink),
-    identity.WithAccountErasers(
-        tokens.NewAccountRevoker(tokenStore), // refresh-token families + API keys
-        passkeySvc.AccountEraser(),           // passkey credentials (passkey.Service.AccountEraser)
-    ))
-
-// 3. breach check (HIBP k-anonymity) — pass to policy/registration per passwords.md
-breach := hibp.New()
-
-// 4. rate-limit login (token bucket, bounded by DefaultMaxKeys) — see infra.md for the middleware
-//    signature. The webapp preset already wires this per client IP on its mounted routes:
-//    tune via webapp.Config.RateLimiter/RateLimitBurst/RateLimitRefill, opt out with
-//    webapp.Config.InsecureNoRateLimit. À-la-carte handlers are wrapped manually.
-limiter := ratelimit.NewTokenBucket(/* burst */ 5, /* refillInterval */ time.Minute)
-mux.Handle("/login", ratelimit.Middleware(limiter, ratelimit.ClientIP)(loginHandler))
-
-// 5. eviction loop — optional: in-memory stores are bounded by default. Schedule janitor only when
-//    opted into NewUnboundedStore() or a larger WithMaxKeys cap; pgx stores evict via the DB.
-j := janitor.Start(ctx, 5*time.Minute, func() {
-    sessStore.DeleteExpired(context.Background(), tenant)
-    otpStore.DeleteExpired(context.Background(), tenant)
-    limiter.Cleanup()
-})
-defer j.Stop()
-```
-
-Details: [storage-pgx.md](storage-pgx.md), [infra.md](infra.md), [passwords.md](passwords.md).
-
----
-
-## 9. API keys (PATs and service tokens)
-
-`tokens` (M8) issues two kinds of long-lived API keys alongside JWTs; only a SHA-256 hash is stored.
-
-- **`tokens.KeyTypePAT`** (`"pat"`) — acts on behalf of a human. `Actor.Kind = egauth.PAT`, `IsHuman()` true, `Actor.UserID` = owning user.
-- **`tokens.KeyTypeService`** (`"service"`) — machine identity. `Actor.Kind = egauth.Service`, `IsMachine()` true, `Actor.KeyID` = key UUID, `Actor.UserID` = zero (creator is on `APIKey.CreatedBy`, not on the Actor).
-
-The key's authority is **only** the scopes you embed in `claims` — it never inherits the user's live roles.
-
-```go
-import (
-    egauth "github.com/JLugagne/egauth"
-    "github.com/JLugagne/egauth/tokens"
-    "github.com/JLugagne/egauth/tokens/basic"
-    "github.com/JLugagne/egauth/event"
-)
-
-// --- Issue a PAT (human, scoped) ---
-pat, err := issuer.IssueAPIKey(ctx, "pat_", tokens.KeyTypePAT, user.ID,
-    basic.Claims{Subject: user.ID, TenantID: tenant, Scopes: []string{"repo:read"}})
-// pat.Token is the cleartext key — show it ONCE, never log it.
-// pat.Hash is the stored value; pat.ID is the key UUID.
-
-// --- Issue a service token (machine) ---
-svcKey, err := issuer.IssueAPIKey(ctx, "svc_", tokens.KeyTypeService, adminUser.ID,
-    basic.Claims{TenantID: tenant, Scopes: []string{"metrics:write"}})
-// svcKey.Claims.Subject is the key's own ID (machine identity).
-
-// --- Verify → Actor (preferred; use concrete *jwt.Service, not Verifier interface) ---
-// issuer here is a *jwt.Service[basic.Claims]
-actor, claims, err := issuer.VerifyAPIKeyActor(ctx, tenant, presentedKey,
-    event.RequestContext{IP: r.RemoteAddr, UserAgent: r.UserAgent()})
-if err != nil { /* tokens.ErrTokenExpired, tokens.ErrNotFound, ... */ }
-
-// actor.IsHuman()   → true for PAT / User
-// actor.IsMachine() → true for Service
-// actor.KeyID       → key UUID (always set for API keys)
-// actor.UserID      → owner for PAT; zero for Service
-
-// --- Gate a route on principal kind and scopes ---
-mux.Handle("GET /api/data", tokens.RequireAuth(issuer, handler,
-    tokens.WithRequiredScopes[basic.Claims]("repo:read"),
-    tokens.RequireHuman[basic.Claims]()))   // 403 "wrong_principal_kind" for Service tokens
-
-mux.Handle("POST /metrics", tokens.RequireAuth(issuer, handler,
-    tokens.WithRequiredScopes[basic.Claims]("metrics:write"),
-    tokens.RequireMachine[basic.Claims]())) // 403 for PAT / User tokens
-```
-
-**Audit events** emitted automatically (via `WithEventSink` on the issuer):
-
-| Event | Trigger | Key `Attrs` |
-|---|---|---|
-| `api_key.created` | `IssueAPIKey` | `key_type`, `created_by` |
-| `api_key.auth.succeeded` | successful `VerifyAPIKey*` | `key_type` [+ `ip`, `user_agent`] |
-| `api_key.auth.failed` | failed verify | `Reason`: `not_found` / `expired` / `revoked` / `tenant_mismatch` / `wrong_type` |
-| `api_key.purged` | expired-key sweep | `count` |
-
-**Revoke on disable:** to kill every credential a user holds when an account is suspended, wire `tokens.NewAccountRevoker(store)` (revokes all their refresh tokens + API keys) into `identity.WithDisableRevokers(...)` so `identity.DisableUser` cascades the revocation. See [identity.md](identity.md) and [tokens.md](tokens.md).
-
-Details: [tokens.md](tokens.md).
-
----
-
-## 10. Revocation that reaches access tokens + CSRF for custom routes
-
-Logout and account disable revoke refresh families, but a stateless access JWT stays valid until
-its `AccessTTL` (commonly 15 min). Wire the `revocation` bus once, then let `RequireAuth` reject
-already-issued access tokens; `origin.Middleware` applies the same CSRF check the built-in
-handlers use to your own routes.
-
-```go
-import (
-    "context"
-
-    "github.com/JLugagne/egauth/identity"
-    "github.com/JLugagne/egauth/origin"
-    "github.com/JLugagne/egauth/revocation"
-    "github.com/JLugagne/egauth/tokens"
-    "github.com/google/uuid"
-)
-
-// One in-process bus, shared by producers and subscribers.
-bus := revocation.NewMemBus()
-
-// (1) Access tokens: a tracker that rejects tokens issued at or before an account cutoff.
-tracker := tokens.NewRevocationTracker(bus) // subscribes to TargetUser events
-
-// (2) Refresh tokens: subscribe the account revoker to the SAME event.
-revoker := tokens.NewAccountRevoker(tokenStore)
-bus.Subscribe(revocation.TargetUser, revocation.HandlerFunc(
-    func(ctx context.Context, rev revocation.Revocation) error {
-        uid, err := uuid.Parse(rev.TargetID)
-        if err != nil {
-            return err
-        }
-        return revoker(ctx, rev.TenantID, uid)
-    }))
-
-// Producer: identity disable/delete publishes the event (same for your own admin actions).
-svc := identity.NewService(store, hasher, policy,
-    identity.WithDisableRevokers(revocation.NewAccountRevocationHook(
-        bus, revocation.ReasonAccountDisabled, revocation.ScopeAll)))
-
-// RequireAuth now rejects live access tokens revoked before their expiry.
-mux.Handle("/api/data", tokens.RequireAuth[MyClaims](verifier, handler,
-    tokens.WithAccessTokenRevocation[MyClaims](tracker)))
-
-// Your own cookie-authenticated mutation routes get the built-in CSRF check.
-mux.Handle("/api/widgets", origin.Middleware(widgetHandler,
-    origin.WithTrustedOrigins("https://app.example.com")))
-```
-
-Notes:
-
-- Opt-in: with no `WithAccessTokenRevocation`, there is no per-request store lookup and the
-  residual window is up to `AccessTTL`.
-- `NewRevocationTracker` is in-process and non-durable — after a restart it is empty until the
-  next event; seed or persist cutoffs if you need the guarantee across restarts.
-- A checker error fails closed (`401`). Tokens issued at or before the cutoff are rejected;
-  tokens issued after it stay valid, so a fresh login works immediately.
-
-Details: [tokens.md](tokens.md), [origin.md](origin.md).
-
----
-
-## Single-tenant shorthand (any module)
-
-```go
-app := identity.NewSingleTenant(svc) // drops the tenantID arg from every call (uses "")
-user, _ := app.Register(ctx, "bob@example.com", password)
-```
-Available on identity, sessions, mfa, otp, passkey, tokens/jwt.
+- Browser app: `egauth.Cookies` (default) with `egauth.JWT` or `egauth.Stateful`.
+- Mobile or API client: `egauth.Bearer`, or `egauth.CookiesAndBearer` when both are served.
+- Behind a reverse proxy: `egauth.TrustedProxies(prefix)`; direct exposure: `egauth.DirectClients()`.
+- Several tenants on subdomains: `egauth.TenantBySubdomain()` with `egauth.TenantKeys()`.
+- Machine access: enable `Modules.APIKeys`, issue keys through `Auth.APIKeys`, serve with `ProtectAPI`.
+- A separate service that only verifies tokens: `egauth.NewResourceServer`.

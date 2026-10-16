@@ -7,19 +7,124 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [v0.17.0] — Unreleased
 
-- **Passkeys enrolled by egauth now work with usernameless login.** Registration options only
-  carried `userVerification`, so `residentKey` defaulted to `"discouraged"` and authenticators
-  could create non-discoverable credentials. `BeginDiscoverableLogin` sends no
-  `allowCredentials`, so the browser could not find such a credential and showed "No passkeys
-  found". Registration now sends `residentKey: "required"` and `requireResidentKey: true` by
-  default. Passkeys enrolled before this fix may be non-discoverable: delete and re-register them.
+v0.17.0 is a breaking, misuse-resistant redesign. A deployment is one validated composition object
+(`egauth.New`) and the application's routes are declared through `Auth.Routes`. Read "Upgrading"
+before deploying: **every user logs in again**.
 
 ### Added
 
-- `passkey.Config.ResidentKey`. The zero value means `required`. Set `Preferred` or
-  `Discouraged` only for username-first deployments that must still enroll old security keys.
+- `egauth.New`, `egauth.Config`, `egauth.Auth`: the single construction path. `New` validates every
+  field from its tag and returns all problems joined, checks store durability, the schema, the
+  KEK against existing data, the limiter, MFA enrollment against enabled modules and any v0.16
+  secret still awaiting `egauth.UpgradeSecretsV016`.
+- `Auth.Routes` with `Protect`, `Optional`, `ProtectAPI`, `Public` and `Build`: a deny-by-default
+  builder that mounts the auth endpoints from `BasePath` and answers 404 to everything undeclared.
+  Requirements are `RequireAnyRole`, `RequireAllRoles`, the matching scope and group forms,
+  `RequireMFA`, `RequireFreshAuth`, `RequireFactor` and `AcceptMustChange`; session-only
+  requirements do not compile on `ProtectAPI`.
+- `egauth.Principal`, passed to handlers as an argument, and the `principal` package
+  (`Subject`, `Caller`, `TenantID`, `Factor`, `SessionAttrs`).
+- Facades that enforce authorization themselves: `Auth.Accounts`, `Auth.Tenants`, `Auth.APIKeys`
+  and `Auth.System`.
+- `egauth.NewResourceServer` and `egauth.APIRoutes` for services that only verify tokens.
+- `egauth.InsecureOptOuts` and `egauth.ResourceInsecure`: every weakening of a default, each with a
+  written reason, listed by `Auth.Posture`.
+- A single multi-factor handshake. Enrollment is read from stored state (a confirmed TOTP or an
+  active passkey), never from configuration, and recovery codes exist only while one of those does.
+- A per-subject security epoch bumped in the same transaction as every security mutation and
+  sealed into every artefact, so revocation does not depend on event fan-out.
+- Delivery with one method per message kind (`EmailDeliverer`, `SMSDeliverer`); a kind added in a
+  later release is a compile error. Link and code values render as `REDACTED` in `fmt` and `slog`.
+- Packages: `kek` (versioned, associated data mandatory), `signing`, `store/*` with memory and pgx
+  implementations and contract suites, `federation` and `federation/providers`, `memstore`,
+  `egauthtest`, `webauthntest`, `adapters/pgx/pgxstore`.
+- Documentation guards (`tools/doclint`), static guards (`tools/archtest`) and behavioural
+  journeys (`internal/journeytest`); see CONTRIBUTING.md.
+
+### Changed
+
+- **Session cutover (D4).** v0.17 artefacts live in new tables. Every v0.16 refresh family,
+  stateful session and access JWT stops working, so every user logs in again. Passwords, TOTP,
+  passkeys, OAuth links, API keys and signing keys carry over.
+- **Registration creates no account until the email is verified (D5).** `POST /register` always
+  answers `202`, and the account exists only once the emailed link is confirmed. This closes
+  pre-account hijacking and the enumeration oracle of the previous `409 email_taken`.
+- **Legacy secret upgrade.** Secrets sealed by v0.16 (TOTP, OAuth client secrets, tenant signing
+  keys) must be re-sealed with associated data. `New` refuses to start until
+  `egauth.UpgradeSecretsV016` has re-sealed every row.
+- **Outstanding emailed links are invalidated.** Registration, password-reset, magic-link and
+  email-change links issued by v0.16 do not work after the upgrade.
+- Federated identities are never linked automatically to an existing account; linking is an
+  authenticated, sensitive action.
+- Passkeys are registered with `residentKey: required` and user verification required, and
+  usernameless login works for every passkey enrolled by v0.17. Passkeys enrolled by an earlier
+  release may be non-discoverable and are reported as needing re-registration.
+- Migrations are expand-only and idempotent. The contract migrations that drop the legacy tables
+  ship in v0.18.
+
+### Removed
+
+- Packages: `webapp`, `tokens` (all, including `tokens/basic`), `sessions` (old), `identity` (old),
+  `mfa` (old), `passkey` (old, including `passkey/passkeytest`, replaced by `webauthntest`),
+  `oauth` (old, including `oauth/providers`, replaced by `federation/providers`), `otp`,
+  `issuance`, `authflow`, `origin`, `revocation`, `janitor`, `health`, `ratelimit` (replaced by
+  `store/limiter`), `keystore` (replaced by `kek` and `store/keys`), and the adapters
+  `adapters/pgx/{identity,sessions,tokens,mfa,otp,passkey,oauth,keystore}` (replaced by
+  `adapters/pgx/store/*`).
+- `egauth.Actor` (replaced by `principal.Subject` and `egauth.Principal`), `ContextWithActor` and
+  `ActorFromContext`; `egauth.Kind` is now `egauth.CredentialKind`.
+- Every `With*` option and the `HandlerOption`, `AuthOption`, `StepUpOption`, `ProviderOption`,
+  `ServiceOption` and `ManagerOption` types.
+- `ValidateHandlerConfig` (both).
+- `identity.ClaimsBuilder`, `mfa.StepUpClaimsBuilder`, `tokens.ClaimsProvider` and
+  `ClaimsProviderFunc`, `RotationContext`.
+- `issuance.Resolver`, `authflow.AccountValidator`, `passkey.AccountGate`,
+  `NewIdentityAccountGate`, `identity.SessionStateReader`.
+- `identity.AccountEraser` and `AccountRevoker`, `tokens.FamilyRevoker` and `NewAccountRevoker`,
+  `keystore.TenantEraser`.
+- Every `tokens.*FromContext`, `tokens.DenyInterim` and `ErrInterimDenied`, `Claims.Interim` and
+  `IsInterim`.
+- `ratelimit.Middleware`, `Wrap`, `ClientIP` and `KeyFunc`.
+- `identity.Mailer` and `SMSSender`, replaced by `EmailDeliverer` and `SMSDeliverer`.
+- `otp.WithOnVerified`.
+- Every `SingleTenant` facade.
+- `event.RedirectFallbackMisuse`.
+- `keystore.Manager.SealSecret`, replaced by `Auth.Tenants().ImportKey`.
+- `identity.Store.UpdateUser` and the verification-token methods.
+- `passkey.ChallengeStore`, `passkey/memory.ChallengeStore` and
+  `adapters/pgx/passkey.NewChallengeStore`.
+- `passkey.Config.ResidentKey`, `CookieKey` and `InsecureNoChallengeStore`.
+- `sessions.Service.BindUser` and `BindSession`, and `sessions.WithNoMaxLifetime`.
+- `oauth.MemoryStore` and `oauth.SafeHTTPClient`.
+- Every open path that accepted no associated data.
+- `keystore.KEK` (struct), replaced by `kek.Local`.
+- Pre-release shapes of the composition API: `Handler()`, `Protect()`, `Optional()`, `Instances`,
+  `SingleProcess()`, `Replicated()`, `NoProxy()` (now `DirectClients()`), `Maintenance`, `External`,
+  `Reap()`, `OutboundTransport`, `principal.System`, `principal/principaltest`, `RequireRoles`,
+  `RequireScopes` and `RequireGroups` (now `RequireAny*` and `RequireAll*`), and `AcceptAPIKeys`
+  (now `ProtectAPI`).
+
+### Fixed
+
+- Passkeys enrolled by egauth work with usernameless login: registration always asks for a
+  resident key, and a client that rewrites the request is refused.
+- The "remember me" choice survives every refresh on both session backends.
+
+### Upgrading
+
+1. Run `pgxstore.Migrate`. It is expand-only and idempotent, so it is safe to repeat and to run
+   while v0.16 replicas still serve traffic.
+2. Run `egauth.UpgradeSecretsV016(ctx, storage, kek.LegacyLocalV016(oldKey), kek)` once. `New`
+   refuses to start until it is done. It is idempotent and reports every row it could not open
+   with `ErrUpgradeIncomplete`.
+3. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
+   passwords, TOTP, passkeys, OAuth links and signing keys carry over. Passkeys report
+   `needs_reregistration` only when they are legacy.
+4. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`; `examples/fullstack` is the
+   reference, and `egauth.ExampleNew` is the minimal configuration.
+5. In v0.18 the contract migrations drop the legacy tables.
 
 ## [v0.16.0] — 2026-10-07
 

@@ -5,131 +5,28 @@ weight: 4
 
 # Sessions
 
-If you prefer stateful, server-side tracking over JWTs, use the `sessions` module. This is particularly useful for monolithic web applications or admin dashboards where immediate, guaranteed revocation is critical.
+## Backends
 
-## Initializing Sessions
+`egauth.JWT(keys)` issues short-lived access tokens with a single-use rotating refresh token. `egauth.Stateful()` keeps a server-side session row. Both pass the same backend suite.
 
-`NewService` takes a `Store` plus optional `ServiceOption`s. The idle duration is **not** an option — you pass it per call (to `CreateSession`, `Touch`, and `Rotate`). The options are `WithClock` (inject a clock, mainly for testing), `WithMaxLifetime` (tune the 30-day default absolute cap, measured from `CreatedAt`) and `WithNoMaxLifetime` (disable the cap, insecure).
+Keys for the JWT backend come from `egauth.StaticKeys(signer)`, built with `signing.EdDSA`, `signing.ES256`, `signing.RS256` or `signing.HS256`, or from `egauth.TenantKeys()` for per-tenant keys.
 
-```go
-import (
-	"time"
+## Transport
 
-	"github.com/JLugagne/egauth/sessions"
-	sessionspg "github.com/JLugagne/egauth/adapters/pgx/sessions"
-)
+`egauth.Config.Transport` is `egauth.Cookies` (the default), `egauth.Bearer` or `egauth.CookiesAndBearer`. Cookies are `__Host-` prefixed, `Secure` (except on a loopback origin) and `HttpOnly`. Under Bearer, tokens travel in the `X-Egauth-*` headers, selected on login with `egauth.HeaderTransport`. A request presenting a cookie and a Bearer credential together is refused.
 
-sessionStore := sessionspg.NewStore(pool)
-sessionSvc := sessions.NewService(
-	sessionStore,
-	sessions.WithMaxLifetime(12 * time.Hour),
-)
-```
+## Sealed attributes
 
-## Creating & Rotating Sessions
+A login mints the session attributes once and they are replayed on every renewal. A renewal re-reads the account state, the security epoch, the multi-factor rule and the claims source every `SessionPolicy.RecheckEvery`.
 
-Creating a session returns the `*Session` record, a secure high-entropy **opaque token** (the plaintext, returned as the second value), and an error. The `Session` struct stores only the SHA-256 `TokenHash` — there is no plaintext token field on it, so you must capture the returned token and put **that** in the cookie.
+## Lifetimes
 
-```go
-// CreateSession(ctx, tenantID, userID, userAgent, ip, duration)
-// The second return value is the plaintext token — the Session itself never holds it.
-sess, token, err := sessionSvc.CreateSession(
-	ctx,
-	"tenant-123",
-	userID, // uuid.UUID
-	r.UserAgent(),
-	clientIP,
-	30*time.Minute, // idle duration for this session
-)
-if err != nil {
-	return err
-}
-_ = sess // sess.ID, sess.ExpiresAt, sess.CreatedAt, etc.
+Defaults: idle 168h, absolute 720h, recheck 5m, reauthentication window 10m. The absolute lifetime is bounded at 90 days, or 400 days with `Insecure.LongSessions`.
 
-// Send `token` to the client in an HttpOnly, Secure, SameSite=Lax cookie.
-http.SetCookie(w, &http.Cookie{
-	Name:     "session_id",
-	Value:    token,
-	HttpOnly: true,
-	Secure:   true,
-	SameSite: http.SameSiteLaxMode,
-})
-```
+## Revocation
 
-### Session Fixation Defense
+The security epoch makes revocation state-derived: a password change, factor change, disable, delete or session revocation bumps it atomically, and a session with a stale epoch is refused at its next recheck. Replaying a consumed refresh token outside the grace window revokes the whole family. The refresh protocol is specified in [the refresh family state machine](https://github.com/JLugagne/egauth/blob/main/docs/protocols/refresh-family.md).
 
-When a user's privilege level changes (e.g., they log in, or complete MFA), you **must** rotate the session token to prevent Session Fixation attacks. `Rotate` issues a brand-new token for the same logical session (invalidating the old one) and returns that new plaintext token as its second value — re-cookie it.
+## Claims
 
-```go
-// Rotate(ctx, tenantID, token, duration) -> (*Session, newToken, error)
-rotatedSess, newToken, err := sessionSvc.Rotate(ctx, "tenant-123", oldSessionToken, 30*time.Minute)
-if err != nil {
-	return err
-}
-_ = rotatedSess
-
-// Update the client's cookie with the new token.
-http.SetCookie(w, &http.Cookie{
-	Name:     "session_id",
-	Value:    newToken,
-	HttpOnly: true,
-	Secure:   true,
-	SameSite: http.SameSiteLaxMode,
-})
-```
-
-## Validating & Touching Sessions
-
-When a request comes in, validate the session with `ValidateSession`, passing the tenant ID and the token from the cookie. To keep the session alive (sliding the idle expiry), call `Touch` with the **token** (not the session ID) and a fresh idle duration.
-
-```go
-// ValidateSession(ctx, tenantID, token) -> (*Session, error)
-sess, err := sessionSvc.ValidateSession(ctx, "tenant-123", tokenFromCookie)
-if err != nil {
-	// Invalid, expired, or past its absolute lifetime cap.
-	return
-}
-
-// Touch(ctx, tenantID, token, duration) -> (*Session, error)
-// Slides the idle expiry forward (clamped to the absolute deadline, if one is set).
-sess, err = sessionSvc.Touch(ctx, "tenant-123", tokenFromCookie, 30*time.Minute)
-if err != nil {
-	return
-}
-```
-
-## Security Features
-
-The `sessions` module ships two defenses worth calling out here. See [Security Hardening]({{< ref "security-hardening" >}}) for the full treatment.
-
-### Absolute Lifetime Cap
-
-`NewService` applies a **30-day absolute cap by default**. `WithMaxLifetime` tunes it: once `now` is past `CreatedAt + d`, `ValidateSession` rejects the session and `Touch`/`Rotate` can no longer keep it alive — they clamp the slid `ExpiresAt` so it never moves past the absolute deadline. This stops an idle-timeout slide from keeping a stolen-but-kept-warm token alive indefinitely. `WithMaxLifetime(0)` keeps the default (it does not disable the cap); only `WithNoMaxLifetime()` disables it, which is insecure.
-
-```go
-sessionSvc := sessions.NewService(
-	sessionStore,
-	sessions.WithMaxLifetime(12*time.Hour),
-)
-```
-
-### Revocation
-
-For immediate revocation, use one of:
-
-```go
-// Revoke a single session by its token (e.g. an explicit logout on one device).
-err := sessionSvc.RevokeSession(ctx, "tenant-123", tokenFromCookie)
-
-// "Log out everywhere": delete every session belonging to a user in this tenant.
-err = sessionSvc.RevokeAllForUser(ctx, "tenant-123", userID)
-```
-
-## Single-Tenant Facade
-
-If your application is not multi-tenant, wrap the service in `sessions.NewSingleTenant(svc)`. It exposes the same methods with the `tenantID` argument dropped — e.g. `CreateSession(ctx, userID, userAgent, ip, duration)`, `ValidateSession(ctx, token)`, `Touch`, `Rotate`, `RevokeSession`, and `RevokeAllForUser(ctx, userID)`.
-
-```go
-single := sessions.NewSingleTenant(sessionSvc)
-sess, token, err := single.CreateSession(ctx, userID, r.UserAgent(), clientIP, 30*time.Minute)
-```
+`egauth.ClaimsSource` is the single source of roles, groups, scopes and custom claims. It is read at admission and on every renewal. Returning `egauth.ErrUnknownSubject` ends the subject's session.

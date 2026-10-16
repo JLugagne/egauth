@@ -11,7 +11,7 @@ layout: hextra-home
 
 <div class="hx:mb-10">
 {{< hextra/hero-subtitle >}}
-  Independent modules in the <code>database/sql</code> style. No framework, no vendor lock-in. Secure-by-default primitives for Passwords, Passkeys, MFA, JWT, and Sessions.
+  One validated composition object and a deny-by-default route builder. Secure-by-default Passwords, Passkeys, MFA, OAuth and Sessions, with CI guards that keep it that way.
 {{< /hextra/hero-subtitle >}}
 </div>
 
@@ -22,27 +22,27 @@ layout: hextra-home
 
 {{< hextra/feature-grid >}}
   {{< hextra/feature-card
-    title="Extreme Composability"
-    subtitle="Import only what you need (identity, tokens, sessions, mfa, passkey). Wire with standard dependency injection."
+    title="One Composition Object"
+    subtitle="egauth.New validates the whole configuration and returns every problem at once. No cookie, issuer, limiter or gate is wired by hand."
   >}}
   {{< hextra/feature-card
-    title="Secure by Default"
-    subtitle="Decoy hashing, Argon2id, constant-time comparisons, single-use refresh token rotation, and strict CSRF protection."
+    title="Deny by Default"
+    subtitle="Routes are declared through Protect, Optional, ProtectAPI and Public. Every other request is a 404, and each gate set is fixed by the library."
   >}}
   {{< hextra/feature-card
-    title="Passkeys & WebAuthn"
-    subtitle="Built-in WebAuthn ceremony handlers with server-side challenge verification and tamper-proof ceremony cookies."
+    title="Sealed Session State"
+    subtitle="What a login proved is minted once, sealed and replayed. Renewal can add a factor, never upgrade one."
   >}}
   {{< hextra/feature-card
-    title="Bring Your Own Router"
-    subtitle="Standard net/http handlers compatible with standard library http.ServeMux, gorilla/mux, chi, gin, or echo."
+    title="Passkeys and MFA"
+    subtitle="Discoverable WebAuthn credentials, TOTP and recovery codes. Enrollment is read from stored state, never from configuration."
   >}}
   {{< hextra/feature-card
     title="Multi-Tenancy Enforced"
-    subtitle="Native tenant isolation across all stateful methods, eliminating cross-tenant data leaks and IDOR vulnerabilities."
+    subtitle="Tenant resolution fails closed, and every credential and ceremony handle is bound to its tenant."
   >}}
   {{< hextra/feature-card
-    title="PostgreSQL & In-Memory Stores"
-    subtitle="Production-ready jackc/pgx/v5 adapters with embedded migrations, and zero-dependency in-memory stores for testing."
+    title="PostgreSQL and In-Memory Stores"
+    subtitle="pgx stores with embedded, expand-only migrations, and in-memory stores for tests, both behind shared contract suites."
   >}}
 {{< /hextra/feature-grid >}}

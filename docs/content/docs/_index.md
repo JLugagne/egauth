@@ -5,9 +5,9 @@ weight: 1
 
 # `egauth` Documentation
 
-Welcome to the `egauth` documentation. Discover how to build secure, modular, and composable authentication workflows in Go.
+`egauth` is a misuse-resistant authentication library for Go: one validated composition object and a deny-by-default route builder.
 
 ## Sections
 
-- [**Philosophy & Architecture**](architecture/) — The architectural foundation, hexagonal structure, multi-tenancy, and design choices.
-- [**SDK Developer Manual**](sdk/) — Practical, runnable integration guides for Passwords, Sessions, Tokens, MFA, Passkeys, OAuth, and Tenancy.
+- [**Philosophy & Architecture**](architecture/): the composition object, the guards, and the design choices.
+- [**Developer Manual**](sdk/): getting started, routes and gates, sessions, identity, MFA, OAuth, tenancy, hardening and upgrading from v0.16.

@@ -29,8 +29,8 @@ it.
 | Project | `github.com/JLugagne/egauth` (repository: `JLugagne/libauth`) |
 | Type | Embeddable Go library (not a service or framework); consumers wire their own router, storage, mail/SMS delivery |
 | Language / toolchain | Go 1.26 (pinned for the life of v1) |
-| Size | ≈72.8k lines of Go in the core module, ≈5.7k in the nested `adapters/pgx` module (including tests) |
-| Modules | Core: `identity`, `issuance`, `tokens` (+ `tokens/jwt`, `tokens/basic`), `sessions`, `passwords` (+ `argon2`, `policy`, `breach/*`), `mfa`, `otp`, `passkey`, `oauth` (+ `oauth/providers`), `authflow`, `webapp`, `keystore`, `ratelimit`, `event`, `health`, `janitor`, `revocation`; adapters: `adapters/pgx`, `adapters/otel` |
+| Size | recorded in the evidence package at the pinned commit |
+| Packages | Core: `egauth` (`New`, `Routes`, facades), `internal/*` services, `store/*` contracts with memory implementations, `kek`, `signing`, `principal`, `event`, `passwords`, `federation`; adapters: `adapters/pgx`, `adapters/otel`; guards in the unpublished `tools` module |
 | Audit commit | To be pinned at engagement start: a specific commit SHA of the hardened v1-readiness tree (signed tag where available). The maintainers will record the SHA in the evidence package and in the resulting ledger entry. |
 
 ### Architecture and threat-model pointers (provided to the auditor)
@@ -40,13 +40,14 @@ it.
   library guarantees, what the consumer must do, CSRF/origin policy, rate-limiting posture,
   constant-time strategy and benchmark evidence, account-existence disclosure, release
   verification.
-- [`docs/security-guarantees.md`](../security-guarantees.md) — the per-module guarantee/consumer
-  responsibility matrix.
+- [`docs/security-guarantees.md`](../security-guarantees.md) — the guarantee matrix by area and the
+  guard that holds each.
 - [`docs/content/docs/architecture.md`](../../docs/content/docs/architecture.md) and
-  [`.llms/architecture.md`](../../.llms/architecture.md) — design model, Service/Store split,
-  composition graph, cross-cutting seams, multi-tenancy model.
+  [`.llms/architecture.md`](../../.llms/architecture.md) — design model, composition object,
+  layering, multi-tenancy model.
 - [`docs/protocols/refresh-family.md`](../protocols/refresh-family.md) — refresh-token family
   state machine (states, transitions, invariants).
+- [`CONTRIBUTING.md`](../../CONTRIBUTING.md) — the invariants and the guard that enforces each.
 - [`docs/content/docs/sdk/security-hardening.md`](../../docs/content/docs/sdk/security-hardening.md)
   — hardening guide for integrators.
 - [`RELEASING.md`](../../RELEASING.md) — release/tag-signing/SBOM/provenance process.
@@ -55,109 +56,102 @@ it.
 
 Coverage is **risk-prioritized, not uniform**. Reviewers should spend effort where a prior
 white-box pass found systemic weakness and where a mistake would be catastrophic, rather than
-sampling all ~72k lines evenly. The numbered areas below are the required minimum; quotations
+sampling the whole code base evenly. The numbered areas below are the required minimum; quotations
 should state coverage per area and any area the bidder proposes to expand or drop.
 
-### (a) Post-auth issuance pipeline and every login flow — highest priority
+### (a) Admission, sealed session state and every login flow — highest priority
 
-One chokepoint (`issuance.Pipeline.Issue`) is supposed to terminate every interactive login path,
-re-load authoritative account state, enforce tenant binding, propagate `MustChangePassword`, apply
-the MFA gate once, and emit one uniform audit event. Review:
+One owner (`internal/issuance`) mints the sealed `principal.SessionAttrs` for every login path,
+re-reads authoritative account state, binds the tenant, applies the multi-factor rule once and
+emits one audit event. Review:
 
-- Whether **every** login flow actually terminates in the pipeline and none can mint a session
-  directly: password login/registration, magic link, OAuth/OIDC callback (with and without the
-  `authflow` engine), `authflow` minter, MFA step-up, OTP verify, passkey login and discoverable
-  login, and the `webapp` preset.
-- Failure paths and races: rejected/aborted issuance mints nothing; disabled and soft-deleted
-  accounts are refused on every flow; a caller cannot clear an authoritative
-  `MustChangePassword`; claim rebuilding at issuance vs. refresh; interim MFA tokens cannot
-  harvest a full renewable pair.
-- The cross-flow invariant suite (`internal/loginflowtest`) — whether its table really covers
-  every exported constructor and whether invoking it would catch a bypass.
+- Whether **every** primary flow ends in that owner and none can mint a session directly:
+  password login and registration, magic link, emailed and texted codes, OAuth and OIDC callback,
+  external primary factors, passkey login (username-first and discoverable), and MFA completion.
+- The enrollment rule: a subject with a confirmed TOTP or an active passkey never gets a session
+  from one factor, whatever modules are enabled, and the pre-MFA flow handle is never accepted as a
+  session.
+- Failure paths and races: a rejected or aborted login mints nothing; disabled, deleted and
+  unverified accounts are refused on every flow; must-change is only ever raised by renewal;
+  factors are never added by renewal; claims are re-read at every recheck.
+- The journey matrix (`internal/journeytest`) and the probe battery (G22): whether they cover every
+  route and every module, and whether a bypass would be caught.
 
-### (b) OAuth / OIDC protocol security
+### (b) OAuth, OIDC and federation
 
-Review the authorization-code + PKCE flow and the static OIDC path against current guidance
-(OAuth 2.0 Security Best Current Practice / RFC 9700, OIDC Core):
+Review the authorization-code and PKCE flow against current guidance (OAuth 2.0 Security Best
+Current Practice, OIDC Core):
 
-- `state`/PKCE-verifier/nonce generation, entropy, binding, single-use, constant-time comparison,
-  and the HMAC-authenticated, `__Host-` host-locked state cookie (including the minimum
-  `MinStateSigningKeyLength` gate and fail-closed behavior on missing/short keys).
-- OIDC `id_token` validation: algorithm pinning, `iss`/`aud`/`azp`/`exp`/`nonce` checks, JWKS
-  fetching/rotation, and cross-issuer confusion.
-- SSRF: `oauth.SafeHTTPClient` and the static-discovery/JWKS fetch path — loopback/link-local/
-  RFC1918/RFC6598/multicast guards, DNS-rebinding safety, redirect refusal, and that discovered
-  endpoints are validated before use. Attempt to bypass through provider configuration,
-  tenant-controlled issuers, redirects, IPv6-mapped addresses, or alternative IP encodings.
-- Account linking/just-in-time provisioning: unverified-email refusal by default, no auto-link by
-  email, deleted-account handling, and tenant scoping of state and identities.
-- The `oauth/providers` presets (Apple, Auth0, Cognito, Discord, Facebook, GitHub, GitLab, Google,
-  Keycloak, LinkedIn, Microsoft, Okta) for provider-specific quirks.
+- `state`, PKCE verifier and nonce generation, entropy, binding to the browser, single use and
+  constant-time comparison.
+- `id_token` validation: algorithm pinning, issuer, audience, authorised party, expiry, nonce, JWKS
+  fetching and rotation, and cross-issuer confusion. Issuers are pinned by the provider spec, never
+  derived from the authorization URL.
+- SSRF: the single outbound client in `internal/outbound` and the discovery and JWKS fetch paths,
+  covering loopback, link-local, private, shared-address and multicast ranges, DNS rebinding,
+  redirect refusal and alternative IP encodings, through provider configuration and
+  tenant-registered providers.
+- Account linking and pre-account hijacking: federated identities are never linked to an existing
+  account automatically, linking is an authenticated sensitive action, and a registration only
+  creates an account once its email is verified.
+- The built-in providers in `federation/providers` for provider-specific quirks.
 
-### (c) Token and session state machines
+### (c) Token, session and revocation state machines
 
-Review with the state-machine document as the specification:
+- Refresh rotation, single-use consumption, family chaining, theft detection, the reuse grace
+  window and concurrent rotation, tenant immutability, and replay of the sealed attributes.
+- Revocation through the per-subject security epoch: atomicity with the security mutation, the
+  poller's fail-closed behaviour, and cursor monotonicity.
+- Atomicity and race freedom of the store contracts (single-use consumption, rotation, lockout
+  counters, TOTP step reuse): compare the memory and `pgx` implementations against the contract
+  suites and probe time-of-check windows under concurrency.
+- JWT issuance and verification: algorithm pinning and key-type confusion, key policy, JWKS
+  publication, per-tenant key rotation and tombstones, audience handling, and the cookie classes
+  (`__Host-` prefixes, `SameSite`, clearing on rotation and reuse).
+- API-key lifecycle: entropy, at-rest hashing, kind and scope enforcement, revocation, expiry, and
+  the rule that a key never reaches a session route and a session never reaches an API route.
+- Server-side sessions: idle and absolute lifetime, fixation defence, revocation and eviction.
 
-- Refresh-token rotation, single-use consumption, family chaining, theft detection/replay
-  revocation, the reuse grace window and concurrent-rotation semantics, tenant immutability across
-  rotations, and carry-forward of `MustChangePassword`, `AMR`, and `auth_time`.
-- Atomicity and race-freedom of the consumer-facing store contracts (`ConsumeRefreshToken`,
-  TOTP `MarkTOTPUsed`, attempt increments): compare the in-memory and `pgx` implementations
-  against the interface contract and probe TOCTOU windows under concurrency. A non-atomic
-  third-party adapter must not be able to silently disable replay detection.
-- JWT issuance/verification: algorithm pinning and key-type confusion, key length/denylist
-  gates, JWKS publication, keystore rotation, tenant binding (`MultiTenant`,
-  `VerifyAccessTokenForTenant`), and cookie handling (`__Host-` prefixes, `SameSite`, clearing
-  semantics on rotation/reuse).
-- API-key lifecycle (PAT vs. service token): issuance entropy, at-rest hashing, scope and
-  principal-kind enforcement, revocation, expiry, and audit events.
-- Step-up/AAL: `WithRequiredAMR` fail-closed behavior, `WithMaxAuthAge` freshness, and the
-  interim-token boundary.
-- Server-side sessions: idle/absolute lifetime, fixation defense (`Rotate`), revocation, and
-  store-bound eviction behavior.
+### (d) Passkey and WebAuthn ceremony
 
-### (d) Passkey / WebAuthn ceremony
+- Stateless ceremony handles (AEAD-sealed, bound to the browser), single use, and the absence of
+  shared buckets that a flood could fill.
+- Registration, authentication and discoverable login verification: RP ID and origin validation,
+  challenge binding, resident-key and user-verification requirements, conditional sign count and
+  clone suspension, and `credProps` handling.
+- Whether the `webauthntest` authenticator models a real client faithfully; it must not make tests
+  pass where a real credential would fail.
 
-Review the `passkey` module and the `passkey/passkeytest` helper:
+### (e) Sealing, custom cryptographic glue and constant-time claims
 
-- Ceremony-cookie sealing (HMAC construction, key source/length/denylist, `__Host-` host-lock,
-  single-use, expiry) and the server-side challenge store (replay protection, atomic consume).
-- Registration/authentication/discoverable-login verification: RP ID and origin validation,
-  challenge binding, user-verification default, signature-counter/clone handling, and the
-  account gate for disabled/deleted users.
-- Tenant resolution for discoverable login and whether the `passkeytest` authenticator faithfully
-  models a real WebAuthn client (it must not make tests pass where real credentials would fail).
+The library implements small protocol and crypto glue itself; review that glue and audit the
+accuracy of the written constant-time guarantees:
 
-### (e) Custom cryptographic glue and constant-time claims
-
-The library deliberately implements small protocol/crypto glue itself rather than using a
-framework; review that glue and audit the accuracy of the written constant-time guarantees:
-
-- `authflow` flow-token sealing, the OAuth state cookie MAC, passkey ceremony-cookie MAC, and any
-  other cookie sealing/signing; HMAC key handling and domain separation.
-- Selector/verifier token scheme, `tokens.HashToken` usage, MAC and token comparisons — verify
-  they are constant-time and never short-circuit or branch on secret bytes. Search for `==`,
-  `bytes.Equal`, map lookups or length checks applied to MACs/tokens/password-derived values.
-- Randomness sources for all secrets, nonces, states, selectors, verifiers, and IDs.
-- Argon2id parameter parsing/bounds checks and the decoy-hash enumeration defense.
+- `kek` sealing with mandatory associated data, versioning, the canary, rotation, and the v0.16
+  upgrade path (`egauth.UpgradeSecretsV016`).
+- Sealed ceremony handles, the cookie classes and any other MAC or AEAD construction: key handling
+  and domain separation.
+- Opaque token handling, `crypto/subtle` and `hmac.Equal` use: verify that comparisons are
+  constant-time and never branch on secret bytes. Search for `==`, `bytes.Equal`, map lookups or
+  length checks applied to MACs, tokens and password-derived values.
+- Randomness sources for all secrets, nonces, states and identifiers.
+- Argon2id parameter parsing and bounds, and the decoy-hash enumeration defence.
 - The claimed constant-time properties (documented as structural with benchmark *evidence*, not
   proof): attempt to falsify them with timing measurements under controlled conditions, and
   report any claim that is overstated.
 
 ### (f) Multi-tenant isolation
 
-Every tenant-scoped Store/Service method takes an explicit `tenantID`; single-tenant uses the
-empty partition via `SingleTenant` facades. Review:
+Every tenant-scoped store and service call carries a tenant. Review:
 
-- Cross-tenant IDOR/authorization on every externally supplied identifier (user IDs, family IDs,
-  API-key IDs, credential IDs, session tokens, OAuth state) and whether `ErrTenantMismatch` is
-  returned rather than a not-found that leaks existence.
-- Tenant resolvers in the HTTP middleware: fail-closed when resolution returns empty, no fallback
-  to the tenant-unaware verification path.
-- Tenant binding of OAuth state/callbacks, step-up, refresh rotations, passkey discoverable login,
-  and audit events.
-- Store-level tenancy: composite keys and uniqueness constraints in `pgx` and in-memory stores,
-  including any key-collision/overwrite scenarios.
+- Cross-tenant access through every externally supplied identifier (user, family, API-key,
+  credential and session identifiers, ceremony handles, OAuth state), and whether
+  `egauth.ErrTenantMismatch` is returned rather than a not-found that leaks existence.
+- Tenant resolution in the request preamble: fail-closed when resolution is empty or fails, and no
+  fallback to a tenant-unaware path.
+- Tenant binding of OAuth state, step-up, rotations, passkey discoverable login and events.
+- Store-level tenancy: composite keys and uniqueness constraints in `pgx` and the memory stores,
+  and `Auth.Tenants` erasure.
 
 ### (g) Supply chain and release provenance
 
@@ -305,7 +299,7 @@ volunteer), **Auditor** (selected firm/individual), **Legal/Finance** (if applic
 | 10 | Retest | Auditor | Verify each accepted fix on the fix commit; deliver a retest addendum. Remaining findings repeat steps 8–10 once more if needed. |
 | 11 | Final report | Auditor | Deliver the complete report plus the executive summary, coverage matrix, and independence statement. |
 | 12 | Publish | Maintainer | Publish the report (or public summary) in the repository or a durable public location; link it from `AUDIT.md`. |
-| 13 | Update the ledger and disclosures | Maintainer | Replace the pending template in `AUDIT.md` with the real entry (auditor, date, commit, scope, findings counts, report link, retest status). Update the disclosure surfaces only if the audit status actually changes, in the same PR: `README.md`, `SECURITY.md`, `llms.txt`, `doc.go`, `CHANGELOG.md` — keeping `disclosure_test.go` and the canonical sentence in lock-step. **Gate:** the honest disclosure still matches reality. |
+| 13 | Update the ledger and disclosures | Maintainer | Replace the pending template in `AUDIT.md` with the real entry (auditor, date, commit, scope, findings counts, report link, retest status). Update the disclosure surfaces only if the audit status actually changes, in one change set: `README.md`, `SECURITY.md`, `llms.txt`, `doc.go`, `CHANGELOG.md` — keeping `disclosure_test.go` and the canonical sentence in lock-step. **Gate:** the honest disclosure still matches reality. |
 | 14 | Close out | Maintainer | File follow-up tickets for open findings (public or private as appropriate); announce the result; schedule the next review before the report is a year old. |
 
 ## 9. Response format and evaluation

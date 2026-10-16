@@ -3,36 +3,20 @@ title: "Tenants"
 weight: 7
 ---
 
-# Multi-Tenancy
+# Tenants
 
-`egauth` was built from the ground up to support native multi-tenancy. Every stateful operation across all modules (Identity, Tokens, Sessions, MFA) requires a Tenant ID. This physically guarantees isolation and prevents Cross-Tenant Insecure Direct Object References (IDORs).
+## Modes
 
-## Explicit Tenancy
+- `egauth.SingleTenant()`: one tenant, the empty one.
+- `egauth.TenantBySubdomain()`: the public origin contains exactly one `{tenant}` host label, for example `https://{tenant}.example.com`.
+- `egauth.TenantFromRequest(resolver)`: your `egauth.TenantResolver` maps a request to a tenant.
 
-When calling any service method, the `tenantID` is explicitly passed as the second argument (immediately following the `context.Context`).
+A request whose tenant cannot be resolved is refused with 401, with no fallback. Credentials, ceremony handles and OAuth state are bound to their tenant, and a handle sealed for one tenant is refused under another, without being consumed.
 
-```go
-user, err := identityService.Register(
-	ctx, 
-	"org-abc-123", // the tenantID
-	"bob@example.com", 
-	"Password123!", 
-)
-```
+## Administration
 
-## Single-Tenant Mode
+`Auth.Tenants` erases a tenant, imports, renews and revokes tenant signing keys, and manages runtime OAuth providers. Each call needs a system caller minted for that tenant with `Auth.System(tenant, reason)`, or an authorised session caller of that tenant. Any other tenant returns `egauth.ErrTenantMismatch`.
 
-If your application does not require multi-tenancy, the empty string `""` acts as the valid default partition.
+## Keys
 
-To avoid passing `""` everywhere, each module provides a `NewSingleTenant` facade that automatically wraps the service and strips away the `tenantID` argument from the method signatures.
-
-```go
-// 1. Create the core service
-svc := identity.NewService(store, hasher, policy)
-
-// 2. Wrap it in the SingleTenant facade
-app := identity.NewSingleTenant(svc) 
-
-// 3. Call methods without the tenant argument!
-user, err := app.Register(ctx, "bob@example.com", "Password123!")
-```
+`egauth.TenantKeys()` gives each tenant its own signing keys, held in `store/keys` and sealed by the KEK. A tombstone blocks provisioning after revocation.

@@ -1,102 +1,34 @@
 ---
 title: "Identity and Passwords"
-weight: 2
+weight: 3
 ---
 
 # Identity and Passwords
 
-The `identity` module safely manages user accounts, credentials, password resetting, and GDPR-compliant soft-deletion.
+Enable the `Password` module to register and log in with a password.
 
-## Registering Users
+## Registration
 
-Registration automatically hashes passwords using your configured KDF (e.g., Argon2id) and validates complexity against your policy. Every stateful operation takes a `tenantID` string as its second argument.
+`POST /register` always answers `202`. No account exists until the emailed link is confirmed, so an address cannot be claimed by someone who does not control it, and the answer does not reveal whether the address already has an account. An address that already has one receives an account-exists notice instead of a link. `egauth.PasswordModule.Registration` selects open sign-up or invite-only.
 
-```go
-user, err := identityService.Register(
-	ctx, 
-	"tenant-123", // Tenant isolation is natively required for all stateful operations
-	"alice@example.com", 
-	"CorrectHorseBatteryStaple!", 
-)
+## Login
 
-if err != nil {
-	// Errors like ErrEmailAlreadyExists or password policy failures are returned here
-	log.Println("Registration failed:", err)
-	return
-}
+`POST /login` verifies the identifier and password. Unknown, locked, disabled and unverified accounts answer exactly like a wrong password, and each spends the same hashing cost. A successful login either establishes a session or, for a user with a second factor, returns a flow handle that is not a session.
 
-fmt.Printf("Registered user %s successfully", user.ID)
-```
+## Passwords
 
-## Authentication & Decoy Hashing
+- Argon2id hashing with a recorded cost; a hash recorded at an older cost is replaced after a successful login.
+- A floor of 8 to 1024 characters, NFKC normalised, applied before any policy.
+- `passwords.Policy` and `passwords.BreachChecker` are seams. References are in `passwords/policy` and `passwords/breach/hibp`.
 
-To authenticate a user, call `Authenticate()`. This method implements decoy hashing, ensuring that the response time is indistinguishable whether the user exists or not, preventing username enumeration attacks.
+## Reset and change
 
-```go
-authUser, err := identityService.Authenticate(
-	ctx, 
-	"tenant-123",
-	"password", // Authentication Provider type
-	"alice@example.com", 
-	"CorrectHorseBatteryStaple!", 
-)
+A reset starts with `POST /password/forgot`, which answers uniformly, and finishes with the emailed link. A reset ends no session by itself but bumps the security epoch, so every other session dies at its next recheck, while factors survive. A change requires the current password and a fresh session, and keeps the current session.
 
-if err != nil {
-	// Never reveal IF the user exists to the client
-	http.Error(w, "invalid email or password", http.StatusUnauthorized)
-	return
-}
-```
+## Account administration
 
-## User Lifecycle: Soft Deletes
+`Auth.Accounts` creates accounts, sets temporary passwords (which force a change at the next login), disables and enables accounts, revokes sessions, unlocks a locked second factor and deletes accounts. A deletion runs through the lifecycle outbox, so `Hooks.AccountDeleted` is retried until it succeeds.
 
-For compliance (like GDPR), deleting a user anonymizes their Personally Identifiable Information (PII) rather than dropping the row entirely, which protects your database's relational integrity.
+## Delivery
 
-```go
-err := identityService.DeleteAccount(ctx, "tenant-123", authUser.ID)
-// The user's email is replaced with a random UUID, and their credentials are wiped.
-```
-
-> **Register account erasers.** `DeleteAccount` and every password rotation (`ResetPassword`,
-> `ChangePassword`, `SetTemporaryPassword`) clear recovery channels, purge pending verification
-> tokens, and run the registered `AccountErasers`. Register at least
-> `tokens.NewAccountRevoker(tokenStore)` and `passkeySvc.AccountEraser()` via
-> `identity.WithAccountErasers(...)`; without the passkey eraser, a passkey an attacker enrolled
-> while holding the password survives the victim's reset and keeps minting sessions. See
-> [Security Hardening]({{< ref "security-hardening" >}}).
-
-## User Lifecycle: Disabling Accounts
-
-`DisableUser` administratively suspends an account: it blocks new logins (`Authenticate` returns `ErrAccountDisabled`) and stops the account from consuming verification tokens. Unlike deletion it is **reversible** with `EnableUser` — so enrollment data (MFA secrets, passkeys) is intentionally preserved.
-
-Blocking new logins is not enough on its own: a user disabled mid-session still holds refresh tokens and API keys minted before the suspension. To kill those immediately, register **disable revokers** when you build the service. `tokens.NewAccountRevoker` revokes a user's refresh tokens and API keys in one hook; add `sessions.Service.RevokeAllForUser` for sessions.
-
-```go
-svc := identity.NewService(
-	store, hasher, policy,
-	// Revoke refresh tokens + API keys when an account is disabled.
-	identity.WithDisableRevokers(tokens.NewAccountRevoker(tokenStore)),
-)
-
-// Stamps DisabledAt, emits AccountDisabled, then revokes the user's tokens and keys.
-err := svc.DisableUser(ctx, "tenant-123", authUser.ID)
-```
-
-The `DisabledAt` stamp is written **first** (fail-closed: the account is blocked even if a downstream revoker errors), and any revoker error is returned so you can retry — the revokers are idempotent. Without revokers wired, `DisableUser` still blocks new logins but leaves already-issued tokens valid until they expire.
-
-> Use `WithDisableRevokers` (not `WithAccountErasers`) for disable: erasers run on permanent `DeleteAccount` and may destroy MFA/passkey enrollment, which a reversible disable must keep.
-
-## Password Resets
-
-The Identity module handles generating secure password reset tokens. `identity.Mailer` is a struct of delivery callbacks (one per flow, e.g. `PasswordReset`) that you supply to actually deliver the email — egauth never sends mail itself. Programmatic callers can skip the Mailer entirely and use the token returned directly by `RequestPasswordReset`.
-
-```go
-// 1. Generate the token (Decoy enabled: returns no error if user doesn't exist)
-token, _, err := identityService.RequestPasswordReset(ctx, "tenant-123", "bob@example.com")
-
-// 2. In your Mailer.PasswordReset callback, send the reset link:
-// https://yourapp.com/reset?token=<token>
-
-// 3. Complete the reset
-err = identityService.ResetPassword(ctx, "tenant-123", tokenFromURL, "NewSecurePassword123!")
-```
+Messages are sent by your `egauth.EmailDeliverer` and `egauth.SMSDeliverer`. Link and code fields render as `REDACTED` in `fmt` and `slog`; the deliverer reads them directly.

@@ -3,87 +3,163 @@ title: "Getting Started"
 weight: 1
 ---
 
-# Getting Started with `egauth`
+# Getting Started
 
-This guide covers how to embed the `egauth` SDK into your Go application, initialize the database stores, and wire up the dependency injection.
+## 1. Install
 
-## 1. Installation
-
-Install the module using `go get`:
-
-```bash
+```sh
 go get github.com/JLugagne/egauth
+go get github.com/JLugagne/egauth/adapters/pgx
 ```
 
-## 2. Infrastructure & Database
+The second module holds the PostgreSQL stores. Go 1.26 or newer.
 
-`egauth` relies heavily on interfaces for its storage (e.g., `identity.Store`, `tokens.Store`). Out of the box, it provides robust, production-ready PostgreSQL adapters using `jackc/pgx/v5`, as well as zero-dependency in-memory adapters for testing.
+## 2. The minimal service
 
-### Setting up PostgreSQL
+`memstore` keeps everything in memory, so this runs without a database. It registers a password user, confirms the emailed link, logs in, calls a protected route, refreshes and logs out.
 
-You should use the `pgxpool` to manage your database connections. `egauth` packages come with built-in `//go:embed` migrations.
-
+<!-- embed: example_test.go#ExampleNew -->
 ```go
-package main
+key := make([]byte, 32)
+_, _ = rand.Read(key)
+k, _ := kek.NewLocal(key)
+signer, _ := signing.EdDSA("k1", key)
+mail := inbox{links: make(chan string, 1)}
 
-import (
-	"context"
-	"log"
-
-	"github.com/JLugagne/egauth/identity"
-	identitypg "github.com/JLugagne/egauth/adapters/pgx/identity"
-	
-	"github.com/JLugagne/egauth/passwords/argon2"
-	"github.com/JLugagne/egauth/passwords/policy"
-	
-	"github.com/jackc/pgx/v5/pgxpool"
-)
-
-func main() {
-	ctx := context.Background()
-
-	// 1. Initialize the connection pool
-	pool, err := pgxpool.New(ctx, "postgres://user:pass@localhost:5432/mydb")
-	if err != nil {
-		log.Fatalf("failed to connect to db: %v", err)
-	}
-	defer pool.Close()
-
-	// 2. Run Automatic Migrations
-	// Each backend lives under the adapters/pgx module (adapters/pgx/identity, .../tokens, ...) with Migrations.
-	if err := identitypg.Migrate(ctx, pool); err != nil {
-		log.Fatalf("identity migration failed: %v", err)
-	}
-
-	// 3. Initialize Stores
-	identityStore := identitypg.NewStore(pool)
-
-	// 4. Initialize Core Logic (e.g. Hasher and Password Policy)
-	hasher := argon2.NewHasher(argon2.WithMemory(64*1024), argon2.WithTime(1))
-	passwordPolicy := policy.NewDefaultPolicy() // 8 char minimum
-
-	// 5. Wire the Service
-	identityService := identity.NewService(identityStore, hasher, passwordPolicy)
-
-	// Ready to use!
+auth, err := egauth.New(egauth.Config[struct{}]{
+	PublicOrigin: "http://localhost:8080",
+	Proxy:        egauth.DirectClients(),
+	Storage:      memstore.New(k),
+	KEK:          k,
+	Sessions:     egauth.JWT(egauth.StaticKeys(signer)),
+	Transport:    egauth.Bearer,
+	Admin:        egauth.RoleAdmin("admin"),
+	Email:        mail,
+	Pages:        egauth.Pages{Login: "/login", AfterLogin: "/", ConfirmRegistration: "/confirm", PasswordReset: "/reset", SecurityRevert: "/revert"},
+	Modules:      egauth.Modules{Password: &egauth.PasswordModule{}},
+})
+if err != nil {
+	fmt.Println("new:", err)
+	return
 }
+defer func() { _ = auth.Close() }()
+
+h, err := auth.Routes().
+	Protect("GET /me", func(w http.ResponseWriter, _ *http.Request, _ egauth.Principal[struct{}]) {
+		_, _ = fmt.Fprintln(w, "hello")
+	}).
+	Build()
+if err != nil {
+	fmt.Println("routes:", err)
+	return
+}
+
+call := func(method, path, token string, body map[string]any, hdr ...string) (*httptest.ResponseRecorder, map[string]any) {
+	var payload strings.Reader
+	if body != nil {
+		raw, _ := json.Marshal(body)
+		payload = *strings.NewReader(string(raw))
+	}
+	req := httptest.NewRequest(method, "http://localhost:8080"+path, &payload)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	req.Header.Set("Origin", "http://localhost:8080")
+	req.Header.Set(egauth.HeaderTransport, "bearer")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for i := 0; i+1 < len(hdr); i += 2 {
+		req.Header.Set(hdr[i], hdr[i+1])
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	var out map[string]any
+	_ = json.Unmarshal(rec.Body.Bytes(), &out)
+	return rec, out
+}
+
+const email, password = "ada@example.com", "tapir-granite-velvet-orbit-29"
+rec, begin := call("POST", "/auth"+egauth.PathRegister, "", map[string]any{egauth.FieldIdentifier: email, egauth.FieldPassword: password})
+fmt.Println("register:", rec.Code)
+
+link, _ := url.Parse(<-mail.links)
+bind, _ := begin[egauth.FieldBind].(string)
+rec, _ = call("POST", "/auth"+egauth.PathRegisterConfirm, "", map[string]any{egauth.FieldToken: link.Query().Get(egauth.FieldToken), egauth.FieldBind: bind})
+fmt.Println("confirm:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathLogin, "", map[string]any{egauth.FieldIdentifier: email, egauth.FieldPassword: password})
+access, refresh := rec.Header().Get("X-Egauth-Access-Token"), rec.Header().Get("X-Egauth-Refresh-Token")
+fmt.Println("login:", rec.Code)
+
+rec, _ = call("GET", "/me", access, nil)
+fmt.Println("me:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathRefresh, "", nil, "X-Egauth-Refresh-Token", refresh)
+access, refresh = rec.Header().Get("X-Egauth-Access-Token"), rec.Header().Get("X-Egauth-Refresh-Token")
+fmt.Println("refresh:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathLogout, access, nil)
+fmt.Println("logout:", rec.Code)
+
+rec, _ = call("POST", "/auth"+egauth.PathRefresh, "", nil, "X-Egauth-Refresh-Token", refresh)
+fmt.Println("refresh after logout:", rec.Code)
+// Output:
+// register: 202
+// confirm: 200
+// login: 200
+// me: 200
+// refresh: 200
+// logout: 200
+// refresh after logout: 401
 ```
 
-## 3. Emitting Audit Events
+What to notice:
 
-`egauth` operates silently by default, but it can emit critical security events (failed logins, lockouts) without logging sensitive data. Implement an `event.Sink` to capture these:
+- `PublicOrigin` is the one source of truth for cookies, redirects, CSRF and the passkey relying-party ID.
+- `Storage`, `KEK` and `Sessions` are the three pieces of infrastructure. Everything else has a default.
+- `Modules` enables features. At least one primary module is required.
+- `Email` is a deliverer with one method per message kind.
+- `Routes().Build()` returns the single handler to serve.
 
+## 3. Production storage
+
+<!-- embed: adapters/pgx/pgxstore/example_test.go#ExampleNew_postgres -->
 ```go
-import (
-	"log/slog"
+ctx := context.Background()
+pool, err := pgxpool.New(ctx, os.Getenv("DATABASE_URL"))
+if err != nil {
+	log.Fatal(err)
+}
+defer pool.Close()
 
-	"github.com/JLugagne/egauth/event"
-)
+if err := pgxstore.Migrate(ctx, pool); err != nil {
+	log.Fatal(err)
+}
+storage, err := pgxstore.New(ctx, pool)
+if err != nil {
+	log.Fatal(err)
+}
 
-// ... inside main ...
-loggerSink := event.NewSlogSink(slog.Default())
-identityService := identity.NewService(
-    identityStore, hasher, passwordPolicy,
-    identity.WithEventSink(loggerSink),
-)
+auth, err := egauth.New(egauth.Config[struct{}]{
+	PublicOrigin: "https://auth.example.com",
+	Proxy:        egauth.DirectClients(),
+	Storage:      storage,
+	KEK:          kekFromEnv("EGAUTH_KEK"),
+	Sessions:     egauth.JWT(egauth.StaticKeys(signerFromEnv("EGAUTH_SIGNING_SEED"))),
+	Admin:        egauth.RoleAdmin("admin"),
+	Email:        mailer{},
+	Pages:        egauth.Pages{Login: "/login", AfterLogin: "/", ConfirmRegistration: "/confirm", PasswordReset: "/reset", SecurityRevert: "/revert"},
+	Modules:      egauth.Modules{Password: &egauth.PasswordModule{}},
+})
+if err != nil {
+	log.Fatal(err)
+}
+defer func() { _ = auth.Close() }()
 ```
+
+`pgxstore.Migrate` is expand-only and idempotent. `pgxstore.New` only reads, and fails when a migration is missing.
+
+## 4. Next
+
+Read [Routes and Gates](../routes-and-gates/) to declare your own routes.

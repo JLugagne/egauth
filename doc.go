@@ -1,68 +1,59 @@
-// Package egauth is a composable authentication toolkit for Go: a set of independent modules you
-// import à la carte and wire together yourself, in the style of the standard library's
-// database/sql — rather than a framework that owns your HTTP router, your database access, or your
-// conventions. The root package itself is deliberately tiny: it exports only Actor, the explicit
-// authenticated-principal value passed to handlers (never smuggled through context.Context). All
-// behavior lives in the sub-packages below.
+// Package egauth is a misuse-resistant authentication library for Go. A deployment is one validated
+// composition object, built by New from one Config, and the application's own routes are declared
+// through Auth.Routes, a deny-by-default builder. No handler, cookie, issuer, limiter or gate is
+// wired by hand, so no two of them can disagree.
 //
-// # Modules
+// # Composition
 //
-//	identity   Accounts & credentials: register, login (Authenticate), password reset, email
-//	           verification, magic-link login, change-password / change-email, phone verification,
-//	           an independent recovery channel, account deletion, and OAuth identity linking.
-//	tokens     Stateless JWT access tokens + single-use refresh tokens with rotation and theft
-//	           detection, plus API keys. Reference implementation in tokens/jwt.
-//	sessions   Server-side, revocable sessions with idle-timeout (Touch) and fixation defense
-//	           (Rotate).
-//	passwords  Hashing / policy / breach-check seams plus references: passwords/argon2,
-//	           passwords/policy, passwords/breach/hibp, passwords/breach/offline.
-//	mfa        TOTP (RFC 6238) with recovery codes. (SMS is intentionally excluded as a factor.)
-//	otp        One-time codes (email/SMS), with enumeration-safe HTTP handlers.
-//	passkey    WebAuthn / passkeys, including discoverable (usernameless) login.
-//	oauth      OAuth2 / OIDC with PKCE-S256 and id_token/nonce/JWKS; ready-made providers
-//	           (Google, GitHub, Microsoft, Apple, Okta, Auth0, ...) live in oauth/providers.
-//	ratelimit  Pluggable rate-limiting Limiter + token-bucket reference + middleware.
-//	event      Dependency-free security-event Sink seam (audit logging, slog adapter).
-//	health     Optional Store Ping/readiness seam.
+// New checks the whole configuration at once and returns every problem joined: required fields,
+// bounds, module dependencies, origins, store durability, the key-encryption key against existing
+// data, the limiter, and any v0.16 secret that has not been upgraded. It never answers "misconfigured"
+// at request time. The returned Auth owns every policy object, store handle and background worker
+// until Close.
 //
-// # Composable by design
+// Config.Modules enables features: Password, MagicLink, LoginCode, Passkey, OAuth, External, MFA,
+// Verification, SelfDelete and APIKeys. A nil module is off, and at least one primary module is
+// required. Config.Storage comes from memstore.New for tests and development, or from
+// pgxstore.New in the adapters/pgx module for production.
 //
-// There is no top-level constructor that bundles everything, and that is intentional: each module
-// has its own Service interface, its own Store contract (with in-memory and pgx backends behind a
-// shared cross-backend conformance suite), and functional-option dependency injection. You compose
-// exactly the stack you need. A typical password-login deployment wires identity (verifies
-// credentials and manages the account lifecycle) with tokens (issues the access/refresh pair) —
-// identity never issues tokens or sessions itself, so you pick the token backend that fits.
+// # Routes
 //
-//	idStore := identitymem.NewStore()                          // or adapters/pgx/identity.NewStore(pool)
-//	idSvc := identity.NewService(idStore, argon2.NewHasher(), policy.NewDefaultPolicy())
+// Auth.Routes returns a builder. Protect serves an established human session, Optional serves
+// everyone and presents a caller that fails a Protect gate as anonymous, ProtectAPI serves API keys
+// of declared kinds, and Public serves everyone. Build returns the handler to serve at the server
+// root: it mounts the auth endpoints under Config.BasePath and answers 404 to every request that is
+// not declared. Handlers receive a Principal as an argument; it is never read from context.
 //
-//	tkStore := basic.NewMemoryStore()                          // tokens/basic: the no-custom-claims path
-//	issuer := basic.NewIssuer(basic.Config{                    // thin tokens/jwt facade, zero [struct{}]
-//		Store: tkStore, Issuer: "example-app", SecretKey: secret,
-//		AccessTTL: 15 * time.Minute, RefreshTTL: 720 * time.Hour,
-//	})
+// # Sessions
 //
-//	user, _ := idSvc.Register(ctx, tenantID, email, password)
-//	pair, _ := issuer.IssueTokenPair(ctx, basic.Claims{Subject: user.ID, TenantID: tenantID})
+// What a login proved is minted once, sealed, stored on every artefact and replayed: later steps
+// can add a factor, never re-derive one. Multi-factor enrollment is read from stored state, so
+// configuration cannot lower the floor. Revocation is derived from a per-subject security epoch,
+// which the stores bump atomically with every security mutation.
 //
-// The complete, runnable login + refresh wiring (including the HTTP handlers) lives in the
-// identity package's example tests — see Example, ExampleNewSingleTenant and ExampleLoginHandler.
+// # Opting out
 //
-// # Multi-tenancy
+// Every weakening of a default lives in InsecureOptOuts, needs a written reason, and is listed by
+// Auth.Posture. Nothing else loosens a gate.
 //
-// Multi-tenancy is explicit and pervasive: every Store and Service operation takes a tenantID
-// string. The empty string is the valid single-tenant default partition, so a single-tenant
-// application simply passes "" — or wraps a Service in that module's SingleTenant facade
-// (e.g. identity.NewSingleTenant) to drop the argument from every call.
+// # Packages
+//
+//	memstore    in-memory Storage for tests and single-instance development
+//	kek         key-encryption keys that seal secrets at rest, with mandatory associated data
+//	signing     JWT signers and verifiers, and JWKS encoding
+//	principal   the Subject, Caller, TenantID and Factor values shared with applications
+//	event       the security-event Sink seam (slog and OpenTelemetry adapters)
+//	passwords   password hashing, policy and breach-check seams, with Argon2id references
+//	federation  identity-provider specs, with 12 built-in providers in federation/providers
+//	store       store contracts, each with memory and pgx implementations and a contract suite
+//	egauthtest  test doubles: clock, mailbox, identity provider, principals
+//	webauthntest a software WebAuthn authenticator for passkey tests
 //
 // # Security and stability
 //
-// egauth is security-literate by default (Argon2id, enumeration-resistant auth paths, refresh
-// rotation with theft detection, alg-pinned JWTs, secure-by-default cookies, pre-auth body caps).
-// The full threat model is in SECURITY.md; the module overview and a copy-pasteable quickstart are
-// in README.md. The API is pre-1.0 and still settling; pin a commit or tag in go.mod for
-// reproducible builds (see the Stability section of README.md).
+// The threat model, the secret-handling model and the consumer responsibilities are in SECURITY.md;
+// the quick start is in README.md. The API is pre-1.0 and still settling; pin a tag in go.mod for
+// reproducible builds.
 //
 // Audit status: egauth's security review to date is an AI-driven audit only; it has not had an
 // independent third-party human security audit, and that risk is accepted for v1.0 — pin a

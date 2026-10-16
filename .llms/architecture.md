@@ -1,226 +1,51 @@
-# architecture — design model & conventions
+# Architecture
 
-module: `github.com/JLugagne/egauth` (Go 1.26+)
-root package exports only `Actor` (see [infra.md](infra.md)). All behavior lives in sub-packages.
+egauth v0.17 is one composition object plus a route builder. Read this first.
 
-## Go version support policy
+## Shape
 
-- **For v1.x and later**: The `go.mod` `go` directive is **pinned for the life of the major version**.
-  v1.0 through v1.x will all use `go 1.26` as the minimum toolchain. Bumping to a newer major Go
-  release is deferred to v2, ensuring maximum build compatibility within v1. This is a stability
-  guarantee for consumers building against v1.x.
-  
-- **Pre-v1 releases**: egauth targets the newest major Go release as its minimum toolchain and bumps
-  deliberately with each new major Go version. This allows pre-v1 development to track the cutting
-  edge. If you need support for an older Go version, pin an earlier egauth release.
+- `egauth.New(cfg)` validates an `egauth.Config[C]` and returns an `egauth.Auth[C]`. `C` is the type of the application's custom claims; use `struct{}` for none.
+- `Auth` owns every policy object, store handle and background worker until `Auth.Close`. It is safe for concurrent use. One of each, never exported.
+- `Auth.Routes()` returns the deny-by-default route builder. `Build` returns the one `http.Handler` to serve at the server root.
+- Handlers receive an `egauth.Principal` as an argument. There is no context accessor for it.
+- Application code reaches administration through facades that check authorization themselves: `Auth.Accounts`, `Auth.Tenants`, `Auth.APIKeys`, and `Auth.System` for background work.
 
-## Model: à-la-carte, not a framework
+## Packages
 
-egauth is a set of independent modules in the style of `database/sql`: import the ones you need,
-wire them with dependency injection. egauth NEVER owns your HTTP router, DB access, mail/SMS
-transport, or conventions. There is no top-level constructor that bundles everything — that is
-deliberate. You compose exactly the stack you need.
+| Package | Role |
+|---|---|
+| `egauth` | `New`, `Config`, `Auth`, `Routes`, `Principal`, facades, delivery messages, opt-outs |
+| `memstore` | in-memory `egauth.Storage` for tests and development |
+| `adapters/pgx/pgxstore` | PostgreSQL `egauth.Storage`, `Migrate` (separate module) |
+| `adapters/otel` | OpenTelemetry event sink (separate module) |
+| `kek` | key-encryption keys; associated data is mandatory on every seal and open |
+| `signing` | `signing.Signer`, `signing.Verifier`, JWKS encoding and parsing |
+| `principal` | `principal.Subject`, `principal.Caller`, `principal.TenantID`, `principal.Factor`, `principal.SessionAttrs` |
+| `event` | `event.Sink`, `event.Event`, event types, slog sink |
+| `passwords` | hashing, policy and breach-check seams; references in `passwords/argon2`, `passwords/policy`, `passwords/breach/hibp` |
+| `federation` | `federation.Provider` specs; built-ins in `federation/providers` |
+| `store/*` | store contracts (identity, ceremony, deployment, limiter, tokens, sessions, mfa, passkey, federation, keys) with `memory` implementations and `storetest` suites |
+| `egauthtest`, `webauthntest` | test doubles |
 
-## The Service / Store split (every module)
+Everything under `internal/` is unreachable from applications and adapters.
 
-Each module follows the same shape:
+## Why misuse is hard
 
-- **`Service` interface** — the business logic (e.g. `identity.Service`, `sessions.Service`).
-  Constructed with `NewService(store, deps..., opts...)`. Functional-options DI (`WithX(...)`).
-- **`Store` contract** — persistence interface the Service depends on. Two interchangeable impls:
-  - `<module>/memory` — zero-dependency, in core module, for tests / single-process apps.
-  - `adapters/pgx/<module>` — PostgreSQL via jackc/pgx, in a **separate module** (see [storage-pgx.md](storage-pgx.md)).
-- **`SingleTenant` facade** — `NewSingleTenant(svc)` wraps a Service and hard-wires `tenantID=""`,
-  dropping the tenant argument from every call. Exists on identity, sessions, mfa, otp, passkey,
-  tokens/jwt. `.Service()` is the escape hatch back to the multi-tenant Service.
-- **HTTP handlers** — à-la-carte `http.HandlerFunc` factories (e.g. `identity.LoginHandler(...)`)
-  you mount on your own mux. egauth imposes no router. Form-encoded bodies, configurable via
-  `HandlerOption`s. Most are POST-only (405 otherwise) with a pre-auth body cap (default 4 KiB).
+1. Cookies, issuers, sinks, limiters and gates are not parameters of anything an application calls.
+2. `New` checks the whole wiring and returns all problems joined. See `config.md`.
+3. Routes are declared through four verbs, and every undeclared request is 404. See `routes.md`.
+4. A login produces sealed `principal.SessionAttrs` once; renewal only strengthens it. See `sessions.md`.
+5. Opt-outs are fields of `egauth.InsecureOptOuts` with a reason, listed by `Auth.Posture`.
+6. CI guards (G1 to G29, see CONTRIBUTING.md) reject changes that reopen these.
 
-`tokens` is generic over a custom-claims type `C` (`Issuer[C]`, `Claims[C]`, ...). The `tokens/basic`
-facade specializes everything to `C=struct{}` so the common no-custom-claims case never spells the
-type argument. See [tokens.md](tokens.md).
+## Layering
 
-## Multi-tenancy (explicit & pervasive)
+Contracts (`store/*`, `kek`, `signing`, `principal`, `event`) import nothing above them. `internal/*` services sit on the contracts. The root package composes services. Adapters implement contracts and never import core `internal/`.
 
-Every tenant-scoped Store and Service method takes an explicit `tenantID string`. Empty string `""`
-is the valid **single-tenant default partition** — passing it explicitly keeps the tenant boundary
-visible at every call site (the defense against cross-tenant access / IDOR). Single-tenant apps use
-a `SingleTenant` facade to drop the argument. `ErrTenantMismatch` guards record/argument mismatch.
+## Multi-tenancy
 
-## Conformance test suites (for Store/Service implementers)
+`egauth.Config.Tenancy` is `egauth.SingleTenant()`, `egauth.TenantBySubdomain()` (the public origin holds one `{tenant}` host label) or `egauth.TenantFromRequest(resolver)`. A request whose tenant cannot be resolved is 401, with no fallback. Credentials are bound to their tenant: a handle sealed for tenant A is refused under tenant B.
 
-Cross-backend behavior is locked by shared suites — memory and pgx both run them, and external
-implementers MUST run them on upgrade (Store interfaces are monolithic for v0.x and may gain
-methods in minor releases):
+## Errors
 
-- `identity/storetest`, `identity/servicetest`
-- `sessions/storetest`, `mfa/storetest`, `otp/storetest`, `passkey/storetest`
-- `tokens/issuertest`
-- `passwords/hashertest`
-
-### Cross-flow login invariants
-
-`internal/loginflowtest` is the conformance suite for login entry points, not for Store/Service
-implementations. It enumerates every exported login flow (identity password and magic link, the
-`authflow` engine and the identity handler wired with `WithAuthFlow`, the OAuth callback with and
-without `WithAuthFlow`, MFA step-up, OTP verify, passkey login and discoverable login, and the
-`webapp` preset) and runs the same post-authentication invariant assertions against each: disabled
-and deleted accounts are refused, tenant binding fails closed, `MustChangePassword` propagates and
-survives a caller trying to clear it, a configured MFA gate withholds the full renewable pair,
-claims are rebuilt at issuance, issuance is audited, and no rejection mints a session. Flows that
-genuinely cannot exercise an invariant record the reason in the table and the suite skips it
-visibly.
-
-A new or renamed login constructor must be added to the table (or recorded with a reason in
-`nonFlowConstructors`), or `TestAllLoginFlowsRegistered` fails. Treat a red suite as a release
-blocker: it means a flow stopped applying one of the shared controls.
-
-## Cross-cutting seams (bring-your-own)
-
-- `identity.Mailer` / `identity.SMSSender` — delivery; egauth never sends mail/SMS itself.
-- `event.Sink` — security/audit events; nil = no-op. `event.NewSlogSink` for the slog case.
-- `ratelimit.Limiter` — throttling; `TokenBucket` reference + middleware.
-- `health.Pinger` — readiness; pgx stores implement it.
-- `janitor.Start(ctx, interval, fn)` — periodic eviction loop for in-memory stores.
-- `passwords.Hasher` / `passwords.Policy` / `passwords.BreachChecker` — pluggable; argon2/policy/hibp references.
-- `origin` — exported same-origin / CSRF primitive (`origin.Allowed`, `origin.Middleware`) so apps can gate their own cookie-authenticated routes with the exact check the built-in handlers apply. See [origin.md](origin.md).
-
-See [infra.md](infra.md), [passwords.md](passwords.md).
-
-## Composition graph (who pairs with whom)
-
-- **Credential verification** = `identity` (manages accounts; does NOT issue tokens/sessions).
-- **Interactive session issuance** = `issuance` (one chokepoint). Every login path — `identity` password/register/magic-link, `oauth` callback, `authflow` engine minter, `mfa` step-up (and the app-owned passkey/OTP callbacks, which can reuse it) — mints through `issuance.Pipeline.Issue`, which re-loads the authoritative account state (rejecting disabled/deleted), binds the tenant, OR-s `MustChangePassword` from authoritative state, applies the MFA gate once, and emits one uniform `session.issued` event. Handlers never call `tokens.Issuer.IssueTokenPair` for a login; `internal/securitydefaults` guards that mechanically. The pipeline depends only on `tokens` (plus `event`/`uuid`), and `identity.SessionStateReader` is the reference resolver.
-- **Issue auth state** = `tokens` (stateless JWT + refresh) OR `sessions` (server-side, revocable). Pick one.
-- **Social login** = `oauth` (+ `oauth/providers`) → `identity.LinkOrCreateIdentity` (JIT) → tokens/sessions.
-- **Second factor** = `mfa` (TOTP), `passkey` (WebAuthn, can also be a primary/passwordless factor),
-  `otp` (email/SMS one-time codes, also usable as passwordless primary).
-- **Step-up** = `tokens` carries `AuthTime`/`AMR`; `Claims.FreshAuth(maxAge)` gates sensitive ops.
-- **Credential enrollment** = *fail-closed*. `passkey` registration Begin/Finish and `mfa` Enroll/Confirm refuse `403 assurance_required` unless a gate (canonical: `tokens.DenyInterim`) or the explicit insecure opt-out is wired; `identity`'s email-change/phone/recovery-email enrollment defaults to `tokens.DenyInterim`. `mfa.StepUpHandler` refuses `500 misconfigured` without an authoritative `mfa.WithSessionStateResolver` (or the explicit echo opt-out), so the post-factor pair is never minted from the interim token's subject alone.
-- **Credential-rotation fan-out** = `identity.WithAccountErasers(...)` runs cross-module revocation hooks on `ResetPassword`, `ChangePassword`, `SetTemporaryPassword` and `DeleteAccount` (before soft-delete), alongside a recovery-channel clear and a per-user pending-verification-token purge. Register every credential class you use — at minimum `tokens.NewAccountRevoker(store)` and `passkey.Service.AccountEraser()`; without them an attacker-planted recovery channel or passkey survives the victim's password reset. Also see the enrollment gates below.
-- **Account disable fan-out** = `identity.WithDisableRevokers(...)` runs cross-module revocation hooks on `DisableUser` to kill a suspended user's refresh tokens, API keys (`tokens.NewAccountRevoker`) and sessions — re-establishable credentials only, leaving MFA/passkey enrollment intact for `EnableUser`.
-- **Unified revocation bus** = `revocation.Bus` carries account/tenant/session/family revocations to subscribers. `tokens.NewRevocationTracker(bus)` subscribes to account-scoped events and lets `tokens.WithAccessTokenRevocation(checker)` reject already-issued access JWTs before their `AccessTTL`, so one event can kill the refresh family and the live access tokens together. The reference `revocation.MemBus` fans out synchronously, joins handler errors, and recovers a panicking subscriber (logged, reported in the joined error) so one bad handler cannot skip the revocation of every later subscriber. See [tokens.md](tokens.md).
-- **Forced password change (temporary credentials)** = `identity.AdminCreateUser` / `identity.SetTemporaryPassword`
-  flag a credential for a forced change at next login; the flagged user receives a full, renewable pair carrying
-  `tokens.Claims.MustChangePassword=true`. The `issuance` pipeline computes the flag from the authoritative
-  credential state and OR-s the caller's signal, so no login path can issue an unflagged session. The flag is
-  recorded on the refresh-token family and `Rotate` replays it onto every silent refresh, so
-  `tokens.WithPasswordChangeGate` keeps soft-redirecting every protected route to the reset page until the password
-  is changed — a user cannot escape by waiting for the access token to expire. The credential stays valid — never a
-  lockout. egauth does NOT do age-based/periodic rotation (NIST SP 800-63B discourages fixed-interval expiry). See
-  [tokens.md](tokens.md) for the gate middleware and SECURITY.md for the full policy description.
-
-See [recipes.md](recipes.md) for concrete wiring of each stack.
-
-## Storage backends
-
-- core module ships every `<module>/memory` store + `ratelimit.TokenBucket` (in-memory and
-  bounded by default; explicit unbounded opt-out for janitor-evicted deployments — see below).
-- `adapters/pgx` is a separate go.mod so core consumers never pull pgx/testcontainers/Docker.
-  `Migrate(ctx, pool)` once at startup (forward-only, versioned, idempotent). [storage-pgx.md](storage-pgx.md).
-
-### In-memory store growth control
-
-Every in-process store a consumer can grow without authenticating is **bounded by default**.
-The unbounded model (self-managed eviction via `janitor`) is an explicit, clearly named opt-out:
-
-| Package | Bounded default | Unbounded opt-out | Cap policy |
-|---|---|---|---|
-| `sessions/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first; at the cap, live sessions are never evicted — `CreateSession` fails with `ErrStoreCapacityExceeded` (or `WithEvictLiveOnFull(true)` opts into soonest-expiring) |
-| `otp/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | expired first, then soonest-expiring |
-| `identity/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | pending verification tokens: expired first, then soonest-expiring; users/identities are durable |
-| `mfa/memory` | `NewStore()`, `NewBoundedStore(n)` | `NewUnboundedStore()` | recovery-attempt records: stalest first, but never one under an active lockout (the cap may be exceeded while every record is locked); TOTP enrollments/recovery codes are durable |
-| `tokens/memory` | `NewStore[C]()`, `NewBoundedStore[C](n)` | `NewUnboundedStore[C]()` | refresh-token records: expired first, then soonest-expiring; API keys are durable |
-| `ratelimit` | `NewTokenBucket(…)` | `NewTokenBucket(…, WithMaxKeys(n))` | evicts most-refilled (least-pressure) bucket |
-
-Durable per-account records (users, identities, MFA enrollments, recovery codes, API keys) are
-never silently evicted; sized too small, the caps bound memory rather than drop credentials.
-`DefaultMaxEntries` is 100,000 for the memory stores and `DefaultMaxKeys` is 100,000 for
-`TokenBucket` — large enough that ordinary use never reaches them. Both models are safe for
-concurrent use; the bounded defaults require no external scheduler and are recommended for
-Internet-facing deployments where key cardinality is unbounded.
-
-## Module placement decisions (v1 API freeze)
-
-### oauth/providers — keep in core module (decided 2026-06-15)
-
-The 12 built-in OAuth providers (`apple`, `auth0`, `cognito`, `discord`, `facebook`, `github`,
-`gitlab`, `google`, `keycloak`, `linkedin`, `microsoft`, `okta`) live in `oauth/providers` inside
-the core `github.com/JLugagne/egauth` module, not in a separate module.
-
-Rationale:
-- Provider constructors are already stable and in active use (reference app, docs examples).
-- Moving to a separate module before v1 would be a breaking import-path change for any existing
-  consumer, which is worse than the status quo.
-- Provider churn in v1.x can be absorbed by additive changes (new constructors, not changed ones).
-  A provider signature never needs to change — only new providers are added.
-- A separate module for providers would add go.mod/go.sum overhead with no real isolation benefit:
-  providers import `oauth` core anyway, so the dependency graph is unchanged.
-
-Trade-off accepted: `oauth/providers` is part of the v1 public API surface and is frozen under
-SemVer. Breaking a provider constructor requires a v2. This is the accepted cost of keeping the
-DX simple.
-
-### passkey/passkeytest — test-helper package in core module (decided 2026-06-15)
-
-`passkey/passkeytest` (package `passkeytest`) exports `SoftAuthenticator`, a minimal software
-WebAuthn authenticator for integration testing. It lives in the core module rather than a separate
-module because:
-- It has no additional dependencies beyond what `passkey` itself imports.
-- It mirrors the established pattern of `identity/servicetest`, `identity/storetest`, `mfa/storetest`,
-  etc., which all live in the core module.
-- A separate test-helper module would add friction with no benefit.
-
-## Principal / Actor classification (M8)
-
-Every authenticated request in egauth is represented by an `egauth.Actor`. The `Actor.Kind`
-field (`egauth.PrincipalKind`) lets the application know — without inspecting token internals —
-whether the request comes from a human or a machine:
-
-| Kind | Value | `IsHuman()` | `IsMachine()` | Subject |
-|---|---|---|---|---|
-| `User` | `"user"` | true | false | `Actor.UserID` (the account UUID) |
-| `PAT` | `"pat"` | true | false | `Actor.UserID` (the owning user) + `Actor.KeyID` (the key UUID) |
-| `Service` | `"service"` | false | true | `Actor.KeyID` (the key's own UUID; `UserID` is zero) |
-
-Zero-value `Kind` (`""`) is treated as `User` by both helpers, so a zero-value `Actor` (e.g. in
-tests that do not set `Kind`) is always safe.
-
-`Actor.Scopes` carries the permission scopes verbatim from the token. egauth never interprets or
-enforces scopes — that is deliberately left to application middleware (e.g.
-`tokens.WithRequiredScopes`). See [infra.md](infra.md) for the full `Actor` signature and API key
-type constants.
-
-**Minting API keys.** `tokens.Issuer.IssueAPIKey(ctx, prefix, keyType, createdBy, claims)` issues
-an opaque API key. `keyType` is `tokens.KeyTypePAT` or `tokens.KeyTypeService`; `createdBy` is the
-UUID of the human user performing the action (recorded in the `api_key.created` audit event). The
-resulting `Actor.Kind` at verification time mirrors the stored `keyType`.
-
-## Security posture (summary)
-
-Secure-by-default: Argon2id hashing, enumeration-safe auth paths (uniform responses + decoy hashing),
-brute-force lockout, single-use selector/verifier tokens, refresh-token rotation with family-based
-theft detection, per-kid alg-pinned JWTs (symmetric HS256 or asymmetric RS256/ES256/EdDSA; reject `none`/alg-confusion), SHA-256-only storage of
-refresh/API/session/OTP secrets, secure-by-default cookies, pre-auth body caps against hashing-DoS,
-secret redaction on `fmt`/`slog`, SSRF guard on outbound OAuth/OIDC calls.
-Per-handler and per-constructor defaults with their explicit opt-outs: [secure-defaults-matrix.md](secure-defaults-matrix.md)
-(mechanically guarded by `internal/securitydefaults`).
-
-**Forced-password-change for temporary credentials.** `identity.AdminCreateUser` and
-`identity.SetTemporaryPassword` provision a credential flagged for a forced change at next login
-(admin-created accounts, admin-issued one-time passwords). A flagged login issues a full, renewable
-pair carrying `tokens.Claims.MustChangePassword=true`; the flag is recorded on the refresh-token
-family and `Rotate` replays it onto every silent refresh (overriding the `ClaimsProvider`), so the
-flag cannot be dropped by refreshing. `tokens.WithPasswordChangeGate` enforces the gate generically
-in the `RequireAuth` middleware. Forcing a change on a user's *existing* sessions is an explicit
-admin action (revoke their token families, e.g. via `SetTemporaryPassword`'s erasers). egauth
-deliberately does NOT force periodic, age-based rotation (NIST SP 800-63B discourages fixed-interval
-expiry). Zero behavior change unless a credential is explicitly flagged.
-
-Consumer responsibilities (NOT provided by egauth): CSRF tokens (a strict same-origin check is
-on by default on every handler family, and `origin.Middleware` exposes the same check for your
-own routes), rate-limit policy, mail/SMS transport, metrics/tracing, request idempotency.
-
-Full threat model + explicit trade-offs: `SECURITY.md`.
-NOTE: security review to date is an AI-driven audit, not an independent third-party human audit (pre-1.0).
+`egauth.New` returns `egauth.ConfigError` values joined. Facades return `egauth.ErrForbidden`, `egauth.ErrTenantMismatch`, `egauth.ErrReauthRequired`, `egauth.ErrAPIKeyCaller` and `store.ErrNotFound` for the cases an application maps to statuses. Endpoints answer JSON `{"error": "<code>"}`.

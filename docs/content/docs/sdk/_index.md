@@ -5,15 +5,16 @@ weight: 20
 
 # `egauth` Developer Manual
 
-Welcome to the `egauth` Developer Manual. `egauth` is a completely modular, composable, and unopinionated authentication SDK for Go. It is designed to act as the authentication backbone for your applications, providing you with high-security primitives (NIST SP 800-63B compliant) while leaving the architectural decisions—like HTTP routing, API design, and DTOs—up to you.
+This manual shows how to embed `egauth` in a Go application. The pages build on one another.
 
-## Modules Overview
-- **Getting Started**: Initializing stores and basic wiring.
-- **Identity & Passwords**: Managing users, registration, authentication, and secure password hashing.
-- **Tokens & HTTP**: Issuing stateless JWTs, managing stateful refresh token families, and protecting HTTP handlers.
-- **Sessions**: Managing stateful server-side sessions and idle timeouts.
-- **OAuth & OIDC**: Social logins (Google, GitHub) and OIDC integration.
-- **MFA & Passkeys**: Implementing Multi-Factor Authentication via TOTP and WebAuthn (biometrics/hardware keys).
-- **Tenancy**: Data isolation across all operations.
-- **Delivery seams**: `identity.Mailer` and `identity.SMSSender` are bring-your-own-delivery callbacks — wire your SMTP/SMS provider; egauth never sends mail or SMS itself. **Events**: pluggable audit-event `event.Sink` seam.
-- **Security Hardening**: The checklist of opt-in controls — cost ceilings, absolute timeouts, UV enforcement, SSRF defence, and rate limiting — to set before production.
+## Pages
+
+- [Getting Started](getting-started/): the minimal service and its production storage.
+- [Routes and Gates](routes-and-gates/): declaring routes and what each kind enforces.
+- [Identity and Passwords](identity-and-passwords/): registration, login, reset and password policy.
+- [Sessions](sessions/): backends, transport, renewal and revocation.
+- [Multi-Factor Authentication](mfa/): TOTP, recovery codes and passkeys.
+- [OAuth and Federation](oauth/): providers and account linking.
+- [Tenants](tenants/): tenancy modes and administration.
+- [Security Hardening](security-hardening/): the posture of a production deployment.
+- [Upgrading from v0.16](upgrading/): the cutover.
