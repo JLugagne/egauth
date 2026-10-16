@@ -2,6 +2,8 @@ module github.com/JLugagne/egauth
 
 go 1.26.7
 
+toolchain go1.26.9
+
 // The v0.1.0–v0.2.1 tags predate the public-release security hardening (insecure-by-default
 // passkey, stale go directive, no tokens/basic). They are retracted so `go get` warns about and
 // skips them once a version carrying this block (v0.3.0) is published.
@@ -14,32 +16,21 @@ retract (
 require (
 	github.com/fxamacker/cbor/v2 v2.9.4
 	github.com/go-webauthn/webauthn v0.18.2
-	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/stretchr/testify v1.12.1
 	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.59.0
+	golang.org/x/net v0.60.0
 	golang.org/x/text v0.42.0
 )
 
 require (
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect
 	github.com/go-webauthn/x v0.3.1 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
 	github.com/google/go-tpm v0.9.8 // indirect
-	github.com/jackc/pgpassfile v1.0.0 // indirect
-	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.11.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/tinylib/msgp v1.6.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	golang.org/x/sys v0.48.0 // indirect
 )
-
-// The adapters/pgx sub-module is imported by e2e-security tests. The require pins the
-// newest published adapter release so consumers can resolve it from the module proxy; the
-// replace resolves it from this checkout for development (external consumers ignore
-// replace directives, so the require must always name a real published version).
-require github.com/JLugagne/egauth/adapters/pgx v0.16.0
-
-replace github.com/JLugagne/egauth/adapters/pgx => ./adapters/pgx

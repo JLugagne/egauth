@@ -25,7 +25,9 @@ func newRecorder() (*tracetest.SpanRecorder, *sdktrace.TracerProvider) {
 }
 
 func TestNewSpanSink_ImplementsSink(t *testing.T) {
-	var _ event.Sink = egauthotel.NewSpanSink(nil)
+	if egauthotel.NewSpanSink(nil) == nil {
+		t.Fatal("NewSpanSink returned nil")
+	}
 }
 
 func TestSpanSink_EmitsSpanPerEvent(t *testing.T) {
@@ -194,7 +196,7 @@ func TestNewSink_DropsPIIAndSecretsByDefault(t *testing.T) {
 	}
 	for _, ev := range s.Events() {
 		for _, kv := range ev.Attributes {
-			if strings.Contains(kv.Value.Emit(), "jane@example.com") {
+			if strings.Contains(kv.Value.String(), "jane@example.com") {
 				t.Error("error text leaked into a span event")
 			}
 		}

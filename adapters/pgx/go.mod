@@ -2,17 +2,12 @@ module github.com/JLugagne/egauth/adapters/pgx
 
 go 1.26.7
 
-// The `replace` directive at the bottom of this file resolves the core module
-// (github.com/JLugagne/egauth) from this repo's root, so every go command (build, test, vet, tidy,
-// go work sync) works locally and offline — without reaching the module proxy for the core version,
-// which is unpublished until the maintainer cuts the root tag (and the repo is private until
-// launch). The committed root go.work also lists both modules. The `require` below pins the core
-// version this adapter ships against.
-//
-// At release the maintainer removes the `replace` (keeping the pinned `require`) and re-tidies
-// against the published core tag, for a clean shipped go.mod — see the two-tag dance in
-// RELEASING.md. A replace in a dependency module is ignored by external importers anyway, so even
-// if it shipped it would be harmless to consumers.
+toolchain go1.26.9
+
+// The `replace` below resolves the core module from this repo's root so every go command works
+// offline before the core tag exists. The `require` tracks the VERSION file (enforced by
+// scripts/sync-versions.sh --check). At release the maintainer drops the replace and re-tidies
+// against the published core tag; see RELEASING.md.
 
 require (
 	github.com/google/uuid v1.6.0
@@ -33,13 +28,13 @@ require (
 	github.com/tinylib/msgp v1.6.5 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/net v0.59.0 // indirect
+	golang.org/x/net v0.60.0 // indirect
 )
 
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20260917205352-e937bb47801a // indirect
-	github.com/JLugagne/egauth v0.16.0
+	github.com/JLugagne/egauth v0.17.0-dev
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
@@ -89,3 +84,5 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
+
+replace github.com/JLugagne/egauth => ../..

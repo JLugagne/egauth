@@ -10,12 +10,12 @@ on:
 permissions:
   contents: read
 
-# Multi-module monorepo: the core flagship module (.) and the nested pgx adapter module
-# (./adapters/pgx). The committed go.work resolves the core module from local disk for the adapter
-# jobs, so CI is green before any tag is published. The core jobs run with GOWORK=off to resolve
-# from the root go.mod alone, as external consumers do (no Docker). The root go.mod pins the adapter
-# to a published version and keeps a local replace for development; the packaging job below proves a
-# consumer can resolve that graph through the proxy.
+# Multi-module monorepo: the core module (.), the published adapters (./adapters/pgx,
+# ./adapters/otel) and the unpublished guard module (./tools). Each adapter go.mod replaces the core
+# module with the checkout, so CI is green before any tag is published. The core jobs run with
+# GOWORK=off to resolve from the root go.mod alone, as external consumers do (no Docker). The core
+# module has no dependency on any adapter; the packaging job below proves a consumer can resolve
+# all three published modules offline.
 
 jobs:
   test-core:
@@ -27,9 +27,9 @@ jobs:
     timeout-minutes: 30
     # OS matrix: crypto/timing-sensitive code (Argon2, HMAC, constant-time compares) can behave
     # differently across platforms, so the core suite runs on Linux, macOS and Windows. The Go
-    # version is intentionally NOT a matrix dimension: the module's `go 1.26` directive is the
-    # deliberate minimum (see TASK-035 / the keep-go-1.26 decision), and an older toolchain refuses
-    # to build a `go 1.26` module — so there is no meaningful "prior stable Go" leg to test.
+    # version is intentionally NOT a matrix dimension: setup-go reads the module's `toolchain` line
+    # (which carries the standard-library security fixes), and an older toolchain refuses to build
+    # the module, so there is no meaningful "prior stable Go" leg to test.
     strategy:
       fail-fast: false
       matrix:
@@ -53,21 +53,21 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # The core suite imports the pgx adapter's passkey package but no testcontainers, so it
-        # tests with NO Docker daemon. GOWORK=off (job env) resolves the adapter from the local
-        # replace pinned in the root go.mod.
-        run: go test -race -failfast ./...
+        # The core suite needs no Docker daemon. GOWORK=off (job env) tests the standalone module.
+        # internal/journeytest is excluded: under -race it exceeds the default test timeout and the
+        # journey-short and journey-full jobs already run it.
+        shell: bash
+        run: go test -race -failfast -timeout 30m $(go list ./... | grep -v '/internal/journeytest$')
 
   consumer-smoke:
     name: Packaging — consumer module graph (offline)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # External consumers cannot see this repo's local `replace` directives. This job proves the
-    # root go.mod pins the adapter to a version the proxy can serve: the script warms the module
-    # cache from the public proxy with the repo root's and the adapter's full dependency graphs,
-    # then runs `go list -m all` + `go mod download all` in a throwaway consumer module with only
-    # a local file:// proxy. A cold runner cache is fine; the offline run is still the assertion,
-    # so a pin the proxy cannot serve fails here.
+    # External consumers cannot see this repo's local `replace` directives or go.work. The script
+    # warms the module cache from the public proxy with the dependency graph of every published
+    # module, then runs `go list -m all`, `go mod download all`, `go build ./...` and `go vet` of
+    # one named package per published module in a throwaway consumer module with only a local
+    # file:// proxy. The offline run is the assertion.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -80,6 +80,115 @@ jobs:
 
       - name: Consumer module smoke (warm-up + offline assertion)
         run: bash scripts/consumer-smoke.sh
+
+  versions:
+    name: Version sync (G17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: VERSION against every sibling require, CORE_VERSION and RELEASING.md
+        run: bash scripts/sync-versions.sh --check
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run script tests
+        env:
+          GOWORK: "off"
+        run: go test -count=1 ./scripts/...
+
+  archtest:
+    name: Architecture guards (tools/archtest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'tools/go.mod'
+          cache: true
+          cache-dependency-path: tools/go.sum
+
+      - name: Run guards
+        # -count=1: the guards read repository files the test cache does not track.
+        working-directory: tools
+        env:
+          GOWORK: "off"
+        run: go test -count=1 ./archtest/...
+
+  doclint:
+    name: Doc lint (tools/doclint)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'tools/go.mod'
+          cache: true
+          cache-dependency-path: tools/go.sum
+
+      - name: Run doclint
+        working-directory: tools
+        env:
+          GOWORK: "off"
+        run: go run ./doclint -check
+
+      - name: Run doclint unit tests
+        working-directory: tools
+        env:
+          GOWORK: "off"
+        run: go vet ./... && go test -count=1 ./doclint/...
+
+  journey-short:
+    name: Journey matrix (short)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run the pinned short matrix
+        run: go test -short -timeout 20m ./internal/journeytest/...
+
+  journey-full:
+    name: Journey matrix (full) and G7b
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      GOWORK: "off"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: true
+
+      - name: Run the full matrix, probes and the G7b semantic opt-out guard
+        run: go test -count=1 -timeout 40m ./internal/journeytest/...
 
   test-adapters-pgx:
     name: adapters/pgx — Test & Vet (Docker/testcontainers)
@@ -99,6 +208,11 @@ jobs:
           go-version-file: 'adapters/pgx/go.mod'
           cache: true
 
+      - name: Require a healthy Docker daemon
+        # testcontainers skips, rather than fails, when the provider is unhealthy: fail here so the
+        # G29 legacy upgrade and e2e journeys can never be silently skipped.
+        run: docker info
+
       - name: Verify dependencies
         run: go mod verify
 
@@ -106,73 +220,19 @@ jobs:
         run: go vet ./...
 
       - name: Run tests
-        # The adapter module owns the Docker-dependent pgx conformance/integration tests.
+        # The adapter module owns the Docker-dependent pgx conformance/integration tests, including
+        # adapters/pgx/e2e (journey harness on real Postgres and the G29 legacy upgrade).
         # ubuntu-latest ships the Docker engine, so testcontainers-go works out of the box.
-        # The committed go.work (at the repo root) resolves the core module from local disk.
-        # NOTE: this runs the DEFAULT (untagged) build. The `integration`-tagged real-Postgres
-        # contract suite (adapters/pgx/sessions/integration_test.go) is exercised by the dedicated
-        # test-adapters-pgx-integration job below.
-        run: go test -race -failfast ./...
-
-  test-adapters-pgx-integration:
-    name: adapters/pgx — Integration contract suite (real Postgres service)
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    # Runs the `integration`-tagged sessions.Store contract suite against a REAL Postgres, proving
-    # the pgx store at runtime — not just via the in-memory contract mock. We use a Postgres
-    # SERVICE container and point the suite at it through TEST_DATABASE_URL (the test honours that
-    # env var and skips testcontainers when it is set), so this job needs no Docker-in-Docker.
-    # The build tag keeps this suite out of the default `go test ./...`, so the unit-test jobs stay
-    # DB-free.
-    defaults:
-      run:
-        working-directory: adapters/pgx
-    services:
-      postgres:
-        # Pinned by digest: the mutable tag is recorded here for readability, the digest is the
-        # immutable reference. To update, run `docker pull postgres:16-alpine` then
-        # `docker inspect --format='{{index .RepoDigests 0}}' postgres:16-alpine` and replace the digest.
-        image: postgres:16-alpine@sha256:cf78e76683b9ca8c5733cbbdce6c9262b45b6767934dd0a95e671f9a0fc20685
-        env:
-          POSTGRES_USER: testuser
-          POSTGRES_PASSWORD: testpass
-          POSTGRES_DB: testdb
-        ports:
-          - 5432:5432
-        # Wait until Postgres is accepting connections before the steps run.
-        options: >-
-          --health-cmd "pg_isready -U testuser -d testdb"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-    env:
-      TEST_DATABASE_URL: "postgres://testuser:testpass@localhost:5432/testdb?sslmode=disable"
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'adapters/pgx/go.mod'
-          cache: true
-
-      - name: Run go vet (integration tag)
-        run: go vet -tags=integration ./...
-
-      - name: Run integration contract suite against the Postgres service
-        # The suite applies the embedded migrations to the service DB, then runs the shared
-        # storetest.StoreContractTesting suite plus the explicit FindSessionByHash expiry-boundary
-        # check. -tags=integration is what pulls integration_test.go into the build.
-        run: go test -race -failfast -tags=integration ./sessions/...
+        # The replace directive in adapters/pgx/go.mod resolves the core module from the checkout.
+        run: go test -race -failfast -timeout 30m ./...
 
   test-short:
     name: Docker-less unit tests (go test -short)
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    # Proves the documented Docker-less contributor path: `go test -short ./...` passes in BOTH
-    # modules with no Docker daemon — every testcontainers test skips under -short. We do NOT start
-    # any Docker service in this job, so a regression that makes a unit test depend on Docker fails
+    timeout-minutes: 30
+    # Proves the documented Docker-less contributor path: `go test -short ./...` passes in the core
+    # and pgx modules (otel has its own job) with no Docker daemon: every testcontainers test
+    # skips under -short. We do NOT start any Docker service in this job, so a regression that makes a unit test depend on Docker fails
     # here. (The full pgx conformance suites still run in test-adapters-pgx with Docker.)
     steps:
       - name: Checkout code
@@ -187,7 +247,7 @@ jobs:
       - name: Core — go test -short (no Docker)
         env:
           GOWORK: "off"
-        run: go test -short ./...
+        run: go test -short -timeout 20m ./...
 
       - name: adapters/pgx — go test -short (no Docker; testcontainers tests skip)
         working-directory: adapters/pgx
@@ -199,7 +259,7 @@ jobs:
     timeout-minutes: 10
     # adapters/otel is a separate module (an OpenTelemetry event.Sink) in the go.work workspace that
     # otherwise had no CI coverage. It carries no Docker/testcontainers dependency, so vet + test is
-    # sufficient; it resolves the core module from the workspace.
+    # sufficient; the replace directive in its go.mod resolves the core module from the checkout.
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -207,7 +267,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version-file: 'go.mod'
+          go-version-file: 'adapters/otel/go.mod'
           cache: true
 
       - name: adapters/otel — go vet
@@ -221,11 +281,10 @@ jobs:
   fuzz:
     name: Fuzz (short pass on untrusted-input parsers)
     runs-on: ubuntu-latest
-    # 7 targets x 60s fuzz budget + target compilation; capped well above that.
+    # 4 targets x 60s fuzz budget + target compilation; capped well above that.
     timeout-minutes: 25
-    # The fuzz targets cover the highest-value attack surface of an auth SDK: the parsers fed
-    # attacker-controlled input (Argon2 PHC, JWT decode, OAuth state cookie, authflow flow token,
-    # WebAuthn CBOR/base64). All live in the core module, so GOWORK=off. A short pass per target
+    # The fuzz targets cover the parsers fed attacker-controlled input (Argon2 PHC, sealed-blob
+    # unseal, redirect target parsing). All live in the core module, so GOWORK=off. A short pass per target
     # catches panics (DoS) and mis-parses on every push without a long-running fuzz budget.
     env:
       GOWORK: "off"
@@ -244,18 +303,15 @@ jobs:
           set -euo pipefail
           go test -run='^$' -fuzz=FuzzNeedsRehash                     -fuzztime=60s ./passwords/argon2
           go test -run='^$' -fuzz=FuzzCompare                         -fuzztime=60s ./passwords/argon2
-          go test -run='^$' -fuzz=FuzzUnpackState                     -fuzztime=60s ./oauth
-          go test -run='^$' -fuzz=FuzzDecodeFlowToken                 -fuzztime=60s ./authflow
-          go test -run='^$' -fuzz=FuzzVerifyAccessToken               -fuzztime=60s ./tokens/jwt
-          go test -run='^$' -fuzz=FuzzParseCredentialCreationResponse -fuzztime=60s ./passkey
-          go test -run='^$' -fuzz=FuzzParseCredentialRequestResponse  -fuzztime=60s ./passkey
+          go test -run='^$' -fuzz=FuzzUnseal                          -fuzztime=60s ./internal/core
+          go test -run='^$' -fuzz=FuzzParse                           -fuzztime=60s ./internal/redirect
 
   coverage:
     name: Coverage (core security packages)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Non-gating: produces a coverage profile for the security-critical core packages
-    # (passwords, tokens, oauth, passkey), prints the total to the log, and uploads the profile.
+    # (passwords, core, redirect, sealing, keys), prints the total to the log, and uploads the profile.
     env:
       GOWORK: "off"
     steps:
@@ -271,7 +327,7 @@ jobs:
       - name: Generate coverage profile
         run: |
           go test -covermode=atomic -coverprofile=coverage.out \
-            ./passwords/... ./tokens/... ./oauth/... ./passkey/...
+            ./passwords/... ./internal/core/... ./internal/redirect/... ./internal/sealing/... ./internal/keys/...
           echo "Total coverage:"
           go tool cover -func=coverage.out | tail -1
 
@@ -296,21 +352,11 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: govulncheck — core
-        env:
-          GOWORK: "off"
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-
-      - name: govulncheck — adapters/pgx
-        working-directory: adapters/pgx
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
-
-      - name: govulncheck — adapters/otel
-        working-directory: adapters/otel
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+      - name: govulncheck (pinned in the Makefile)
+        run: make vulncheck
 
   lint:
-    name: Linting (both modules)
+    name: Linting (all modules)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -323,35 +369,5 @@ jobs:
           go-version-file: 'go.mod'
           cache: true
 
-      - name: Run golangci-lint — core
-        # Use go run so golangci-lint is compiled with the same Go version as the project,
-        # bypassing the "lower than targeted Go version" error.
-        env:
-          GOWORK: "off"
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
-
-      - name: Run golangci-lint — adapters/pgx
-        working-directory: adapters/pgx
-        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run --timeout=5m
-
-  docs:
-    name: Docs API Drift
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: 'go.mod'
-          cache: true
-
-      - name: Check doc code samples against the current API
-        # Every egauth-qualified symbol in a ```go fence under docs/, in README.md, and in every
-        # Go package doc comment (incl. the root doc.go) must resolve to a real exported identifier
-        # (via `go doc`), so prose cannot drift from the API without failing CI. doctest resolves
-        # adapters/pgx/* symbols too, which needs the workspace to see the adapter module — the
-        # committed go.work provides it (no GOWORK=off here). See internal/doctest.
-        run: go run ./internal/doctest
+      - name: golangci-lint (pinned in the Makefile; runs the same Go as the project)
+        run: make lint

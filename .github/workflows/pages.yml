@@ -29,15 +29,15 @@ jobs:
     permissions:
       contents: read
     env:
-      HUGO_VERSION: 0.162.1
+      HUGO_VERSION: 0.167.0
     steps:
       - name: Install Hugo CLI
         run: |
           wget -O ${{ runner.temp }}/hugo.deb https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_linux-amd64.deb
-          # Expected SHA256 of hugo_extended_0.162.1_linux-amd64.deb, fetched from the official
+          # Expected SHA256 of hugo_extended_0.167.0_linux-amd64.deb, fetched from the official
           # release checksums file:
-          # https://github.com/gohugoio/hugo/releases/download/v0.162.1/hugo_0.162.1_checksums.txt
-          echo "9678d806aa1382742e7d61a4e96b174560ff81f82ad6e75c1d69b40d85fe4210  hugo.deb" > ${{ runner.temp }}/hugo.sha256
+          # https://github.com/gohugoio/hugo/releases/download/v0.167.0/hugo_0.167.0_checksums.txt
+          echo "2d012c4490248195e2db07e89ce7f76af8bead93233e930bdf3733c53acd3b23  hugo.deb" > ${{ runner.temp }}/hugo.sha256
           cd ${{ runner.temp }}
           sha256sum --check --strict hugo.sha256
           sudo dpkg -i hugo.deb

@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Consumer module smoke test for the published root go.mod.
+# Consumer module smoke test for every published module (core, adapters/pgx, adapters/otel).
 #
-# External consumers resolve github.com/JLugagne/egauth through the module proxy and cannot
-# see the repository's local `replace` directives. This script builds a throwaway consumer
-# module that requires the root module, serves every dependency from the local module cache
-# as a file:// proxy, and asserts that both `go list -m all` and `go mod download all`
-# succeed. It fails if the root go.mod requires a version no proxy can serve (for example a
-# placeholder pseudo-version that only resolves inside the repository's own workspace).
+# External consumers resolve each module through the module proxy and cannot see the repository's
+# `replace` directives or go.work. This script builds a throwaway consumer module that requires all
+# three published modules at CORE_VERSION (the value scripts/sync-versions.sh keeps equal to the
+# VERSION file), maps each module path to its checkout directory, serves every third-party
+# dependency from the local module cache as a file:// proxy, and asserts that `go list -m all`,
+# `go mod download all` and `go build` succeed, and that `go vet` is clean on one package per
+# published module (named explicitly: go vet reports nothing for dependencies of the packages it
+# is given).
 #
-# The script first warms the module cache from the configured public proxy with the full
-# dependency graphs of the repo root and the pinned adapter, then runs the consumer commands
-# with only a local file:// proxy. The offline run is the assertion; the warm-up merely lets
-# the check run on a cold runner instead of requiring a pre-populated module cache. Requires
-# Go >= 1.26.7 and network access to GOPROXY for the warm-up.
+# The script first warms the module cache from the configured public proxy with the dependency
+# graph of every published module; the offline run is the assertion. Requires Go >= 1.26.7 and
+# network access to GOPROXY for the warm-up.
 #
 # Usage: scripts/consumer-smoke.sh [path-to-repo]
 
@@ -21,66 +21,61 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CORE='github.com/JLugagne/egauth'
-ADAPTER='github.com/JLugagne/egauth/adapters/pgx'
-CORE_VERSION='v0.16.0'
+PGX='github.com/JLugagne/egauth/adapters/pgx'
+OTEL='github.com/JLugagne/egauth/adapters/otel'
+CORE_VERSION='v0.17.0-dev'
 PLACEHOLDER='v0.0.0-00010101000000-000000000000'
 
 # Pick a Go binary >= 1.26.7 without triggering a toolchain download.
 GO="$(command -v go)"
-if ! GOTOOLCHAIN=local "$GO" version 2>/dev/null | grep -qE 'go1\.26\.(7|[89]|[1-9][0-9])'; then
+if ! GOTOOLCHAIN=local "$GO" version 2>/dev/null | grep -qE 'go1\.(26\.(7|[89]|[1-9][0-9])|2[7-9]|[3-9][0-9])'; then
   CACHED="$(find "$(go env GOMODCACHE)/golang.org" -maxdepth 1 -name 'toolchain@v0.0.1-go1.26.7.*' -type d 2>/dev/null | head -1)"
   [ -n "$CACHED" ] || { echo "SKIP: no go1.26.7 toolchain available"; exit 2; }
   GO="$CACHED/bin/go"
 fi
 
 MODCACHE_SRC="$(GOTOOLCHAIN=local "$GO" env GOMODCACHE)"
-ADAPTER_VERSION="$(cd "$REPO" && GOWORK=off GOTOOLCHAIN=local "$GO" list -m -f '{{.Version}}' "$ADAPTER")"
-
-echo "root module adapter pin: $ADAPTER@$ADAPTER_VERSION"
-if [ -z "$ADAPTER_VERSION" ] || [ "$ADAPTER_VERSION" = "$PLACEHOLDER" ]; then
-  echo "FAIL: root go.mod requires an unresolvable placeholder version for $ADAPTER" >&2
-  exit 1
-fi
 
 WORK="$(mktemp -d)"
 trap 'chmod -R u+w "$WORK" 2>/dev/null; rm -rf "$WORK"' EXIT
 
 # ---- warm the module cache for the graphs the offline consumer resolves ---------------------
-# The file:// proxy below can only serve modules already in the cache. Populate it from the
-# public proxy with the repo root's graph, the adapter module's graph, and the adapter module
-# itself (the root's local `replace` keeps the adapter out of the root's download set, but the
-# consumer has no such replace and must resolve it from the proxy). The `-modfile` copies keep
-# the go.sum entries this warm-up needs out of the checkout. The warm-up itself is not the
-# assertion: the consumer commands below stay offline and still fail if the pin is bad.
 echo
 echo "== warm-up: populate the module cache from the configured proxy =="
-cp "$REPO/go.mod" "$WORK/root.mod"
-cp "$REPO/adapters/pgx/go.mod" "$WORK/adapter.mod"
-( cd "$REPO" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download -modfile="$WORK/root.mod" all )
-( cd "$REPO/adapters/pgx" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download -modfile="$WORK/adapter.mod" all )
-mkdir -p "$WORK/adapter-download"
-cat > "$WORK/adapter-download/go.mod" <<EOF
-module consumer-smoke-adapter-download
+for m in . adapters/pgx adapters/otel; do
+  name="$(echo "$m" | tr '/.' '__')"
+  cp "$REPO/$m/go.mod" "$WORK/$name.mod"
+  cp "$REPO/$m/go.sum" "$WORK/$name.sum"
+  ( cd "$REPO/$m" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download -modfile="$WORK/$name.mod" all )
+done
 
-go 1.26.7
-EOF
-( cd "$WORK/adapter-download" && GOWORK=off GOTOOLCHAIN=local "$GO" mod download "$ADAPTER@$ADAPTER_VERSION" )
-
-# ---- throwaway consumer that imports egauth exactly as a downstream user would ------------
+# ---- throwaway consumer that imports one package per published module -----------------------
 mkdir -p "$WORK/consumer"
 cat > "$WORK/consumer/go.mod" <<EOF
 module example.com/consumer
 
 go 1.26.7
 
-require $CORE $CORE_VERSION
+require (
+	$CORE $CORE_VERSION
+	$PGX $CORE_VERSION
+	$OTEL $CORE_VERSION
+)
 
-replace $CORE => $REPO
+replace (
+	$CORE => $REPO
+	$PGX => $REPO/adapters/pgx
+	$OTEL => $REPO/adapters/otel
+)
 EOF
 cat > "$WORK/consumer/main.go" <<'EOF'
 package main
 
-import _ "github.com/JLugagne/egauth/event"
+import (
+	_ "github.com/JLugagne/egauth/adapters/otel"
+	_ "github.com/JLugagne/egauth/adapters/pgx/pgxstore"
+	_ "github.com/JLugagne/egauth/event"
+)
 
 func main() {}
 EOF
@@ -108,11 +103,9 @@ if ! OUT="$(run list -m all)"; then
   echo "FAIL: go list -m all failed" >&2
   exit 1
 fi
-if ! printf '%s\n' "$OUT" | grep -qF "$ADAPTER $ADAPTER_VERSION"; then
-  printf '%s\n' "$OUT"
-  echo "FAIL: $ADAPTER@$ADAPTER_VERSION missing from the module graph" >&2
-  exit 1
-fi
+for m in "$CORE" "$PGX" "$OTEL"; do
+  printf '%s\n' "$OUT" | grep -qF "$m $CORE_VERSION" || { printf '%s\n' "$OUT"; echo "FAIL: $m@$CORE_VERSION missing from the module graph" >&2; exit 1; }
+done
 if printf '%s\n' "$OUT" | grep -qF "$PLACEHOLDER"; then
   echo "FAIL: placeholder pseudo-version present in the module graph" >&2
   exit 1
@@ -127,6 +120,15 @@ if ! OUT="$(run mod download all)"; then
   exit 1
 fi
 echo "PASS: all modules download"
+
+echo
+echo "== consumer: go build + go vet, one package per published module =="
+if ! OUT="$(run build ./... && run vet "$OTEL" "$PGX/pgxstore" "$CORE/event")"; then
+  printf '%s\n' "$OUT"
+  echo "FAIL: consumer build or vet failed" >&2
+  exit 1
+fi
+echo "PASS: consumer builds and vets"
 
 echo
 echo "PASS: consumer smoke test"

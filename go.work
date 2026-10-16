@@ -1,13 +1,14 @@
-// Workspace for local development and CI of the multi-module monorepo: the core flagship module
-// (.) plus the nested pgx adapter module (./adapters/pgx). It lets the adapter resolve the core
-// module from local disk before any tag is published. External consumers do NOT use this file —
-// they resolve each module via its published tag. See RELEASING.md for the two-tag release dance.
+// Workspace for local development and CI of the multi-module monorepo: the core module (.), the
+// published adapters (./adapters/pgx, ./adapters/otel) and the unpublished guard module (./tools).
+// External consumers do NOT use this file; they resolve each module via its published tag. See
+// RELEASING.md.
 go 1.26.7
 
-toolchain go1.26.7
+toolchain go1.26.9
 
 use (
 	.
 	./adapters/otel
 	./adapters/pgx
+	./tools
 )
