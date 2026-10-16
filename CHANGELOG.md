@@ -58,6 +58,9 @@ before deploying: **every user logs in again**.
   email-change links issued by v0.16 do not work after the upgrade.
 - Federated identities are never linked automatically to an existing account; linking is an
   authenticated, sensitive action.
+- A security-revert link only removes what changed during the window of the notice it came from.
+  When that removes the account's last second factor, the account is disabled instead of mailing a
+  password reset: mailbox access alone never yields a session past the second factor.
 - Passkeys are registered with `residentKey: required` and user verification required, and
   usernameless login works for every passkey enrolled by v0.17. Passkeys enrolled by an earlier
   release may be non-discoverable and are reported as needing re-registration.

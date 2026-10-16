@@ -18,6 +18,8 @@ import (
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/ceremony"
 	"github.com/JLugagne/egauth/store/identity"
+	"github.com/JLugagne/egauth/store/mfa"
+	"github.com/JLugagne/egauth/store/passkey"
 )
 
 const (
@@ -183,6 +185,26 @@ type revertPlan struct {
 	address identity.Identifier
 	restore bool
 	since   time.Time
+	until   time.Time
+}
+
+func (p revertPlan) covers(at time.Time) bool {
+	return !at.Before(p.since.Add(-revertSlack)) && (p.until.IsZero() || !at.After(p.until.Add(revertSlack)))
+}
+
+func (p revertPlan) spans(start, end time.Time) []interval {
+	if p.until.IsZero() {
+		return []interval{{p.since, end}}
+	}
+	hi := p.until.Add(revertSlack)
+	if !hi.Before(start) {
+		return []interval{{p.since, maxTime(hi, end)}}
+	}
+	return []interval{{p.since, hi}, {start, end}}
+}
+
+type interval struct {
+	from, to time.Time
 }
 
 func (h *acctHandlers) revert(w http.ResponseWriter, r *httpx.Request) {
@@ -319,7 +341,11 @@ func (a *Accounts) planRevert(ctx context.Context, rec ceremony.Record, t core.T
 	case !first.IsZero() && first.Before(since):
 		since = first
 	}
-	return revertPlan{user: u, address: addr, restore: restore, since: since}, nil
+	until := changedAt
+	if restore {
+		until = time.Time{}
+	}
+	return revertPlan{user: u, address: addr, restore: restore, since: since, until: until}, nil
 }
 
 type revertOutcome struct {
@@ -328,17 +354,30 @@ type revertOutcome struct {
 
 type revertRun struct {
 	*Accounts
-	last time.Time
+	first, last time.Time
 }
 
 func (r *revertRun) Apply(ctx context.Context, m identity.Mutation) (identity.Applied, error) {
 	ap, err := r.Accounts.Apply(ctx, m)
 	for _, it := range ap.Outbox {
+		if it.CreatedAt.IsZero() {
+			continue
+		}
+		if r.first.IsZero() || it.CreatedAt.Before(r.first) {
+			r.first = it.CreatedAt
+		}
 		if it.CreatedAt.After(r.last) {
 			r.last = it.CreatedAt
 		}
 	}
 	return ap, err
+}
+
+func (r *revertRun) start(began time.Time) time.Time {
+	if r.first.IsZero() || began.Before(r.first) {
+		return began
+	}
+	return r.first
 }
 
 func (r *revertRun) end() time.Time {
@@ -350,6 +389,7 @@ func (r *revertRun) end() time.Time {
 
 func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, error) {
 	sub := plan.user.Subject
+	began := r.clock.Now()
 	if err := r.lockDown(ctx, sub); err != nil {
 		return revertOutcome{}, err
 	}
@@ -363,24 +403,27 @@ func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, 
 			return revertOutcome{}, mutationProblem(err)
 		}
 	}
-	cutoff := plan.since.Add(-revertSlack)
-	if err := r.removeFactorsSince(ctx, sub, cutoff); err != nil {
+	stripped, err := r.removeFactors(ctx, sub, plan)
+	if err != nil {
 		return revertOutcome{}, mutationProblem(err)
 	}
-	if err := r.removeIdentifiersSince(ctx, plan.user, cutoff); err != nil {
+	if err := r.removeIdentifiers(ctx, plan); err != nil {
 		return revertOutcome{}, mutationProblem(err)
 	}
-	widens, err := r.spanWidens(ctx, sub, plan.since, r.end())
+	spans := plan.spans(r.start(began), r.end())
+	widens, err := r.spanWidens(ctx, sub, spans)
 	if err != nil {
 		return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
 	}
-	if out.disabled = out.taken || widens; out.disabled {
+	if out.disabled = out.taken || widens || stripped; out.disabled && !stripped {
 		if _, err := r.Apply(ctx, identity.SetDisabledState{Subject: sub, Disable: true}); err != nil {
 			return revertOutcome{}, mutationProblem(err)
 		}
 	}
-	if err := r.recordSpan(ctx, plan.user, plan.since, r.end()); err != nil {
-		return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
+	for _, s := range spans {
+		if err := r.recordSpan(ctx, plan.user, s.from, s.to); err != nil {
+			return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
+		}
 	}
 	r.dropAnchor(ctx, sub, plan.address)
 	if plan.restore && !out.taken {
@@ -398,28 +441,77 @@ func (a *Accounts) dropReverts(ctx context.Context, t core.TenantID, addr identi
 	_, _ = a.ceremonies.DeleteForScope(ctx, t, scope.Hash(), ceremony.SecurityRevert)
 }
 
-func (a *revertRun) removeFactorsSince(ctx context.Context, sub core.Subject, since time.Time) error {
+func (a *revertRun) removeFactors(ctx context.Context, sub core.Subject, plan revertPlan) (bool, error) {
 	e, err := a.mfa.GetTOTP(ctx, sub)
-	switch {
-	case err == nil && !e.CreatedAt.Before(since):
+	hasTOTP := err == nil
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return false, err
+	}
+	creds, err := a.passkeys.List(ctx, sub)
+	if err != nil {
+		return false, err
+	}
+	dropTOTP := hasTOTP && plan.covers(totpChangedAt(e))
+	had := hasTOTP && e.Confirmed()
+	kept := had && !dropTOTP
+	var drop []passkey.CredentialID
+	for _, c := range creds {
+		had = had || c.Active()
+		if plan.covers(c.CreatedAt) {
+			drop = append(drop, c.ID)
+			continue
+		}
+		kept = kept || c.Active()
+	}
+	stripped := had && !kept
+	if stripped {
+		if _, err := a.Apply(ctx, identity.SetDisabledState{Subject: sub, Disable: true}); err != nil {
+			return false, err
+		}
+	}
+	if dropTOTP {
 		if _, err := a.Apply(ctx, identity.BumpEpoch{Subject: sub, Change: identity.FactorTOTPRemoved}); err != nil {
-			return err
+			return stripped, err
 		}
 		if err := a.mfa.DeleteForSubject(ctx, sub); err != nil {
+			return stripped, err
+		}
+	}
+	if err := a.removePasskeys(ctx, sub, drop); err != nil {
+		return stripped, err
+	}
+	return stripped, a.removeLinks(ctx, sub, plan)
+}
+
+func totpChangedAt(e mfa.Enrollment) time.Time {
+	if e.ConfirmedAt != nil {
+		return *e.ConfirmedAt
+	}
+	return e.CreatedAt
+}
+
+func (a *revertRun) removePasskeys(ctx context.Context, sub core.Subject, ids []passkey.CredentialID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if _, err := a.Apply(ctx, identity.BumpEpoch{Subject: sub, Change: identity.FactorPasskeyRemoved}); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := a.passkeys.Delete(ctx, sub, id); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
-	case err != nil && !errors.Is(err, store.ErrNotFound):
-		return err
 	}
-	if err := a.removePasskeysSince(ctx, sub, since); err != nil {
-		return err
-	}
+	return nil
+}
+
+func (a *revertRun) removeLinks(ctx context.Context, sub core.Subject, plan revertPlan) error {
 	links, err := a.identity.ListFederated(ctx, sub)
 	if err != nil {
 		return err
 	}
 	for _, l := range links {
-		if l.LinkedAt.Before(since) {
+		if !plan.covers(l.LinkedAt) {
 			continue
 		}
 		m := identity.UnlinkFederated{Subject: sub, Provider: l.Identity.Provider, ProviderSubject: l.Identity.ProviderSubject}
@@ -430,36 +522,14 @@ func (a *revertRun) removeFactorsSince(ctx context.Context, sub core.Subject, si
 	return nil
 }
 
-func (a *revertRun) removePasskeysSince(ctx context.Context, sub core.Subject, since time.Time) error {
-	creds, err := a.passkeys.List(ctx, sub)
-	if err != nil {
-		return err
-	}
-	bumped := false
-	for _, c := range creds {
-		if c.CreatedAt.Before(since) {
-			continue
-		}
-		if !bumped {
-			if _, err := a.Apply(ctx, identity.BumpEpoch{Subject: sub, Change: identity.FactorPasskeyRemoved}); err != nil {
-				return err
-			}
-			bumped = true
-		}
-		if err := a.passkeys.Delete(ctx, sub, c.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
-			return err
-		}
-	}
-	return nil
-}
-
-func (a *revertRun) removeIdentifiersSince(ctx context.Context, u identity.User, since time.Time) error {
-	if !u.PhoneVerifiedAt.IsZero() && !u.PhoneVerifiedAt.Before(since) {
+func (a *revertRun) removeIdentifiers(ctx context.Context, plan revertPlan) error {
+	u := plan.user
+	if !u.PhoneVerifiedAt.IsZero() && plan.covers(u.PhoneVerifiedAt) {
 		if _, err := a.Apply(ctx, identity.SetPhone{Subject: u.Subject}); err != nil {
 			return err
 		}
 	}
-	if !u.RecoveryEmailVerifiedAt.IsZero() && !u.RecoveryEmailVerifiedAt.Before(since) {
+	if !u.RecoveryEmailVerifiedAt.IsZero() && plan.covers(u.RecoveryEmailVerifiedAt) {
 		if _, err := a.Apply(ctx, identity.SetRecoveryEmail{Subject: u.Subject}); err != nil {
 			return err
 		}

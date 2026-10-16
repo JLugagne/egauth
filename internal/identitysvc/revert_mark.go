@@ -256,13 +256,24 @@ func (a *Accounts) superseded(ctx context.Context, sub core.Subject, changedAt t
 	return false, nil
 }
 
-func (a *Accounts) spanWidens(ctx context.Context, sub core.Subject, from, to time.Time) (bool, error) {
+func (a *Accounts) spanWidens(ctx context.Context, sub core.Subject, ivs []interval) (bool, error) {
 	all, err := a.spans(ctx, sub)
 	if err != nil {
 		return false, err
 	}
-	_, widens := pickSpan(all, from, to)
-	return widens, nil
+	for _, iv := range ivs {
+		slot, widens := pickSpan(all, iv.from, iv.to)
+		if widens {
+			return true, nil
+		}
+		s := &all[slot]
+		if !s.live {
+			s.live, s.from, s.to = true, iv.from, iv.to
+			continue
+		}
+		s.from, s.to = minTime(s.from, iv.from), maxTime(s.to, iv.to)
+	}
+	return false, nil
 }
 
 func pickSpan(all [revertSpans]revertSpan, from, to time.Time) (int, bool) {
