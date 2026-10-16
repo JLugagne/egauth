@@ -172,21 +172,25 @@ test-e2e:
 
 # Generate SBOM (Software Bill of Materials) for release.
 # Usage: make sbom VERSION=vX.Y.Z
+# VERSION reaches the shell only through the environment ("$$VERSION"), never by text substitution,
+# and must be a strict semver tag.
+sbom: override export VERSION := $(value VERSION)
 sbom:
-	@if [ -z "$(VERSION)" ]; then echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1; fi
-	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$(VERSION)..."
+	@case "$$VERSION" in ''|*[!0-9A-Za-z.-]*) echo "Usage: make sbom VERSION=vX.Y.Z"; exit 1;; esac; \
+	printf '%s\n' "$$VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$$' || { echo "FAIL: VERSION must be a semver tag such as v1.2.3"; exit 1; }
+	@echo "==> Generating SBOM for github.com/JLugagne/egauth@$$VERSION..."
 	go install github.com/anchore/syft/cmd/syft@$(SYFT_VERSION)
 	@dir=""; \
 	for attempt in 1 2 3 4 5 6 7 8 9 10; do \
-	  GOWORK=off go mod download github.com/JLugagne/egauth@$(VERSION) >/dev/null 2>&1; \
-	  dir=$$(GOWORK=off go list -m -f '{{.Dir}}' github.com/JLugagne/egauth@$(VERSION) 2>/dev/null); \
+	  GOWORK=off go mod download "github.com/JLugagne/egauth@$$VERSION" >/dev/null 2>&1; \
+	  dir=$$(GOWORK=off go list -m -f '{{.Dir}}' "github.com/JLugagne/egauth@$$VERSION" 2>/dev/null); \
 	  if [ -n "$$dir" ] && [ -d "$$dir" ]; then break; fi; \
-	  echo "==> module $(VERSION) not resolvable yet (attempt $$attempt/10); retrying in 15s..."; \
+	  echo "==> module $$VERSION not resolvable yet (attempt $$attempt/10); retrying in 15s..."; \
 	  sleep 15; \
 	done; \
-	if [ -z "$$dir" ] || [ ! -d "$$dir" ]; then echo "FAIL: could not resolve module source for $(VERSION) (is the tag published?)"; exit 1; fi; \
-	MODULE=$$(GOWORK=off go list -m -f '{{.Path}}' github.com/JLugagne/egauth@$(VERSION)); \
-	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$(VERSION)" -o cyclonedx-json > libauth-$(VERSION).sbom.json; \
-	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$(VERSION)" -o cyclonedx > libauth-$(VERSION).sbom.xml
-	@echo "==> SBOM generated: libauth-$(VERSION).sbom.json and libauth-$(VERSION).sbom.xml"
-	@echo "==> Attach these files to the GitHub release using: gh release upload $(VERSION) libauth-$(VERSION).sbom.*"
+	if [ -z "$$dir" ] || [ ! -d "$$dir" ]; then echo "FAIL: could not resolve module source for $$VERSION (is the tag published?)"; exit 1; fi; \
+	MODULE=$$(GOWORK=off go list -m -f '{{.Path}}' "github.com/JLugagne/egauth@$$VERSION"); \
+	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$$VERSION" -o cyclonedx-json > "libauth-$$VERSION.sbom.json"; \
+	syft "dir:$$dir" --source-name "$$MODULE" --source-version "$$VERSION" -o cyclonedx > "libauth-$$VERSION.sbom.xml"
+	@echo "==> SBOM generated: libauth-$$VERSION.sbom.json and libauth-$$VERSION.sbom.xml"
+	@echo "==> Attach these files to the GitHub release using: gh release upload $$VERSION libauth-$$VERSION.sbom.*"
