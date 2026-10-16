@@ -31,6 +31,8 @@ var sentinels = []struct {
 }{
 	{"ErrSystemCallerInRequest", egauth.ErrSystemCallerInRequest},
 	{"ErrAPIKeyCaller", egauth.ErrAPIKeyCaller},
+	{"ErrResourceTokenCaller", egauth.ErrResourceTokenCaller},
+	{"ErrSessionEnded", egauth.ErrSessionEnded},
 	{"ErrClaimsNotSubset", egauth.ErrClaimsNotSubset},
 	{"ErrReauthRequired", egauth.ErrReauthRequired},
 	{"ErrTenantMismatch", egauth.ErrTenantMismatch},

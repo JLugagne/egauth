@@ -13,6 +13,7 @@ import (
 	"github.com/JLugagne/egauth/internal/audit"
 	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/internal/principalctx"
+	"github.com/JLugagne/egauth/internal/session"
 	"github.com/JLugagne/egauth/kek"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store/keys"
@@ -102,6 +103,8 @@ func (f *facade) authorize(ctx context.Context, by principal.Caller, method stri
 	switch by.Kind() {
 	case principal.CallerAPIKey:
 		return grant{}, ErrAPIKeyCaller
+	case principal.CallerResourceToken:
+		return grant{}, ErrResourceTokenCaller
 	case principal.CallerSystem:
 		return f.authorizeSystem(ctx, by, method, tenant, sc)
 	case principal.CallerSession:
@@ -136,6 +139,9 @@ func (f *facade) authorizeSession(ctx context.Context, by principal.Caller, tena
 	attrs, ok := by.Session()
 	if !ok || attrs.IsZero() {
 		return grant{}, errors.Join(ErrForbidden, errors.New("egauth: the session caller carries no session"))
+	}
+	if err := f.sessionLive(ctx, by); err != nil {
+		return grant{}, err
 	}
 	if sc == scopeSystem {
 		return grant{}, errors.Join(ErrForbidden, errors.New("egauth: only a system caller may run this method"))
@@ -174,6 +180,21 @@ func (f *facade) authorizeSession(ctx context.Context, by principal.Caller, tena
 		return grant{}, errors.Join(ErrReauthRequired, errors.New("egauth: the session is not fresh within the reauthentication window"))
 	}
 	return grant{tenant: tenant, subject: sub, epoch: st.Epoch(), claims: claims}, nil
+}
+
+func (f *facade) sessionLive(ctx context.Context, by principal.Caller) error {
+	h, err := session.HandleOf(by)
+	if err != nil {
+		return errors.Join(ErrSessionEnded, err)
+	}
+	switch err := f.o.backend.Live(ctx, h); {
+	case err == nil:
+		return nil
+	case errors.Is(err, session.ErrEnded):
+		return errors.Join(ErrSessionEnded, err)
+	default:
+		return errors.Join(errors.New("egauth: checking the caller's session"), err)
+	}
 }
 
 func needsAdmin(sc scope, caller, target core.Subject) bool {

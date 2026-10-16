@@ -6,6 +6,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/JLugagne/egauth/federation"
 	"github.com/JLugagne/egauth/federation/providers"
 	"github.com/JLugagne/egauth/internal/core"
@@ -153,7 +155,7 @@ func runtimeCap(t *testing.T, c Case) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session, err := core.SessionCaller(principaltest.Full())
+	session, err := core.SessionCaller(principaltest.Full(), uuid.New(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,9 +25,10 @@ import (
 const DefaultAPIKeyLifetime = 90 * 24 * time.Hour
 
 // APIKeys issues and revokes the API keys of the calling user. Only a session caller has keys: a
-// System caller gets ErrForbidden and an API-key caller ErrAPIKeyCaller. Every method needs a
-// session fresh within SessionPolicy.ReauthWindow and multi-factor when its subject enrolled a
-// second factor. It returns ErrFacadeUnavailable when Modules.APIKeys is nil.
+// System caller gets ErrForbidden, an API-key caller ErrAPIKeyCaller and a resource-token caller
+// ErrResourceTokenCaller. Every method needs a live session (ErrSessionEnded otherwise) fresh
+// within SessionPolicy.ReauthWindow and multi-factor when its subject enrolled a second factor. It
+// returns ErrFacadeUnavailable when Modules.APIKeys is nil.
 type APIKeys struct {
 	f *facade
 }

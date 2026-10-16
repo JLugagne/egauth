@@ -33,6 +33,11 @@ type Backend interface {
 	Reissue(ctx context.Context, w http.ResponseWriter, cur Handle, a core.SessionAttrs) error
 	// End revokes the session presented by r and clears its credentials on w. It is idempotent.
 	End(ctx context.Context, w http.ResponseWriter, r *http.Request) error
+	// Live returns nil while the stored session h names is live by the rules of Resume: not ended,
+	// revoked, replaced by Reissue nor past its absolute lifetime. It returns ErrEnded otherwise, and
+	// an error joined with httpx.ErrUnavailable when the store cannot answer. Facades call it for
+	// every session Caller.
+	Live(ctx context.Context, h Handle) error
 	// Durability reports whether sessions survive restarts and are shared between instances.
 	Durability() store.Durability
 	lifecycle.Subscriber
@@ -41,6 +46,9 @@ type Backend interface {
 // ErrTenantMismatch reports a credential sealed for another tenant than the resolved one. Nothing
 // was consumed, so the caller refuses the request without clearing the credential.
 var ErrTenantMismatch = errors.New("session: credential sealed for another tenant")
+
+// ErrEnded reports a stored session that is no longer live.
+var ErrEnded = errors.New("session: the session is no longer live")
 
 // ErrHandleMismatch reports a Handle or Resumed whose parts do not describe the same session.
 var ErrHandleMismatch = errors.New("session: handle does not match the session attributes")
@@ -53,6 +61,7 @@ type Handle struct {
 	subject core.Subject
 	lineage uuid.UUID
 	id      uuid.UUID
+	key     string
 }
 
 // NewHandle binds the stored session id to a. It returns ErrHandleMismatch for zero attributes or a
@@ -63,6 +72,37 @@ func NewHandle(a core.SessionAttrs, id uuid.UUID) (Handle, error) {
 	}
 	return Handle{subject: a.Subject(), lineage: a.Lineage(), id: id}, nil
 }
+
+// NewKeyedHandle is NewHandle for a backend that finds its stored session by a lookup key rather
+// than by id (the stateful token digest). It also returns ErrHandleMismatch for an empty key.
+func NewKeyedHandle(a core.SessionAttrs, id uuid.UUID, key []byte) (Handle, error) {
+	if len(key) == 0 {
+		return Handle{}, ErrHandleMismatch
+	}
+	h, err := NewHandle(a, id)
+	if err != nil {
+		return Handle{}, err
+	}
+	h.key = string(key)
+	return h, nil
+}
+
+// HandleOf returns the handle of the stored session a session Caller was resumed from, for
+// Backend.Live. It returns ErrHandleMismatch for any other caller.
+func HandleOf(c core.Caller) (Handle, error) {
+	a, ok := c.Session()
+	id, key, stored := c.Stored()
+	if !ok || !stored {
+		return Handle{}, ErrHandleMismatch
+	}
+	if len(key) == 0 {
+		return NewHandle(a, id)
+	}
+	return NewKeyedHandle(a, id, key)
+}
+
+// Key returns the lookup key of a keyed handle, nil otherwise.
+func (h Handle) Key() []byte { return []byte(h.key) }
 
 // ID returns the refresh family id (JWT) or the session row id (stateful).
 func (h Handle) ID() uuid.UUID { return h.id }
@@ -97,3 +137,8 @@ func (r Resumed) Attrs() core.SessionAttrs { return r.attrs }
 func (r Resumed) Claims() core.SealedClaims { return r.claims }
 
 func (r Resumed) Handle() Handle { return r.handle }
+
+// Caller returns the session Caller of r, bound to its stored session.
+func (r Resumed) Caller() (core.Caller, error) {
+	return core.SessionCaller(r.attrs, r.handle.id, []byte(r.handle.key))
+}

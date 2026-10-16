@@ -19,9 +19,10 @@ import (
 )
 
 // Tenants administers one tenant: its erasure, its signing keys and its runtime OAuth providers.
-// Every method needs a System caller minted for that tenant, or a session caller of that tenant
-// allowed by Config.Admin, fresh within SessionPolicy.ReauthWindow and multi-factor when its
-// subject enrolled a second factor; ImportKey alone needs a System caller. Any other tenant returns
+// Every method needs a System caller minted for that tenant, or a live session caller of that
+// tenant (ErrSessionEnded otherwise) allowed by Config.Admin, fresh within
+// SessionPolicy.ReauthWindow and multi-factor when its subject enrolled a second factor; ImportKey
+// alone needs a System caller. Any other tenant returns
 // ErrTenantMismatch: cross-tenant work mints one System caller per tenant.
 type Tenants struct {
 	f *facade

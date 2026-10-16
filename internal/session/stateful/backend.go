@@ -205,6 +205,10 @@ func (b *Backend) load(ctx context.Context, tok string) (loaded, error) {
 	if err != nil {
 		return loaded{}, errors.Join(ErrInvalidToken, err)
 	}
+	return b.loadRow(ctx, t, hash)
+}
+
+func (b *Backend) loadRow(ctx context.Context, t core.TenantID, hash []byte) (loaded, error) {
 	rec, err := b.sessions.Get(ctx, t, hash)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
@@ -276,7 +280,7 @@ func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Req
 	if err := b.write(w, a, p.token, idle, false); err != nil {
 		return session.Resumed{}, err
 	}
-	return resumed(a, core.NewSealedClaims(l.rec.AppClaims()), l.rec.ID())
+	return resumed(a, core.NewSealedClaims(l.rec.AppClaims()), l.rec.ID(), l.hash)
 }
 
 func (b *Backend) renew(ctx context.Context, w http.ResponseWriter, tok string, l loaded, now time.Time) (session.Resumed, error) {
@@ -304,11 +308,11 @@ func (b *Backend) renew(ctx context.Context, w http.ResponseWriter, tok string, 
 	if err := b.write(w, renewed, tok, next.IdleExpiresAt(), false); err != nil {
 		return session.Resumed{}, err
 	}
-	return resumed(renewed, claims, l.rec.ID())
+	return resumed(renewed, claims, l.rec.ID(), l.hash)
 }
 
-func resumed(a core.SessionAttrs, c core.SealedClaims, id uuid.UUID) (session.Resumed, error) {
-	h, err := session.NewHandle(a, id)
+func resumed(a core.SessionAttrs, c core.SealedClaims, id uuid.UUID, hash []byte) (session.Resumed, error) {
+	h, err := session.NewKeyedHandle(a, id, hash)
 	if err != nil {
 		return session.Resumed{}, err
 	}
@@ -343,6 +347,27 @@ func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	}
 	if len(errs) > 0 {
 		return unavailable(errors.Join(errs...))
+	}
+	return nil
+}
+
+// Live reads the row h names by its token digest, as Resume does: it must still be live in the
+// store, carry h's id, subject and lineage, and be within its absolute lifetime.
+func (b *Backend) Live(ctx context.Context, h session.Handle) error {
+	key := h.Key()
+	if h.IsZero() || len(key) == 0 {
+		return session.ErrEnded
+	}
+	l, err := b.loadRow(ctx, h.Subject().Tenant, key)
+	switch {
+	case errors.Is(err, httpx.ErrUnavailable):
+		return err
+	case err != nil:
+		return errors.Join(session.ErrEnded, err)
+	case l.rec.ID() != h.ID() || l.attrs.Subject() != h.Subject() || l.attrs.Lineage() != h.Lineage():
+		return errors.Join(session.ErrEnded, errors.New("stateful: the row is another session"))
+	case !b.clk.Now().Before(l.end):
+		return errors.Join(session.ErrEnded, ErrLifetimeExceeded)
 	}
 	return nil
 }

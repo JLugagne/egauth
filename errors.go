@@ -27,6 +27,14 @@ var (
 	ErrReauthRequired = errors.New("egauth: reauthentication required")
 	// ErrAPIKeyCaller is returned by every facade method for an API-key caller.
 	ErrAPIKeyCaller = errors.New("egauth: API-key callers cannot use this method")
+	// ErrResourceTokenCaller is returned by every facade method for the Caller of a ResourceServer
+	// route: a resource token is a short-lived, audience-bound delegation, never a first-party
+	// session, so it cannot administer accounts, keys or tenants.
+	ErrResourceTokenCaller = errors.New("egauth: resource-token callers cannot use this method")
+	// ErrSessionEnded is returned by every facade method for a session Caller whose session is no
+	// longer live: logged out, revoked, reissued or past its absolute lifetime. Callers are taken
+	// per request; take a new one from the next request's Principal.
+	ErrSessionEnded = errors.New("egauth: the caller's session has ended")
 	// ErrSystemCallerInRequest is returned by every facade method for a System caller used while
 	// serving a request.
 	ErrSystemCallerInRequest = errors.New("egauth: system caller used inside a request")

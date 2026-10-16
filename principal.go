@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JLugagne/egauth/internal/core"
+	"github.com/JLugagne/egauth/internal/session"
 	"github.com/JLugagne/egauth/principal"
 )
 
@@ -63,12 +64,32 @@ func (c AppClaims[C]) clone() AppClaims[C] {
 	return c
 }
 
-func sessionPrincipal[C any](a principal.SessionAttrs, claims AppClaims[C]) (Principal[C], error) {
-	caller, err := core.SessionCaller(a)
+func sessionPrincipal[C any](res session.Resumed, claims AppClaims[C]) (Principal[C], error) {
+	caller, err := res.Caller()
 	if err != nil {
 		return Principal[C]{}, err
 	}
-	return Principal[C]{kind: Session, subject: a.Subject(), attrs: a, claims: claims.clone(), caller: caller}, nil
+	return withCaller(res.Attrs(), claims, caller), nil
+}
+
+func resourcePrincipal[C any](a principal.SessionAttrs, claims AppClaims[C]) (Principal[C], error) {
+	caller, err := core.ResourceTokenCaller(a)
+	if err != nil {
+		return Principal[C]{}, err
+	}
+	return withCaller(a, claims, caller), nil
+}
+
+func detachedSessionPrincipal[C any](a principal.SessionAttrs, claims AppClaims[C]) (Principal[C], error) {
+	caller, err := core.SessionCaller(a, uuid.New(), nil)
+	if err != nil {
+		return Principal[C]{}, err
+	}
+	return withCaller(a, claims, caller), nil
+}
+
+func withCaller[C any](a principal.SessionAttrs, claims AppClaims[C], caller principal.Caller) Principal[C] {
+	return Principal[C]{kind: Session, subject: a.Subject(), attrs: a, claims: claims.clone(), caller: caller}
 }
 
 func apiKeyPrincipal[C any](info APIKeyInfo, claims AppClaims[C]) (Principal[C], error) {
@@ -115,5 +136,8 @@ func (p Principal[C]) APIKey() (APIKeyInfo, bool) {
 }
 
 // Caller returns the facade caller of this principal; it is the zero Caller, refused by every
-// facade, for Anonymous.
+// facade, for Anonymous. On a ResourceServer route it is a principal.CallerResourceToken, refused
+// by every facade with ErrResourceTokenCaller although Kind is Session. A session Caller is bound
+// to the stored session it was resumed from: facades refuse it with ErrSessionEnded once that
+// session is logged out, revoked or reissued.
 func (p Principal[C]) Caller() principal.Caller { return p.caller }

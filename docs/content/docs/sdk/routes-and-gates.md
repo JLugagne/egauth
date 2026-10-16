@@ -65,6 +65,8 @@ if err := auth.Accounts().Disable(ctx, admin, user); err != nil {
 
 `Auth.Accounts`, `Auth.Tenants` and `Auth.APIKeys` take the caller from the principal. `Auth.System` mints a system caller for background work and is refused inside a request.
 
+Only a first-party session caller or a system caller passes a facade. An API-key caller is refused with `ErrAPIKeyCaller`, and the caller of a `ResourceServer` route with `ErrResourceTokenCaller`: a resource token is a short-lived delegation, not a session. A session caller is bound to the session it came from. Once that session is logged out, revoked or reissued, every facade refuses it with `ErrSessionEnded`, so take the caller from the current request and do not keep it.
+
 ## API keys
 
 Enable `Modules.APIKeys` with the kinds you issue, create keys with `Auth.APIKeys().Create`, and serve them with `ProtectAPI`. A key never reaches a session route and a session never reaches an API route.

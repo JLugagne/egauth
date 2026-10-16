@@ -123,55 +123,58 @@ type facadeCall struct {
 }
 
 func (w *facadeWorld) everyFacadeCall(target principal.Subject) []facadeCall {
-	tn := w.tenantID()
+	return facadeCalls(w.a, w.tenantID(), target)
+}
+
+func facadeCalls(a *egauth.Auth[gateClaims], tn principal.TenantID, target principal.Subject) []facadeCall {
 	return []facadeCall{
 		{"Accounts.Create", func(ctx context.Context, by principal.Caller) error {
-			_, err := w.a.Accounts().Create(ctx, by, egauth.CreateAccountRequest{Email: "new@example.com"})
+			_, err := a.Accounts().Create(ctx, by, egauth.CreateAccountRequest{Email: "new@example.com"})
 			return err
 		}},
 		{"Accounts.Disable", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Accounts().Disable(ctx, by, target.User)
+			return a.Accounts().Disable(ctx, by, target.User)
 		}},
 		{"Accounts.Enable", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Accounts().Enable(ctx, by, target.User)
+			return a.Accounts().Enable(ctx, by, target.User)
 		}},
 		{"Accounts.Delete", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Accounts().Delete(ctx, by, target.User)
+			return a.Accounts().Delete(ctx, by, target.User)
 		}},
 		{"Accounts.SetTemporaryPassword", func(ctx context.Context, by principal.Caller) error {
-			_, err := w.a.Accounts().SetTemporaryPassword(ctx, by, target.User)
+			_, err := a.Accounts().SetTemporaryPassword(ctx, by, target.User)
 			return err
 		}},
 		{"Accounts.UnlockMFA", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Accounts().UnlockMFA(ctx, by, target.User)
+			return a.Accounts().UnlockMFA(ctx, by, target.User)
 		}},
 		{"Accounts.RevokeSessions", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Accounts().RevokeSessions(ctx, by, target.User)
+			return a.Accounts().RevokeSessions(ctx, by, target.User)
 		}},
 		{"APIKeys.Create", func(ctx context.Context, by principal.Caller) error {
-			_, err := w.a.APIKeys().Create(ctx, by, egauth.APIKeyRequest{Kind: "service", Lifetime: defaultExpiry()})
+			_, err := a.APIKeys().Create(ctx, by, egauth.APIKeyRequest{Kind: "service", Lifetime: defaultExpiry()})
 			return err
 		}},
 		{"APIKeys.Revoke", func(ctx context.Context, by principal.Caller) error {
-			return w.a.APIKeys().Revoke(ctx, by, target.User)
+			return a.APIKeys().Revoke(ctx, by, target.User)
 		}},
 		{"APIKeys.List", func(ctx context.Context, by principal.Caller) error {
-			_, err := w.a.APIKeys().List(ctx, by)
+			_, err := a.APIKeys().List(ctx, by)
 			return err
 		}},
-		{"Tenants.Erase", func(ctx context.Context, by principal.Caller) error { return w.a.Tenants().Erase(ctx, by, tn) }},
+		{"Tenants.Erase", func(ctx context.Context, by principal.Caller) error { return a.Tenants().Erase(ctx, by, tn) }},
 		{"Tenants.RenewKeys", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Tenants().RenewKeys(ctx, by, egauth.RenewKeysRequest{Tenant: tn, Lifetime: defaultExpiry(), Overlap: defaultExpiry()})
+			return a.Tenants().RenewKeys(ctx, by, egauth.RenewKeysRequest{Tenant: tn, Lifetime: defaultExpiry(), Overlap: defaultExpiry()})
 		}},
 		{"Tenants.ImportKey", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Tenants().ImportKey(ctx, by, egauth.ImportKeyRequest{Tenant: tn, KeyID: "k", Alg: "EdDSA", Material: make([]byte, 32)})
+			return a.Tenants().ImportKey(ctx, by, egauth.ImportKeyRequest{Tenant: tn, KeyID: "k", Alg: "EdDSA", Material: make([]byte, 32)})
 		}},
-		{"Tenants.RevokeKeys", func(ctx context.Context, by principal.Caller) error { return w.a.Tenants().RevokeKeys(ctx, by, tn) }},
+		{"Tenants.RevokeKeys", func(ctx context.Context, by principal.Caller) error { return a.Tenants().RevokeKeys(ctx, by, tn) }},
 		{"Tenants.SetOAuthProvider", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Tenants().SetOAuthProvider(ctx, by, egauth.SetProviderRequest{Tenant: tn, Provider: provider("corp")})
+			return a.Tenants().SetOAuthProvider(ctx, by, egauth.SetProviderRequest{Tenant: tn, Provider: provider("corp")})
 		}},
 		{"Tenants.RemoveOAuthProvider", func(ctx context.Context, by principal.Caller) error {
-			return w.a.Tenants().RemoveOAuthProvider(ctx, by, egauth.RemoveProviderRequest{Tenant: tn, Name: "corp"})
+			return a.Tenants().RemoveOAuthProvider(ctx, by, egauth.RemoveProviderRequest{Tenant: tn, Name: "corp"})
 		}},
 	}
 }

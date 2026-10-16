@@ -48,4 +48,4 @@ Contracts (`store/*`, `kek`, `signing`, `principal`, `event`) import nothing abo
 
 ## Errors
 
-`egauth.New` returns `egauth.ConfigError` values joined. Facades return `egauth.ErrForbidden`, `egauth.ErrTenantMismatch`, `egauth.ErrReauthRequired`, `egauth.ErrAPIKeyCaller` and `store.ErrNotFound` for the cases an application maps to statuses. Endpoints answer JSON `{"error": "<code>"}`.
+`egauth.New` returns `egauth.ConfigError` values joined. Facades return `egauth.ErrForbidden`, `egauth.ErrTenantMismatch`, `egauth.ErrReauthRequired`, `egauth.ErrAPIKeyCaller`, `egauth.ErrResourceTokenCaller`, `egauth.ErrSessionEnded` and `store.ErrNotFound` for the cases an application maps to statuses. Endpoints answer JSON `{"error": "<code>"}`.

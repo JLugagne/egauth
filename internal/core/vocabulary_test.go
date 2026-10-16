@@ -121,9 +121,14 @@ func TestAccountStateZeroIsUnusable(t *testing.T) {
 
 func TestCaller(t *testing.T) {
 	a := passwordSession(t)
-	c, err := core.SessionCaller(a)
+	stored := uuid.MustParse("dddddddd-dddd-4ddd-8ddd-dddddddddddd")
+	c, err := core.SessionCaller(a, stored, []byte{1, 2})
 	require.NoError(t, err)
 	require.Equal(t, core.CallerSession, c.Kind())
+	gotStored, gotKey, bound := c.Stored()
+	require.True(t, bound)
+	require.Equal(t, stored, gotStored)
+	require.Equal(t, []byte{1, 2}, gotKey)
 	require.Equal(t, tenantA, c.Tenant())
 	s, ok := c.Subject()
 	require.True(t, ok)
@@ -134,7 +139,19 @@ func TestCaller(t *testing.T) {
 	_, isKey := c.APIKey()
 	require.False(t, isKey)
 
-	_, err = core.SessionCaller(core.SessionAttrs{})
+	_, err = core.SessionCaller(core.SessionAttrs{}, stored, nil)
+	require.ErrorIs(t, err, core.ErrInvalidArgument)
+	_, err = core.SessionCaller(a, uuid.Nil, nil)
+	require.ErrorIs(t, err, core.ErrInvalidArgument, "a session caller is always bound to its stored session")
+
+	rt, err := core.ResourceTokenCaller(a)
+	require.NoError(t, err)
+	require.Equal(t, core.CallerResourceToken, rt.Kind())
+	_, isSession = rt.Session()
+	require.False(t, isSession, "a resource token is not a session caller")
+	_, _, bound = rt.Stored()
+	require.False(t, bound)
+	_, err = core.ResourceTokenCaller(core.SessionAttrs{})
 	require.ErrorIs(t, err, core.ErrInvalidArgument)
 
 	key := uuid.MustParse("cccccccc-cccc-4ccc-8ccc-cccccccccccc")

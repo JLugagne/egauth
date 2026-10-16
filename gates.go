@@ -139,7 +139,7 @@ func (g *sessionGate[C]) authenticate(w http.ResponseWriter, r *http.Request, te
 	case err != nil:
 		return Principal[C]{}, refuseRequirement
 	}
-	p, err := sessionPrincipal(a, claims)
+	p, err := sessionPrincipal(res, claims)
 	if err != nil {
 		return Principal[C]{}, refuseMismatch
 	}

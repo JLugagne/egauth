@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"math"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -256,6 +257,35 @@ func TestVerifyRefusesEveryClaimDefect(t *testing.T) {
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery)
 	if _, err := w.codec.VerifySession(t.Context(), tok, w.keys); !errors.Is(err, jwt.ErrExpired) {
 		t.Fatalf("token at its exp: %v", err)
+	}
+}
+
+func TestVerifyRefusesLifetimesBeyondTheRepresentableRange(t *testing.T) {
+	fx := backendtest.NewFixture(t)
+	w := buildWorld(t, fx, newSigner(t))
+	tok := startBearer(t, w, goldenAttrs(t, fx.Clock.Now(), core.TransportBearer), `{}`)
+	parts := strings.Split(tok, ".")
+	header, base := decodePart(t, parts[0]), decodePart(t, parts[1])
+	iat := int64(base["iat"].(float64))
+	edits := map[string]func(p map[string]any){
+		"lifetime overflowing a Duration": func(p map[string]any) {
+			p["exp"] = json.Number(strconv.FormatInt(iat+math.MaxInt64/int64(time.Second)+1, 10))
+		},
+		"lifetime of centuries": func(p map[string]any) { p["exp"] = json.Number(strconv.FormatInt(iat+1<<40, 10)) },
+		"iat and exp near MaxInt64": func(p map[string]any) {
+			p["iat"] = json.Number(strconv.FormatInt(math.MaxInt64-60, 10))
+			p["exp"] = json.Number(strconv.FormatInt(math.MaxInt64, 10))
+		},
+	}
+	for name, edit := range edits {
+		p := map[string]any{}
+		for k, v := range base {
+			p[k] = v
+		}
+		edit(p)
+		if got, err := w.codec.VerifySession(t.Context(), w.resign(t, header, p), w.keys); !errors.Is(err, jwt.ErrInvalidToken) {
+			t.Errorf("%s: accepted with RecheckEvery %v, expires %v (%v)", name, fx.Lifetimes.RecheckEvery, got.ExpiresAt(), err)
+		}
 	}
 }
 

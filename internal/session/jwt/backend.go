@@ -440,6 +440,22 @@ func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	return b.revoke(ctx, tok.attrs.Subject().Tenant, tok.family)
 }
 
+// Live checks the refresh family h names through the family cache: it must belong to h's subject
+// and lineage and be neither revoked nor past its absolute expiry.
+func (b *Backend) Live(ctx context.Context, h session.Handle) error {
+	if h.IsZero() {
+		return session.ErrEnded
+	}
+	err := b.families.Live(ctx, h.Subject(), revoke.Family{ID: h.ID(), Lineage: h.Lineage()})
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, revoke.ErrUnavailable):
+		return unavailable(err)
+	}
+	return errors.Join(session.ErrEnded, err)
+}
+
 func (b *Backend) revoke(ctx context.Context, t principal.TenantID, family uuid.UUID) error {
 	if err := b.tokens.RevokeFamily(ctx, t, family); err != nil {
 		return unavailable(err)

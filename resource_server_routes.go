@@ -125,7 +125,7 @@ func (g *resourceGate[C]) authenticate(r *http.Request) (Principal[C], refusal) 
 	case err != nil:
 		return Principal[C]{}, refuseRequirement
 	}
-	p, err := sessionPrincipal(a, claims)
+	p, err := resourcePrincipal(a, claims)
 	if err != nil {
 		return Principal[C]{}, refuseMismatch
 	}

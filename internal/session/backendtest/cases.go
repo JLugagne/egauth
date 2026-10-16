@@ -57,6 +57,7 @@ func cases() []suiteCase {
 		{"KeptLineageSurvivesRevocationInTheSameSecond", keptLineageSurvives},
 		{"RenewedFamilyStaysOwnedByItsSubject", renewedFamilyOwned},
 		{"EndRevokesAndIsIdempotent", endRevokes},
+		{"LiveTracksTheStoredSession", liveTracksStoredSession},
 		{"ReportsDurability", reportsDurability},
 	}
 }
@@ -613,6 +614,56 @@ func endRevokes(t *testing.T, e *env) {
 			t.Fatalf("End without credentials: %v", err)
 		}
 	}
+}
+
+func (e *env) live(h session.Handle, want bool, what string) {
+	e.t.Helper()
+	err := e.b.Live(e.t.Context(), h)
+	switch {
+	case want && err != nil:
+		e.t.Fatalf("%s: Live = %v, want live", what, err)
+	case !want && !errors.Is(err, session.ErrEnded):
+		e.t.Fatalf("%s: Live = %v, want session.ErrEnded", what, err)
+	}
+}
+
+func liveTracksStoredSession(t *testing.T, e *env) {
+	e.live(session.Handle{}, false, "zero handle")
+	for _, tr := range []core.Transport{core.TransportCookies, core.TransportBearer} {
+		s := e.newUser()
+		a := principaltest.Attrs(e.passwordSpec(s, tr))
+		c := e.start(a)
+		res := c.expect(statusOK, "live session")
+		e.live(res.Handle(), true, "resumed session")
+		next, err := e.reissue(res.Handle(), a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := next.expect(statusOK, "reissued session")
+		e.poll()
+		e.live(res.Handle(), false, "handle replaced by Reissue")
+		e.live(got.Handle(), true, "reissued session")
+		e.advance(e.fx.Lifetimes.RecheckEvery + time.Second)
+		renewed := next.expect(statusOK, "renewed session")
+		e.live(renewed.Handle(), true, "renewed session")
+		if err := next.end(); err != nil {
+			t.Fatal(err)
+		}
+		e.poll()
+		e.live(renewed.Handle(), false, "ended session")
+
+		ended := e.start(principaltest.Attrs(e.passwordSpec(s, tr))).expect(statusOK, "session to end by event")
+		if err := e.b.OnSessionEnded(t.Context(), lifecycle.SessionEnded{Subject: s, Family: ended.Handle().ID()}); err != nil {
+			t.Fatal(err)
+		}
+		e.poll()
+		e.live(ended.Handle(), false, "session ended by a lifecycle event")
+	}
+	s := e.newUser()
+	spec := e.passwordSpec(s, core.TransportCookies)
+	old := e.start(principaltest.Attrs(spec)).expect(statusOK, "session to outlive")
+	e.fx.Clock.Set(spec.CreatedAt.Add(e.fx.Lifetimes.MaxLifetime))
+	e.live(old.Handle(), false, "session at its absolute lifetime")
 }
 
 func reportsDurability(t *testing.T, e *env) {

@@ -22,13 +22,13 @@ import (
 )
 
 // Accounts administers the accounts of the caller's tenant. Every method needs a System caller or a
-// session caller allowed by Config.Admin, fresh within SessionPolicy.ReauthWindow and multi-factor
-// when its subject enrolled a second factor; RevokeSessions alone also lets a session caller act on
-// itself. Disable, Enable, Delete and SetTemporaryPassword are applied by the identity service the
-// auth endpoints use, which bumps the security epoch, queues the lifecycle outbox and notifies the
-// owner; RevokeSessions and UnlockMFA act on the session backend and the MFA store directly, with
-// no epoch bump, outbox row or notice. A user id of another tenant is never reached: the target is
-// always the caller's tenant.
+// live session caller (ErrSessionEnded otherwise) allowed by Config.Admin, fresh within
+// SessionPolicy.ReauthWindow and multi-factor when its subject enrolled a second factor;
+// RevokeSessions alone also lets a session caller act on itself. Disable, Enable, Delete and
+// SetTemporaryPassword are applied by the identity service the auth endpoints use, which bumps the
+// security epoch, queues the lifecycle outbox and notifies the owner; RevokeSessions and UnlockMFA
+// act on the session backend and the MFA store directly, with no epoch bump, outbox row or notice.
+// A user id of another tenant is never reached: the target is always the caller's tenant.
 type Accounts struct {
 	f *facade
 }

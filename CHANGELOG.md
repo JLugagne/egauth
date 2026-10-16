@@ -117,6 +117,12 @@ before deploying: **every user logs in again**.
 - Passkeys enrolled by egauth work with usernameless login: registration always asks for a
   resident key, and a client that rewrites the request is refused.
 - The "remember me" choice survives every refresh on both session backends.
+- Facades refuse the caller of a `ResourceServer` route with the new `ErrResourceTokenCaller`
+  (`principal.CallerResourceToken`): a resource token could mint API keys or disable accounts.
+- Facades refuse a session caller whose session was logged out, revoked or reissued with the new
+  `ErrSessionEnded`, on both session backends.
+- Access tokens whose `exp − iat` overflowed a `time.Duration` passed the `RecheckEvery` bound;
+  `iat` and `exp` are now bounded and compared in seconds.
 
 ### Upgrading
 

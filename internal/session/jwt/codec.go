@@ -38,6 +38,7 @@ const (
 
 	tenantMarker   = "{tenant}"
 	maxFingerprint = 128
+	maxUnixSeconds = 1 << 40
 )
 
 var (
@@ -383,7 +384,7 @@ func (c *Codec) check(cs claimSet, tenant principal.TenantID, audience string) (
 		return Token{}, false, invalid("audience")
 	}
 	now := c.clk.Now()
-	if cs.Iat <= 0 || cs.Exp <= cs.Iat || time.Duration(cs.Exp-cs.Iat)*time.Second > c.recheck {
+	if cs.Iat <= 0 || cs.Exp <= cs.Iat || cs.Exp > maxUnixSeconds || cs.Exp-cs.Iat > int64(c.recheck/time.Second) {
 		return Token{}, false, invalid("lifetime")
 	}
 	if time.Unix(cs.Iat, 0).After(now.Add(MaxIssuedAtSkew)) {

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/JLugagne/egauth/federation"
 	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/internal/principaltest"
@@ -129,7 +131,7 @@ func TestVerified(t *testing.T) {
 }
 
 func TestForRuntime(t *testing.T) {
-	session, err := core.SessionCaller(principaltest.Full())
+	session, err := core.SessionCaller(principaltest.Full(), uuid.New(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,7 +16,7 @@ func Resolve[C any](cfg Config[C]) (*configcheck.Resolved, []*configcheck.Error)
 }
 
 func NewSessionPrincipal[C any](a principal.SessionAttrs, claims AppClaims[C]) (Principal[C], error) {
-	return sessionPrincipal(a, claims)
+	return detachedSessionPrincipal(a, claims)
 }
 
 func NewAPIKeyPrincipal[C any](info APIKeyInfo, claims AppClaims[C]) (Principal[C], error) {

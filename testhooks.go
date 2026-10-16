@@ -19,14 +19,15 @@ const hookCaller = "github.com/JLugagne/egauth/egauthtest."
 
 var errHookCaller = errors.New("egauth: test hooks may be called only by package egauthtest")
 
-// TestHookSessionPrincipal builds a session Principal from attrs, bypassing every gate. It checks
-// its caller at run time and returns an error unless that caller is in package egauthtest; the
-// repository guard test also fails on any other caller.
+// TestHookSessionPrincipal builds a session Principal from attrs, bypassing every gate. Its Caller
+// is bound to no stored session, so facades refuse it with ErrSessionEnded. It checks its caller at
+// run time and returns an error unless that caller is in package egauthtest; the repository guard
+// test also fails on any other caller.
 func TestHookSessionPrincipal[C any](attrs principal.SessionAttrs, claims AppClaims[C]) (Principal[C], error) {
 	if !calledByEgauthtest() {
 		return Principal[C]{}, errHookCaller
 	}
-	return sessionPrincipal(attrs, claims)
+	return detachedSessionPrincipal(attrs, claims)
 }
 
 // TestHookAPIKeyPrincipal builds an API-key Principal from info, bypassing every gate. Like

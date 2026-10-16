@@ -87,6 +87,7 @@ func TestBackendContract(t *testing.T) {
 		"Reissue":    "func(context.Context, http.ResponseWriter, session.Handle, core.SessionAttrs) error",
 		"End":        "func(context.Context, http.ResponseWriter, *http.Request) error",
 		"Durability": "func() store.Durability",
+		"Live":       "func(context.Context, session.Handle) error",
 	}
 	for name, sig := range want {
 		m, ok := bt.MethodByName(name)

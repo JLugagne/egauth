@@ -74,7 +74,8 @@ const (
 	TransportBearer  = core.TransportBearer
 )
 
-// Caller is the sealed identity of whoever invokes a facade method (session, API key or system).
+// Caller is the sealed identity of whoever invokes a facade method (session, API key, system or
+// resource token).
 type Caller = core.Caller
 
 // CallerKind says who acts through a facade.
@@ -82,9 +83,10 @@ type CallerKind = core.CallerKind
 
 // Caller kinds.
 const (
-	CallerSession = core.CallerSession
-	CallerAPIKey  = core.CallerAPIKey
-	CallerSystem  = core.CallerSystem
+	CallerSession       = core.CallerSession
+	CallerAPIKey        = core.CallerAPIKey
+	CallerSystem        = core.CallerSystem
+	CallerResourceToken = core.CallerResourceToken
 )
 
 // Sealed is the opaque persisted form of session state. Stores keep its bytes verbatim and never
