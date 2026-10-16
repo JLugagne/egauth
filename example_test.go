@@ -173,6 +173,22 @@ func ExampleUpgradeSecretsV016() {
 	fmt.Println(report)
 }
 
+func ExampleUpgradeIdentifiersV016() {
+	ctx := context.Background()
+	var storage egauth.Storage
+
+	report, err := egauth.UpgradeIdentifiersV016(ctx, storage)
+	switch {
+	case errors.Is(err, egauth.ErrIdentifiersHeld):
+		for _, h := range report.Held {
+			fmt.Println("repair by hand:", h.Subject, h.Kind, h.Problem)
+		}
+	case err != nil:
+		return
+	}
+	fmt.Println(report.Upgraded, report.Rewritten)
+}
+
 func ExampleAccounts() {
 	ctx := context.Background()
 	var auth *egauth.Auth[struct{}]

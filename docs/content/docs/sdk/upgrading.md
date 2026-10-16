@@ -33,9 +33,28 @@ if err != nil {
 fmt.Println(report)
 ```
 
-3. Deploy. Passkeys report `needs_reregistration` only when they are legacy.
-4. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`. The reference is `examples/fullstack`, and the minimal configuration is `ExampleNew`.
-5. In v0.18 the contract migrations drop the legacy tables.
+3. Re-normalise v0.16 identifiers once, after draining the v0.16 replicas. `egauth.New` refuses to start while an account is unchecked. Identifiers that cannot be made canonical are reported with `ErrIdentifiersHeld` and stay readable by subject until repaired.
+
+<!-- embed: example_test.go#ExampleUpgradeIdentifiersV016 -->
+```go
+ctx := context.Background()
+var storage egauth.Storage
+
+report, err := egauth.UpgradeIdentifiersV016(ctx, storage)
+switch {
+case errors.Is(err, egauth.ErrIdentifiersHeld):
+	for _, h := range report.Held {
+		fmt.Println("repair by hand:", h.Subject, h.Kind, h.Problem)
+	}
+case err != nil:
+	return
+}
+fmt.Println(report.Upgraded, report.Rewritten)
+```
+
+4. Deploy. Passkeys report `needs_reregistration` only when they are legacy.
+5. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`. The reference is `examples/fullstack`, and the minimal configuration is `ExampleNew`.
+6. In v0.18 the contract migrations drop the legacy tables.
 
 ## What changed for the application
 

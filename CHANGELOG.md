@@ -135,12 +135,16 @@ before deploying: **every user logs in again**.
    `legacy, err := kek.LegacyLocalV016(oldKey)`. `New`
    refuses to start until it is done. It is idempotent and reports every row it could not open
    with `ErrUpgradeIncomplete`.
-3. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
+3. Run `egauth.UpgradeIdentifiersV016(ctx, storage)` once, after draining the v0.16 replicas.
+   It re-normalises every v0.16 email, phone and recovery email; `New` refuses to start until
+   every account is checked. Identifiers it cannot make canonical are listed with
+   `ErrIdentifiersHeld` and stay readable by subject.
+4. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
    passwords, TOTP, passkeys, OAuth links and signing keys carry over. Passkeys report
    `needs_reregistration` only when they are legacy.
-4. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`; `examples/fullstack` is the
+5. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`; `examples/fullstack` is the
    reference, and `ExampleNew` in the root package is the minimal configuration.
-5. In v0.18 the contract migrations drop the legacy tables.
+6. In v0.18 the contract migrations drop the legacy tables.
 
 ## [v0.16.0] — 2026-10-07
 

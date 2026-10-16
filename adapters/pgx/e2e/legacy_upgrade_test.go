@@ -108,6 +108,7 @@ func TestG29LegacyUpgrade(t *testing.T) {
 	_, err := buildAuth(ctx, t, pool, newKey)
 	require.Error(t, err, "New refuses to start while v0.16 secrets remain")
 	require.Contains(t, err.Error(), "UpgradeSecretsV016")
+	require.Contains(t, err.Error(), "UpgradeIdentifiersV016", "and while v0.16 identifiers are unchecked")
 
 	st, err := pgxstore.New(ctx, pool)
 	require.NoError(t, err)
@@ -127,8 +128,12 @@ func TestG29LegacyUpgrade(t *testing.T) {
 		require.Zero(t, legacyLeft, table)
 	}
 
+	ids, err := egauth.UpgradeIdentifiersV016(ctx, st)
+	require.NoError(t, err)
+	require.Equal(t, egauth.IdentifierUpgradeReport{Upgraded: 2}, ids, "alice and bob are already canonical")
+
 	auth, err := buildAuth(ctx, t, pool, newKey)
-	require.NoError(t, err, "New starts once the secrets are upgraded")
+	require.NoError(t, err, "New starts once the secrets and identifiers are upgraded")
 	h := serve(t, auth)
 
 	t.Run("TOTP secret opens", func(t *testing.T) {

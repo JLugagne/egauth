@@ -166,6 +166,23 @@ func TestLivenessRefusesV016SecretsLeftInPlace(t *testing.T) {
 	require.ErrorContains(t, err, "9 v0.16 secrets not upgraded; run egauth.UpgradeSecretsV016")
 }
 
+type countingIdentity struct {
+	identityStub
+	legacy int64
+}
+
+func (s countingIdentity) CountLegacyIdentifiers(context.Context) (int64, error) {
+	return s.legacy, nil
+}
+
+func TestLivenessRefusesUncheckedV016Identifiers(t *testing.T) {
+	cfg := fullConfig(t)
+	cfg.Storage.Identity = countingIdentity{identityStub: cfg.Storage.Identity.(identityStub), legacy: 5}
+	err := newErr(t, cfg)
+	requireField(t, err, "Storage.Identity")
+	require.ErrorContains(t, err, "5 v0.16 accounts with unchecked identifiers; run egauth.UpgradeIdentifiersV016")
+}
+
 func TestLivenessRefusesEnrolledFactorsWhoseModuleIsAbsent(t *testing.T) {
 	cfg := fullConfig(t)
 	cfg.Modules.MFA = nil

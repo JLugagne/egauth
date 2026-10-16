@@ -18,7 +18,9 @@ const Retention = 7 * 24 * time.Hour
 
 // Store persists accounts. Every method is scoped to a tenant, through a TenantID or a Subject.
 // Lookups of a missing account return store.ErrNotFound. ReapExpired deletes done outbox rows and
-// epoch-log rows older than Retention; it never deletes an account.
+// epoch-log rows older than Retention; it never deletes an account. A stored identifier that
+// NewIdentifier refuses (a v0.16 value v0.17 cannot represent) never fails a read or a mutation: it
+// is read as the zero Identifier, so the account stays readable and administrable by subject.
 type Store interface {
 	store.Base
 	store.Reaper
@@ -63,4 +65,16 @@ type Store interface {
 	// ErrNotTombstoned unless Tombstone was applied, and store.ErrConflict while an outbox row of s
 	// for another Component is not done.
 	EraseUser(ctx context.Context, s principal.Subject) error
+	// V016Identifiers returns up to limit accounts of every tenant, tombstoned or not, whose
+	// identifiers are not IdentifiersCanonical, ordered by tenant then user id and strictly after
+	// after (the zero Subject starts the listing). A limit below 1 returns ErrInvalidMutation.
+	V016Identifiers(ctx context.Context, after principal.Subject, limit int) ([]V016Identifiers, error)
+	// CountLegacyIdentifiers counts the accounts in IdentifiersUnchecked; held accounts are not
+	// counted.
+	CountLegacyIdentifiers(ctx context.Context) (int64, error)
+	// UpgradeIdentifiers applies u as a compare-and-swap, without bumping the epoch or queueing the
+	// outbox: it returns false when the account no longer holds u.Old or is already canonical. It
+	// returns ErrInvalidMutation when ValidateUpgrade refuses u and ErrIdentifierTaken when a
+	// rewritten email or phone is owned by another live account; nothing is then written.
+	UpgradeIdentifiers(ctx context.Context, u IdentifierUpgrade) (bool, error)
 }

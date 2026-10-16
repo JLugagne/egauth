@@ -1,5 +1,6 @@
 // Package memory provides an in-process identity.Store. It reports store.Ephemeral: accounts are
-// lost on restart and invisible to other instances.
+// lost on restart and invisible to other instances. It never holds a v0.16 account, so every
+// account is IdentifiersCanonical.
 package memory
 
 import (

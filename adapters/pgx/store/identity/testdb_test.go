@@ -212,5 +212,13 @@ WHERE tenant_id = $1 AND user_id = $2 AND provider = 'password'`,
 VALUES ($1, $2, $3, now(), now())`, s.User, s.Tenant.String(), email.Value())
 			require.NoError(t, err)
 		},
+		SeedV016: func(t *testing.T, _ identity.Store, r identity.V016Identifiers) {
+			_, err := pool().Exec(context.Background(), `INSERT INTO users
+    (id, tenant_id, email, email_verified_at, phone, phone_verified_at, recovery_email, recovery_email_verified_at, created_at, updated_at)
+VALUES ($1, $2, $3, now(), nullif($4, ''), CASE WHEN $4 = '' THEN NULL ELSE now() END,
+    nullif($5, ''), CASE WHEN $5 = '' THEN NULL ELSE now() END, now(), now())`,
+				r.Subject.User, r.Subject.Tenant.String(), r.Email, r.Phone, r.RecoveryEmail)
+			require.NoError(t, err)
+		},
 	}
 }

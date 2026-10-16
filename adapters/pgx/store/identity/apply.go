@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/JLugagne/egauth/adapters/pgx/internal/migrate"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store"
 	contract "github.com/JLugagne/egauth/store/identity"
@@ -107,15 +108,9 @@ FROM users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, sub.User, sub.Tenant.St
 		return current{}, contract.ErrTombstoned
 	}
 	c := current{sub: sub, verified: verified != nil, epoch: uint64(max(epoch, 0))}
-	if c.email, err = ident(contract.IdentifierEmail, &email); err != nil {
-		return current{}, err
-	}
-	if c.phone, err = ident(contract.IdentifierPhone, phone); err != nil {
-		return current{}, err
-	}
-	if c.recovery, err = ident(contract.IdentifierRecoveryEmail, recovery); err != nil {
-		return current{}, err
-	}
+	c.email = ident(contract.IdentifierEmail, &email)
+	c.phone = ident(contract.IdentifierPhone, phone)
+	c.recovery = ident(contract.IdentifierRecoveryEmail, recovery)
 	return c, nil
 }
 
@@ -140,7 +135,7 @@ func apply(ctx context.Context, tx pgx.Tx, m contract.Mutation) (contract.Applie
 	return effects(ctx, tx, c, m, old)
 }
 
-func exec(ctx context.Context, tx pgx.Tx, what string, sql string, args ...any) (int64, error) {
+func exec(ctx context.Context, tx migrate.Querier, what string, sql string, args ...any) (int64, error) {
 	tag, err := tx.Exec(ctx, sql, args...)
 	if isUnique(err) {
 		return 0, contract.ErrIdentifierTaken
@@ -280,8 +275,8 @@ func create(ctx context.Context, tx pgx.Tx, m contract.CreateVerified) (current,
 	}
 	c := current{sub: principal.Subject{Tenant: m.Tenant, User: id}, email: m.Email, verified: true}
 	if _, err := exec(ctx, tx, "create user", `INSERT INTO users
-    (id, tenant_id, email, email_verified_at, security_epoch, created_at, updated_at)
-VALUES ($1, $2, $3, now(), 0, now(), now())`, id, m.Tenant.String(), m.Email.Value()); err != nil {
+    (id, tenant_id, email, email_verified_at, security_epoch, identifier_state, created_at, updated_at)
+VALUES ($1, $2, $3, now(), 0, $4, now(), now())`, id, m.Tenant.String(), m.Email.Value(), int16(contract.IdentifiersCanonical)); err != nil {
 		return current{}, err
 	}
 	if !m.PHC.IsZero() {

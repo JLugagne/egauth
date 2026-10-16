@@ -1,6 +1,8 @@
 // Package identity is the PostgreSQL identity.Store. Accounts live in the v0.16 users and identities
-// tables, extended in place by 009_security_epoch.sql; the epoch feed and the lifecycle outbox live
-// in egauth_epoch_log and egauth_lifecycle_outbox.
+// tables, extended in place by 009_security_epoch.sql and 010_identifier_state.sql; the epoch feed
+// and the lifecycle outbox live in egauth_epoch_log and egauth_lifecycle_outbox. users.identifier_state
+// defaults to IdentifiersUnchecked, so every row a v0.16 replica writes, even during a rolling
+// upgrade, is listed by V016Identifiers.
 package identity
 
 import (
@@ -113,15 +115,15 @@ func nullIdent(id contract.Identifier) *string {
 	return &v
 }
 
-func ident(k contract.IdentifierKind, v *string) (contract.Identifier, error) {
+func ident(k contract.IdentifierKind, v *string) contract.Identifier {
 	if v == nil || *v == "" {
-		return contract.Identifier{}, nil
+		return contract.Identifier{}
 	}
 	id, err := contract.NewIdentifier(k, *v)
 	if err != nil {
-		return contract.Identifier{}, errors.Join(errors.New("identity: stored "+k.String()+" is not canonical"), err)
+		return contract.Identifier{}
 	}
-	return id, nil
+	return id
 }
 
 const userColumns = `u.id, u.tenant_id, u.email, u.email_verified_at, u.phone, u.phone_verified_at, u.recovery_email,
@@ -151,15 +153,9 @@ func scanUser(row scanner) (contract.User, error) {
 	if u.Subject.Tenant, err = tenantOf(tenant); err != nil {
 		return contract.User{}, err
 	}
-	if u.Email, err = ident(contract.IdentifierEmail, &email); err != nil {
-		return contract.User{}, err
-	}
-	if u.Phone, err = ident(contract.IdentifierPhone, phone); err != nil {
-		return contract.User{}, err
-	}
-	if u.RecoveryEmail, err = ident(contract.IdentifierRecoveryEmail, recovery); err != nil {
-		return contract.User{}, err
-	}
+	u.Email = ident(contract.IdentifierEmail, &email)
+	u.Phone = ident(contract.IdentifierPhone, phone)
+	u.RecoveryEmail = ident(contract.IdentifierRecoveryEmail, recovery)
 	u.EmailVerifiedAt, u.PhoneVerifiedAt, u.RecoveryEmailVerifiedAt = at(verified), at(phoneAt), at(recoveryAt)
 	u.DisabledAt, u.DeletedAt, u.CreatedAt = at(disabled), at(deleted), created.UTC()
 	u.SecurityEpoch = uint64(max(epoch, 0))
@@ -306,9 +302,7 @@ func scanLink(row scanner) (contract.FederatedLink, error) {
 	if l.Subject.Tenant, err = tenantOf(tenant); err != nil {
 		return contract.FederatedLink{}, err
 	}
-	if l.Identity.ProviderEmail, err = ident(contract.IdentifierEmail, email); err != nil {
-		return contract.FederatedLink{}, err
-	}
+	l.Identity.ProviderEmail = ident(contract.IdentifierEmail, email)
 	l.Identity.ProviderEmailVerified = verified && !l.Identity.ProviderEmail.IsZero()
 	l.LinkedAt = linked.UTC()
 	return l, nil

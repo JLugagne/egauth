@@ -37,7 +37,7 @@
 4. Store durability: every security store reports the same level; ephemeral stores are accepted only on a loopback origin or with `Insecure.EphemeralState`.
 5. Schema: every embedded migration is recorded.
 6. KEK canary: existing data opens with the configured KEK.
-7. Legacy secrets: none remain un-upgraded (`egauth.UpgradeSecretsV016`).
+7. Legacy secrets: none remain un-upgraded (`egauth.UpgradeSecretsV016`), and no v0.16 account has unchecked identifiers (`egauth.UpgradeIdentifiersV016`).
 8. MFA enrollment versus enabled modules: stored enrollments need their module.
 9. Modules: deliverers, pages and API-key kinds.
 10. OAuth provider specs are complete and issuers are pinned.

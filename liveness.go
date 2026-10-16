@@ -124,6 +124,16 @@ func checkLegacySecrets[C any](ctx context.Context, cfg *Config[C], v *problems)
 	}
 }
 
+func checkLegacyIdentifiers[C any](ctx context.Context, cfg *Config[C], v *problems) {
+	n, err := cfg.Storage.Identity.CountLegacyIdentifiers(ctx)
+	switch {
+	case err != nil:
+		v.add("Storage.Identity", "counting v0.16 identifiers: "+err.Error())
+	case n > 0:
+		v.add("Storage.Identity", strconv.FormatInt(n, 10)+" v0.16 accounts with unchecked identifiers; run egauth.UpgradeIdentifiersV016")
+	}
+}
+
 func checkEnrollments[C any](ctx context.Context, cfg *Config[C], v *problems) {
 	m := &cfg.Modules
 	if m.MFA == nil {

@@ -92,6 +92,7 @@ func bringUp[C any](cfg *Config[C], pol *policies, o *owned, durability store.Du
 	}
 	o.dataKey = openDataKey(ctx, cfg, v)
 	checkLegacySecrets(ctx, cfg, v)
+	checkLegacyIdentifiers(ctx, cfg, v)
 	checkEnrollments(ctx, cfg, v)
 	if err := v.err(); err != nil {
 		return err

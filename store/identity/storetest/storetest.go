@@ -27,7 +27,7 @@ import (
 var ErrInjected = errors.New("storetest: injected failure")
 
 // Hooks reach the state that the identity.Store contract cannot set, on the store under test. Every
-// field is required.
+// field is required except SeedV016.
 type Hooks struct {
 	// Age moves every instant stored for s d into the past, as if it had happened d earlier: the
 	// created, due and done instants of its epoch-log and outbox rows, and the last failure and
@@ -41,6 +41,11 @@ type Hooks struct {
 	// Unverified inserts account s with an unverified email, as v0.16 left one; no mutation creates
 	// such an account.
 	Unverified func(t *testing.T, st identity.Store, s principal.Subject, email identity.Identifier)
+	// SeedV016 inserts account r.Subject with r's Email, Phone and RecoveryEmail verbatim,
+	// IdentifiersUnchecked, as a v0.16 deployment wrote it; an empty phone or recovery email is
+	// absent. Leave it nil for a store that can never hold a v0.16 account: Run then checks that it
+	// lists none.
+	SeedV016 func(t *testing.T, st identity.Store, r identity.V016Identifiers)
 }
 
 var hooks sync.Map
@@ -74,6 +79,7 @@ func Run(t *testing.T, newStore func(*testing.T) identity.Store) {
 		"MarkEmailVerified":      markEmailVerified,
 		"ApplyRefusals":          applyRefusals,
 		"IdentifierUniqueness":   identifierUniqueness,
+		"V016Identifiers":        legacyIdentifiers,
 		"FederatedLinks":         federatedLinks,
 		"FederatedRebind":        federatedRebind,
 		"EffectsAreAtomic":       effectsAreAtomic,

@@ -26,5 +26,6 @@ Secrets at rest (TOTP seeds, OAuth client secrets, tenant signing keys) are seal
 
 1. `pgxstore.Migrate`.
 2. `egauth.UpgradeSecretsV016(ctx, storage, legacy, newKEK)` where `legacy, err := kek.LegacyLocalV016(oldKey)`: re-seals every legacy secret with associated data. Idempotent. `egauth.ErrUpgradeIncomplete` plus a report when rows open under no legacy form.
-3. Deploy. Every user logs in again; emailed links are invalid. Credentials and API keys carry over.
-4. v0.18 drops the legacy tables.
+3. `egauth.UpgradeIdentifiersV016(ctx, storage)` after draining the v0.16 replicas: re-normalises v0.16 emails and phones. Idempotent. `egauth.ErrIdentifiersHeld` plus a report for identifiers it cannot make canonical; those accounts stay readable by subject.
+4. Deploy. Every user logs in again; emailed links are invalid. Credentials and API keys carry over.
+5. v0.18 drops the legacy tables.
