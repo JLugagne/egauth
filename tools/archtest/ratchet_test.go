@@ -22,6 +22,8 @@ const (
 
 var permanentEntries = []archtest.PermanentEntry{
 	{Guard: guardG07a, Symbol: archtest.ModulePath + "/adapters/otel.Options.ExportPII", RemovedBy: archtest.Permanent},
+	{Guard: guardG07a, Symbol: archtest.ModulePath + "/event.AccountDisabled", RemovedBy: archtest.Permanent},
+	{Guard: guardG07a, Symbol: archtest.ModulePath + "/event.InsecureConfiguration", RemovedBy: archtest.Permanent},
 	{Guard: guardG07a, Symbol: archtest.ModulePath + "/kek.LegacyOpener", RemovedBy: archtest.WPV018},
 	{Guard: guardG07a, Symbol: archtest.ModulePath + "/kek.LegacyLocalV016", RemovedBy: archtest.WPV018},
 	{Guard: guardG07a, Symbol: archtest.ModulePath + ".UpgradeSecretsV016", RemovedBy: archtest.WPV018},
@@ -273,6 +275,8 @@ func TestRatchetReleaseAllowsOnlyPermanentTypedEntries(t *testing.T) {
 	}}
 	otel := archtest.ExemptionList{Guard: guardG07a, MaxEntries: 1, Entries: []archtest.Exemption{
 		{Guard: guardG07a, Symbol: archtest.ModulePath + "/adapters/otel.Options.ExportPII", RemovedBy: archtest.Permanent},
+		{Guard: guardG07a, Symbol: archtest.ModulePath + "/event.AccountDisabled", RemovedBy: archtest.Permanent},
+		{Guard: guardG07a, Symbol: archtest.ModulePath + "/event.InsecureConfiguration", RemovedBy: archtest.Permanent},
 	}}
 	if got := archtest.CheckRelease("0.17.0", []archtest.ExemptionList{permanent, otel}, permanentEntries); len(got) != 0 {
 		t.Fatalf("permanent typed entries must survive a release: %v", got)
@@ -338,5 +342,17 @@ func TestRatchetEnvOverridesVersion(t *testing.T) {
 	got, err := archtest.ReleaseVersion(t.TempDir())
 	if err != nil || got != "9.9.9" {
 		t.Fatalf("want override 9.9.9, got %q %v", got, err)
+	}
+}
+
+func TestLegacyPackagesAreDeleted(t *testing.T) {
+	ws := repoWorkspace(t)
+	for _, rel := range specLegacyPrefixes {
+		if _, err := os.Stat(filepath.Join(ws.Root, filepath.FromSlash(rel))); err == nil {
+			t.Errorf("the legacy package %s of DESIGN.md section 10.1 still exists", rel)
+		}
+	}
+	if archtest.LegacyPrefixCount != 0 || len(archtest.LegacyRelPrefixes()) != 0 {
+		t.Errorf("the legacy exemption prefixes must be empty after the cutover")
 	}
 }

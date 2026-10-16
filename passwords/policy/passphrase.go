@@ -35,49 +35,47 @@ type PassphrasePolicy struct {
 	breach passwords.BreachChecker
 }
 
-// PassphraseOption configures a PassphrasePolicy.
-type PassphraseOption func(*PassphrasePolicy)
-
-// WithMinLength overrides the minimum length (in code points).
-func WithMinLength(n int) PassphraseOption {
-	return func(p *PassphrasePolicy) { p.MinLength = n }
-}
-
-// WithMaxLength overrides the maximum length (in code points); 0 disables the maximum.
-func WithMaxLength(n int) PassphraseOption {
-	return func(p *PassphrasePolicy) { p.MaxLength = n }
-}
-
-// WithDenylist adds entries to the rejected-secret denylist. Matching is case-insensitive and
-// whitespace-insensitive (all whitespace is stripped on both sides before comparison), so a
-// banned secret cannot be bypassed by re-spacing it. Call it multiple times to extend the list.
-func WithDenylist(entries ...string) PassphraseOption {
-	return func(p *PassphrasePolicy) {
-		for _, e := range entries {
-			p.denylist[normalizeDenyEntry(e)] = struct{}{}
-		}
-	}
-}
-
-// WithBreachChecker wires a BreachChecker (e.g. a HIBP k-anonymity client) into the policy.
-func WithBreachChecker(b passwords.BreachChecker) PassphraseOption {
-	return func(p *PassphrasePolicy) { p.breach = b }
+// PassphraseConfig tunes NewPassphrasePolicyFrom. A zero MinLength or MaxLength selects the
+// default; set the exported MaxLength field of the built policy to 0 to remove the maximum.
+type PassphraseConfig struct {
+	// MinLength is the minimum length in code points.
+	MinLength int
+	// MaxLength is the maximum length in code points.
+	MaxLength int
+	// Denylist extends the rejected-secret denylist. Matching is case-insensitive and
+	// whitespace-insensitive (all whitespace is stripped on both sides before comparison), so a
+	// banned secret cannot be bypassed by re-spacing it.
+	Denylist []string
+	// Breach screens secrets against a compromised corpus, for example a HIBP k-anonymity spec.
+	Breach passwords.BreachChecker
 }
 
 // NewPassphrasePolicy builds a PassphrasePolicy with NIST-aligned defaults and a small
-// built-in denylist of extremely common secrets. Supply WithBreachChecker for real
-// compromised-credential screening (the built-in denylist is only a minimal backstop).
-func NewPassphrasePolicy(opts ...PassphraseOption) *PassphrasePolicy {
+// built-in denylist of extremely common secrets. Use NewPassphrasePolicyFrom with a Breach checker
+// for real compromised-credential screening (the built-in denylist is only a minimal backstop).
+func NewPassphrasePolicy() *PassphrasePolicy {
+	return NewPassphrasePolicyFrom(PassphraseConfig{})
+}
+
+// NewPassphrasePolicyFrom builds a PassphrasePolicy from c; see PassphraseConfig.
+func NewPassphrasePolicyFrom(c PassphraseConfig) *PassphrasePolicy {
 	p := &PassphrasePolicy{
 		MinLength: DefaultPassphraseMinLength,
 		MaxLength: DefaultPassphraseMaxLength,
 		denylist:  make(map[string]struct{}),
+		breach:    c.Breach,
+	}
+	if c.MinLength != 0 {
+		p.MinLength = c.MinLength
+	}
+	if c.MaxLength != 0 {
+		p.MaxLength = c.MaxLength
 	}
 	for _, e := range builtinDenylist {
 		p.denylist[e] = struct{}{}
 	}
-	for _, opt := range opts {
-		opt(p)
+	for _, e := range c.Denylist {
+		p.denylist[normalizeDenyEntry(e)] = struct{}{}
 	}
 	return p
 }

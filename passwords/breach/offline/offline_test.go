@@ -60,7 +60,7 @@ func TestLoadHashes_PlainAndWithCount(t *testing.T) {
 func TestLoadHashes_Threshold(t *testing.T) {
 	pw := "seen-thrice"
 	src := sha1Upper(pw) + ":3"
-	c, err := offline.LoadHashes(strings.NewReader(src), offline.WithThreshold(5))
+	c, err := offline.LoadHashesAtLeast(strings.NewReader(src), 5)
 	require.NoError(t, err)
 
 	got, err := c.IsBreached(context.Background(), pw)

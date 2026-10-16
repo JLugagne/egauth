@@ -17,6 +17,7 @@ import (
 
 	"github.com/JLugagne/egauth"
 	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/passwords"
 	"github.com/JLugagne/egauth/passwords/argon2"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store"
@@ -139,7 +140,7 @@ func TestAccountsCreateWithATemporaryPasswordForcesAChange(t *testing.T) {
 	require.False(t, u.EmailVerifiedAt.IsZero())
 	cred, err := w.st.Identity.GetPassword(ctx, created.Subject)
 	require.NoError(t, err)
-	require.NoError(t, argon2.NewHasher().Compare(ctx, cred.PHC.PHC(), pw))
+	require.NoError(t, argon2.NewHasher().Compare(ctx, passwords.PHC(cred.PHC.PHC()), pw))
 	require.Equal(t, http.StatusOK, w.loginWith("new.user@example.com", pw).code)
 
 	_, err = w.a.Accounts().Create(ctx, admin, egauth.CreateAccountRequest{Email: "new.user@example.com"})

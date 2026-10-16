@@ -66,8 +66,8 @@ type inspector struct {
 }
 
 // Fields parses every tag reachable from t (a struct or a pointer to one) and checks the spec
-// itself: grammar, predicate and kind compatibility, module and bound=le paths, registry keys in
-// both directions, Raised keys, and untagged fields. Nested structs are walked when an egauth tag is
+// itself: grammar, predicate and kind compatibility, module and bound=le paths, registry keys
+// against tags and tags against the registry, Raised keys, and untagged fields. Nested structs are walked when an egauth tag is
 // reachable from them; untagged fields are allowed only for bools and the toggles of the modules
 // struct. A tag reachable only through an unexported field or a map value is a problem, since
 // Validate could not enforce it. G5 drives its probes from the returned fields.

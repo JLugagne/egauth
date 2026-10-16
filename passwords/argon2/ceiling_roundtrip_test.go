@@ -27,21 +27,13 @@ func TestHashOutputMustVerifyAboveCeilings(t *testing.T) {
 		wantParam string
 	}{
 		{
-			name: "iterations above MaxTime",
-			h: argon2hasher.NewHasher(
-				argon2hasher.WithTime(argon2hasher.MaxTime+1),
-				argon2hasher.WithMemory(argon2hasher.MinMemoryKiB),
-				argon2hasher.WithThreads(1),
-			),
+			name:      "iterations above MaxTime",
+			h:         argon2hasher.NewTunedHasher(argon2hasher.Params{Time: argon2hasher.MaxTime + 1, MemoryKiB: argon2hasher.MinMemoryKiB, Threads: 1}),
 			wantParam: fmt.Sprintf("t=%d", argon2hasher.MaxTime),
 		},
 		{
-			name: "memory above MaxMemoryKiB",
-			h: argon2hasher.NewHasher(
-				argon2hasher.WithMemory(argon2hasher.MaxMemoryKiB+1),
-				argon2hasher.WithTime(1),
-				argon2hasher.WithThreads(1),
-			),
+			name:      "memory above MaxMemoryKiB",
+			h:         argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: argon2hasher.MaxMemoryKiB + 1, Time: 1, Threads: 1}),
 			wantParam: fmt.Sprintf("m=%d", argon2hasher.MaxMemoryKiB),
 		},
 	}
@@ -54,9 +46,9 @@ func TestHashOutputMustVerifyAboveCeilings(t *testing.T) {
 			assert.Contains(t, phc, tc.wantParam,
 				"the generation path must clamp the over-ceiling option to the verify-path ceiling")
 
-			assert.NoError(t, tc.h.Compare(ctx, phc, password),
+			assert.NoError(t, tc.h.Compare(ctx, passwords.PHC(phc), password),
 				"Hash produced a PHC string the same hasher cannot verify; stored hash: %s", phc)
-			assert.NotErrorIs(t, tc.h.Compare(ctx, phc, password), passwords.ErrInvalidPassword,
+			assert.NotErrorIs(t, tc.h.Compare(ctx, passwords.PHC(phc), password), passwords.ErrInvalidPassword,
 				"Compare must not report its own Hash output as an invalid password")
 		})
 	}
@@ -69,15 +61,11 @@ func TestHashAboveCeilingSurvivesConfigRevert(t *testing.T) {
 	ctx := context.Background()
 	const password = "CorrectHorseBatteryStaple-2026!"
 
-	overCeiling := argon2hasher.NewHasher(
-		argon2hasher.WithTime(argon2hasher.MaxTime+1),
-		argon2hasher.WithMemory(argon2hasher.MinMemoryKiB),
-		argon2hasher.WithThreads(1),
-	)
+	overCeiling := argon2hasher.NewTunedHasher(argon2hasher.Params{Time: argon2hasher.MaxTime + 1, MemoryKiB: argon2hasher.MinMemoryKiB, Threads: 1})
 	phc, err := overCeiling.Hash(ctx, password)
 	require.NoError(t, err)
 
 	reverted := argon2hasher.NewHasher()
-	assert.NoError(t, reverted.Compare(ctx, phc, password),
+	assert.NoError(t, reverted.Compare(ctx, passwords.PHC(phc), password),
 		"reverting the hasher configuration must recover hashes minted above the ceiling")
 }

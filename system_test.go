@@ -35,7 +35,7 @@ func TestSystemCallerIsRefusedInsideARequestByEveryFacadeMethod(t *testing.T) {
 	uses := w.systemUses()
 	require.Len(t, uses, len(calls), "every refused use is audited")
 	for _, u := range uses {
-		require.ErrorIs(t, u.Err, egauth.ErrSystemCallerInRequest)
+		require.Contains(t, u.Err.Text(), egauth.ErrSystemCallerInRequest.Error())
 	}
 	u, err := w.st.Identity.GetUser(context.Background(), target)
 	require.NoError(t, err)

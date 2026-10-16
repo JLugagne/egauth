@@ -2,6 +2,7 @@ package argon2_test
 
 import (
 	"context"
+	"github.com/JLugagne/egauth/passwords"
 	"testing"
 
 	argon2hasher "github.com/JLugagne/egauth/passwords/argon2"
@@ -40,11 +41,7 @@ import (
 // benchHasher builds a hasher at a fixed, low-but-valid cost so the benchmarks
 // run quickly while still exercising the real KDF and constant-time compare.
 func benchHasher() *argon2hasher.Hasher {
-	return argon2hasher.NewHasher(
-		argon2hasher.WithMemory(argon2hasher.MinMemoryKiB),
-		argon2hasher.WithTime(1),
-		argon2hasher.WithThreads(1),
-	)
+	return argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: argon2hasher.MinMemoryKiB, Time: 1, Threads: 1})
 }
 
 // BenchmarkCompare_CorrectPassword measures the success path: a full Argon2id
@@ -60,7 +57,7 @@ func BenchmarkCompare_CorrectPassword(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = h.Compare(ctx, stored, password)
+		_ = h.Compare(ctx, passwords.PHC(stored), password)
 	}
 }
 
@@ -79,7 +76,7 @@ func BenchmarkCompare_WrongPassword(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = h.Compare(ctx, stored, "wrong-horse-battery-staple")
+		_ = h.Compare(ctx, passwords.PHC(stored), "wrong-horse-battery-staple")
 	}
 }
 
@@ -97,7 +94,7 @@ func BenchmarkCompare_MalformedHash(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = h.Compare(ctx, malformed, "correct-horse-battery-staple")
+		_ = h.Compare(ctx, passwords.PHC(malformed), "correct-horse-battery-staple")
 	}
 }
 
@@ -111,11 +108,7 @@ func BenchmarkCompare_MalformedHash(b *testing.B) {
 // modestly higher than the "old" cost; production deltas will be larger.
 func BenchmarkDecoyGap_VerifyOldCost(b *testing.B) {
 	ctx := context.Background()
-	old := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(argon2hasher.MinMemoryKiB),
-		argon2hasher.WithTime(1),
-		argon2hasher.WithThreads(1),
-	)
+	old := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: argon2hasher.MinMemoryKiB, Time: 1, Threads: 1})
 	const password = "correct-horse-battery-staple"
 	oldHash, err := old.Hash(ctx, password)
 	if err != nil {
@@ -123,15 +116,11 @@ func BenchmarkDecoyGap_VerifyOldCost(b *testing.B) {
 	}
 	// The operator has since raised the configured cost; Compare still honours
 	// the stored (old, cheaper) cost for this not-yet-rehashed account.
-	target := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(2*argon2hasher.MinMemoryKiB),
-		argon2hasher.WithTime(3),
-		argon2hasher.WithThreads(2),
-	)
+	target := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 2 * argon2hasher.MinMemoryKiB, Time: 3, Threads: 2})
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = target.Compare(ctx, oldHash, password)
+		_ = target.Compare(ctx, passwords.PHC(oldHash), password)
 	}
 }
 
@@ -141,11 +130,7 @@ func BenchmarkDecoyGap_VerifyOldCost(b *testing.B) {
 // residual timing gap.
 func BenchmarkDecoyGap_DecoyNewCost(b *testing.B) {
 	ctx := context.Background()
-	target := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(2*argon2hasher.MinMemoryKiB),
-		argon2hasher.WithTime(3),
-		argon2hasher.WithThreads(2),
-	)
+	target := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 2 * argon2hasher.MinMemoryKiB, Time: 3, Threads: 2})
 	const password = "correct-horse-battery-staple"
 	b.ReportAllocs()
 	b.ResetTimer()

@@ -2,6 +2,7 @@ package argon2_test
 
 import (
 	"context"
+	"github.com/JLugagne/egauth/passwords"
 	"testing"
 
 	"github.com/JLugagne/egauth/passwords/argon2"
@@ -35,6 +36,6 @@ func FuzzCompare(f *testing.F) {
 
 	h := argon2.NewHasher()
 	f.Fuzz(func(_ *testing.T, hash, password string) {
-		_ = h.Compare(context.Background(), hash, password)
+		_ = h.Compare(context.Background(), passwords.PHC(hash), password)
 	})
 }

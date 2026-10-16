@@ -5,9 +5,8 @@
 //
 // # Composable by design
 //
-// Like the rest of egauth (see the database/sql-style note in package identity), passwords is a
-// seam, not a framework. identity.NewService takes a passwords.Hasher and passwords.Policy, so you
-// plug in the shipped references or your own:
+// passwords is a seam, not a framework: egauth.New builds its Hasher and Policy from Config, and the
+// references below can also be used on their own or replaced by your own:
 //
 //   - passwords/argon2 — Argon2id Hasher (PHC string, crypto/rand salt, constant-time compare).
 //     The recommended default.
@@ -20,7 +19,7 @@
 //
 //	hasher := argon2.NewHasher()
 //	pol := policy.NewDefaultPolicy()                    // or policy.NewPassphrasePolicy(...)
-//	svc := identity.NewService(store, hasher, pol)
+//	err := pol.Verify(ctx, candidate)
 //
 // # Security posture
 //

@@ -66,9 +66,9 @@ func passwordProblem(err error) error {
 
 func (s *Service) matches(ctx context.Context, phc, password string) bool {
 	canon := passwords.Canonical(password)
-	ok := s.hasher.Compare(ctx, phc, canon) == nil
+	ok := s.hasher.Compare(ctx, passwords.PHC(phc), canon) == nil
 	if canon != password {
-		legacy := s.hasher.Compare(ctx, phc, password) == nil
+		legacy := s.hasher.Compare(ctx, passwords.PHC(phc), password) == nil
 		ok = ok || legacy
 	}
 	return ok

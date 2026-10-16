@@ -64,7 +64,7 @@ func TestSpanSink_ErrorSetsStatusAndRecordsError(t *testing.T) {
 	sink.EmitEvent(context.Background(), event.Event{
 		Type:   event.DeliveryFailed,
 		Reason: "smtp_timeout",
-		Err:    sentinel,
+		Err:    event.CauseOf(sentinel),
 	})
 
 	spans := rec.Ended()
@@ -85,7 +85,7 @@ func TestSpanSink_ErrorSetsStatusAndRecordsError(t *testing.T) {
 func TestSpanSink_NilTracer_IsNoop(t *testing.T) {
 	// Must not panic.
 	sink := egauthotel.NewSpanSink(nil)
-	sink.EmitEvent(context.Background(), event.Event{Type: event.MFAEnrolled})
+	sink.EmitEvent(context.Background(), event.Event{Type: event.MFAVerified})
 }
 
 func TestSpanSink_SecurityEventMapping(t *testing.T) {
@@ -100,7 +100,7 @@ func TestSpanSink_SecurityEventMapping(t *testing.T) {
 		{event.Event{Type: event.RefreshReuseDetected}, "egauth.refresh.reuse_detected"},
 		{event.Event{Type: event.TokenFamilyRevoked}, "egauth.token.family_revoked"},
 		{event.Event{Type: event.MFAVerificationFailed}, "egauth.mfa.verification_failed"},
-		{event.Event{Type: event.InsecureCookieMisuse}, "egauth.cookies.insecure_misuse"},
+		{event.Event{Type: event.InsecureConfiguration}, "egauth.configuration.insecure"},
 		{event.Event{Type: event.AccountBlocked}, "egauth.account.blocked"},
 	}
 
@@ -174,7 +174,7 @@ func TestNewSink_StatusFollowsSeverity(t *testing.T) {
 func TestNewSink_DropsPIIAndSecretsByDefault(t *testing.T) {
 	rec, sink := newSink(t, egauthotel.Options{})
 	sink.EmitEvent(context.Background(), event.Event{
-		Type: event.LoginFailed, UserID: "u-1", TenantID: "t-1", Err: errors.New("mailbox jane@example.com"),
+		Type: event.LoginFailed, UserID: "u-1", TenantID: "t-1", Err: event.CauseOf(errors.New("mailbox jane@example.com")),
 		Attrs: map[string]any{
 			string(event.KeyMethod): "password", string(event.KeyIP): "192.0.2.1",
 			string(event.KeyCaptchaToken): "tok-secret", "rogue": "x",

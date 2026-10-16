@@ -13,7 +13,7 @@ import (
 )
 
 // TestClientDoesNotFollowRedirects pins the redirect policy. The breach endpoint is whatever
-// WithBaseURL names — commonly a self-hosted mirror — and the request carries a hash prefix derived
+// Config.BaseURL names — commonly a self-hosted mirror — and the request carries a hash prefix derived
 // from the user's password. A 3xx from that endpoint used to be followed (net/http's default policy
 // allows ten hops), so a hostile or compromised mirror could choose the next destination and walk
 // this process into an internal address.
@@ -31,7 +31,7 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer mirror.Close()
 
-	c := hibp.New(hibp.WithBaseURL(mirror.URL), hibp.WithHTTPClient(mirror.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: mirror.URL}, mirror.Client())
 	breached, err := c.IsBreached(context.Background(), "password123")
 
 	// The redirect is not followed, so the 302 is a non-200 and the client reports an upstream
@@ -42,7 +42,7 @@ func TestClientDoesNotFollowRedirects(t *testing.T) {
 }
 
 // TestClientRefusesInternalBaseURL proves the dial-time guard applies to this client: pointing the
-// breach check at a loopback host no longer reaches it, even though WithBaseURL is documented for
+// breach check at a loopback host no longer reaches it, even though Config.BaseURL is documented for
 // self-hosted mirrors.
 func TestClientRefusesInternalBaseURL(t *testing.T) {
 	var hits int
@@ -52,8 +52,8 @@ func TestClientRefusesInternalBaseURL(t *testing.T) {
 	}))
 	defer internal.Close()
 
-	// No WithHTTPClient: the default hardened client is used, which is the point of the test.
-	c := hibp.New(hibp.WithBaseURL(internal.URL))
+	// No injected client: the default hardened client is used, which is the point of the test.
+	c := hibp.New(hibp.Config{BaseURL: internal.URL})
 	_, err := c.IsBreached(context.Background(), "password123")
 
 	require.Error(t, err, "the default client must refuse a loopback base URL")
@@ -67,7 +67,7 @@ func TestClientFailOpenStillReportsNotBreachedWhenTheGuardBlocks(t *testing.T) {
 	internal := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer internal.Close()
 
-	c := hibp.New(hibp.WithBaseURL(internal.URL), hibp.WithFailOpen())
+	c := hibp.New(hibp.Config{BaseURL: internal.URL, FailOpen: true})
 	breached, err := c.IsBreached(context.Background(), "password123")
 	assert.NoError(t, err, "fail-open swallows the upstream error by design")
 	assert.False(t, breached)
@@ -76,7 +76,7 @@ func TestClientFailOpenStillReportsNotBreachedWhenTheGuardBlocks(t *testing.T) {
 // TestClientAcceptsAHardenedDefaultTimeout keeps the documented 10s default: switching the client
 // must not have silently removed the bound.
 func TestClientAcceptsAHardenedDefaultTimeout(t *testing.T) {
-	c := hibp.New()
+	c := hibp.New(hibp.Config{})
 	require.NotNil(t, c)
 	// IsBreached against the real endpoint is not exercised here; the assertion is that the
 	// constructor produced a usable client with a bounded timeout.

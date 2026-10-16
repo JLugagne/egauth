@@ -109,7 +109,7 @@ type Reseal struct {
 }
 
 // Store persists provider specs and reads linked identities. Links are written through the identity
-// store's LinkFederated and UnlinkFederated mutations, in the same transaction as the epoch bump.
+// store's LinkFederated and UnlinkFederated mutations, atomically with the epoch bump.
 type Store interface {
 	store.Base
 

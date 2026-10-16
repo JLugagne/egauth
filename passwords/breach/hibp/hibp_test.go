@@ -55,7 +55,7 @@ func TestClient_IsBreached_FoundSendsOnlyPrefix(t *testing.T) {
 	const pw = "Sup3rSecret-passphrase!"
 	srv, lastPath := rangeServer(t, pw, 42)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	breached, err := c.IsBreached(context.Background(), pw)
 	require.NoError(t, err)
 	assert.True(t, breached, "a suffix present with a positive count is breached")
@@ -70,7 +70,7 @@ func TestClient_IsBreached_NotFound(t *testing.T) {
 	// count 0 => the server omits our suffix entirely, only decoy/padding lines remain.
 	srv, _ := rangeServer(t, pw, 0)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	breached, err := c.IsBreached(context.Background(), pw)
 	require.NoError(t, err)
 	assert.False(t, breached)
@@ -86,7 +86,7 @@ func TestClient_IsBreached_PaddingZeroCountNeverMatches(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	breached, err := c.IsBreached(context.Background(), pw)
 	require.NoError(t, err)
 	assert.False(t, breached, "zero-count padding entries must not be treated as a breach")
@@ -97,13 +97,13 @@ func TestClient_Threshold(t *testing.T) {
 	srv, _ := rangeServer(t, pw, 5)
 
 	// Below threshold: not breached.
-	strict := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()), hibp.WithThreshold(10))
+	strict := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL, Threshold: 10}, srv.Client())
 	breached, err := strict.IsBreached(context.Background(), pw)
 	require.NoError(t, err)
 	assert.False(t, breached, "count 5 is below threshold 10")
 
 	// At/above threshold: breached.
-	lax := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()), hibp.WithThreshold(5))
+	lax := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL, Threshold: 5}, srv.Client())
 	breached, err = lax.IsBreached(context.Background(), pw)
 	require.NoError(t, err)
 	assert.True(t, breached, "count 5 meets threshold 5")
@@ -115,7 +115,7 @@ func TestClient_FailClosed_PropagatesError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	_, err := c.IsBreached(context.Background(), "whatever")
 	require.Error(t, err, "by default an upstream failure propagates (the policy then fails closed)")
 }
@@ -126,7 +126,7 @@ func TestClient_FailOpen_SwallowsError(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()), hibp.WithFailOpen())
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL, FailOpen: true}, srv.Client())
 	breached, err := c.IsBreached(context.Background(), "whatever")
 	require.NoError(t, err, "fail-open swallows the upstream error")
 	assert.False(t, breached, "fail-open treats an unreachable service as not-breached")
@@ -146,7 +146,7 @@ func TestClient_OversizedResponseFailsClosed(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	_, err := c.IsBreached(context.Background(), pw)
 	require.Error(t, err, "an oversized/truncated response must error, not silently report not-breached")
 }
@@ -163,7 +163,7 @@ func TestClient_LargeLineWithinCapIsParsed(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 	breached, err := c.IsBreached(context.Background(), pw)
 	require.NoError(t, err, "a line larger than 64 KiB but within the response cap must not error")
 	assert.True(t, breached)
@@ -171,7 +171,7 @@ func TestClient_LargeLineWithinCapIsParsed(t *testing.T) {
 
 func TestClient_RespectsContextCancellation(t *testing.T) {
 	srv, _ := rangeServer(t, "ctx-pw-123456", 1)
-	c := hibp.New(hibp.WithBaseURL(srv.URL), hibp.WithHTTPClient(srv.Client()))
+	c := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled
@@ -181,3 +181,11 @@ func TestClient_RespectsContextCancellation(t *testing.T) {
 
 // The client must satisfy the passwords.BreachChecker hook so it drops straight into the policy.
 var _ passwords.BreachChecker = (*hibp.Client)(nil)
+
+func TestConfigZeroValueFailsClosedOnAnUnreachableMirror(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusInternalServerError) }))
+	defer srv.Close()
+	breached, err := hibp.NewWithHTTPClient(hibp.Config{BaseURL: srv.URL}, srv.Client()).IsBreached(context.Background(), "password123")
+	require.Error(t, err)
+	assert.False(t, breached)
+}

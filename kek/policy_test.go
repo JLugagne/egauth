@@ -6,7 +6,6 @@ import (
 
 	"github.com/JLugagne/egauth/internal/secretpolicy"
 	"github.com/JLugagne/egauth/kek"
-	"github.com/JLugagne/egauth/keystore"
 )
 
 func TestNewLocalRejectsEveryPublishedCredential(t *testing.T) {
@@ -55,8 +54,8 @@ func TestLegacyLocalV016AcceptsExactlyTheV016Keys(t *testing.T) {
 		"random":               randomKey(t),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := keystore.NewKEK(key); err != nil {
-				t.Fatalf("fixture refused by v0.16 keystore.NewKEK: %v", err)
+			if _, err := v016Accepts(key); err != nil {
+				t.Fatalf("fixture refused by v0.16 key policy: %v", err)
 			}
 			if _, err := kek.LegacyLocalV016(key); err != nil {
 				t.Fatalf("LegacyLocalV016 refuses a key v0.16 accepted: %v", err)
@@ -69,8 +68,8 @@ func TestLegacyLocalV016AcceptsExactlyTheV016Keys(t *testing.T) {
 		"repeated byte": []byte("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := keystore.NewKEK(key); err == nil {
-				t.Fatal("fixture accepted by v0.16 keystore.NewKEK")
+			if _, err := v016Accepts(key); err == nil {
+				t.Fatal("fixture accepted by v0.16 key policy")
 			}
 			if _, err := kek.LegacyLocalV016(key); !errors.Is(err, kek.ErrInvalidKey) {
 				t.Fatalf("LegacyLocalV016 = %v, want ErrInvalidKey", err)
@@ -83,4 +82,11 @@ func TestNewLocalStaysStricterThanV016(t *testing.T) {
 	if _, err := kek.NewLocal([]byte("abababababababababababababababcd")); !errors.Is(err, kek.ErrInvalidKey) {
 		t.Fatalf("NewLocal(low diversity) = %v, want ErrInvalidKey", err)
 	}
+}
+
+func v016Accepts(key []byte) (struct{}, error) {
+	if len(key) != kek.KeyLength {
+		return struct{}{}, kek.ErrInvalidKey
+	}
+	return struct{}{}, secretpolicy.Validate("KEK", key, kek.KeyLength)
 }

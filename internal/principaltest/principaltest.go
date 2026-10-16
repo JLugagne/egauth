@@ -52,8 +52,8 @@ func Full() core.SessionAttrs {
 	})
 }
 
-// FullPending returns a bound Pending with every field set to a non-zero value, for the same
-// round-trip suites as Full.
+// FullPending returns a bound Pending with every field set to a non-zero value, for round-trip
+// suites alongside Full.
 func FullPending() core.Pending {
 	return core.ForTestPending(core.ForTestPendingFields{
 		Subject:     fullSubject,

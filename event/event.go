@@ -1,6 +1,6 @@
 // Package event defines egauth's optional security-event seam. Services emit lifecycle and
 // security events — login success/failure, account lockout, refresh-token reuse, MFA changes,
-// API-key lifecycle (creation, successful auth, failed auth, expiry purge), delivery failures,
+// API-key lifecycle (creation, successful auth, failed auth), delivery failures,
 // ... — to a Sink the application supplies. It is entirely optional (a nil Sink disables
 // emission) and dependency-free, so any module can emit without coupling to a particular
 // logging or telemetry implementation.
@@ -24,6 +24,7 @@ package event
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 )
 
@@ -34,7 +35,7 @@ type Type string
 const (
 	LoginSucceeded          Type = "login.succeeded"
 	LoginFailed             Type = "login.failed"
-	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, amr, interim, must_change_password
+	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, authn_methods, interim, must_change_password
 	AccountLocked           Type = "account.locked"
 	UserRegistered          Type = "user.registered"
 	PasswordReset           Type = "password.reset"   // completed via a reset token
@@ -50,25 +51,19 @@ const (
 	AccountEnabled          Type = "account.enabled"  // administrative re-activation
 	RefreshReuseDetected    Type = "refresh.reuse_detected"
 	TokenFamilyRevoked      Type = "token.family_revoked"
-	MFAChallengeRequired    Type = "mfa.challenge_required" // a login flow paused mid-pipeline: a second factor must be satisfied before final credential issuance (authflow engine)
-	MFAEnrolled             Type = "mfa.enrolled"
-	MFAConfirmed            Type = "mfa.confirmed"
-	MFAVerified             Type = "mfa.verified" // a second factor (TOTP or recovery code) was successfully verified
+	MFAChallengeRequired    Type = "mfa.challenge_required" // a login flow paused mid-pipeline: a second factor must be satisfied before final credential issuance (login flow)
+	MFAVerified             Type = "mfa.verified"           // a second factor (TOTP or recovery code) was successfully verified
 	MFAVerificationFailed   Type = "mfa.verification_failed"
-	MFADisabled             Type = "mfa.disabled"
-	MFAUnlocked             Type = "mfa.unlocked"                   // an operator reset a locked-out second factor (UnlockMFA)
-	CredentialAdded         Type = "credential.added"               // a passkey/WebAuthn credential was registered
-	CredentialRemoved       Type = "credential.removed"             // a passkey/WebAuthn credential was deleted
-	DeliveryFailed          Type = "delivery.failed"                // a swallowed mailer/delivery error (outage signal)
-	InsecureCookieMisuse    Type = "cookies.insecure_misuse"        // Insecure (non-Secure) cookies served to a non-loopback, non-TLS host (likely production misconfiguration)
-	RedirectFallbackMisuse  Type = "oauth.redirect_fallback_misuse" // redirect_uri derived from the request Host in a production-like request (WEB-02): deploy WithRedirectURL or WithAllowedHosts in production
+	MFAUnlocked             Type = "mfa.unlocked"       // an operator reset a locked-out second factor (UnlockMFA)
+	CredentialAdded         Type = "credential.added"   // a passkey/WebAuthn credential was registered
+	CredentialRemoved       Type = "credential.removed" // a passkey/WebAuthn credential was deleted
+	DeliveryFailed          Type = "delivery.failed"    // a swallowed mailer/delivery error (outage signal)
 
 	// API-key lifecycle events.
 	APIKeyCreated       Type = "api_key.created"        // a new API key (PAT or service token) was issued; carries type and created_by in Attrs
 	APIKeyRevoked       Type = "api_key.revoked"        // an API key was administratively soft-revoked; carries type and created_by in Attrs (mirrors api_key.created; no secret)
 	APIKeyAuthSucceeded Type = "api_key.auth.succeeded" // an API key was verified successfully; carries key type in Attrs
 	APIKeyAuthFailed    Type = "api_key.auth.failed"    // an API key verification failed; Reason carries the failure code (see ReasonAPIKey* constants)
-	APIKeyPurged        Type = "api_key.purged"         // expired keys were hard-deleted by the sweep; Attrs carries "count"
 )
 
 // Reason codes for APIKeyAuthFailed events. These are the only valid values for Event.Reason
@@ -95,13 +90,55 @@ type Event struct {
 	// Reason is a short machine code for an outcome or failure (e.g. "invalid_credentials",
 	// "account_locked", "reuse_after_grace"). Keep it free of secrets and raw user input.
 	Reason string
-	// Err is the underlying error for failure/outage events (e.g. a swallowed mailer or store
+	// Err describes the underlying failure of an outage event (e.g. a swallowed mailer or store
 	// error), so an otherwise-invisible outage is observable. Its text may embed personal data (a
 	// rejected mailbox, a phone number) and is classified PII: NewSlogSink logs only its type.
-	Err error
+	Err Cause
 	// Attrs carries extra structured context. Never put secrets, tokens or passwords here.
 	Attrs map[string]any
 }
+
+// Cause is the failure behind an outage event, reduced to the dynamic type of the error and its
+// text. It holds no error value, so a sink cannot unwrap, compare or format it into a log by
+// accident. The text is classified PII.
+type Cause struct {
+	typeName string
+	text     string
+}
+
+// CauseOf describes err; it returns the zero Cause for a nil error.
+func CauseOf(err error) Cause {
+	if err == nil {
+		return Cause{}
+	}
+	return Cause{typeName: fmt.Sprintf("%T", err), text: err.Error()}
+}
+
+// IsZero reports whether c describes no failure.
+func (c Cause) IsZero() bool { return c.typeName == "" }
+
+// Type returns the dynamic Go type of the failure, such as "*net.OpError". It carries no personal data.
+func (c Cause) Type() string { return c.typeName }
+
+// Text returns the error text, which may embed personal data.
+func (c Cause) Text() string { return c.text }
+
+// String renders only the dynamic type, never the text, so fmt and log verbs cannot leak it.
+func (c Cause) String() string {
+	if c.IsZero() {
+		return "<nil>"
+	}
+	return c.typeName
+}
+
+// GoString renders only the dynamic type, for the %#v verb.
+func (c Cause) GoString() string { return c.String() }
+
+// Format renders only the dynamic type for every fmt verb, including %+v.
+func (c Cause) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
+
+// LogValue renders only the dynamic type for slog.
+func (c Cause) LogValue() slog.Value { return slog.StringValue(c.String()) }
 
 // Sink receives emitted events. Implementations MUST be safe for concurrent use and SHOULD NOT
 // block the caller (buffer or dispatch asynchronously if the backend is slow).
@@ -183,14 +220,14 @@ func (s *slogSink) EmitEvent(ctx context.Context, e Event) {
 	for k, v := range e.PublicAttrs() {
 		attrs = append(attrs, slog.Any(k, v))
 	}
-	if e.Err != nil {
-		attrs = append(attrs, slog.String("error_type", fmt.Sprintf("%T", e.Err)))
+	if !e.Err.IsZero() {
+		attrs = append(attrs, slog.String("error_type", e.Err.Type()))
 	}
 	s.logger.LogAttrs(ctx, levelFor(e), "egauth security event", attrs...)
 }
 
 func levelFor(e Event) slog.Level {
-	if e.Err != nil {
+	if !e.Err.IsZero() {
 		return slog.LevelError
 	}
 	switch e.Type.Severity() {

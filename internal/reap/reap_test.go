@@ -119,7 +119,7 @@ func TestFailuresAreEmittedAndOtherStoresStillRun(t *testing.T) {
 		t.Fatalf("want 2 events, got %d", len(got))
 	}
 	for _, e := range got {
-		if e.Type != event.LifecycleRetry || e.Err == nil {
+		if e.Type != event.LifecycleRetry || e.Err.IsZero() {
 			t.Fatalf("got %+v", e)
 		}
 	}
@@ -211,7 +211,7 @@ func TestRetryEventsScopesToSubjectAndCarriesAttempts(t *testing.T) {
 		Component: identity.ComponentMFA, Event: identity.EventDelete, Subject: sub, Attempts: 3, Err: errors.New("x"),
 	})
 	got := s.all()
-	if len(got) != 1 || got[0].Type != event.LifecycleRetry || got[0].UserID != sub.User.String() || got[0].TenantID != sub.Tenant.String() || got[0].Err == nil {
+	if len(got) != 1 || got[0].Type != event.LifecycleRetry || got[0].UserID != sub.User.String() || got[0].TenantID != sub.Tenant.String() || got[0].Err.IsZero() {
 		t.Fatalf("got %+v", got)
 	}
 	reap.RetryEvents(nil).ReportRetry(context.Background(), lifecycle.Retry{})

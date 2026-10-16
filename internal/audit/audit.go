@@ -61,7 +61,7 @@ func Emit(ctx context.Context, sink event.Sink, t event.Type, s Scope, d Detail,
 		return nil
 	}
 	deliver(ctx, sink, event.Event{
-		Type: t, TenantID: s.TenantID, UserID: s.UserID, Reason: d.Reason, Err: cause, Attrs: m,
+		Type: t, TenantID: s.TenantID, UserID: s.UserID, Reason: d.Reason, Err: event.CauseOf(cause), Attrs: m,
 	})
 	return nil
 }

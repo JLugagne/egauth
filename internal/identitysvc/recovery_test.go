@@ -31,6 +31,9 @@ func TestRecoveryEmailIsSetOnlyAfterItsLinkIsConfirmed(t *testing.T) {
 	if !w.sink.has(event.RecoveryChannelEnrolled) {
 		t.Fatal("no recovery_channel.enrolled event")
 	}
+	if countOf(w, event.IdentifierChanged) != 1 {
+		t.Fatal("want exactly one identifier.changed event")
+	}
 	expectStatus(t, w.call(routes.RecoveryEmailConfirm, "", map[string]string{routes.FieldToken: tokenOf(t, link.link)}), http.StatusBadRequest)
 }
 

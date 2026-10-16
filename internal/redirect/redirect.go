@@ -15,7 +15,7 @@ const MaxLength = 512
 
 var (
 	// ErrNoOrigins is returned by Parse when called with the zero Origins.
-	ErrNoOrigins = errors.New("redirect: no origins configured")
+	ErrNoOrigins = errors.New("redirect: origins are required")
 	// ErrInvalidOrigin is returned by NewOrigins for a value that is not an exact http(s) origin.
 	ErrInvalidOrigin = errors.New("redirect: invalid origin")
 	// ErrRejected is returned by Parse for every target it refuses; it is joined with a reason.
@@ -25,7 +25,7 @@ var (
 var forbiddenEscapes = []string{"%2f", "%5c", "%09", "%0a", "%0d", "%25", "%2e"}
 
 // Origins is the set of origins a target may point to: relative targets resolve against Public,
-// absolute targets must match one of the extra origins exactly.
+// absolute targets are accepted only on an exact match with one of the extra origins.
 type Origins struct {
 	public *url.URL
 	extra  []string

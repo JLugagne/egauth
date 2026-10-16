@@ -106,7 +106,7 @@ func Passkey(cred PasskeyCredential, flags AuthenticatorFlags, at time.Time) (co
 }
 
 // PasskeyStepUp records a passkey assertion used as a second factor. Pending.Add refuses it when
-// cred is the credential of the primary passkey (C-28). It returns the same errors as Passkey.
+// cred is the credential of the primary passkey (C-28). It returns the errors of Passkey.
 func PasskeyStepUp(cred PasskeyCredential, flags AuthenticatorFlags, at time.Time) (core.Verified, error) {
 	if err := checkPasskey(cred, flags); err != nil {
 		return core.Verified{}, err

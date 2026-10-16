@@ -25,21 +25,12 @@ type DefaultPolicy struct {
 	denylist         map[string]struct{}
 }
 
-// DefaultOption configures a DefaultPolicy.
-type DefaultOption func(*DefaultPolicy)
-
-// WithDefaultBreachChecker configures a custom breach checker for DefaultPolicy.
-func WithDefaultBreachChecker(b passwords.BreachChecker) DefaultOption {
-	return func(p *DefaultPolicy) { p.breach = b }
-}
-
-// WithDefaultDenylist adds entries to the rejected-secret denylist.
-func WithDefaultDenylist(entries ...string) DefaultOption {
-	return func(p *DefaultPolicy) {
-		for _, e := range entries {
-			p.denylist[normalizeDenyEntry(e)] = struct{}{}
-		}
-	}
+// DefaultConfig tunes NewDefaultPolicyFrom.
+type DefaultConfig struct {
+	// Breach replaces the built-in breached-password screen when non-nil.
+	Breach passwords.BreachChecker
+	// Denylist extends the rejected-secret denylist.
+	Denylist []string
 }
 
 var defaultBreachedChecker passwords.BreachChecker
@@ -54,7 +45,12 @@ func init() {
 
 // NewDefaultPolicy creates a DefaultPolicy with sensible default requirements.
 // By default, it screens candidate passwords against known breached passwords.
-func NewDefaultPolicy(opts ...DefaultOption) *DefaultPolicy {
+func NewDefaultPolicy() *DefaultPolicy {
+	return NewDefaultPolicyFrom(DefaultConfig{})
+}
+
+// NewDefaultPolicyFrom creates a DefaultPolicy with the default requirements and the screening of c.
+func NewDefaultPolicyFrom(c DefaultConfig) *DefaultPolicy {
 	p := &DefaultPolicy{
 		MinLength:        8,
 		MaxLength:        72,
@@ -65,11 +61,14 @@ func NewDefaultPolicy(opts ...DefaultOption) *DefaultPolicy {
 		breach:           defaultBreachedChecker,
 		denylist:         make(map[string]struct{}),
 	}
+	if c.Breach != nil {
+		p.breach = c.Breach
+	}
 	for _, e := range defaultBreachedDenylist {
 		p.denylist[normalizeDenyEntry(e)] = struct{}{}
 	}
-	for _, opt := range opts {
-		opt(p)
+	for _, e := range c.Denylist {
+		p.denylist[normalizeDenyEntry(e)] = struct{}{}
 	}
 	return p
 }

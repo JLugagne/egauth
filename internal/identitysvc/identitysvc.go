@@ -295,7 +295,7 @@ func (s *Service) Close() error {
 //     unknown identifier still reads the password store, so an outage of it answers the same 503,
 //     and every refusal of a well-formed identifier charges one lockout write: to the account for a
 //     wrong password, to a decoy subject otherwise.
-//   - /register answers the same 202 and binds the browser whether or not the email has a verified
+//   - /register answers 202 and binds the browser whether or not the email has a verified
 //     account; it hashes the password, stores one PendingRegistration ceremony and sends exactly one
 //     message either way (a link, or AccountExistsNotice; the ceremony of a verified account is never
 //     delivered). A ceremony store or Links failure drops the message as event.DeliveryFailed and
@@ -304,9 +304,9 @@ func (s *Service) Close() error {
 //     an explicit confirm then admits the account but drops the password chosen in the other browser.
 //     An existing unverified account has its pre-verification credentials wiped (C-39); a verified one
 //     is refused with 409.
-//   - /password/forgot answers the same 202 for every identifier and sends a link only to the
+//   - /password/forgot answers 202 for every identifier and sends a link only to the
 //     verified email of a usable account. The ceremony is stored and the link built on the delivery
-//     workers, so the request does the same work for every identifier. The link is bound to the
+//     workers, so the request costs every identifier alike. The link is bound to the
 //     subject's epoch as read by the request, so any later security change kills it (C-17).
 //   - /password/reset checks the new password before consuming the link, never issues a session and
 //     applies SetPassword{PasswordReset}, whose epoch bump ends every session; factors survive (C-54,

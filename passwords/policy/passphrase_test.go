@@ -48,7 +48,7 @@ func TestPassphrasePolicy_Defaults(t *testing.T) {
 
 func TestPassphrasePolicy_Denylist(t *testing.T) {
 	ctx := context.Background()
-	p := policy.NewPassphrasePolicy(policy.WithDenylist("MyCompanyName2024"))
+	p := policy.NewPassphrasePolicyFrom(policy.PassphraseConfig{Denylist: []string{"MyCompanyName2024"}})
 
 	// Case-insensitive, trimmed match.
 	assert.ErrorIs(t, p.Verify(ctx, "  mycompanyname2024 "), passwords.ErrPasswordBreached)
@@ -59,20 +59,18 @@ func TestPassphrasePolicy_BreachChecker(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("rejects a breached password", func(t *testing.T) {
-		p := policy.NewPassphrasePolicy(policy.WithBreachChecker(
-			passwords.BreachCheckerFunc(func(_ context.Context, pw string) (bool, error) {
-				return pw == "this is a breached passphrase", nil
-			})))
+		p := policy.NewPassphrasePolicyFrom(policy.PassphraseConfig{Breach: passwords.BreachCheckerFunc(func(_ context.Context, pw string) (bool, error) {
+			return pw == "this is a breached passphrase", nil
+		})})
 		assert.ErrorIs(t, p.Verify(ctx, "this is a breached passphrase"), passwords.ErrPasswordBreached)
 		require.NoError(t, p.Verify(ctx, "this one is perfectly fine"))
 	})
 
 	t.Run("propagates checker errors so the caller chooses fail-open/closed", func(t *testing.T) {
 		boom := errors.New("hibp unreachable")
-		p := policy.NewPassphrasePolicy(policy.WithBreachChecker(
-			passwords.BreachCheckerFunc(func(_ context.Context, _ string) (bool, error) {
-				return false, boom
-			})))
+		p := policy.NewPassphrasePolicyFrom(policy.PassphraseConfig{Breach: passwords.BreachCheckerFunc(func(_ context.Context, _ string) (bool, error) {
+			return false, boom
+		})})
 		assert.ErrorIs(t, p.Verify(ctx, "a sufficiently long phrase"), boom)
 	})
 }
@@ -82,4 +80,19 @@ func TestPassphrasePolicy_NoCompositionRules(t *testing.T) {
 	p := policy.NewPassphrasePolicy()
 	// All-lowercase, all-letters, spaces — explicitly allowed (the NIST stance).
 	require.NoError(t, p.Verify(ctx, "the quick brown fox jumps"))
+}
+
+func TestNewPassphrasePolicyFromZeroConfigKeepsTheDefaults(t *testing.T) {
+	p := policy.NewPassphrasePolicyFrom(policy.PassphraseConfig{})
+	assert.Equal(t, policy.DefaultPassphraseMinLength, p.MinLength)
+	assert.Equal(t, policy.DefaultPassphraseMaxLength, p.MaxLength)
+	assert.ErrorIs(t, p.Verify(context.Background(), "correct horse battery staple"), passwords.ErrPasswordBreached)
+}
+
+func TestNewPassphrasePolicyFromHonoursLengthBounds(t *testing.T) {
+	p := policy.NewPassphrasePolicyFrom(policy.PassphraseConfig{MinLength: 4, MaxLength: 6})
+	ctx := context.Background()
+	require.NoError(t, p.Verify(ctx, "abcde"))
+	assert.ErrorIs(t, p.Verify(ctx, "abc"), passwords.ErrPasswordTooShort)
+	assert.ErrorIs(t, p.Verify(ctx, "abcdefg"), passwords.ErrPasswordTooLong)
 }

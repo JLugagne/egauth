@@ -18,7 +18,7 @@ func TestArgon2Hasher_Contract(t *testing.T) {
 	hashertest.HasherContractTesting(t, hasher)
 }
 
-// TestArgon2CostFloors proves that WithMemory/WithTime/WithThreads clamp a
+// TestArgon2CostFloors proves that Params clamp a
 // too-low cost UP to the documented safe floor (OWASP 2021) instead of
 // producing a dangerously weak hasher. The floors are exported constants,
 // referenced here at compile time.
@@ -31,16 +31,12 @@ func TestArgon2CostFloors(t *testing.T) {
 
 	// Drive every option below its floor in one hasher; each parameter in the
 	// produced PHC string must be at or above the floor.
-	hasher := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(1),
-		argon2hasher.WithTime(0),
-		argon2hasher.WithThreads(0),
-	)
+	hasher := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 1, Time: 0, Threads: 0})
 
 	mem, tm, par := costParams(t, hasher)
-	assert.GreaterOrEqual(t, mem, argon2hasher.MinMemoryKiB, "WithMemory(1) must clamp up to MinMemoryKiB")
-	assert.GreaterOrEqual(t, tm, argon2hasher.MinTime, "WithTime(0) must clamp up to MinTime")
-	assert.GreaterOrEqual(t, par, uint32(argon2hasher.MinThreads), "WithThreads(0) must clamp up to MinThreads")
+	assert.GreaterOrEqual(t, mem, argon2hasher.MinMemoryKiB, "Params{MemoryKiB: 1} must clamp up to MinMemoryKiB")
+	assert.GreaterOrEqual(t, tm, argon2hasher.MinTime, "Params{Time: 0} must not drop below MinTime")
+	assert.GreaterOrEqual(t, par, uint32(argon2hasher.MinThreads), "Params{Threads: 0} must not drop below MinThreads")
 
 	// Specifically, a sub-floor memory value lands exactly on the floor.
 	assert.Equal(t, argon2hasher.MinMemoryKiB, mem, "sub-floor memory must clamp to the floor value")
@@ -88,15 +84,15 @@ func TestArgon2Hasher_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("Invalid PHC format", func(t *testing.T) {
-		err := hasher.Compare(ctx, "invalidhash", "password")
+		err := hasher.Compare(ctx, passwords.PHC("invalidhash"), "password")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 
-		err = hasher.Compare(ctx, "$argon2id$v=19$m=65536,t=1,p=4$invalid_base64$hash", "password")
+		err = hasher.Compare(ctx, passwords.PHC("$argon2id$v=19$m=65536,t=1,p=4$invalid_base64$hash"), "password")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 	})
 
 	t.Run("Unsupported algorithm", func(t *testing.T) {
-		err := hasher.Compare(ctx, "$bcrypt$v=2b$10$salt$hash", "password")
+		err := hasher.Compare(ctx, passwords.PHC("$bcrypt$v=2b$10$salt$hash"), "password")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 	})
 }
@@ -119,7 +115,7 @@ func TestArgon2Hasher_RejectsOversizedPassword(t *testing.T) {
 	// is reported as an ordinary credential mismatch (no enumeration signal).
 	valid, err := hasher.Hash(ctx, "TestPassword123!")
 	require.NoError(t, err)
-	err = hasher.Compare(ctx, valid, oversized)
+	err = hasher.Compare(ctx, passwords.PHC(valid), oversized)
 	assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 }
 
@@ -140,7 +136,7 @@ func TestArgon2Hasher_HonorsContextCancellation(t *testing.T) {
 	_, err = hasher.Hash(ctx, "TestPassword123!")
 	assert.ErrorIs(t, err, context.Canceled)
 
-	err = hasher.Compare(ctx, valid, "TestPassword123!")
+	err = hasher.Compare(ctx, passwords.PHC(valid), "TestPassword123!")
 	assert.ErrorIs(t, err, context.Canceled)
 }
 
@@ -193,7 +189,7 @@ func TestArgon2Hasher_MalformedParamsDoNotPanic(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NotPanics(t, func() {
-				err := hasher.Compare(ctx, tc.hash, "password")
+				err := hasher.Compare(ctx, passwords.PHC(tc.hash), "password")
 				assert.ErrorIs(t, err, passwords.ErrInvalidPassword)
 			})
 		})
@@ -203,6 +199,6 @@ func TestArgon2Hasher_MalformedParamsDoNotPanic(t *testing.T) {
 		password := "TestPassword123!"
 		good, err := hasher.Hash(ctx, password)
 		require.NoError(t, err)
-		require.NoError(t, hasher.Compare(ctx, good, password))
+		require.NoError(t, hasher.Compare(ctx, passwords.PHC(good), password))
 	})
 }

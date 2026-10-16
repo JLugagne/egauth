@@ -248,7 +248,7 @@ func bearerExempt(r *http.Request) bool {
 }
 
 // BearerAuthorization reports whether r carries exactly one Authorization header holding a
-// non-empty Bearer credential. It is the same test as the bearer exemption of Check, so the
+// non-empty Bearer credential. It applies the bearer exemption of Check, so the
 // preamble can resolve the transport of an endpoint that never issues a credential from it.
 func BearerAuthorization(r *http.Request) bool {
 	auth, n := single(r, headerAuthorization)

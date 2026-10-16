@@ -204,7 +204,7 @@ func TestSlogSinkOmitsEnvelopePII(t *testing.T) {
 	var buf bytes.Buffer
 	event.NewSlogSink(slog.New(slog.NewJSONHandler(&buf, nil))).EmitEvent(context.Background(), event.Event{
 		Type: event.DeliveryFailed, TenantID: "tenant-1", UserID: "user-4f2a", Reason: "smtp_rejected",
-		Err: errors.New("550 mailbox jane@example.com unavailable"),
+		Err: event.CauseOf(errors.New("550 mailbox jane@example.com unavailable")),
 	})
 	out := buf.String()
 	for _, bad := range []string{"user-4f2a", "jane@example.com", "mailbox"} {

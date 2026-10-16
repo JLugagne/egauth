@@ -24,7 +24,7 @@ func TestCompare_RejectsUnboundedIterationCount(t *testing.T) {
 	for _, iterations := range []string{"17", "100", "4294967295"} {
 		crafted := "$argon2id$v=19$m=65536,t=" + iterations + ",p=1$" + salt + "$" + hash
 		start := time.Now()
-		err := h.Compare(context.Background(), crafted, "anypassword")
+		err := h.Compare(context.Background(), passwords.PHC(crafted), "anypassword")
 		elapsed := time.Since(start)
 
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword,
@@ -37,13 +37,13 @@ func TestCompare_RejectsUnboundedIterationCount(t *testing.T) {
 // TestCompare_AcceptsCostsAtOrBelowTheCeiling is the control: the ceiling must not reject a hash a
 // deployment could legitimately have stored.
 func TestCompare_AcceptsCostsAtOrBelowTheCeiling(t *testing.T) {
-	h := argon2hasher.NewHasher(argon2hasher.WithMemory(8 * 1024))
+	h := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 8 * 1024})
 	// A genuinely hashed password at a low cost, so the round trip is exercised end to end.
 	phc, err := h.Hash(context.Background(), "correct horse battery staple")
 	require.NoError(t, err)
 
-	require.NoError(t, h.Compare(context.Background(), phc, "correct horse battery staple"))
-	assert.ErrorIs(t, h.Compare(context.Background(), phc, "wrong"), passwords.ErrInvalidPassword)
+	require.NoError(t, h.Compare(context.Background(), passwords.PHC(phc), "correct horse battery staple"))
+	assert.ErrorIs(t, h.Compare(context.Background(), passwords.PHC(phc), "wrong"), passwords.ErrInvalidPassword)
 }
 
 // TestMaxTimeIsAboveAnyLegitimateCost documents the bound's intent: it sits far above real

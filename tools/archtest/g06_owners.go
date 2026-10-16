@@ -15,18 +15,14 @@ const G06 GuardID = "G06"
 
 func init() { RegisterList(G06Exemptions()) }
 
-const maxG06Entries = LegacyPrefixCount + 3
+const maxG06Entries = LegacyPrefixCount
 
 type g06Typed struct {
 	rel, name, row string
 	removedBy      WorkPackage
 }
 
-var g06TypedEntries = []g06Typed{
-	{rel: "event", name: "KeyAMR", row: "jwt", removedBy: WP5},
-	{rel: "", name: "ActorFromContext", row: "ctxvalue", removedBy: WP16},
-	{rel: "", name: "ContextWithActor", row: "ctxvalue", removedBy: WP16},
-}
+var g06TypedEntries []g06Typed
 
 var g06Exemptions = g06BuildExemptions()
 

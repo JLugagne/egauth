@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/JLugagne/egauth/event"
+	"github.com/JLugagne/egauth/internal/audit"
 	"github.com/JLugagne/egauth/internal/core"
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/identity"
@@ -18,10 +20,26 @@ func (s *Service) Apply(ctx context.Context, m identity.Mutation) (identity.Appl
 	if err != nil {
 		return identity.Applied{}, err
 	}
+	s.auditIdentifierChanges(ctx, a.Outbox)
 	if s.dispatcher != nil && len(a.Outbox) > 0 {
 		s.dispatcher.DispatchOutbox(context.WithoutCancel(ctx), a.Outbox)
 	}
 	return a, nil
+}
+
+func (s *Service) auditIdentifierChanges(ctx context.Context, items []identity.OutboxItem) {
+	if s.audit == nil {
+		return
+	}
+	seen := map[identity.IdentifierKind]bool{}
+	for _, it := range items {
+		if it.Event != identity.EventIdentifierChanged || seen[it.Identifier] {
+			continue
+		}
+		seen[it.Identifier] = true
+		_ = s.audit.Emit(ctx, event.IdentifierChanged, scopeOf(it.Subject), audit.Detail{}, nil,
+			audit.A(event.KeyIdentifierKind, it.Identifier.String()))
+	}
 }
 
 // VerifyEmailOwnership records the first verified proof that the owner of sub's unverified email

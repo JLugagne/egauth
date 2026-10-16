@@ -26,37 +26,19 @@ type Checker struct {
 	hashes map[string]struct{} // uppercase hex SHA-1 digests
 }
 
-// Option configures a load.
-type Option func(*loadConfig)
-
-type loadConfig struct {
-	threshold int
-}
-
-// WithThreshold sets the minimum sighting count a "<hash>:<count>" entry must have to be loaded
-// as breached (default 1). Entries without a count are always loaded. Has no effect on
-// LoadPasswords (plaintext lists carry no counts).
-func WithThreshold(n int) Option {
-	return func(c *loadConfig) {
-		if n < 1 {
-			n = 1
-		}
-		c.threshold = n
-	}
-}
-
 func newChecker() *Checker { return &Checker{hashes: make(map[string]struct{})} }
 
 // LoadHashes builds a Checker from newline-delimited SHA-1 hashes. Each line is either a bare
-// 40-char hex hash or the HIBP offline format "<HASH>:<count>"; counts below WithThreshold are
-// skipped. Blank lines are ignored. Hashes are normalized to uppercase. A line that is neither
-// blank nor a valid hash is an error.
-func LoadHashes(r io.Reader, opts ...Option) (*Checker, error) {
-	cfg := loadConfig{threshold: 1}
-	for _, opt := range opts {
-		opt(&cfg)
-	}
+// 40-char hex hash or the HIBP offline format "<HASH>:<count>". Blank lines are ignored. Hashes are
+// normalized to uppercase. A line that is neither blank nor a valid hash is an error.
+func LoadHashes(r io.Reader) (*Checker, error) {
+	return LoadHashesAtLeast(r, 1)
+}
 
+// LoadHashesAtLeast is LoadHashes that skips "<HASH>:<count>" entries seen fewer than minCount
+// times (a minCount below 1 counts as 1). Entries without a count are always loaded.
+func LoadHashesAtLeast(r io.Reader, minCount int) (*Checker, error) {
+	minCount = max(minCount, 1)
 	c := newChecker()
 	sc := bufio.NewScanner(r)
 	for sc.Scan() {
@@ -70,7 +52,7 @@ func LoadHashes(r io.Reader, opts ...Option) (*Checker, error) {
 			if err != nil {
 				return nil, fmt.Errorf("offline: malformed count in %q: %w", line, err)
 			}
-			if count < cfg.threshold {
+			if count < minCount {
 				continue
 			}
 			hashPart = strings.TrimSpace(h)

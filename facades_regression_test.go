@@ -48,7 +48,7 @@ func TestSystemCallerRefusalsAreAudited(t *testing.T) {
 	require.ErrorIs(t, w.a.Tenants().Erase(context.Background(), sys, other), egauth.ErrTenantMismatch)
 	uses := w.systemUses()
 	require.Len(t, uses, 1)
-	require.ErrorIs(t, uses[0].Err, egauth.ErrTenantMismatch)
+	require.Contains(t, uses[0].Err.Text(), egauth.ErrTenantMismatch.Error())
 	require.Equal(t, "acme-job", uses[0].Reason)
 }
 
@@ -117,7 +117,7 @@ func TestSystemCallerMintedByAnotherAuthIsRefusedForATenantThisAuthCannotServe(t
 	require.ErrorIs(t, err, store.ErrNotFound, "no account exists in a tenant the deployment never serves")
 	uses := multi.systemUses()
 	require.Len(t, uses, 1)
-	require.ErrorIs(t, uses[0].Err, egauth.ErrTenantNotServed)
+	require.Contains(t, uses[0].Err.Text(), egauth.ErrTenantNotServed.Error())
 }
 
 func TestAccountsCreateIsRefusedInAnErasedTenant(t *testing.T) {

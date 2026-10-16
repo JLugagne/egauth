@@ -1,19 +1,14 @@
-// Package secretpolicy_test pins the shared credential-material policy and the public alias
-// tokens/jwt.DeniedSecrets re-exports: the policy moved to internal/secretpolicy and the alias
-// must stay the same map, not a copy that can drift.
+// Package secretpolicy_test pins the shared credential-material policy.
 package secretpolicy_test
 
 import (
 	"bytes"
 	"crypto/rand"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	secretpolicy "github.com/JLugagne/egauth/internal/secretpolicy"
-
-	"github.com/JLugagne/egauth/tokens/jwt"
 )
 
 // randomKey returns n cryptographically random bytes or fails the test.
@@ -125,21 +120,5 @@ func TestIsTrivial(t *testing.T) {
 				t.Fatalf("IsTrivial(%q) = %t, want %t", tt.key, got, tt.want)
 			}
 		})
-	}
-}
-
-func TestJWTDeniedSecretsAliasesSharedDenied(t *testing.T) {
-	if len(jwt.DeniedSecrets) != len(secretpolicy.Denied) {
-		t.Fatalf("jwt.DeniedSecrets has %d entries, secretpolicy.Denied has %d; the alias fragmented",
-			len(jwt.DeniedSecrets), len(secretpolicy.Denied))
-	}
-	for literal := range secretpolicy.Denied {
-		if !jwt.DeniedSecrets[literal] {
-			t.Errorf("jwt.DeniedSecrets is missing %q, which secretpolicy.Denied refuses", literal)
-		}
-	}
-	// Same map, not a copy: fragmentation cannot return silently.
-	if fmt.Sprintf("%p", jwt.DeniedSecrets) != fmt.Sprintf("%p", secretpolicy.Denied) {
-		t.Error("jwt.DeniedSecrets is a copy of secretpolicy.Denied; it must alias the same map")
 	}
 }

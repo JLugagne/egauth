@@ -33,7 +33,7 @@ func TestArgon2Hasher_CompareRejectsOversizedMemory(t *testing.T) {
 	crafted := "$argon2id$v=19$m=999999999,t=1,p=1$" + validSalt + "$" + validHash
 
 	require.NotPanics(t, func() {
-		err := hasher.Compare(ctx, crafted, "anypassword")
+		err := hasher.Compare(ctx, passwords.PHC(crafted), "anypassword")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword,
 			"Compare must reject memory=999999999 as ErrInvalidPassword, not attempt argon2.IDKey")
 	})

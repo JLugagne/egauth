@@ -30,7 +30,7 @@ func (s Sensitivity) String() string {
 
 const (
 	KeyMethod          AttrKey = "method"
-	KeyAMR             AttrKey = "amr"
+	KeyAMR             AttrKey = "authn_methods"
 	KeyRememberMe      AttrKey = "remember_me"
 	KeyInterim         AttrKey = "interim"
 	KeyMustChange      AttrKey = "must_change_password"

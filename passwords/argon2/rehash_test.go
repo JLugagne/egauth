@@ -3,6 +3,7 @@ package argon2_test
 import (
 	"context"
 	"fmt"
+	"github.com/JLugagne/egauth/passwords"
 	"strings"
 	"testing"
 
@@ -30,18 +31,14 @@ func TestArgon2Hasher_NewHasherDefaultsUnchanged(t *testing.T) {
 // cost parameters baked into the produced hash.
 func TestArgon2Hasher_WithParams(t *testing.T) {
 	ctx := context.Background()
-	hasher := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(128*1024),
-		argon2hasher.WithTime(3),
-		argon2hasher.WithThreads(2),
-	)
+	hasher := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 128 * 1024, Time: 3, Threads: 2})
 
 	hash, err := hasher.Hash(ctx, "TestPassword123!")
 	require.NoError(t, err)
 
 	parts := strings.Split(hash, "$")
 	require.Len(t, parts, 6)
-	assert.Equal(t, "m=131072,t=3,p=2", parts[3], "WithMemory/WithTime/WithThreads must be honored")
+	assert.Equal(t, "m=131072,t=3,p=2", parts[3], "Params must be honored")
 }
 
 // TestArgon2Hasher_NeedsRehash_WeakHash verifies that a hash produced with
@@ -50,17 +47,13 @@ func TestArgon2Hasher_WithParams(t *testing.T) {
 func TestArgon2Hasher_NeedsRehash_WeakHash(t *testing.T) {
 	ctx := context.Background()
 
-	weak := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(8*1024),
-		argon2hasher.WithTime(1),
-		argon2hasher.WithThreads(1),
-	)
+	weak := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 8 * 1024, Time: 1, Threads: 1})
 	target := argon2hasher.NewHasher()
 
 	weakHash, err := weak.Hash(ctx, "TestPassword123!")
 	require.NoError(t, err)
 	// Sanity: the weak hash must still verify.
-	require.NoError(t, target.Compare(ctx, weakHash, "TestPassword123!"))
+	require.NoError(t, target.Compare(ctx, passwords.PHC(weakHash), "TestPassword123!"))
 
 	assert.True(t, target.NeedsRehash(weakHash), "a weak imported hash must need rehash")
 
@@ -98,19 +91,26 @@ func TestArgon2Hasher_RehashRoundTrip(t *testing.T) {
 	// 1. A hash made at target verifies and does not need rehash.
 	strong, err := target.Hash(ctx, password)
 	require.NoError(t, err)
-	require.NoError(t, target.Compare(ctx, strong, password))
+	require.NoError(t, target.Compare(ctx, passwords.PHC(strong), password))
 	assert.False(t, target.NeedsRehash(strong))
 
 	// 2. A weak hash verifies but needs rehash.
-	weak := argon2hasher.NewHasher(argon2hasher.WithMemory(8 * 1024))
+	weak := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 8 * 1024})
 	weakHash, err := weak.Hash(ctx, password)
 	require.NoError(t, err)
-	require.NoError(t, target.Compare(ctx, weakHash, password))
+	require.NoError(t, target.Compare(ctx, passwords.PHC(weakHash), password))
 	require.True(t, target.NeedsRehash(weakHash))
 
 	// 3. Re-hash with the target, then it no longer needs rehash.
 	rehashed, err := target.Hash(ctx, password)
 	require.NoError(t, err)
-	require.NoError(t, target.Compare(ctx, rehashed, password))
+	require.NoError(t, target.Compare(ctx, passwords.PHC(rehashed), password))
 	assert.False(t, target.NeedsRehash(rehashed))
+}
+
+func TestNewTunedHasherZeroFieldsKeepTheDefaults(t *testing.T) {
+	ctx := context.Background()
+	phc, err := argon2hasher.NewTunedHasher(argon2hasher.Params{Time: 2}).Hash(ctx, "TestPassword123!")
+	require.NoError(t, err)
+	assert.Equal(t, "m=65536,t=2,p=4", strings.Split(phc, "$")[3])
 }

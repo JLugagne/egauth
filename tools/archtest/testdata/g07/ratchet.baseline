@@ -1,4 +1,2 @@
 G07a	github.com/JLugagne/egauth/event.AccountDisabled		permanent
 G07a	github.com/JLugagne/egauth/event.InsecureConfiguration		permanent
-G07a	github.com/JLugagne/egauth/event.InsecureCookieMisuse		permanent
-G07a	github.com/JLugagne/egauth/event.MFADisabled		permanent

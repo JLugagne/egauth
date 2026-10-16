@@ -59,9 +59,9 @@ func (h *fakeHasher) Hash(_ context.Context, password string) (string, error) {
 	return "$fake$" + password, nil
 }
 
-func (h *fakeHasher) Compare(_ context.Context, hash, password string) error {
+func (h *fakeHasher) Compare(_ context.Context, hash passwords.PHC, password string) error {
 	h.compares.Add(1)
-	if len(password) > passwords.MaxPasswordLength || hash != "$fake$"+password {
+	if len(password) > passwords.MaxPasswordLength || string(hash) != "$fake$"+password {
 		return passwords.ErrInvalidPassword
 	}
 	return nil

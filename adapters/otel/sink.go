@@ -94,15 +94,15 @@ func (s *spanSink) EmitEvent(ctx context.Context, e event.Event) {
 	}
 	span.SetAttributes(attrs...)
 
-	if e.Type.Severity() >= event.SeverityWarn || e.Err != nil {
+	if e.Type.Severity() >= event.SeverityWarn || !e.Err.IsZero() {
 		span.SetStatus(codes.Error, statusText(e))
 	}
-	if e.Err != nil {
+	if !e.Err.IsZero() {
+		exc := []attribute.KeyValue{attribute.String("exception.type", e.Err.Type())}
 		if s.pii {
-			span.RecordError(e.Err)
-		} else {
-			span.AddEvent("exception", trace.WithAttributes(attribute.String("exception.type", fmt.Sprintf("%T", e.Err))))
+			exc = append(exc, attribute.String("exception.message", e.Err.Text()))
 		}
+		span.AddEvent("exception", trace.WithAttributes(exc...))
 	}
 }
 

@@ -9,7 +9,7 @@
 //
 // Failure posture: by default IsBreached returns the upstream error (network failure, non-200,
 // malformed body). Wired into a passwords.Policy that propagates the error, this fails CLOSED —
-// the password is rejected when the service is unreachable. Use WithFailOpen to instead treat an
+// the password is rejected when the service is unreachable. Set Config.FailOpen to instead treat an
 // unreachable service as "not breached" (fail open), trading screening coverage for availability.
 package hibp
 
@@ -24,16 +24,14 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"time"
 
-	"github.com/JLugagne/egauth/internal/safehttp"
+	"github.com/JLugagne/egauth/internal/outbound"
 	"github.com/JLugagne/egauth/passwords"
 )
 
 const (
 	defaultBaseURL   = "https://api.pwnedpasswords.com"
 	defaultUserAgent = "egauth-hibp"
-	defaultTimeout   = 10 * time.Second
 	// maxResponseBytes caps the range response. Real responses are tens of KB even with padding;
 	// the cap defends against a misbehaving/hostile endpoint streaming unbounded data.
 	maxResponseBytes = 4 << 20 // 4 MiB
@@ -41,92 +39,51 @@ const (
 
 // Client is a passwords.BreachChecker backed by the HIBP range API.
 type Client struct {
-	httpClient *http.Client
-	baseURL    string
-	userAgent  string
-	threshold  int
-	addPadding bool
-	failOpen   bool
+	send      func(*http.Request) (*http.Response, error)
+	baseURL   string
+	userAgent string
+	threshold int
+	failOpen  bool
 }
 
-// Option configures a Client.
-type Option func(*Client)
+// Config tunes a Client. The zero value selects the public HIBP endpoint, a descriptive default
+// User-Agent, a threshold of 1 and fail-closed behavior.
+type Config struct {
+	// BaseURL overrides the API base URL (default https://api.pwnedpasswords.com), for a
+	// self-hosted mirror. A mirror is a network peer, not a trust anchor: the request still goes
+	// through the guarded outbound client, so pointing this at an internal host does not make that
+	// host reachable.
+	BaseURL string
+	// UserAgent identifies the application; HIBP requires a non-empty, descriptive value.
+	UserAgent string
+	// Threshold is the minimum sighting count for a password to count as breached; below 1 means 1.
+	Threshold int
+	// FailOpen makes IsBreached return (false, nil) instead of an error when the service is
+	// unreachable or misbehaves. Without it the client fails closed.
+	FailOpen bool
+}
 
-// WithHTTPClient sets the HTTP client (e.g. to tune timeouts or transport). The default client is
-// the hardened one (see New): a custom client is cloned with redirect following disabled, because a
-// 3xx from the endpoint would otherwise choose the next hop and a hostile or compromised mirror
-// could walk this process into an internal address.
-func WithHTTPClient(c *http.Client) Option {
-	return func(cl *Client) {
-		if c != nil {
-			cl.httpClient = safehttp.NoRedirect(c)
-		}
+// New builds a HIBP breach-check Client that sends through the guarded outbound client: a dial-time
+// guard refuses internal addresses after DNS resolution and redirects are never followed, because
+// the request carries a hash prefix derived from the user's password and must not be steerable.
+func New(c Config) *Client {
+	cl := &Client{
+		send:      outbound.New(outbound.Config{}).Static().DoSecretPath,
+		baseURL:   defaultBaseURL,
+		userAgent: defaultUserAgent,
+		threshold: max(c.Threshold, 1),
+		failOpen:  c.FailOpen,
 	}
-}
-
-// WithBaseURL overrides the API base URL (default https://api.pwnedpasswords.com). Mainly for
-// testing or pointing at a self-hosted mirror.
-//
-// A mirror is a network peer, not a trust anchor: the request still goes through the hardened client
-// (see New), so pointing this at an internal host does not make that host reachable.
-func WithBaseURL(u string) Option {
-	return func(cl *Client) { cl.baseURL = strings.TrimRight(u, "/") }
-}
-
-// WithUserAgent sets the User-Agent header. HIBP requires a non-empty, descriptive User-Agent;
-// set it to identify your application.
-func WithUserAgent(ua string) Option {
-	return func(cl *Client) {
-		if ua != "" {
-			cl.userAgent = ua
-		}
+	if c.BaseURL != "" {
+		cl.baseURL = strings.TrimRight(c.BaseURL, "/")
 	}
-}
-
-// WithThreshold sets the minimum sighting count for a password to be treated as breached
-// (default 1, i.e. any appearance). Raise it to only reject passwords seen at least n times.
-func WithThreshold(n int) Option {
-	return func(cl *Client) {
-		if n < 1 {
-			n = 1
-		}
-		cl.threshold = n
+	if c.UserAgent != "" {
+		cl.userAgent = c.UserAgent
 	}
+	return cl
 }
 
-// WithAddPadding toggles the Add-Padding request header (default on). When enabled, HIBP pads
-// the response with random zero-count entries so a network observer cannot infer the queried
-// prefix's popularity from the response size. Zero-count entries are ignored either way.
-func WithAddPadding(enabled bool) Option {
-	return func(cl *Client) { cl.addPadding = enabled }
-}
-
-// WithFailOpen makes IsBreached return (false, nil) instead of an error when the service is
-// unreachable or misbehaves. Without it the client fails closed (the error propagates).
-func WithFailOpen() Option {
-	return func(cl *Client) { cl.failOpen = true }
-}
-
-// New builds a HIBP breach-check Client.
-func New(opts ...Option) *Client {
-	c := &Client{
-		// Hardened client: a dial-time guard refuses internal addresses (evaluated after DNS
-		// resolution, so it is DNS-rebinding safe) and redirects are never followed. The breach
-		// endpoint is whatever WithBaseURL names — commonly a self-hosted mirror — and this request
-		// carries a hash prefix derived from the user's password, so it must not be steerable.
-		httpClient: safehttp.Client(defaultTimeout),
-		baseURL:    defaultBaseURL,
-		userAgent:  defaultUserAgent,
-		threshold:  1,
-		addPadding: true,
-	}
-	for _, opt := range opts {
-		opt(c)
-	}
-	return c
-}
-
-// IsBreached reports whether password appears in the HIBP corpus at least WithThreshold times.
+// IsBreached reports whether password appears in the HIBP corpus at least Config.Threshold times.
 func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) {
 	sum := sha1.Sum([]byte(password))
 	full := strings.ToUpper(hex.EncodeToString(sum[:]))
@@ -137,11 +94,9 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 		return c.fail(err)
 	}
 	req.Header.Set("User-Agent", c.userAgent)
-	if c.addPadding {
-		req.Header.Set("Add-Padding", "true")
-	}
+	req.Header.Set("Add-Padding", "true")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.send(req)
 	if err != nil {
 		return c.fail(err)
 	}
@@ -155,7 +110,7 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 	// and a missing suffix in a TRUNCATED body must NOT be treated as "not breached" (that would
 	// be a silent false negative — even under the fail-closed default). Surface it as an upstream
 	// failure so the configured posture decides. Genuine range responses are tens of KB, well
-	// under the cap; this only guards a malformed/hostile endpoint (WithBaseURL allows mirrors).
+	// under the cap; this only guards a malformed/hostile endpoint (Config.BaseURL allows mirrors).
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return c.fail(err)

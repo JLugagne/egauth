@@ -16,6 +16,7 @@ package argon2_test
 
 import (
 	"context"
+	"github.com/JLugagne/egauth/passwords"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,23 +37,15 @@ func TestResidualTiming_DecoyUsesCurrentCostNotStored(t *testing.T) {
 	password := "TestPassword123!"
 
 	// Account hashed before the operator raised cost.
-	old := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(argon2hasher.MinMemoryKiB),
-		argon2hasher.WithTime(1),
-		argon2hasher.WithThreads(1),
-	)
+	old := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: argon2hasher.MinMemoryKiB, Time: 1, Threads: 1})
 	oldHash, err := old.Hash(ctx, password)
 	require.NoError(t, err)
 
 	// Operator raises the configured cost (the documented upgrade).
-	target := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(64*1024),
-		argon2hasher.WithTime(3),
-		argon2hasher.WithThreads(4),
-	)
+	target := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 64 * 1024, Time: 3, Threads: 4})
 
 	// The old hash still verifies — Compare honours the STORED (lower) cost.
-	require.NoError(t, target.Compare(ctx, oldHash, password))
+	require.NoError(t, target.Compare(ctx, passwords.PHC(oldHash), password))
 
 	// The decoy path is Hash at the CURRENT target cost. Its cost segment is the
 	// NEW (higher) parameters, not the stored hash's. This divergence is the

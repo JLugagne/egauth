@@ -2,6 +2,7 @@ package hashertest
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/JLugagne/egauth/passwords"
@@ -13,21 +14,26 @@ import (
 // It allows flexible testing by injecting custom behavior for each method.
 type MockHasher struct {
 	HashFunc    func(ctx context.Context, password string) (string, error)
-	CompareFunc func(ctx context.Context, hash, password string) error
+	CompareFunc func(ctx context.Context, hash passwords.PHC, password string) error
 }
 
 var _ passwords.Hasher = (*MockHasher)(nil)
 
+// ErrUndefined is returned by a MockHasher method whose function field is nil.
+var ErrUndefined = errors.New("hashertest: mock function is not defined")
+
+// Hash calls HashFunc, or returns ErrUndefined when it is nil.
 func (m *MockHasher) Hash(ctx context.Context, password string) (string, error) {
 	if m.HashFunc == nil {
-		panic("called not defined HashFunc")
+		return "", ErrUndefined
 	}
 	return m.HashFunc(ctx, password)
 }
 
-func (m *MockHasher) Compare(ctx context.Context, hash, password string) error {
+// Compare calls CompareFunc, or returns ErrUndefined when it is nil.
+func (m *MockHasher) Compare(ctx context.Context, hash passwords.PHC, password string) error {
 	if m.CompareFunc == nil {
-		panic("called not defined CompareFunc")
+		return ErrUndefined
 	}
 	return m.CompareFunc(ctx, hash, password)
 }
@@ -44,7 +50,7 @@ func HasherContractTesting(t *testing.T, hasher passwords.Hasher) {
 		require.NoError(t, err, "Hash should succeed for a valid password")
 		require.NotEmpty(t, hash, "Hash must not be empty")
 
-		err = hasher.Compare(ctx, hash, password)
+		err = hasher.Compare(ctx, passwords.PHC(hash), password)
 		require.NoError(t, err, "Compare should succeed for the correct password")
 	})
 
@@ -55,7 +61,7 @@ func HasherContractTesting(t *testing.T, hasher passwords.Hasher) {
 		hash, err := hasher.Hash(ctx, password)
 		require.NoError(t, err, "Hash should succeed")
 
-		err = hasher.Compare(ctx, hash, wrongPassword)
+		err = hasher.Compare(ctx, passwords.PHC(hash), wrongPassword)
 		assert.Error(t, err, "Compare should fail for an incorrect password")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword, "Compare should return ErrInvalidPassword")
 	})
@@ -69,7 +75,7 @@ func HasherContractTesting(t *testing.T, hasher passwords.Hasher) {
 		// Modify the hash slightly
 		tamperedHash := hash + "tampered"
 
-		err = hasher.Compare(ctx, tamperedHash, password)
+		err = hasher.Compare(ctx, passwords.PHC(tamperedHash), password)
 		assert.Error(t, err, "Compare should fail for a tampered hash")
 	})
 }

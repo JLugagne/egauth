@@ -12,9 +12,9 @@ const G07a GuardID = "G07a"
 
 func init() { RegisterList(G07aExemptions()) }
 
-const maxG07aEntries = LegacyPrefixCount + 4
+const maxG07aEntries = LegacyPrefixCount + 2
 
-var g07aEventTypes = []string{"AccountDisabled", "MFADisabled", "InsecureCookieMisuse", "InsecureConfiguration"}
+var g07aEventTypes = []string{"AccountDisabled", "InsecureConfiguration"}
 
 var g07aExemptions = g07aBuildExemptions()
 

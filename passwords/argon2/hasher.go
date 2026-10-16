@@ -12,21 +12,26 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// NewHasher creates a new Argon2id hasher.
-//
-// With no options it uses sensible, backward-compatible defaults:
-// m=64MB (65536 KiB), t=1, p=4, keyLen=32, saltLen=16. These follow the
-// OWASP (2021) guidance for highly concurrent workloads, balanced for
-// general use. The configured cost also doubles as the minimum acceptable
-// cost reported by NeedsRehash: any stored hash weaker than this hasher's
-// parameters is flagged for rehash on next successful login (SEC-10).
-//
-// Use WithTime, WithMemory and WithThreads to tune the cost; values are clamped
-// into the range Compare accepts ([MinTime, MaxTime] and
-// [MinMemoryKiB, MaxMemoryKiB]), so every accepted configuration both hashes and
-// verifies. Raising the cost upgrades existing users transparently via
-// NeedsRehash.
-func NewHasher(opts ...Option) *Hasher {
+// NewHasher creates an Argon2id hasher with the defaults m=64MB (65536 KiB), t=1, p=4, keyLen=32,
+// saltLen=16, following the OWASP (2021) guidance for highly concurrent workloads. The configured
+// cost doubles as the minimum acceptable cost reported by NeedsRehash: a stored hash weaker than
+// this hasher's parameters is flagged for rehash on the next successful login (SEC-10).
+func NewHasher() *Hasher {
+	return NewTunedHasher(Params{})
+}
+
+// Params tunes the Argon2id cost of a Hasher. A zero field selects the default of NewHasher.
+// Other values are clamped into the range Compare accepts ([MinTime, MaxTime],
+// [MinMemoryKiB, MaxMemoryKiB], at least MinThreads), so every accepted configuration both hashes
+// and verifies. Raising the cost upgrades existing users transparently through NeedsRehash.
+type Params struct {
+	MemoryKiB uint32
+	Time      uint32
+	Threads   uint8
+}
+
+// NewTunedHasher creates an Argon2id hasher with the cost of p; see Params for the clamping.
+func NewTunedHasher(p Params) *Hasher {
 	h := &Hasher{
 		time:    1,
 		memory:  64 * 1024,
@@ -34,17 +39,20 @@ func NewHasher(opts ...Option) *Hasher {
 		keyLen:  32,
 		saltLen: 16,
 	}
-	for _, opt := range opts {
-		opt(h)
+	if p.Time != 0 {
+		h.time = min(max(p.Time, MinTime), MaxTime)
+	}
+	if p.MemoryKiB != 0 {
+		h.memory = min(max(p.MemoryKiB, MinMemoryKiB), MaxMemoryKiB)
+	}
+	if p.Threads != 0 {
+		h.threads = max(p.Threads, MinThreads)
 	}
 	return h
 }
 
-// Option configures a Hasher's Argon2id cost parameters.
-type Option func(*Hasher)
-
 // Minimum acceptable Argon2id cost parameters. Any value passed to the
-// corresponding option below this floor is silently clamped UP to it, so a
+// corresponding Params field below this floor is silently clamped UP to it, so a
 // caller tuning the cost down cannot drop the hasher below a safe Argon2id
 // configuration. The defaults baked into NewHasher (m=65536 KiB, t=1, p=4)
 // sit at or above every floor and are therefore never affected.
@@ -56,7 +64,7 @@ const (
 	// MinMemoryKiB is the minimum Argon2id memory cost in KiB (OWASP 2021: 19 MiB).
 	MinMemoryKiB uint32 = 19456
 	// MaxMemoryKiB is the upper bound on the memory parameter enforced on both paths: Hash
-	// (through WithMemory's clamp) never emits a larger value, and Compare rejects a stored m
+	// (through NewTunedHasher's clamp) never emits a larger value, and Compare rejects a stored m
 	// above it.
 	// Any stored PHC hash carrying a memory value above this ceiling is rejected as
 	// ErrInvalidPassword before the KDF is invoked, preventing an OOM DoS via a
@@ -66,7 +74,7 @@ const (
 	// MinTime is the minimum number of Argon2id iterations (the t parameter).
 	MinTime uint32 = 1
 	// MaxTime is the upper bound on the iteration count (t) enforced on both paths: Hash (through
-	// WithTime's clamp) never emits a larger value, and Compare rejects a stored t above it. It
+	// NewTunedHasher's clamp) never emits a larger value, and Compare rejects a stored t above it. It
 	// is the CPU counterpart of MaxMemoryKiB.
 	//
 	// A stored PHC string is untrusted on the verify path: it may have been imported, migrated, or
@@ -80,64 +88,6 @@ const (
 	// MinThreads is the minimum Argon2id degree of parallelism (the p parameter).
 	MinThreads uint8 = 1
 )
-
-// WithTime sets the number of Argon2id iterations (the t parameter).
-//
-// Values outside [MinTime, MaxTime] are clamped into that range. The floor is
-// the safe minimum (per the OWASP Password Storage Cheat Sheet, 2021); the
-// ceiling is the largest value Compare accepts, so a hasher can never be
-// configured to emit a hash it would itself reject.
-func WithTime(time uint32) Option {
-	return func(h *Hasher) {
-		if time < MinTime {
-			time = MinTime
-		}
-		// Clamp to the ceiling Compare enforces (F-PWD-001). Without this, Hash accepted
-		// t > MaxTime, emitted a PHC string Compare classifies as ErrInvalidPassword before
-		// the KDF, and the affected accounts could never log in again — not even after the
-		// configuration was reverted, because the unusable cost is stored in the hash.
-		if time > MaxTime {
-			time = MaxTime
-		}
-		h.time = time
-	}
-}
-
-// WithMemory sets the Argon2id memory cost in KiB (the m parameter).
-//
-// Values outside [MinMemoryKiB, MaxMemoryKiB] are clamped into that range. The
-// floor is the OWASP 2021 minimum (19 MiB); the ceiling is the largest value
-// Compare accepts, so a hasher can never be configured to emit a hash it would
-// itself reject.
-func WithMemory(memory uint32) Option {
-	return func(h *Hasher) {
-		if memory < MinMemoryKiB {
-			memory = MinMemoryKiB
-		}
-		// Clamp to the ceiling Compare enforces (F-PWD-001). Without this, Hash accepted
-		// m > MaxMemoryKiB, emitted a PHC string Compare classifies as ErrInvalidPassword
-		// before the KDF, and the affected accounts could never log in again — not even
-		// after the configuration was reverted, because the unusable cost is stored in the
-		// hash.
-		if memory > MaxMemoryKiB {
-			memory = MaxMemoryKiB
-		}
-		h.memory = memory
-	}
-}
-
-// WithThreads sets the Argon2id degree of parallelism (the p parameter).
-//
-// A value below MinThreads is clamped up to MinThreads so the hasher cannot be
-// tuned below the safe floor (per the OWASP Password Storage Cheat Sheet, 2021).
-func WithThreads(threads uint8) Option {
-	return func(h *Hasher) {
-		if threads < MinThreads {
-			threads = MinThreads
-		}
-		h.threads = threads
-	}
-}
 
 // NeedsRehash reports whether a stored PHC-formatted Argon2id hash should be
 // re-hashed at this hasher's current target cost.
@@ -253,7 +203,8 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 }
 
 // Compare checks a plaintext password against a PHC formatted Argon2id hash.
-func (h *Hasher) Compare(ctx context.Context, hash, password string) error {
+func (h *Hasher) Compare(ctx context.Context, phc passwords.PHC, password string) error {
+	hash := string(phc)
 	// Reject empty candidates immediately, mirroring Hash() which also short-circuits before
 	// the KDF on empty input. No stored hash can ever correspond to "": Hash rejects empty
 	// passwords, so the round-trip is impossible. Returning here restores timing symmetry with

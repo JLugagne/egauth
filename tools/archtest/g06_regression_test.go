@@ -46,6 +46,7 @@ func TestG06RegressionsFire(t *testing.T) {
 }
 
 func TestG06TypedExemptionIsBoundToItsRow(t *testing.T) {
+	t.Cleanup(archtest.BindG06TypedEntryForTest("", "ActorFromContext", "ctxvalue"))
 	ws, cfg := fixture(t, "g06")
 	sawClock := false
 	for _, v := range archtest.CheckG06(ws, cfg) {

@@ -167,13 +167,13 @@ func (s *Service) Completes(f core.Factor) bool {
 //     SecondFactors for the subject sealed in the flow. A failed code also charges the flow record,
 //     which dies after ceremony.MFAFlow.MaxAttempts; the per-subject lockout stays the bound.
 //   - /mfa/passkey/begin returns {state, options, handle} for a step-up bound to the flow's subject;
-//     /mfa/passkey/finish verifies the assertion, which must come from the same flow, with a
+//     /mfa/passkey/finish verifies the assertion, which must come from this flow, with a
 //     credential other than the primary passkey of the flow.
 //   - On success the flow record is consumed exactly once, the flow cookie cleared, and the sealed
 //     Pending plus the new factor go to issuer.Complete, which issues the session (or refuses it
 //     when the account or epoch changed meanwhile).
-//   - /reauth needs an established session and reauthenticates it on the same lineage through
-//     issuer. With "factor":"passkey" (StepUp present) a single assertion with user verification
+//   - /reauth needs an established session and reauthenticates it on its own lineage through
+//     issuer. With "factor":"passkey" (StepUp present) one assertion with user verification
 //     suffices (DESIGN §5.3), so neither a password nor the Password module is needed: without
 //     "handle" it answers {state:"passkey_challenge", options, handle} for the session's subject;
 //     with "handle" and the assertion in the same JSON body it verifies pk+uv for that very session

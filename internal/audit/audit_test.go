@@ -115,7 +115,7 @@ func TestEmitCarriesCauseAndRecordsFactorCode(t *testing.T) {
 	if err := audit.MFAVerified(context.Background(), r, audit.Scope{}, principal.FactorTOTP); err != nil {
 		t.Fatal(err)
 	}
-	if !errors.Is(r.got[0].Err, cause) {
+	if r.got[0].Err.Text() != cause.Error() || r.got[0].Err.Type() != "*errors.errorString" {
 		t.Fatalf("cause lost: %+v", r.got[0])
 	}
 	if r.got[1].Attrs[string(event.KeyFactor)] != principal.FactorTOTP.Code() {

@@ -44,6 +44,9 @@ func TestPhoneVerificationSetsTheVerifiedPhone(t *testing.T) {
 	if !w.sink.has(event.PhoneVerified) {
 		t.Fatal("no phone.verified event")
 	}
+	if countOf(w, event.IdentifierChanged) != 1 {
+		t.Fatal("want exactly one identifier.changed event")
+	}
 	notices := w.amailer.securityNotices()
 	if len(notices) != 1 || notices[0].To != "pam@example.com" || notices[0].RevertLink == "" {
 		t.Fatalf("notices = %v, want one to the account email", notices)

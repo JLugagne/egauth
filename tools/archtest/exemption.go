@@ -160,19 +160,11 @@ func Filter(vs []Violation, l ExemptionList) []Violation {
 	return out
 }
 
-var legacyRelPrefixes = []string{
-	"webapp", "tokens", "sessions", "identity", "mfa", "passkey", "oauth", "otp", "issuance",
-	"authflow", "origin", "revocation", "janitor", "health", "ratelimit", "keystore",
-	"internal/loginflowtest", "internal/securitydefaults", "internal/doctest", "internal/httputil",
-	"internal/safehttp",
-	"adapters/pgx/identity", "adapters/pgx/sessions", "adapters/pgx/tokens", "adapters/pgx/mfa",
-	"adapters/pgx/otp", "adapters/pgx/passkey", "adapters/pgx/oauth", "adapters/pgx/keystore",
-	"adapters/pgx/internal/pgxmigrate",
-}
+var legacyRelPrefixes []string
 
 // LegacyPrefixCount is the number of legacy package prefixes of DESIGN.md section 10.1 still
 // exempt. It may only decrease, down to zero at the WP16 cutover.
-const LegacyPrefixCount = 30
+const LegacyPrefixCount = 0
 
 // LegacyRelPrefixes returns the legacy package prefixes, relative to the module path, that are
 // exempt until WP16.

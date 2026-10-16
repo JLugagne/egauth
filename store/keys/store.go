@@ -115,8 +115,8 @@ type Reseal struct {
 
 // Store persists tenant keys. A key is addressed by its tenant, so every method takes one.
 //
-// Every method that inserts a key (CreateTenant, PutKey, Rotate) checks the tombstone in the same
-// transaction as the insert and returns ErrTenantTombstoned for an erased tenant (T-13). Each one
+// Every method that inserts a key (CreateTenant, PutKey, Rotate) checks the tombstone within
+// the insert transaction and returns ErrTenantTombstoned for an erased tenant (T-13). Each one
 // also returns ErrLegacyAADVersion for a key whose AADVersion is not AADVersionCurrent.
 type Store interface {
 	store.Base

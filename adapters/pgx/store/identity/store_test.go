@@ -3,7 +3,6 @@ package identity_test
 import (
 	"context"
 	"io/fs"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,10 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
-	legacypgx "github.com/JLugagne/egauth/adapters/pgx/identity"
+	"github.com/JLugagne/egauth/adapters/pgx/internal/legacyfixture"
 	"github.com/JLugagne/egauth/adapters/pgx/internal/migrate"
 	identitystore "github.com/JLugagne/egauth/adapters/pgx/store/identity"
-	legacycore "github.com/JLugagne/egauth/identity"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/identity"
@@ -38,17 +36,25 @@ func TestPingReportsAMissingMigration(t *testing.T) {
 	require.Error(t, err)
 }
 
+func legacyIdentityFS(t *testing.T) fs.FS {
+	t.Helper()
+	fsys, err := legacyfixture.FS(legacyfixture.Identity)
+	require.NoError(t, err)
+	return fsys
+}
+
 func TestLegacyMigrationsAreTheV016Files(t *testing.T) {
-	legacy, err := filepath.Glob(filepath.Join("..", "..", "identity", "migrations", "*.sql"))
+	legacy, err := fs.Glob(legacyIdentityFS(t), "migrations/*.sql")
 	require.NoError(t, err)
 	require.Len(t, legacy, 8)
 	for _, path := range legacy {
-		want, err := os.ReadFile(path)
+		want, err := fs.ReadFile(legacyIdentityFS(t), path)
 		require.NoError(t, err)
-		got, err := fs.ReadFile(identitystore.Migrations, "migrations/"+filepath.Base(path))
-		require.NoError(t, err, "%s must keep its v0.16 name so the bootstrap carries it over", filepath.Base(path))
+		name := filepath.Base(path)
+		got, err := fs.ReadFile(identitystore.Migrations, "migrations/"+name)
+		require.NoError(t, err, "%s must keep its v0.16 name so the bootstrap carries it over", name)
 		idempotent := strings.ReplaceAll(string(want), "CREATE UNIQUE INDEX idx_", "CREATE UNIQUE INDEX IF NOT EXISTS idx_")
-		require.Equal(t, idempotent, string(got), "%s must be the v0.16 file, made idempotent only (G16)", filepath.Base(path))
+		require.Equal(t, idempotent, string(got), "%s must be the v0.16 file, made idempotent only (G16)", name)
 	}
 }
 
@@ -65,27 +71,22 @@ func TestMigrationsAreIdempotent(t *testing.T) {
 	require.NoError(t, identitystore.New(pool).Ping(ctx))
 }
 
-func legacyAccount(t *testing.T, old *legacypgx.Store, email, hash string) principal.Subject {
+func legacyAccount(t *testing.T, pool *pgxpool.Pool, email, hash string) principal.Subject {
 	t.Helper()
-	ctx := context.Background()
-	u, err := old.CreateUser(ctx, "acme", email)
+	id, err := legacyfixture.CreatePasswordAccount(context.Background(), pool, legacyfixture.Account{Tenant: "acme", Email: email, PHC: hash})
 	require.NoError(t, err)
-	require.NoError(t, old.AddIdentity(ctx, "acme", &legacycore.Identity{
-		UserID: u.ID, TenantID: "acme", Provider: "password", ProviderID: email, PasswordHash: &hash,
-	}))
 	acme, err := principal.ParseTenantID("acme")
 	require.NoError(t, err)
-	return principal.Subject{Tenant: acme, User: u.ID}
+	return principal.Subject{Tenant: acme, User: id}
 }
 
 func TestUpgradesAV016DatabaseInPlace(t *testing.T) {
 	ctx := context.Background()
 	pool := emptyDatabase(t)
-	require.NoError(t, legacypgx.Migrate(ctx, pool))
-	old := legacypgx.NewStore(pool)
+	require.NoError(t, legacyfixture.Migrate(ctx, pool, legacyfixture.Identity))
 	hash := "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$legacy"
-	alice := legacyAccount(t, old, "alice@example.com", hash)
-	bob := legacyAccount(t, old, "bob@example.com", hash)
+	alice := legacyAccount(t, pool, "alice@example.com", hash)
+	bob := legacyAccount(t, pool, "bob@example.com", hash)
 
 	require.NoError(t, migrate.Run(ctx, pool, []migrate.Module{{Name: "identity", FS: identitystore.Migrations}}),
 		"the v0.16 files are bootstrapped, never re-run")

@@ -115,7 +115,7 @@ func TestSlogSink_LevelsAndAttrs(t *testing.T) {
 
 	t.Run("error when Err is set", func(t *testing.T) {
 		buf.Reset()
-		sink.EmitEvent(context.Background(), event.Event{Type: event.DeliveryFailed, Err: errors.New("smtp down")})
+		sink.EmitEvent(context.Background(), event.Event{Type: event.DeliveryFailed, Err: event.CauseOf(errors.New("smtp down"))})
 		r := decodeLast()
 		assert.Equal(t, "ERROR", r.Level)
 		assert.Empty(t, r.Error, "the error text is PII and must not be logged")
@@ -134,7 +134,7 @@ func TestAPIKeyEventTypes(t *testing.T) {
 	assert.Equal(t, event.Type("api_key.created"), event.APIKeyCreated)
 	assert.Equal(t, event.Type("api_key.auth.succeeded"), event.APIKeyAuthSucceeded)
 	assert.Equal(t, event.Type("api_key.auth.failed"), event.APIKeyAuthFailed)
-	assert.Equal(t, event.Type("api_key.purged"), event.APIKeyPurged)
+	assert.Equal(t, event.Type("api_key.revoked"), event.APIKeyRevoked)
 
 	// Verify the Reason code constants.
 	assert.Equal(t, "not_found", event.ReasonAPIKeyNotFound)
@@ -183,7 +183,7 @@ func TestAPIKeyInfoEvents_LogAtInfo(t *testing.T) {
 		Event string `json:"event"`
 	}
 
-	for _, typ := range []event.Type{event.APIKeyCreated, event.APIKeyAuthSucceeded, event.APIKeyPurged} {
+	for _, typ := range []event.Type{event.APIKeyCreated, event.APIKeyAuthSucceeded, event.APIKeyRevoked} {
 		buf.Reset()
 		sink.EmitEvent(context.Background(), event.Event{Type: typ})
 		var r record
@@ -227,4 +227,12 @@ func TestRequestContext_ApplyTo(t *testing.T) {
 		assert.Equal(t, "service", got["key_type"], "pre-existing attrs survive")
 		assert.Equal(t, "9.9.9.9", got[event.AttrIP])
 	})
+}
+
+func TestCauseKeepsTypeAndTextButNoErrorValue(t *testing.T) {
+	assert.True(t, event.CauseOf(nil).IsZero())
+	c := event.CauseOf(errors.New("smtp down"))
+	assert.False(t, c.IsZero())
+	assert.Equal(t, "*errors.errorString", c.Type())
+	assert.Equal(t, "smtp down", c.Text())
 }

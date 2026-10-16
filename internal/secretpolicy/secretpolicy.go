@@ -27,8 +27,6 @@ var (
 // module's minimum-length gates, so length alone cannot reject them. New key-loading paths must
 // consult this list through Validate rather than keeping a private partial copy: the fragmented
 // per-package denylists were themselves the finding.
-//
-// tokens/jwt.DeniedSecrets aliases this map for backward compatibility.
 var Denied = map[string]bool{
 	"replace-with-a-32-byte-minimum-secret-in-production!": true,
 	"super-secret-32-byte-key-here!!!":                     true,

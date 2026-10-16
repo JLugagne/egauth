@@ -27,7 +27,7 @@ type EmailDeliverer interface {
 	SecurityNotice(ctx context.Context, m SecurityNoticeMessage) error
 }
 
-// SMSDeliverer sends one text message per message kind, with the same contract as EmailDeliverer.
+// SMSDeliverer sends one text message per message kind; its contract mirrors EmailDeliverer.
 type SMSDeliverer interface {
 	// LoginCode sends a texted sign-in code; it yields the sms_code factor, never email_code.
 	LoginCode(ctx context.Context, m CodeMessage) error

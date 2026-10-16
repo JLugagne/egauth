@@ -156,7 +156,7 @@ func (f *follower[K, V]) forget(k K) {
 // it names, and marks the cache fresh. A cursor the store no longer retains (store.ErrNotFound)
 // drops every entry and restarts from the beginning of the feed. Concurrent calls are serialised.
 // It returns ErrUnavailable joined with the store error when the feed cannot be read, and an error
-// when the backlog is longer than one poll reads; in both cases the cache is not marked fresh and
+// when the backlog is longer than one poll reads; after either failure the cache is not marked fresh and
 // stops trusting its entries once PollBound has elapsed.
 func (f *follower[K, V]) Poll(ctx context.Context) error {
 	f.pollMu.Lock()

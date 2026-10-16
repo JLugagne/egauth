@@ -13,10 +13,10 @@ func TestV17TypesAreUniqueAndDoNotCollideWithLegacy(t *testing.T) {
 		event.PasswordReset, event.PasswordChanged, event.EmailVerified, event.EmailChanged, event.PhoneVerified,
 		event.RecoveryChannelEnrolled, event.AccountDeleted, event.Logout, event.AccountBlocked,
 		event.AccountDisabled, event.AccountEnabled, event.RefreshReuseDetected, event.TokenFamilyRevoked,
-		event.MFAChallengeRequired, event.MFAEnrolled, event.MFAConfirmed, event.MFAVerified,
-		event.MFAVerificationFailed, event.MFADisabled, event.MFAUnlocked, event.CredentialAdded,
-		event.CredentialRemoved, event.DeliveryFailed, event.InsecureCookieMisuse, event.RedirectFallbackMisuse,
-		event.APIKeyCreated, event.APIKeyRevoked, event.APIKeyAuthSucceeded, event.APIKeyAuthFailed, event.APIKeyPurged,
+		event.MFAChallengeRequired, event.MFAVerified,
+		event.MFAVerificationFailed, event.MFAUnlocked, event.CredentialAdded,
+		event.CredentialRemoved, event.DeliveryFailed,
+		event.APIKeyCreated, event.APIKeyRevoked, event.APIKeyAuthSucceeded, event.APIKeyAuthFailed,
 	}
 	seen := map[event.Type]bool{}
 	for _, l := range legacy {

@@ -19,11 +19,6 @@ var emitterOwners = []string{"internal/audit", "event"}
 
 var applicationEmitters = []string{}
 
-var legacyEmitters = []string{
-	"authflow", "identity", "issuance", "keystore", "mfa", "oauth", "otp", "passkey", "sessions",
-	"tokens",
-}
-
 var skippedDirs = []string{"tools", "testdata", "vendor", "node_modules"}
 
 type emitSite struct {
@@ -145,13 +140,9 @@ func TestAuditIsTheOnlyLibraryEmitter(t *testing.T) {
 			used[p] = true
 			continue
 		}
-		if p, ok := underAny(s.rel, legacyEmitters); ok {
-			used[p] = true
-			continue
-		}
 		t.Errorf("%s: %s outside internal/audit; emit through audit.Emit or a typed audit helper", s.pos, s.msg)
 	}
-	for _, p := range append(slices.Clone(applicationEmitters), legacyEmitters...) {
+	for _, p := range applicationEmitters {
 		if !used[p] {
 			t.Errorf("emitter exemption %q no longer matches any site; remove it", p)
 		}

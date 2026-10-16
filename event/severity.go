@@ -32,13 +32,11 @@ func (t Type) Severity() Severity {
 	switch t {
 	case LoginSucceeded, SessionIssued, UserRegistered, PasswordReset, PasswordChanged, EmailVerified,
 		EmailChanged, PhoneVerified, RecoveryChannelEnrolled, AccountDeleted, Logout, AccountDisabled,
-		AccountEnabled, MFAChallengeRequired, MFAEnrolled, MFAConfirmed, MFAVerified, MFADisabled,
-		MFAUnlocked, CredentialAdded, CredentialRemoved, APIKeyCreated, APIKeyRevoked,
-		APIKeyAuthSucceeded, APIKeyPurged, IdentifierChanged, LimiterPerInstance:
+		AccountEnabled, MFAChallengeRequired, MFAVerified, MFAUnlocked, CredentialAdded, CredentialRemoved, APIKeyCreated, APIKeyRevoked,
+		APIKeyAuthSucceeded, IdentifierChanged, LimiterPerInstance:
 		return SeverityInfo
 	case LoginFailed, AccountLocked, AccountBlocked, RefreshReuseDetected, TokenFamilyRevoked,
-		MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, InsecureCookieMisuse,
-		RedirectFallbackMisuse, SystemCallerUsed, InsecureConfiguration, ClaimsStale, ProxyHeadersIgnored:
+		MFAVerificationFailed, APIKeyAuthFailed, DeliveryFailed, SystemCallerUsed, InsecureConfiguration, ClaimsStale, ProxyHeadersIgnored:
 		return SeverityWarn
 	case MountMismatch, ClaimsUnavailable, ClaimsTooLarge, MFAModuleMissing, LifecycleRetry,
 		RevocationUnavailable:

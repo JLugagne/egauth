@@ -40,8 +40,8 @@ type subdomainTenant struct {
 }
 
 // TenantBySubdomain resolves the tenant from the first host label of the request, matched against
-// publicOrigin of the form scheme://{tenant}.parent[:port]. The label must match [a-z0-9-]{1,63}
-// and the port must be the origin's. It returns ErrInvalidTenancy for any other origin.
+// publicOrigin of the form scheme://{tenant}.parent[:port]. The label is limited to [a-z0-9-]{1,63}
+// and the port is the origin's. It returns ErrInvalidTenancy for any other origin.
 func TenantBySubdomain(publicOrigin string) (TenantResolver, error) {
 	scheme, rest, ok := strings.Cut(publicOrigin, "://")
 	if !ok || !strings.HasPrefix(rest, tenantMarker+".") || strings.Count(publicOrigin, tenantMarker) != 1 {

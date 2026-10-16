@@ -17,10 +17,7 @@ func TestArgon2Hasher_EmptyPasswordSymmetry(t *testing.T) {
 	ctx := context.Background()
 
 	// Build a hasher with minimal cost so the non-empty path runs quickly.
-	hasher := argon2hasher.NewHasher(
-		argon2hasher.WithMemory(8*4), // minimum: 8*threads KiB (threads=4 default)
-		argon2hasher.WithTime(1),
-	)
+	hasher := argon2hasher.NewTunedHasher(argon2hasher.Params{MemoryKiB: 8 * 4, Time: 1})
 
 	// Produce a valid stored hash for a non-empty password.
 	storedHash, err := hasher.Hash(ctx, "correct-horse-battery-staple")
@@ -42,7 +39,7 @@ func TestArgon2Hasher_EmptyPasswordSymmetry(t *testing.T) {
 		cancelledCtx, cancel := context.WithCancel(context.Background())
 		cancel() // pre-cancel so ctx.Err() == context.Canceled from the start
 
-		err := hasher.Compare(cancelledCtx, storedHash, "")
+		err := hasher.Compare(cancelledCtx, passwords.PHC(storedHash), "")
 		// Must be ErrInvalidPassword: the empty-password guard must fire BEFORE ctx.Err() is
 		// checked and BEFORE argon2 is invoked. Any other error means the guard is missing.
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword,
@@ -57,7 +54,7 @@ func TestArgon2Hasher_EmptyPasswordSymmetry(t *testing.T) {
 	})
 
 	t.Run("non-empty wrong password still fails normally through argon2", func(t *testing.T) {
-		err := hasher.Compare(ctx, storedHash, "wrong-password")
+		err := hasher.Compare(ctx, passwords.PHC(storedHash), "wrong-password")
 		assert.ErrorIs(t, err, passwords.ErrInvalidPassword,
 			"a wrong non-empty password must still fail with ErrInvalidPassword")
 	})
