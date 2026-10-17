@@ -66,8 +66,7 @@ const lockSQL = `SELECT pg_advisory_xact_lock($1::bigint)`
 // not record, and records it. The whole run is one transaction holding a database-wide advisory
 // lock, so concurrent runs from several instances serialise and a failed run leaves no trace. A
 // module whose FS is nil is skipped. Files must be idempotent and must not use transaction control.
-// A v0.16 schema_migrations table is read once to skip files that v0.16 already applied; see
-// bootstrap.
+// A v0.16 schema_migrations table is read once to skip files that v0.16 already applied.
 func Run(ctx context.Context, db Migrator, modules []Module) error {
 	steps, err := buildPlan(modules)
 	if err != nil {
@@ -188,7 +187,7 @@ func apply(ctx context.Context, db Querier, m planned, version string) error {
 	if err != nil {
 		return errors.Join(fmt.Errorf("migrate: read %q of %q", version, m.name), err)
 	}
-	record := "\nINSERT INTO egauth_schema_migrations (module, version) VALUES ('" +
+	record := ";\nINSERT INTO egauth_schema_migrations (module, version) VALUES ('" +
 		strings.ReplaceAll(m.name, "'", "''") + "', '" + strings.ReplaceAll(version, "'", "''") +
 		"') ON CONFLICT (module, version) DO NOTHING;"
 	if _, err := db.Exec(ctx, string(body)+record); err != nil {

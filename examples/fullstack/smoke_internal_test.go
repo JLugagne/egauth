@@ -108,6 +108,7 @@ func TestDisableStatusSeparatesDenialFromFailure(t *testing.T) {
 		{egauth.ErrTenantMismatch, http.StatusForbidden},
 		{egauth.ErrReauthRequired, http.StatusUnauthorized},
 		{store.ErrNotFound, http.StatusNotFound},
+		{egauth.ErrInvalidRequest, http.StatusBadRequest},
 		{errors.New("connection reset"), http.StatusInternalServerError},
 	} {
 		if got, _ := disableStatus(tc.err); got != tc.want {

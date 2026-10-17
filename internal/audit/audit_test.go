@@ -7,7 +7,6 @@ import (
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/internal/audit"
-	"github.com/JLugagne/egauth/internal/lifecycle"
 	"github.com/JLugagne/egauth/principal"
 )
 
@@ -62,13 +61,13 @@ func TestHelpersEmitTheirTypes(t *testing.T) {
 	for _, err := range []error{
 		audit.CredentialAdded(ctx, r, s, principal.FactorPasskey), audit.CredentialRemoved(ctx, r, s, principal.FactorPasskey),
 		audit.MFAVerified(ctx, r, s, principal.FactorTOTP), audit.MFAUnlocked(ctx, r, s),
-		audit.SystemCallerUsed(ctx, r, s, "janitor"), audit.IdentifierChanged(ctx, r, s, lifecycle.IdentifierEmail),
+		audit.SystemCallerUsed(ctx, r, s, "janitor"),
 	} {
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	want := []event.Type{event.CredentialAdded, event.CredentialRemoved, event.MFAVerified, event.MFAUnlocked, event.SystemCallerUsed, event.IdentifierChanged}
+	want := []event.Type{event.CredentialAdded, event.CredentialRemoved, event.MFAVerified, event.MFAUnlocked, event.SystemCallerUsed}
 	if len(r.got) != len(want) {
 		t.Fatalf("got %d events", len(r.got))
 	}
@@ -77,8 +76,8 @@ func TestHelpersEmitTheirTypes(t *testing.T) {
 			t.Errorf("event %d = %s, want %s", i, r.got[i].Type, w)
 		}
 	}
-	if r.got[4].Reason != "janitor" || r.got[5].Attrs[string(event.KeyIdentifierKind)] != "email" {
-		t.Fatalf("helper payloads wrong: %+v %+v", r.got[4], r.got[5])
+	if r.got[4].Reason != "janitor" {
+		t.Fatalf("helper payload wrong: %+v", r.got[4])
 	}
 }
 
@@ -94,7 +93,6 @@ func TestHelpersRejectZeroDomainValues(t *testing.T) {
 	ctx := context.Background()
 	for name, err := range map[string]error{
 		"zero factor":        audit.CredentialAdded(ctx, r, audit.Scope{}, principal.Factor{}),
-		"undeclared kind":    audit.IdentifierChanged(ctx, r, audit.Scope{}, lifecycle.IdentifierKind(0)),
 		"empty system cause": audit.SystemCallerUsed(ctx, r, audit.Scope{}, ""),
 	} {
 		if !errors.Is(err, audit.ErrInvalidArgument) {

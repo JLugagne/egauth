@@ -21,7 +21,7 @@ func secondDrivers() []SecondDriver {
 			Enroll: enrollRecovery, Complete: completeRecovery,
 		},
 		{
-			MFA: MFAPasskeyStepUp, Module: "Passkey", Factor: "pk_stepup", Verified: event.MFAVerified, VerifiedAfterIssue: true,
+			MFA: MFAPasskeyStepUp, Module: "Passkey", Factor: "pk_stepup", Verified: event.MFAVerified,
 			Enroll: enrollStepUpPasskey, Complete: completeStepUpPasskey,
 		},
 	}

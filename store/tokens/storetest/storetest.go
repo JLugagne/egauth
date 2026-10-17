@@ -69,6 +69,7 @@ func Run(t *testing.T, newStore func(*testing.T) tokens.Store) {
 		"ReuseWithoutFingerprint":  reuseWithoutFingerprint,
 		"ReuseAfterGraceStoreTime": reuseAfterGrace,
 		"GraceIgnoresIssuerClock":  graceIgnoresIssuerClock,
+		"ReuseAfterIdle":           reuseAfterIdle,
 		"RotateConcurrent":         rotateConcurrent,
 		"Reissue":                  reissue,
 		"ReissueRefusals":          reissueRefusals,
@@ -479,6 +480,24 @@ func reuseAfterGrace(t *testing.T, h *harness) {
 	h.f.Travel(t, h.s, tokens.ReuseGrace+time.Second)
 	_, err = h.rotate(a, h.next(a, fp))
 	require.ErrorIs(t, err, tokens.ErrReused, "past the grace window in store time even the same client is a replay")
+	require.True(t, h.state(a).Revoked)
+}
+
+func reuseAfterIdle(t *testing.T, h *harness) {
+	s := subject(t, "t")
+	fp := []byte("same-client")
+	a := h.create(spec{subject: s, fp: fp, idle: time.Hour})
+	unused := h.create(spec{subject: subject(t, "t"), fp: fp, idle: time.Hour})
+	_, err := h.rotate(a, h.next(a, fp))
+	require.NoError(t, err)
+	h.f.Travel(t, h.s, 2*time.Hour)
+	_, err = h.s.Get(t.Context(), unused.Tenant(), unused.TokenHash())
+	require.ErrorIs(t, err, store.ErrNotFound, "an unconsumed idle-expired token is gone")
+	got, err := h.s.Get(t.Context(), a.Tenant(), a.TokenHash())
+	require.NoError(t, err, "a consumed token stays readable past its idle window so its replay reaches rotation")
+	require.Equal(t, a.Family(), got.Family())
+	_, err = h.rotate(a, h.next(a, []byte("thief")))
+	require.ErrorIs(t, err, tokens.ErrReused, "a consumed token is a replay even past its own idle window")
 	require.True(t, h.state(a).Revoked)
 }
 

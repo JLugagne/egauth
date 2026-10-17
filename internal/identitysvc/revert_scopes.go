@@ -14,12 +14,12 @@ func (a *Accounts) Scope(id identity.Identifier) (ceremony.Scope, error) {
 }
 
 // RevertScopes returns every ceremony scope that holds SecurityRevert data of sub beyond the
-// current identifiers: the
-// anchors of each previous email address still on record and of current, and the span, lock and tenure bookkeeping. The tenure
-// scope comes last because it is the only record of the previous addresses: a caller deleting the
-// scopes in order and stopping at the first failure can retry the rest. The revert links sent to a previous address are not included: that scope is per address, so it
-// may hold another account's links; they expire with their TTL. Addresses already dropped
-// from the tenure records cannot be enumerated.
+// current identifiers: the anchors of each previous email address still on record and of current,
+// and the span, lock and tenure bookkeeping. The tenure scope comes last because it is the only
+// record of the previous addresses: a caller deleting the scopes in order and stopping at the first
+// failure can retry the rest. The revert links sent to a previous address are not included: that
+// scope is per address, so it may hold another account's links; they expire with their TTL.
+// Addresses already dropped from the tenure records cannot be enumerated.
 func (a *Accounts) RevertScopes(ctx context.Context, sub core.Subject, current []identity.Identifier) ([]ceremony.Scope, error) {
 	tenures, err := a.tenures(ctx, sub)
 	if err != nil {

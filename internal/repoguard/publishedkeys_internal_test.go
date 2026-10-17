@@ -15,9 +15,6 @@ import (
 	"github.com/JLugagne/egauth/internal/secretpolicy"
 )
 
-// keyFieldNames are the struct fields and option arguments that carry secret key material in this
-// module's examples and documentation. A literal assigned to any of them is published the moment
-// the snippet is rendered by go/doc or committed to the docs tree.
 var keyFieldNames = []string{
 	"SecretKey",
 	"CookieKey",
@@ -27,13 +24,8 @@ var keyFieldNames = []string{
 	"Secret",
 }
 
-// minPublishedKeyLength is the shortest literal treated as a potential credential. It matches
-// secretpolicy.MinKeyLength: anything shorter cannot be an HS256 key in this module and is far more
-// likely to be a placeholder such as "changeme".
 const minPublishedKeyLength = secretpolicy.MinKeyLength
 
-// denyListSourceFile is where the denylist itself lives. It necessarily contains the very literals
-// it denies, so the scan skips it.
 const denyListSourceFile = "internal/secretpolicy/secretpolicy.go"
 
 // TestNoPublishedKeyLiteralsInExamples is the guard behind the denylist: every long string literal
@@ -108,14 +100,12 @@ func TestPublishedKeyGuardAcceptsDeniedLiteral(t *testing.T) {
 			t.Errorf("denylisted literal %q must satisfy the guard, got %q", denied, problem)
 		}
 	}
-	// "changeme" is a placeholder, not a key: it is below the length threshold.
+
 	if problem := publishedKeyProblem("docs/content/example.md", "changeme"); problem != "" {
 		t.Errorf("a short placeholder must be ignored, got %q", problem)
 	}
 }
 
-// publishedKeyProblem returns a human-readable problem when a published literal is missing from the
-// denylist, or "" when the literal is safe to publish.
 func publishedKeyProblem(rel, literal string) string {
 	if len(literal) < minPublishedKeyLength {
 		return ""
@@ -123,8 +113,7 @@ func publishedKeyProblem(rel, literal string) string {
 	if secretpolicy.Denied[literal] {
 		return ""
 	}
-	// Mirrors the issuer's marker check: a near-copy of a published example is refused even when it
-	// is not byte-identical to a denylisted entry.
+
 	if strings.Contains(literal, "minimum-hs256-signing-secret") {
 		return ""
 	}
@@ -132,7 +121,6 @@ func publishedKeyProblem(rel, literal string) string {
 		strconv.Quote(literal) + " — replace it with examplekey.New() or add it to the denylist"
 }
 
-// keyOptionFuncs are the option constructors that take key material as their argument.
 var keyOptionFuncs = map[string]bool{
 	"WithStateSigningKey": true,
 	"WithCookieKey":       true,
@@ -141,18 +129,12 @@ var keyOptionFuncs = map[string]bool{
 	"NewHMACSigner":       true,
 }
 
-// goKeyLiterals parses one Go file and returns every string literal assigned to a key-bearing field
-// or passed to a key-bearing option constructor.
-//
-// Only Example functions are scanned. go/doc renders those on pkg.go.dev as the package's usage
-// documentation, which is what makes a literal in one published; an ordinary test body is not
-// rendered, so scanning those would flag assertion messages and unrelated fixtures.
 func goKeyLiterals(t *testing.T, path string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		// A file that does not parse is not this guard's business; the build will fail first.
+
 		return nil
 	}
 	var out []string
@@ -181,8 +163,6 @@ func goKeyLiterals(t *testing.T, path string) []string {
 	return out
 }
 
-// isExampleFunc reports whether a declaration is a godoc Example function: a func named Example or
-// Example<Xxx>, with no receiver and no parameters.
 func isExampleFunc(fn *ast.FuncDecl) bool {
 	if fn.Recv != nil || fn.Type.Params != nil && len(fn.Type.Params.List) > 0 {
 		return false
@@ -194,14 +174,10 @@ func isExampleFunc(fn *ast.FuncDecl) bool {
 	if rest == "" {
 		return true
 	}
-	// Example<Xxx> must continue with an upper-case letter to be a godoc example.
+
 	return rest[0] >= 'A' && rest[0] <= 'Z'
 }
 
-// markdownKeyLiterals returns long string literals assigned to a key-bearing field inside fenced
-// Go snippets in a markdown file. It is deliberately line-oriented: doc snippets are read by humans
-// and copied verbatim, so a simple scan is both sufficient and robust to snippet fragments that do
-// not parse as a whole file.
 func markdownKeyLiterals(t *testing.T, path string) []string {
 	t.Helper()
 	raw, err := os.ReadFile(path)
@@ -231,7 +207,6 @@ func markdownKeyLiterals(t *testing.T, path string) []string {
 	return out
 }
 
-// quotedLiterals extracts every double-quoted string from s.
 func quotedLiterals(s string) []string {
 	var out []string
 	for i := 0; i < len(s); i++ {
@@ -253,8 +228,6 @@ func quotedLiterals(s string) []string {
 	return out
 }
 
-// literalStrings returns the string values of an expression composed of string literals, handling
-// the concatenation and single-argument conversion forms that appear in snippets.
 func literalStrings(e ast.Expr) []string {
 	switch node := e.(type) {
 	case *ast.BasicLit:
@@ -278,7 +251,6 @@ func literalStrings(e ast.Expr) []string {
 	return nil
 }
 
-// isKeyFieldName reports whether an AST expression names one of the key-bearing identifiers.
 func isKeyFieldName(e ast.Expr) bool {
 	name := exprName(e)
 	if name == "" {
@@ -292,7 +264,6 @@ func isKeyFieldName(e ast.Expr) bool {
 	return false
 }
 
-// exprName returns the identifier name of a simple expression (Ident or SelectorExpr).
 func exprName(e ast.Expr) string {
 	switch node := e.(type) {
 	case *ast.Ident:
@@ -303,8 +274,6 @@ func exprName(e ast.Expr) string {
 	return ""
 }
 
-// isSkippedDir reports whether a directory should be skipped by the repository walk. Worktrees and
-// build output can contain copies of the module and are not published documentation.
 func isSkippedDir(name string) bool {
 	switch name {
 	case ".git", ".github", "node_modules", "public", "testdata":
@@ -313,7 +282,6 @@ func isSkippedDir(name string) bool {
 	return strings.HasPrefix(name, ".")
 }
 
-// collectFiles walks root and returns every file for which keep reports true.
 func collectFiles(t *testing.T, root string, keep func(path string, d fs.DirEntry) bool) []string {
 	t.Helper()
 	var out []string
@@ -338,7 +306,6 @@ func collectFiles(t *testing.T, root string, keep func(path string, d fs.DirEntr
 	return out
 }
 
-// relPath returns path relative to root, with forward slashes, for stable messages.
 func relPath(t *testing.T, root, path string) string {
 	t.Helper()
 	rel, err := filepath.Rel(root, path)
@@ -373,8 +340,7 @@ func TestReleaseToolingInstallsArePinned(t *testing.T) {
 		}
 		for i, line := range strings.Split(string(raw), "\n") {
 			trimmed := strings.TrimSpace(line)
-			// Only shell invocations count. Prose that warns against @latest ("never install it at
-			// @latest") is the documentation doing its job.
+
 			if !strings.HasPrefix(trimmed, "go install ") && !strings.HasPrefix(trimmed, "brew install ") {
 				continue
 			}

@@ -33,7 +33,8 @@ const (
 	Never EmailVerification = 0
 	// ClaimBased trusts the email_verified claim, for emails of the spec's Domains only.
 	ClaimBased EmailVerification = 1
-	// Always trusts every email the provider returns; only for providers egauth knows to verify.
+	// Always trusts the provider's email_verified claim without a domain restriction; a false or absent
+	// claim is never upgraded. Only for providers egauth knows to verify.
 	Always EmailVerification = 2
 )
 

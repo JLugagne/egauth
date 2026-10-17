@@ -227,6 +227,9 @@ func (r *Reaper) run(ctx context.Context, force bool) error {
 }
 
 func (r *Reaper) emit(ctx context.Context, reason string, err error) {
+	if r.base.Err() != nil && errors.Is(err, context.Canceled) {
+		return
+	}
 	_ = audit.Emit(context.WithoutCancel(ctx), r.events, event.LifecycleRetry, audit.Scope{}, audit.Detail{Reason: reason}, err)
 }
 

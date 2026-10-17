@@ -184,10 +184,7 @@ func expectedEvents(d PrimaryDriver, sd SecondDriver, parked, created bool) []ev
 		return append(out, issue...)
 	}
 	out = append(out, event.MFAChallengeRequired)
-	if sd.VerifiedAfterIssue {
-		return append(append(out, issue...), sd.Verified)
-	}
-	return append(append(out, sd.Verified), issue...)
+	return append(append(out, issue...), sd.Verified)
 }
 
 func (r *Run) assertParked(c *Client, res *Resp) {

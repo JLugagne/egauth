@@ -186,7 +186,7 @@ func TestResourceServerRevocationLagOptOut(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, w.call(h, http.MethodGet, "/items", tok).Code)
 	evs := w.sink.of(event.InsecureConfiguration)
 	require.Len(t, evs, 1)
-	require.Equal(t, "revocation_lag_up_to_ttl", evs[0].Reason)
+	require.Equal(t, "short-lived demo tokens", evs[0].Reason)
 }
 
 func TestResourceServerWithoutOptOutEmitsNoInsecureEvent(t *testing.T) {

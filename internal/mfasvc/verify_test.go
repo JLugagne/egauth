@@ -43,7 +43,7 @@ func TestVerifyRefusesFactorsItDoesNotOwn(t *testing.T) {
 	}
 }
 
-func TestVerifyTOTPYieldsTheTOTPFactorAndEmitsMFAVerified(t *testing.T) {
+func TestVerifyTOTPYieldsTheTOTPFactorAndLeavesMFAVerifiedToTheCaller(t *testing.T) {
 	w := newWorld(t)
 	sub := w.user("ann@example.com")
 	secret, _ := w.enrolled(sub)
@@ -54,9 +54,8 @@ func TestVerifyTOTPYieldsTheTOTPFactorAndEmitsMFAVerified(t *testing.T) {
 	if v.Subject() != sub || len(v.Factors()) != 1 || v.Factors()[0] != core.FactorTOTP || v.Identifies() {
 		t.Fatalf("verified = %v %v identifies=%v", v.Subject(), v.Factors(), v.Identifies())
 	}
-	e, ok := w.sink.last(event.MFAVerified)
-	if !ok || e.Attrs[string(event.KeyFactor)] != core.FactorTOTP.Code() {
-		t.Fatalf("MFAVerified = %+v, %v", e, ok)
+	if e, ok := w.sink.last(event.MFAVerified); ok {
+		t.Fatalf("Verify emitted MFAVerified before the flow completed: %+v", e)
 	}
 }
 

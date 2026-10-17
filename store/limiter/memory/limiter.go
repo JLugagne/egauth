@@ -62,7 +62,10 @@ func (l *Limiter) EraseTenant(ctx context.Context, t principal.TenantID) error {
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for _, c := range []limiter.Class{limiter.LoginIdentifier, limiter.CodeRequestIdentifier} {
+	for c := range limiter.Class(255) {
+		if !c.Valid() || !c.PerTenant() {
+			continue
+		}
 		prefix := string(limiter.TenantPrefix(c, t))
 		for k := range l.buckets {
 			if len(k) >= len(prefix) && k[:len(prefix)] == prefix {

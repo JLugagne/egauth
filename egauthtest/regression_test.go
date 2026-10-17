@@ -17,7 +17,8 @@ import (
 
 func TestDefaultIdPStampsTokensFromTheWallClock(t *testing.T) {
 	idp := egauthtest.NewIdP(t, nil)
-	tok := idp.SignIDToken(egauthtest.IDToken{User: egauthtest.IdPUser{Subject: "s"}, Audience: idp.ClientID()})
+	tok, err := idp.SignIDToken(egauthtest.IDToken{User: egauthtest.IdPUser{Subject: "s"}, Audience: idp.ClientID()})
+	require.NoError(t, err)
 	claims := verifyIDToken(t, idp, tok)
 	iat := time.Unix(int64(claims["iat"].(float64)), 0)
 	require.WithinDuration(t, time.Now(), iat, time.Minute)

@@ -14,16 +14,6 @@ import (
 	"testing"
 )
 
-// secretFieldPattern matches field names whose VALUE is credential material: a secret, a bearer
-// token, a key, a password or its stored hash, a verifier, or a one-time code.
-//
-// The pattern is anchored and specific about what it excludes, because a guard that cries wolf gets
-// exempted into uselessness:
-//   - the plaintext "Password" and the stored "PasswordHash" are covered, but boolean FLAGS about a
-//     password (MustChangePassword) are not — formatting a bool leaks nothing;
-//   - PUBLIC keys are excluded (only the private half is a credential);
-//   - strings that are not credentials but happen to end in "code" — StatusCode, ErrorCode,
-//     CountryCode — are excluded; only a bare Code or an *OTPCode is matched.
 var secretFieldPattern = regexp.MustCompile(`(?i)^(` +
 	`secret|secretkey|signingkey|cookiekey|privatekey|kek|` +
 	`token|accesstoken|refreshtoken|flowtoken|api?key|` +
@@ -32,8 +22,6 @@ var secretFieldPattern = regexp.MustCompile(`(?i)^(` +
 	`credential|credentials|clientsecret|otpcode|code` +
 	`)$`)
 
-// redactionExemptions lists exported types that carry a secret-shaped field but are not covered by
-// the redaction contract, each with the reason it is safe; it is empty and an entry needs a review.
 var redactionExemptions = map[string]string{}
 
 // TestCredentialBearingTypesAreRedacted is the systemic guard behind the per-type redaction work.
@@ -120,9 +108,8 @@ func TestSecretFieldPatternRejectsUnredactedSyntheticType(t *testing.T) {
 	}
 }
 
-// goType describes one exported struct type found in the module source.
 type goType struct {
-	qualified      string // package.Type, e.g. "mfa.Enrollment"
+	qualified      string
 	secretFields   []string
 	hasSecretField bool
 	hasString      bool
@@ -130,7 +117,6 @@ type goType struct {
 	hasLogValue    bool
 }
 
-// missingRedactionMethods returns the names of the redaction methods the type does not implement.
 func (g goType) missingRedactionMethods() []string {
 	var missing []string
 	if !g.hasString {
@@ -145,13 +131,10 @@ func (g goType) missingRedactionMethods() []string {
 	return missing
 }
 
-// collectExportedTypes walks every non-test package in the module and returns its exported struct
-// types together with the redaction methods they declare.
 func collectExportedTypes(t *testing.T, root string) []goType {
 	t.Helper()
 	byType := make(map[string]*goType)
 
-	// Pass 1: collect exported struct declarations and their field names.
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -214,7 +197,6 @@ func collectExportedTypes(t *testing.T, root string) []goType {
 		return nil
 	})
 
-	// Pass 2: record which redaction methods each type declares (value or pointer receiver).
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -275,16 +257,15 @@ func collectExportedTypes(t *testing.T, root string) []goType {
 	return out
 }
 
-// receiverTypeName returns the bare type name of a method receiver, unwrapping a pointer.
 func receiverTypeName(e ast.Expr) string {
 	switch node := e.(type) {
 	case *ast.Ident:
 		return node.Name
 	case *ast.StarExpr:
 		return receiverTypeName(node.X)
-	case *ast.IndexExpr: // generic receiver: Type[T]
+	case *ast.IndexExpr:
 		return receiverTypeName(node.X)
-	case *ast.IndexListExpr: // generic receiver: Type[T, U]
+	case *ast.IndexListExpr:
 		return receiverTypeName(node.X)
 	}
 	return ""
@@ -302,7 +283,6 @@ func returnsSlogValue(fn *ast.FuncDecl) bool {
 	return returnsNamed(fn, "Value") && receiverPkg(fn) != ""
 }
 
-// returnsNamed reports whether the single result of fn has the given type name.
 func returnsNamed(fn *ast.FuncDecl, name string) bool {
 	if fn.Type.Results == nil || len(fn.Type.Results.List) != 1 {
 		return false
@@ -316,12 +296,8 @@ func returnsNamed(fn *ast.FuncDecl, name string) bool {
 	return false
 }
 
-// receiverPkg is a hook kept for future package-qualified result checks; the LogValue result is
-// always slog.Value, so the name check is sufficient today.
 func receiverPkg(*ast.FuncDecl) string { return "slog" }
 
-// reflectInterfaceCheck documents the interfaces this guard is enforcing, so the intent is visible
-// next to the AST-based implementation.
 var (
 	_ = reflect.TypeOf((*interface{ String() string })(nil)).Elem()
 	_ = reflect.TypeOf((*interface{ GoString() string })(nil)).Elem()

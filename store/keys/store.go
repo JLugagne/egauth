@@ -152,7 +152,9 @@ type Store interface {
 	// from. The cursor is store-issued, never a clock reading (T-15). Every keyset change appends to
 	// the feed, deletions as much as insertions: CreateTenant, PutKey, Rotate, RevokeTenantKeys,
 	// Tombstone, EraseTenant and the keys ReapExpired removes. Instances evict their verification
-	// caches from this feed, so a missing deletion keeps a revoked key verifying elsewhere.
+	// caches from this feed, so a missing deletion keeps a revoked key verifying elsewhere. A cursor
+	// older than the retained feed returns store.ErrNotFound: the caller drops its caches and resumes
+	// from the zero cursor; it is not transient.
 	ChangesSince(ctx context.Context, c store.Cursor) ([]Change, store.Cursor, error)
 
 	// CountLegacySealed returns how many keys still have aad_version 0.

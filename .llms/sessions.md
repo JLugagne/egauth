@@ -23,7 +23,7 @@ Refresh reuse outside the grace window, or inside it from another client fingerp
 
 ## Transport
 
-- Cookies: `__Host-` prefixed, `Secure` (except on a loopback origin), `HttpOnly`, with three closed classes: session, flow (the MFA handle, `SameSite=Strict`) and bind (browser binding of an unauthenticated ceremony).
+- Cookies: `__Host-` prefixed, `Secure` (on a loopback origin the prefix and `Secure` are dropped), `HttpOnly`, with three closed classes: session, flow (the MFA handle, `SameSite=Strict`) and bind (browser binding of an unauthenticated ceremony).
 - Bearer: tokens in `X-Egauth-Access-Token`, `X-Egauth-Refresh-Token` and `X-Egauth-Session-Token` response headers; requests send `Authorization: Bearer`. A login selects it with `egauth.HeaderTransport` set to `bearer`, when `Config.Transport` allows it.
 - A request that presents a cookie and a Bearer credential together is refused.
 

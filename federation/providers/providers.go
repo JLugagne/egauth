@@ -2,6 +2,11 @@
 // constructor refuses an empty client ID and returns a validated spec. Fixed-issuer providers pin
 // their own issuer and JWKS; the issuer is never derived from an authorization URL. Adjust the
 // returned value (Name, Scopes, Domains) directly; the configuration is validated again at New.
+//
+// # Stability
+//
+// Stability class: experimental. No SemVer guarantee: the API may change or be removed in any
+// release. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package providers
 
 import (

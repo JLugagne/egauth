@@ -14,7 +14,7 @@
 
 `egauth.EmailDeliverer` and `egauth.SMSDeliverer` have one method per message kind. Every method must be idempotent on `DeliveryID`, which is stable across retries. Messages hold working credentials:
 
-- `egauth.LinkMessage.Link`, `egauth.CodeMessage.Code` and `egauth.SecurityNoticeMessage.RevertLink` render as `REDACTED` in `fmt` and `slog`.
+- `egauth.LinkMessage.Link`, `egauth.CodeMessage.Code` and `egauth.SecurityNoticeMessage.RevertLink` render as `REDACTED` under every `fmt` verb and in `slog`; JSON marshalling is not redacted.
 - JSON encoding of a message is not redacted; a deliverer that queues messages as JSON stores the credential in the queue, so protect that queue as a secret store.
 
 Security notices carry a revert link that undoes a credential or identifier change for several days.

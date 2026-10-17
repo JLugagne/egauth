@@ -129,6 +129,8 @@ func ParseJWKS(doc []byte) ([]Verifier, error) {
 	return out, nil
 }
 
+const algEd25519 = "Ed25519"
+
 func jwkAlgorithm(j jwk) string {
 	switch {
 	case j.Kty == "OKP" && j.Crv == "Ed25519":
@@ -162,7 +164,7 @@ func parseJWK(raw json.RawMessage) (Verifier, bool, error) {
 	switch {
 	case alg == "":
 		return Verifier{}, false, nil
-	case j.Alg == "" || j.Alg == alg:
+	case j.Alg == "" || j.Alg == alg || (alg == AlgEdDSA && j.Alg == algEd25519):
 	case j.Alg == AlgEdDSA || j.Alg == AlgES256 || j.Alg == AlgRS256 || j.Alg == AlgHS256:
 		return Verifier{}, false, errors.New("alg " + j.Alg + " does not match kty/crv " + j.Kty + "/" + j.Crv)
 	default:

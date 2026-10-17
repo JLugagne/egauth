@@ -13,6 +13,7 @@ import (
 
 	"github.com/JLugagne/egauth/internal/clock"
 	"github.com/JLugagne/egauth/internal/lifecycle"
+	"github.com/JLugagne/egauth/internal/principalctx"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/identity"
@@ -275,6 +276,15 @@ func TestDispatchSurvivesCallerCancellation(t *testing.T) {
 	d.disp.DispatchOutbox(ctx, []identity.OutboxItem{d.row(1, identity.ComponentSessions, identity.EventDisable)})
 	if !slices.Equal(d.out.ackedIDs(), []int64{1}) {
 		t.Fatal("the committed mutation's rows are dispatched even if the request is cancelled")
+	}
+}
+
+func TestFastPathRunsHooksOutsideTheRequestPrincipal(t *testing.T) {
+	d := newDispatchCase(t)
+	ctx := principalctx.Set(context.Background(), "request principal")
+	d.disp.DispatchOutbox(ctx, []identity.OutboxItem{d.row(1, identity.ComponentHooks, identity.EventDelete)})
+	if got := d.m.world.hooks.sawRequest(); !slices.Equal(got, []bool{false}) {
+		t.Fatalf("a hook dispatched inline from a request must not run in-request, got %v", got)
 	}
 }
 

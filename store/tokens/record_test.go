@@ -170,6 +170,10 @@ func TestRestoreRefreshRecordRefusesRowsNewCouldNotProduce(t *testing.T) {
 		"zero subject":        func(w *tokens.RefreshRow) { w.Subject = principal.Subject{} },
 		"nil lineage":         func(w *tokens.RefreshRow) { w.Lineage = uuid.Nil },
 		"no created":          func(w *tokens.RefreshRow) { w.CreatedAt = time.Time{} },
+		"created after family": func(w *tokens.RefreshRow) {
+			w.CreatedAt = w.FamilyExpiresAt.Add(48 * time.Hour)
+			w.IdleExpiresAt = w.FamilyExpiresAt
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -29,11 +29,12 @@ func (s Sensitivity) String() string {
 }
 
 const (
-	KeyMethod          AttrKey = "method"
-	KeyAMR             AttrKey = "authn_methods"
-	KeyRememberMe      AttrKey = "remember_me"
-	KeyInterim         AttrKey = "interim"
-	KeyMustChange      AttrKey = "must_change_password"
+	KeyMethod     AttrKey = "method"
+	KeyAMR        AttrKey = "authn_methods"
+	KeyRememberMe AttrKey = "remember_me"
+	KeyInterim    AttrKey = "interim"
+	KeyMustChange AttrKey = "must_change_password"
+	// KeyReason is Public: it must be a short code, never free text that could carry personal data.
 	KeyReason          AttrKey = "reason"
 	KeyCount           AttrKey = "count"
 	KeyFamily          AttrKey = "family"
@@ -54,7 +55,7 @@ const (
 	KeyHost            AttrKey = "host"
 	KeyFactor          AttrKey = "factor"
 	KeyPurpose         AttrKey = "purpose"
-	// KeyFlowID is the correlation id of a legacy MFA flow; it is not the flow token.
+	// KeyFlowID is a flow correlation id; it is never the flow token.
 	KeyFlowID  AttrKey = "flow_id"
 	KeyFactors AttrKey = "factors"
 	// KeyCaptchaToken carries EndpointRequest.CaptchaToken; it is Secret so that no sink ever

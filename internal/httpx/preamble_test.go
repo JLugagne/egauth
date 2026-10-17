@@ -476,6 +476,8 @@ func TestBearerCSRFExemptionNeedsBearerTransport(t *testing.T) {
 		{"authorization bearer without transport header", httpx.CookiesAndBearer, map[string]string{"Authorization": "Bearer x"}, http.StatusForbidden},
 		{"transport header selects bearer", httpx.CookiesAndBearer, map[string]string{"X-Egauth-Transport": "bearer"}, http.StatusOK},
 		{"bearer only with authorization bearer", httpx.BearerOnly, map[string]string{"Authorization": "Bearer x"}, http.StatusOK},
+		{"bearer only with transport header", httpx.BearerOnly, map[string]string{"X-Egauth-Transport": "bearer"}, http.StatusOK},
+		{"bearer only with no credential header stays CSRF-checked", httpx.BearerOnly, nil, http.StatusForbidden},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

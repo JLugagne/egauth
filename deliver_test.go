@@ -53,7 +53,7 @@ func TestDeliveryMessagesRedactOneTimeSecrets(t *testing.T) {
 			ptr.Elem().Set(reflect.ValueOf(c.msg))
 			var outputs []string
 			for _, v := range []any{c.msg, ptr.Interface()} {
-				for _, verb := range []string{"%v", "%+v", "%#v", "%s"} {
+				for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%d", "%t", "%10.3v"} {
 					outputs = append(outputs, fmt.Sprintf(verb, v))
 				}
 				var buf bytes.Buffer
@@ -72,5 +72,16 @@ func TestDeliveryMessagesRedactOneTimeSecrets(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSecurityNoticeWithoutClientRendersNoBogusIP(t *testing.T) {
+	m := egauth.SecurityNoticeMessage{Event: egauth.SecurityFactorsChanged}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("deliver", "msg", m)
+	for _, out := range []string{m.String(), buf.String()} {
+		if strings.Contains(out, "invalid IP") {
+			t.Fatalf("a notice with no client renders a bogus address: %s", out)
+		}
 	}
 }

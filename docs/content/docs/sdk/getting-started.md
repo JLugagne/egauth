@@ -22,8 +22,10 @@ The second module holds the PostgreSQL stores. Go 1.26 or newer.
 ```go
 key := make([]byte, 32)
 _, _ = rand.Read(key)
+seed := make([]byte, 32)
+_, _ = rand.Read(seed)
 k, _ := kek.NewLocal(key)
-signer, _ := signing.EdDSA("k1", key)
+signer, _ := signing.EdDSA("k1", seed)
 mail := inbox{links: make(chan string, 1)}
 
 auth, err := egauth.New(egauth.Config[struct{}]{
@@ -117,7 +119,7 @@ fmt.Println("refresh after logout:", rec.Code)
 What to notice:
 
 - `PublicOrigin` is the one source of truth for cookies, redirects, CSRF and the passkey relying-party ID.
-- `Storage`, `KEK` and `Sessions` are the three pieces of infrastructure. Everything else has a default.
+- `Storage`, `KEK` and `Sessions` are the infrastructure. `PublicOrigin`, `Proxy`, `Admin`, `Email` and `Modules` are required too; everything else has a default.
 - `Modules` enables features. At least one primary module is required.
 - `Email` is a deliverer with one method per message kind.
 - `Routes().Build()` returns the single handler to serve.

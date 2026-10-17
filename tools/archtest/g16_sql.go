@@ -193,6 +193,9 @@ func statementProblem(st sqlStatement) string {
 			if !addColumnOK.MatchString(action) {
 				return "ALTER TABLE action outside ADD COLUMN IF NOT EXISTS: " + clip(action)
 			}
+			if fn := unsafeDefaultCall(action); fn != "" {
+				return "ADD COLUMN default calls " + fn + ": " + clip(action)
+			}
 		}
 		return ""
 	}
@@ -337,6 +340,9 @@ func isCreateTableAs(code string) bool {
 			depth++
 		case r == ')':
 			depth--
+			if depth == 0 {
+				top.WriteRune(' ')
+			}
 		case depth == 0:
 			top.WriteRune(r)
 		}
@@ -418,4 +424,22 @@ func checkMigrationFiles(ws *Workspace, e *embeddedFS) []Violation {
 		}
 	}
 	return out
+}
+
+var safeDefaultCalls = map[string]bool{
+	"NOW": true, "GEN_RANDOM_UUID": true,
+	"VARCHAR": true, "CHAR": true, "NUMERIC": true, "TIMESTAMP": true, "TIMESTAMPTZ": true,
+}
+
+func unsafeDefaultCall(action string) string {
+	_, after, ok := strings.Cut(action, " DEFAULT ")
+	if !ok {
+		return ""
+	}
+	for _, m := range callSite.FindAllStringSubmatch(after, -1) {
+		if !safeDefaultCalls[m[1]] {
+			return m[1]
+		}
+	}
+	return ""
 }

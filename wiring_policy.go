@@ -204,6 +204,10 @@ func buildPages[C any](cfg *Config[C], v *problems) (out issuance.Pages, login r
 			v.add(p.field, "must be a path on PublicOrigin: a login lands on it through issuance, which serves no other origin")
 			continue
 		}
+		if _, err := redirect.Parse(path, o); err != nil {
+			v.add(p.field, err.Error())
+			continue
+		}
 		*p.dst = path
 	}
 	if raw := cfg.Pages.Login; strings.TrimSpace(raw) != "" {

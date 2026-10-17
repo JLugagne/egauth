@@ -85,12 +85,9 @@ type SecondDriver struct {
 	Module string
 	// Factor is the code of the factor a completed challenge adds to the session.
 	Factor string
-	// Verified is the event type a completed challenge emits.
+	// Verified is the event type a completed challenge emits, after the session issuance events
+	// (DESIGN 5.1).
 	Verified event.Type
-	// VerifiedAfterIssue is true when Verified follows the session issuance events instead of preceding
-	// them. DESIGN 5.1 orders MFAVerified after issuance; the TOTP and recovery-code paths emit it earlier today (FOLLOWUPS M11-26), so
-	// the matrix pins the emitted order until that defect is fixed.
-	VerifiedAfterIssue bool
 	// Enroll enrolls the factor through the endpoints with the session of c. Each variant leaves a
 	// distinct credential on the account, whether or not the journey later challenges it.
 	Enroll func(*Run, *Client)

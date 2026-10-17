@@ -70,7 +70,7 @@ func TestAuthenticatedSet(t *testing.T) {
 }
 
 func TestIdentifierKeyedSet(t *testing.T) {
-	login := set(routes.Login, routes.PasskeyLoginBegin)
+	login := set(routes.Login, routes.PasskeyLoginBegin, routes.ExternalLogin)
 	code := set(routes.Register, routes.PasswordForgot, routes.MagicLinkRequest, routes.CodeRequest, routes.EmailVerifyRequest)
 	if got := pathsWhere(func(m routes.EndpointMeta) bool { return m.IdentifierLimit == limiter.LoginIdentifier }); !slices.Equal(got, login) {
 		t.Fatalf("login identifier %v", got)

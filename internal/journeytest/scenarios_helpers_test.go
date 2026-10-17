@@ -171,7 +171,7 @@ func (s *session) lineage() string {
 	return attrs.Lineage().String()
 }
 
-func settle(w *journeytest.World) { w.Clock.Advance(revoke.PollBound + time.Second) }
+func settle(w *journeytest.World) { w.Clock.Advance(revoke.PollBound) }
 
 func queryParam(link, key string) string {
 	u, err := url.Parse(link)

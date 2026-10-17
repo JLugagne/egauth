@@ -128,10 +128,15 @@ func TestRestoreRoundTripsAndRefusesInconsistentRows(t *testing.T) {
 		t.Fatalf("restored record differs from the original: %v", err)
 	}
 	cases := map[string]func(*sessions.Row){
-		"idle past absolute": func(w *sessions.Row) { w.IdleExpiresAt = w.AbsoluteExpiresAt.Add(time.Second) },
-		"idle before check":  func(w *sessions.Row) { w.IdleExpiresAt = w.CheckedAt },
-		"zero subject":       func(w *sessions.Row) { w.Subject = principal.Subject{} },
-		"nil lineage":        func(w *sessions.Row) { w.Lineage = uuid.Nil },
+		"idle past absolute":     func(w *sessions.Row) { w.IdleExpiresAt = w.AbsoluteExpiresAt.Add(time.Second) },
+		"idle before check":      func(w *sessions.Row) { w.IdleExpiresAt = w.CheckedAt },
+		"zero subject":           func(w *sessions.Row) { w.Subject = principal.Subject{} },
+		"nil lineage":            func(w *sessions.Row) { w.Lineage = uuid.Nil },
+		"created after absolute": func(w *sessions.Row) { w.CreatedAt = w.AbsoluteExpiresAt.Add(48 * time.Hour) },
+		"checked before created": func(w *sessions.Row) {
+			w.CheckedAt = w.CreatedAt.Add(-72 * time.Hour)
+			w.IdleExpiresAt = w.CheckedAt.Add(time.Hour)
+		},
 	}
 	for name, mutate := range cases {
 		w := rowOf(r)

@@ -484,3 +484,41 @@ type leakyKEK struct {
 }
 
 func (l leakyKEK) String() string { return "LEAKED" }
+
+type countingStore struct {
+	storekeys.Store
+	reads atomic.Int64
+}
+
+func (c *countingStore) VerificationKeys(ctx context.Context, t principal.TenantID) ([]storekeys.Key, error) {
+	c.reads.Add(1)
+	return c.Store.VerificationKeys(ctx, t)
+}
+
+func TestUnknownTenantsDoNotEvictTheKeyCache(t *testing.T) {
+	ctx := context.Background()
+	clk := clock.NewTest(start)
+	st := &countingStore{Store: memory.NewWithClock(clk.Clock())}
+	k := localKEK(t, random(t, kek.KeyLength))
+	writer := newTenantManager(t, st.Store, k, clk)
+	acme := tenant(t, "acme")
+	require.NoError(t, writer.Renew(ctx, keys.RenewRequest{
+		Tenant: acme, Alg: signing.AlgEdDSA, Lifetime: storekeys.DefaultExpiry(), Overlap: expireAfter(t, time.Hour),
+	}))
+	s, err := writer.Signer(ctx, acme)
+	require.NoError(t, err)
+	m, err := keys.NewTenant(keys.TenantConfig{Store: st, KEK: k, Clock: clk.Clock(), Capacity: 4})
+	require.NoError(t, err)
+	t.Cleanup(m.Stop)
+	require.NoError(t, m.Poll(ctx))
+	_, err = m.Verifier(ctx, acme, s.KeyID())
+	require.NoError(t, err)
+	for i := range 10 {
+		_, err = m.Verifier(ctx, tenant(t, fmt.Sprintf("ghost%d", i)), "kid")
+		require.ErrorIs(t, err, keys.ErrUnknownKey)
+	}
+	before := st.reads.Load()
+	_, err = m.Verifier(ctx, acme, s.KeyID())
+	require.NoError(t, err)
+	require.Equal(t, before, st.reads.Load(), "tenants without keys must not evict cached keysets")
+}

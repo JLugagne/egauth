@@ -47,7 +47,7 @@ func TestRootTestHooksAreCalledOnlyByEgauthtest(t *testing.T) {
 		}
 		slash := filepath.ToSlash(path)
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "testdata" || slash == ".tasks" {
+			if path != "." && (strings.HasPrefix(d.Name(), ".") || strings.HasPrefix(d.Name(), "_") || d.Name() == "testdata") {
 				return filepath.SkipDir
 			}
 			return nil

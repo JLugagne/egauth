@@ -8,8 +8,10 @@ Every Go block is embedded from a compiled example. Search the root `example_tes
 ```go
 key := make([]byte, 32)
 _, _ = rand.Read(key)
+seed := make([]byte, 32)
+_, _ = rand.Read(seed)
 k, _ := kek.NewLocal(key)
-signer, _ := signing.EdDSA("k1", key)
+signer, _ := signing.EdDSA("k1", seed)
 mail := inbox{links: make(chan string, 1)}
 
 auth, err := egauth.New(egauth.Config[struct{}]{

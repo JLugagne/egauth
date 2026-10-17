@@ -108,7 +108,7 @@ func webAuthn(path string) bool {
 
 func identifierLimit(path string) limiter.Class {
 	switch path {
-	case Login, PasskeyLoginBegin:
+	case Login, PasskeyLoginBegin, ExternalLogin:
 		return limiter.LoginIdentifier
 	case Register, PasswordForgot, MagicLinkRequest, CodeRequest, EmailVerifyRequest:
 		return limiter.CodeRequestIdentifier

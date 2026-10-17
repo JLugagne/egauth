@@ -36,7 +36,7 @@ before deploying: **every user logs in again**.
 - A per-subject security epoch bumped in the same transaction as every security mutation and
   sealed into every artefact, so revocation does not depend on event fan-out.
 - Delivery with one method per message kind (`EmailDeliverer`, `SMSDeliverer`); a kind added in a
-  later release is a compile error. Link and code values render as `REDACTED` in `fmt` and `slog`.
+  later release is a compile error. Link and code values render as `REDACTED` under every `fmt` verb and in `slog`.
 - Packages: `kek` (versioned, associated data mandatory), `signing`, `store/*` with memory and pgx
   implementations and contract suites, `federation` and `federation/providers`, `memstore`,
   `egauthtest`, `webauthntest`, `adapters/pgx/pgxstore`.
@@ -116,14 +116,15 @@ before deploying: **every user logs in again**.
 
 1. Run `pgxstore.Migrate`. It is expand-only and idempotent, so it is safe to repeat and to run
    while v0.16 replicas still serve traffic.
-2. Run `egauth.UpgradeSecretsV016(ctx, storage, kek.LegacyLocalV016(oldKey), kek)` once. `New`
+2. Run `egauth.UpgradeSecretsV016(ctx, storage, legacy, newKEK)` once, where
+   `legacy, err := kek.LegacyLocalV016(oldKey)`. `New`
    refuses to start until it is done. It is idempotent and reports every row it could not open
    with `ErrUpgradeIncomplete`.
 3. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
    passwords, TOTP, passkeys, OAuth links and signing keys carry over. Passkeys report
    `needs_reregistration` only when they are legacy.
 4. Replace the v0.16 wiring with `egauth.New` and `Auth.Routes`; `examples/fullstack` is the
-   reference, and `egauth.ExampleNew` is the minimal configuration.
+   reference, and `ExampleNew` in the root package is the minimal configuration.
 5. In v0.18 the contract migrations drop the legacy tables.
 
 ## [v0.16.0] — 2026-10-07

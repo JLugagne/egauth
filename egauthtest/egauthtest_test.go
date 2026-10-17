@@ -2,12 +2,14 @@ package egauthtest_test
 
 import (
 	"context"
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"strings"
@@ -290,16 +292,23 @@ func verifyIDToken(t *testing.T, idp *egauthtest.IdP, token string) map[string]a
 	require.Len(t, parts, 3)
 	var jwks struct {
 		Keys []struct {
-			Kty, Crv, Alg, Kid, X string
+			Kty, Crv, Alg, Kid, X, Y string
 		} `json:"keys"`
 	}
 	getJSON(t, idp, idp.Provider("corp").JWKSURL, &jwks)
 	require.Len(t, jwks.Keys, 1)
-	pub, err := base64.RawURLEncoding.DecodeString(jwks.Keys[0].X)
+	require.Equal(t, "ES256", jwks.Keys[0].Alg)
+	xb, err := base64.RawURLEncoding.DecodeString(jwks.Keys[0].X)
+	require.NoError(t, err)
+	yb, err := base64.RawURLEncoding.DecodeString(jwks.Keys[0].Y)
+	require.NoError(t, err)
+	pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), append(append([]byte{4}, xb...), yb...))
 	require.NoError(t, err)
 	sig, err := base64.RawURLEncoding.DecodeString(parts[2])
 	require.NoError(t, err)
-	require.True(t, ed25519.Verify(ed25519.PublicKey(pub), []byte(parts[0]+"."+parts[1]), sig))
+	require.Len(t, sig, 64)
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	require.True(t, ecdsa.Verify(pub, digest[:], new(big.Int).SetBytes(sig[:32]), new(big.Int).SetBytes(sig[32:])))
 	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
 	require.NoError(t, err)
 	var claims map[string]any

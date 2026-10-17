@@ -1,7 +1,11 @@
 // Package routes holds the closed registry of endpoint paths, request field names and header names.
 package routes
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/JLugagne/egauth/internal/httpx"
+)
 
 // Paths relative to BasePath. Parameterised segments use {name}.
 const (
@@ -166,4 +170,4 @@ func Fields() []string {
 }
 
 // HeaderTransport selects Bearer transport on a login request when the configuration allows it.
-const HeaderTransport = "X-Egauth-Transport"
+const HeaderTransport = httpx.HeaderTransport

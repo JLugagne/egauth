@@ -173,7 +173,9 @@ func SelfServiceOnly() AdminPolicy {
 }
 
 // Transport selects which credential channels a deployment accepts. A login selects Bearer only
-// through HeaderTransport, and only when the deployment allows it.
+// through HeaderTransport, and only when the deployment allows it. Even under Bearer, an
+// unauthenticated POST without HeaderTransport or an Authorization Bearer credential is
+// origin-checked like a browser request, so native clients must send HeaderTransport: bearer.
 type Transport uint8
 
 const (

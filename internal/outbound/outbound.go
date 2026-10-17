@@ -208,17 +208,25 @@ func (a Allowance) control(network, address string, _ syscall.RawConn) error {
 	switch network {
 	case "tcp", "tcp4", "tcp6":
 	default:
-		return errors.Join(ErrBlockedAddress, errors.New("network "+network))
+		return blockedAddress("network " + network)
 	}
 	ap, err := netip.ParseAddrPort(address)
 	if err != nil {
-		return errors.Join(ErrBlockedAddress, err)
+		return blockedAddress(err.Error())
 	}
 	if !a.Permits(ap.Addr()) {
-		return errors.Join(ErrBlockedAddress, errors.New(ap.Addr().String()))
+		return blockedAddress(ap.Addr().String())
 	}
 	return nil
 }
+
+type blockedError string
+
+func (e blockedError) Error() string { return ErrBlockedAddress.Error() + ": " + string(e) }
+
+func (blockedError) Is(target error) bool { return target == ErrBlockedAddress }
+
+func blockedAddress(reason string) error { return blockedError(reason) }
 
 type observed struct {
 	base     *http.Transport

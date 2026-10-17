@@ -3,6 +3,7 @@ package pgxstore_test
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log"
 	"os"
 
@@ -47,7 +48,39 @@ func ExampleNew_postgres() {
 	defer func() { _ = auth.Close() }()
 }
 
-type mailer struct{ egauth.EmailDeliverer }
+type mailer struct{}
+
+func (mailer) send(context.Context, string, string) error {
+	return errors.New("example: wire your email provider here")
+}
+
+func (m mailer) RegistrationLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) AccountExistsNotice(ctx context.Context, msg egauth.NoticeMessage) error {
+	return m.send(ctx, msg.To, "an account already exists for this address")
+}
+func (m mailer) PasswordResetLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) MagicLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) LoginCode(ctx context.Context, msg egauth.CodeMessage) error {
+	return m.send(ctx, msg.To, msg.Code)
+}
+func (m mailer) EmailVerificationLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) EmailChangeLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) RecoveryEmailLink(ctx context.Context, msg egauth.LinkMessage) error {
+	return m.send(ctx, msg.To, msg.Link)
+}
+func (m mailer) SecurityNotice(ctx context.Context, msg egauth.SecurityNoticeMessage) error {
+	return m.send(ctx, msg.To, msg.Summary+"\n"+msg.RevertLink)
+}
 
 func keyFromEnv(name string) []byte {
 	key, err := hex.DecodeString(os.Getenv(name))

@@ -172,7 +172,7 @@ func (b *builder[C]) base() {
 		Hasher: argon2.NewHasher(), Policy: pwPolicy, Breach: breach, Outbound: o.outbound.Static(),
 		Mailer: emailAdapter{d: cfg.Email, audit: o.audit}, Links: links{origins: o.origins, pages: cfg.Pages},
 		Cookies: o.cookies, DataKey: o.dataKey, OpenRegistration: open, LoginPage: b.pol.loginPage, NoPasswordReset: cfg.Modules.Password == nil,
-		Dispatcher: b.outbox, Clock: o.clock, Audit: o.audit,
+		Dispatcher: b.outbox, Clock: o.clock, Audit: o.audit, Startup: startupTimeout,
 	})
 	if err != nil {
 		b.fail("Modules.Password", err)

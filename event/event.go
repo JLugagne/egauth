@@ -35,7 +35,7 @@ type Type string
 const (
 	LoginSucceeded          Type = "login.succeeded"
 	LoginFailed             Type = "login.failed"
-	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, authn_methods, interim, must_change_password
+	SessionIssued           Type = "session.issued" // a login flow minted a credential pair through the unified issuance pipeline; Attrs carry method, authn_methods, remember_me, must_change_password
 	AccountLocked           Type = "account.locked"
 	UserRegistered          Type = "user.registered"
 	PasswordReset           Type = "password.reset"   // completed via a reset token
@@ -154,9 +154,9 @@ func (f SinkFunc) EmitEvent(ctx context.Context, e Event) { f(ctx, e) }
 
 // Emit sends e to sink when sink is non-nil, so a nil (unconfigured) sink is a cheap no-op. It is
 // meant for applications emitting their own events: library code emits through internal/audit,
-// which enforces the attribute registry, and a guard test rejects any other library emitter. A panic in the sink is recovered (see
-// safeEmit) so a misbehaving audit sink can never change a handler's client-visible behavior — the
-// invariant this package documents.
+// which enforces the attribute registry, and a guard test rejects any other library emitter. A
+// panic in the sink is recovered (see safeEmit) so a misbehaving audit sink can never change a
+// handler's client-visible behavior — the invariant this package documents.
 func Emit(ctx context.Context, sink Sink, e Event) {
 	if sink != nil {
 		safeEmit(ctx, sink, e)
@@ -247,25 +247,15 @@ type DiscardSink struct{}
 // EmitEvent implements Sink and does nothing.
 func (DiscardSink) EmitEvent(context.Context, Event) {}
 
-// Discard is the conventional DiscardSink, kept a variable so existing callers compile.
+// Discard is the DiscardSink to pass when emission is disabled on purpose.
 var Discard DiscardSink
 
-// RequestContext carries optional, caller-supplied transport metadata about the request that
-// triggered an authentication event — the client IP and User-Agent. The library cannot discover
-// these on its own (they live on the inbound HTTP request, which the auth core never sees), so
-// the application threads a RequestContext into the auth entry points (login and API-key verify)
-// and egauth copies its non-empty fields into Event.Attrs ("ip" / "user_agent") on the resulting
-// login.* and api_key.auth.* events.
-//
-// It is entirely optional: the entry points accept it as a variadic option, so omitting it simply
-// omits the corresponding Attrs. Both fields are plain strings and may be left empty individually
-// (an empty field is never written to Attrs). RequestContext carries no secrets — an IP and a
-// User-Agent are not credentials — so it is consistent with the event package's no-secrets
-// contract.
+// RequestContext carries optional client IP and User-Agent for an application that emits its own
+// events. The library does not read it: its own events take the client from the request. Both
+// fields may be empty; ApplyTo then adds nothing. It carries no secrets.
 type RequestContext struct {
-	// IP is the client IP address as the application observed it (e.g. from RemoteAddr or a
-	// trusted proxy header). egauth does not parse, validate or trust it — it is recorded verbatim
-	// under the "ip" attribute when non-empty.
+	// IP is the client IP address as the application observed it. It is not parsed or validated and
+	// is recorded verbatim under the "ip" attribute when non-empty.
 	IP string
 	// UserAgent is the client's User-Agent string, recorded verbatim under the "user_agent"
 	// attribute when non-empty.

@@ -37,8 +37,8 @@ func (a *Auth[C]) APIKeys() *APIKeys {
 	return &APIKeys{f: a.facade()}
 }
 
-// APIKeyRequest describes a key to issue. Kind is one of APIKeyModule.Kinds and Name a printable label of
-// at most 128 bytes. Roles, Scopes and Groups must each be a subset of the caller's current
+// APIKeyRequest describes a key to issue. Kind is one of APIKeyModule.Kinds and Name a printable
+// label of at most 128 bytes. Roles, Scopes and Groups must each be a subset of the caller's current
 // AppClaims; a key never carries Custom, which comes from its owner at every use. The zero Lifetime
 // is invalid: pass keys.ExpireAfter, keys.NeverExpire or keys.DefaultExpiry.
 type APIKeyRequest struct {

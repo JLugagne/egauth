@@ -1,8 +1,8 @@
 // Package main is a runnable reference application of egauth: password, magic link, passkey, TOTP
 // MFA, self-delete and API keys on in-memory storage, composed with New and Routes.
 //
-// It imports only the egauth module and builds with a plain go build. Every secret comes from the
-// environment (EGAUTH_KEK, EGAUTH_SIGNING_SEED, 32 bytes each, hex encoded); when unset, a fresh
+// It imports only the egauth module and github.com/google/uuid, and builds with a plain go build.
+// Every secret comes from the environment (EGAUTH_KEK, EGAUTH_SIGNING_SEED, 32 bytes each, hex encoded); when unset, a fresh
 // random key is generated, which is acceptable only because the storage is in memory and the
 // public origin is a loopback origin. The public origin comes from EGAUTH_PUBLIC_ORIGIN, default
 // http://localhost:8080, and the listen address is derived from it; the server speaks plain HTTP,
@@ -229,7 +229,8 @@ func issueKey(auth *egauth.Auth[AppClaims]) egauth.PrincipalHandler[AppClaims] {
 		}
 		secret, err := auth.APIKeys().Create(r.Context(), p.Caller(), req)
 		if err != nil {
-			http.Error(w, "cannot issue a key", http.StatusForbidden)
+			code, msg := disableStatus(err)
+			http.Error(w, msg, code)
 			return
 		}
 		_, _ = fmt.Fprint(w, secret.Reveal())
@@ -260,6 +261,8 @@ func disableStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, egauth.ErrForbidden), errors.Is(err, egauth.ErrTenantMismatch), errors.Is(err, egauth.ErrAPIKeyCaller):
 		return http.StatusForbidden, "forbidden"
+	case errors.Is(err, egauth.ErrInvalidRequest):
+		return http.StatusBadRequest, "invalid request"
 	case errors.Is(err, egauth.ErrReauthRequired):
 		return http.StatusUnauthorized, "reauthentication required"
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, identity.ErrTombstoned):

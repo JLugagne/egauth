@@ -30,7 +30,6 @@ const (
 	maxDiscoveryBytes   = 64 << 10
 	maxJWKSBytes        = 256 << 10
 	resourceMaxLifetime = 15 * time.Minute
-	reasonLagAccepted   = "revocation_lag_up_to_ttl"
 )
 
 // ResourceConfig is the whole wiring of a ResourceServer; NewResourceServer is its only consumer.
@@ -62,7 +61,7 @@ type ResourceConfig struct {
 type ResourceInsecure struct {
 	// RevocationLagUpToTTL accepts a resource token until it expires, up to SessionPolicy.RecheckEvery
 	// after the session was revoked. It requires ResourceConfig.Revocation to be nil, and
-	// NewResourceServer emits one event.InsecureConfiguration.
+	// NewResourceServer emits one event.InsecureConfiguration carrying the acknowledged reason.
 	RevocationLagUpToTTL *Ack
 }
 
@@ -142,7 +141,9 @@ func TestHookNewResourceServer[C any](cfg ResourceConfig, s TestResourceSeams) (
 // *ConfigError: an AuthOrigin whose issuer is another origin, an Audience the Auth does not
 // publish, a claims type C other than the Auth's, a deployment that publishes no JWKS (HS256 or
 // stateful sessions), or a discovery or JWKS fetch that fails. It takes no context; its blocking
-// calls are bounded by StartupTimeout.
+// calls are bounded by StartupTimeout. The server fails closed with 503 on every request once the
+// Auth's JWKS has been unreachable for more than a minute, so the Auth must be reachable at least
+// that often.
 func NewResourceServer[C any](cfg ResourceConfig) (*ResourceServer[C], error) {
 	return newResourceServer[C](cfg, rsSeams{})
 }
@@ -181,7 +182,7 @@ func newResourceServer[C any](cfg ResourceConfig, sm rsSeams) (*ResourceServer[C
 		return nil, err
 	}
 	if spec.lag {
-		_ = audit.Emit(ctx, rs.events, event.InsecureConfiguration, audit.Scope{}, audit.Detail{Reason: reasonLagAccepted}, nil,
+		_ = audit.Emit(ctx, rs.events, event.InsecureConfiguration, audit.Scope{}, audit.Detail{Reason: cfg.Insecure.RevocationLagUpToTTL.Reason()}, nil,
 			audit.A(event.KeyPurpose, "ResourceConfig.Insecure.RevocationLagUpToTTL"))
 	}
 	return rs, nil

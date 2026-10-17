@@ -7,6 +7,12 @@
 // transports, caller kinds) so callers can compare them, and two functions that only delegate:
 // ParseTenantID, the sole way to obtain a non-zero TenantID, and SealedFromBytes, which store
 // implementations need to hand persisted bytes back without being able to decode them.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package principal
 
 import "github.com/JLugagne/egauth/internal/core"

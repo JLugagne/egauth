@@ -3,6 +3,7 @@ package egauth
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/netip"
 	"time"
@@ -122,6 +123,9 @@ func (m LinkMessage) String() string {
 // GoString renders m for %#v with Link redacted.
 func (m LinkMessage) GoString() string { return m.String() }
 
+// Format renders m as String whatever the verb, so no verb prints Link.
+func (m LinkMessage) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, m.String()) }
+
 // LogValue renders m for slog with Link redacted.
 func (m LinkMessage) LogValue() slog.Value {
 	return slog.GroupValue(
@@ -142,6 +146,9 @@ func (m CodeMessage) String() string {
 // GoString renders m for %#v with Code redacted.
 func (m CodeMessage) GoString() string { return m.String() }
 
+// Format renders m as String whatever the verb, so no verb prints Code.
+func (m CodeMessage) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, m.String()) }
+
 // LogValue renders m for slog with Code redacted.
 func (m CodeMessage) LogValue() slog.Value {
 	return slog.GroupValue(
@@ -158,11 +165,14 @@ func (m SecurityNoticeMessage) String() string {
 	return fmt.Sprintf("SecurityNoticeMessage{DeliveryID:%s Tenant:%s To:%s Event:%s Summary:%q RevertLink:%s "+
 		"OccurredAt:%s Client:{IP:%s UserAgent:%q}}",
 		m.DeliveryID, m.Tenant, m.To, m.Event, m.Summary, redactedSecret,
-		m.OccurredAt.Format(time.RFC3339), m.Client.IP, m.Client.UserAgent)
+		m.OccurredAt.Format(time.RFC3339), clientIP(m.Client), m.Client.UserAgent)
 }
 
 // GoString renders m for %#v with RevertLink redacted.
 func (m SecurityNoticeMessage) GoString() string { return m.String() }
+
+// Format renders m as String whatever the verb, so no verb prints RevertLink.
+func (m SecurityNoticeMessage) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, m.String()) }
 
 // LogValue renders m for slog with RevertLink redacted.
 func (m SecurityNoticeMessage) LogValue() slog.Value {
@@ -174,7 +184,14 @@ func (m SecurityNoticeMessage) LogValue() slog.Value {
 		slog.String("summary", m.Summary),
 		slog.String("revert_link", redactedSecret),
 		slog.Time("occurred_at", m.OccurredAt),
-		slog.String("client_ip", m.Client.IP.String()),
+		slog.String("client_ip", clientIP(m.Client)),
 		slog.String("client_user_agent", m.Client.UserAgent),
 	)
+}
+
+func clientIP(c ClientInfo) string {
+	if !c.IP.IsValid() {
+		return ""
+	}
+	return c.IP.String()
 }

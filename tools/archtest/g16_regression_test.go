@@ -93,3 +93,13 @@ func TestG16GuardSelectRejectsQuotedFunctionNames(t *testing.T) {
 		}
 	}
 }
+
+func TestG16CreateTableAsGluedToParenthesesAndVolatileColumnDefaultsAreRejected(t *testing.T) {
+	m := joined(g16Findings(t, "0.17.0-dev")[g16+"/dirty.FS"])
+	if want := "003_swallow.sql:11 CREATE TABLE ... AS"; !strings.Contains(m, want) {
+		t.Errorf("missing %q in:\n%s", want, m)
+	}
+	if want := "003_swallow.sql:12 ADD COLUMN default calls PG_TERMINATE_BACKEND"; !strings.Contains(m, want) {
+		t.Errorf("missing %q in:\n%s", want, m)
+	}
+}

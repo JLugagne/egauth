@@ -5,7 +5,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/JLugagne/egauth/internal/clientaddr"
@@ -15,10 +14,11 @@ import (
 	"github.com/JLugagne/egauth/store/limiter"
 )
 
+var bearerResponseHeaders = []string{"X-Egauth-Access-Token", "X-Egauth-Refresh-Token", "X-Egauth-Session-Token"}
+
 const (
-	maxReauthWindow  = time.Hour
-	maxLimiterValue  = 256
-	bearerTransportV = "bearer"
+	maxReauthWindow = time.Hour
+	maxLimiterValue = 256
 )
 
 // ErrInvalidSettings is returned by NewPreamble for settings it cannot enforce.
@@ -225,7 +225,7 @@ func (g *gate) requestedTransport(hr *http.Request) core.Transport {
 	case BearerOnly:
 		return core.TransportBearer
 	case CookiesAndBearer:
-		if strings.EqualFold(strings.TrimSpace(hr.Header.Get(HeaderTransport)), bearerTransportV) {
+		if csrf.BearerTransportHeader(hr) {
 			return core.TransportBearer
 		}
 		if (g.meta.Authenticated || g.meta.EndsSession) && !cookie.Present(hr) && csrf.BearerAuthorization(hr) {
@@ -283,10 +283,11 @@ func (g *gate) authenticate(w http.ResponseWriter, req *Request, bearerChannel b
 	}
 	a := res.Attrs()
 	if a.IsZero() || a.Subject().IsZero() || a.Subject().Tenant != req.tenant {
+		discardCredentials(w)
 		return errors.Join(ErrUnauthenticated, errors.New("session tenant differs from the resolved tenant"))
 	}
 	if bearerChannel && a.Transport() != core.TransportBearer {
-		cookie.Discard(w)
+		discardCredentials(w)
 		return errors.Join(ErrUnauthenticated, errors.New("cookie-transport session presented on the bearer channel"))
 	}
 	if a.MustChangePassword() && !g.meta.AcceptsMustChange {
@@ -294,6 +295,13 @@ func (g *gate) authenticate(w http.ResponseWriter, req *Request, bearerChannel b
 	}
 	req.resumed, req.hasSess, req.transport = res, true, a.Transport()
 	return nil
+}
+
+func discardCredentials(w http.ResponseWriter) {
+	cookie.Discard(w)
+	for _, h := range bearerResponseHeaders {
+		w.Header().Del(h)
+	}
 }
 
 func (g *gate) sensitive(req *Request) error {

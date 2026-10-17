@@ -141,10 +141,13 @@ func (t *Tenants) RevokeKeys(ctx context.Context, by principal.Caller, tenant pr
 
 // SetOAuthProvider registers req.Provider for req.Tenant. It returns ErrFacadeUnavailable unless
 // OAuthModule.PerTenant is set, ErrInvalidRequest for a name taken by a static provider or a spec
-// that is invalid or incomplete after discovery, and federation.ErrDomainsSystemOnly when a session
-// caller sets Domains.
+// that is invalid or incomplete after discovery, federation.ErrDomainsSystemOnly when a session
+// caller sets Domains, and keys.ErrTenantTombstoned for a tenant Erase removed.
 func (t *Tenants) SetOAuthProvider(ctx context.Context, by principal.Caller, req SetProviderRequest) error {
 	if err := t.providerAccess(ctx, by, "Tenants.SetOAuthProvider", req.Tenant, req.Provider.Name); err != nil {
+		return err
+	}
+	if err := t.f.tenantAlive(ctx, req.Tenant); err != nil {
 		return err
 	}
 	p, err := federation.ForRuntime(req.Provider, by)

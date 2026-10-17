@@ -13,7 +13,7 @@ Keys for the JWT backend come from `egauth.StaticKeys(signer)`, built with `sign
 
 ## Transport
 
-`egauth.Config.Transport` is `egauth.Cookies` (the default), `egauth.Bearer` or `egauth.CookiesAndBearer`. Cookies are `__Host-` prefixed, `Secure` (except on a loopback origin) and `HttpOnly`. Under Bearer, tokens travel in the `X-Egauth-*` headers, selected on login with `egauth.HeaderTransport`. A request presenting a cookie and a Bearer credential together is refused.
+`egauth.Config.Transport` is `egauth.Cookies` (the default), `egauth.Bearer` or `egauth.CookiesAndBearer`. Cookies are `__Host-` prefixed, `Secure` (on a loopback origin the prefix and `Secure` are dropped) and `HttpOnly`. Under Bearer, tokens travel in the `X-Egauth-*` headers, selected on login with `egauth.HeaderTransport`. A request presenting a cookie and a Bearer credential together is refused.
 
 ## Sealed attributes
 

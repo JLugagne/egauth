@@ -41,7 +41,8 @@ func ParseFactor(field string) (core.Factor, error) {
 //
 // It returns the Verified of f, ErrInvalidFactor for any other factor, ErrInvalidCode for a wrong,
 // replayed, unconfirmed or missing code, ErrTooManyAttempts while locked, and an error joined with
-// httpx.ErrServiceUnavailable when a store or the KEK fails: it never verifies on an error.
+// httpx.ErrServiceUnavailable when a store or the KEK fails: it never verifies on an error. It
+// emits no MFAVerified: the caller does once the flow it completes has issued (DESIGN 5.1).
 func (s *Service) Verify(ctx context.Context, sub core.Subject, f core.Factor, code string) (core.Verified, error) {
 	if sub.IsZero() {
 		return core.Verified{}, ErrInvalidCode
@@ -68,7 +69,6 @@ func (s *Service) Verify(ctx context.Context, sub core.Subject, f core.Factor, c
 	if err != nil {
 		return core.Verified{}, err
 	}
-	_ = s.audit.Emit(ctx, event.MFAVerified, scopeOf(sub), audit.Detail{}, nil, audit.A(event.KeyFactor, f.Code()))
 	return v, nil
 }
 

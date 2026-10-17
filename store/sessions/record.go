@@ -158,6 +158,8 @@ func checkRow(r Row) error {
 		return errors.New("client fingerprint is too long")
 	case r.CreatedAt.IsZero() || r.CheckedAt.IsZero() || r.IdleExpiresAt.IsZero() || r.AbsoluteExpiresAt.IsZero():
 		return errors.New("creation, check and expiry times are required")
+	case r.CreatedAt.After(r.AbsoluteExpiresAt) || r.CheckedAt.Before(r.CreatedAt.Add(-maxClockSkew)):
+		return errors.New("creation must not follow the absolute expiry and the last check must not precede creation")
 	case !r.IdleExpiresAt.After(r.CheckedAt) || r.IdleExpiresAt.After(r.AbsoluteExpiresAt):
 		return errors.New("idle expiry must fall after the last check and within the absolute lifetime")
 	}

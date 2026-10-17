@@ -232,8 +232,9 @@ jobs:
     timeout-minutes: 30
     # Proves the documented Docker-less contributor path: `go test -short ./...` passes in the core
     # and pgx modules (otel has its own job) with no Docker daemon: every testcontainers test
-    # skips under -short. We do NOT start any Docker service in this job, so a regression that makes a unit test depend on Docker fails
-    # here. (The full pgx conformance suites still run in test-adapters-pgx with Docker.)
+    # skips under -short. We do NOT start any Docker service in this job, so a regression that makes
+    # a unit test depend on Docker fails here. (The full pgx conformance suites still run in
+    # test-adapters-pgx with Docker.)
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

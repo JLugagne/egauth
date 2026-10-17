@@ -9,6 +9,7 @@ import (
 	"github.com/JLugagne/egauth/internal/sealing"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/signing"
+	"github.com/JLugagne/egauth/store"
 	storekeys "github.com/JLugagne/egauth/store/keys"
 )
 
@@ -66,6 +67,9 @@ func (t *tenantKeys) load(ctx context.Context, tn principal.TenantID) (*keyset, 
 	rows, err := t.store.VerificationKeys(ctx, tn)
 	if err != nil {
 		return nil, err
+	}
+	if len(rows) == 0 {
+		return nil, store.ErrNotFound
 	}
 	ks := &keyset{entries: make(map[string]entry, len(rows))}
 	for _, k := range rows {

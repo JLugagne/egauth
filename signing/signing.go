@@ -2,6 +2,12 @@
 // it has no exported Sign, its key bytes are copied at construction and never returned, and HS256
 // keys are stretched through HKDF so a raw environment key pasted into a JWT library mints tokens
 // that egauth refuses. Every key is bound to exactly one algorithm and key id.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package signing
 
 import (

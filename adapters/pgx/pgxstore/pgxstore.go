@@ -33,8 +33,7 @@ type DB interface {
 
 // New returns a Storage with every field set, each store backed by db and Shared. It only reads:
 // it fails when an embedded migration is not recorded, including on a database Migrate never ran
-// on, joining migrate's ErrNotMigrated with the first missing module and version in registration
-// order, so run Migrate first. It does not check connectivity beyond that read.
+// on, naming the first missing module and version in registration order, so run Migrate first. It does not check connectivity beyond that read.
 func New(ctx context.Context, db DB) (egauth.Storage, error) {
 	if isNil(db) {
 		return egauth.Storage{}, errors.New("pgxstore: nil db")

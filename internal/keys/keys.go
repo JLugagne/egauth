@@ -19,6 +19,7 @@ import (
 	"github.com/JLugagne/egauth/kek"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/signing"
+	"github.com/JLugagne/egauth/store"
 	storekeys "github.com/JLugagne/egauth/store/keys"
 )
 
@@ -232,6 +233,9 @@ func (m *Manager) LogValue() slog.Value { return slog.StringValue(m.String()) }
 
 func (t *tenantKeys) keyset(ctx context.Context, tn principal.TenantID) (*keyset, error) {
 	ks, err := t.cache.Get(ctx, tn)
+	if errors.Is(err, store.ErrNotFound) {
+		return &keyset{entries: map[string]entry{}}, nil
+	}
 	if err != nil {
 		return nil, err
 	}

@@ -77,3 +77,17 @@ func TestNilContextIsHandled(t *testing.T) {
 	ctx := principalctx.Set(nilCtx, testPrincipal{name: "alice"})
 	require.True(t, principalctx.InRequest(ctx))
 }
+
+type otherKey struct{}
+
+func TestDetachEmptiesTheSlotAndKeepsOtherValues(t *testing.T) {
+	ctx := context.WithValue(principalctx.Set(context.Background(), "p"), otherKey{}, "kept")
+	d := principalctx.Detach(ctx)
+	require.False(t, principalctx.InRequest(d))
+	_, ok := principalctx.Get[string](d)
+	require.False(t, ok)
+	require.Equal(t, "kept", d.Value(otherKey{}))
+	require.True(t, principalctx.InRequest(principalctx.Set(d, "again")))
+	var unset context.Context
+	require.False(t, principalctx.InRequest(principalctx.Detach(unset)))
+}

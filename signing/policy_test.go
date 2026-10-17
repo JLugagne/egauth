@@ -111,3 +111,36 @@ func TestParseJWKSInfersOnlyTheKeyTypeAlgorithm(t *testing.T) {
 		}
 	}
 }
+
+func TestParseJWKSKeepsAnRFC9864Ed25519Key(t *testing.T) {
+	seed := randomBytes(t, ed25519.SeedSize)
+	ed, err := signing.EdDSA("ed", seed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, err := ed.Verifier().PublicJWK()
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := strings.Replace(string(j), `"alg":"EdDSA"`, `"alg":"Ed25519"`, 1)
+	if renamed == string(j) {
+		t.Fatalf("PublicJWK layout changed: %s", j)
+	}
+	vs, err := signing.ParseJWKS([]byte(`{"keys":[` + renamed + `]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(vs) != 1 || vs[0].Algorithm() != signing.AlgEdDSA {
+		t.Fatalf("want one EdDSA verifier, got %v", vs)
+	}
+	input := []byte("header.payload")
+	sig := ed25519.Sign(ed25519.NewKeyFromSeed(seed), input)
+	signed := signing.Signed{Algorithm: "Ed25519", KeyID: "ed", Input: string(input), Signature: sig}
+	if err := vs[0].Verify(signed); err != nil {
+		t.Fatalf("fully-specified Ed25519 header refused: %v", err)
+	}
+	signed.Algorithm = "ES256"
+	if err := vs[0].Verify(signed); err == nil {
+		t.Fatal("foreign algorithm accepted")
+	}
+}

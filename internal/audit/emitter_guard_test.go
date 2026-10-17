@@ -17,6 +17,8 @@ const eventImportPath = "github.com/JLugagne/egauth/event"
 
 var emitterOwners = []string{"internal/audit", "event"}
 
+const maxApplicationEmitters = 0
+
 var applicationEmitters = []string{}
 
 var skippedDirs = []string{"tools", "testdata", "vendor", "node_modules"}
@@ -107,8 +109,9 @@ func emitSites(t *testing.T, root string) []emitSite {
 				if sel.Sel.Name == "EmitEvent" {
 					report(x, "direct Sink.EmitEvent call")
 				}
-				if id, ok := sel.X.(*ast.Ident); ok && alias != "" && id.Name == alias && sel.Sel.Name == "Emit" {
-					report(x, "event.Emit call")
+			case *ast.SelectorExpr:
+				if id, ok := x.X.(*ast.Ident); ok && alias != "" && id.Name == alias && x.Sel.Name == "Emit" {
+					report(x, "event.Emit reference")
 				}
 			case *ast.CompositeLit:
 				sel, ok := x.Type.(*ast.SelectorExpr)
@@ -146,5 +149,11 @@ func TestAuditIsTheOnlyLibraryEmitter(t *testing.T) {
 		if !used[p] {
 			t.Errorf("emitter exemption %q no longer matches any site; remove it", p)
 		}
+	}
+}
+
+func TestEmitterExemptionListOnlyShrinks(t *testing.T) {
+	if len(applicationEmitters) > maxApplicationEmitters {
+		t.Fatalf("%d emitter exemptions exceed the ratchet of %d; new exemptions are not allowed", len(applicationEmitters), maxApplicationEmitters)
 	}
 }

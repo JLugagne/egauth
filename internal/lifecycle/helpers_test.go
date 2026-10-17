@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/JLugagne/egauth/internal/lifecycle"
+	"github.com/JLugagne/egauth/internal/principalctx"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/ceremony"
@@ -252,14 +253,16 @@ func (b fakeBackend) OnSessionEnded(_ context.Context, e lifecycle.SessionEnded)
 }
 
 type hookLog struct {
-	c   *calls
-	mu  sync.Mutex
-	ids []uuid.UUID
+	c         *calls
+	mu        sync.Mutex
+	ids       []uuid.UUID
+	inRequest []bool
 }
 
-func (h *hookLog) accountDeleted(_ context.Context, id uuid.UUID, s principal.Subject) error {
+func (h *hookLog) accountDeleted(ctx context.Context, id uuid.UUID, s principal.Subject) error {
 	h.mu.Lock()
 	h.ids = append(h.ids, id)
+	h.inRequest = append(h.inRequest, principalctx.InRequest(ctx))
 	h.mu.Unlock()
 	return h.c.add("hooks.AccountDeleted " + s.User.String())
 }
@@ -269,6 +272,12 @@ func (h *hookLog) tenantErased(_ context.Context, id uuid.UUID, t principal.Tena
 	h.ids = append(h.ids, id)
 	h.mu.Unlock()
 	return h.c.add("hooks.TenantErased " + t.String())
+}
+
+func (h *hookLog) sawRequest() []bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return append([]bool(nil), h.inRequest...)
 }
 
 func (h *hookLog) deliveryIDs() []uuid.UUID {

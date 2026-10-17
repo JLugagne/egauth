@@ -230,3 +230,12 @@ func TestCloseIdleReleasesBothScopes(t *testing.T) {
 	_, err = get(t, clients.Static(), srv.URL)
 	require.NoError(t, err)
 }
+
+func TestBlockedAddressErrorIsASingleLine(t *testing.T) {
+	srv, _ := okServer(t)
+	clients := outbound.New(outbound.Config{Tenant: loopbackAllowance(t)})
+
+	_, err := get(t, clients.Static(), "https"+srv.URL[len("http"):])
+	require.ErrorIs(t, err, outbound.ErrBlockedAddress)
+	require.NotContains(t, err.Error(), "\n")
+}

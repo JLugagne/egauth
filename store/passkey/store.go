@@ -134,7 +134,8 @@ type Store interface {
 	// credential this way, never through a stored flag.
 	Get(ctx context.Context, t principal.TenantID, id CredentialID) (Credential, error)
 	// Update persists the metadata of an existing credential (nickname, last use, backup flags,
-	// discoverable state). It never changes SignCount or SuspendedAt.
+	// discoverable state). It matches (c.Subject, c.ID), returns store.ErrNotFound otherwise, and
+	// never changes PublicKey, Subject, ID, SignCount or SuspendedAt.
 	Update(ctx context.Context, c Credential) error
 	// UpdateSignCount atomically stores next while AcceptsSignCount(next) holds for the stored
 	// credential, and reports whether it did; it returns store.ErrNotFound when the credential is

@@ -136,7 +136,13 @@ func (h *handlers) challenge(w http.ResponseWriter, r *httpx.Request) {
 		r.Fail(w, err)
 		return
 	}
+	h.verified(ctx, f.subject, factor)
 	r.RespondPending(w, f.pending, resp)
+}
+
+func (h *handlers) verified(ctx context.Context, sub core.Subject, f core.Factor) {
+	_ = h.audit.Emit(ctx, event.MFAVerified, audit.Scope{TenantID: sub.Tenant.String(), UserID: sub.User.String()},
+		audit.Detail{}, nil, audit.A(event.KeyFactor, f.Code()))
 }
 
 func (h *handlers) passkeyBegin(w http.ResponseWriter, r *httpx.Request) {
@@ -179,7 +185,6 @@ func (h *handlers) passkeyFinish(w http.ResponseWriter, r *httpx.Request) {
 		r.Fail(w, err)
 		return
 	}
-	_ = h.audit.Emit(ctx, event.MFAVerified, audit.Scope{TenantID: f.subject.Tenant.String(), UserID: f.subject.User.String()},
-		audit.Detail{}, nil, audit.A(event.KeyFactor, core.FactorPasskeyStepUp.Code()))
+	h.verified(ctx, f.subject, core.FactorPasskeyStepUp)
 	r.RespondPending(w, f.pending, resp)
 }

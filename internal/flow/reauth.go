@@ -32,6 +32,7 @@ func (h *handlers) reauth(w http.ResponseWriter, r *httpx.Request) {
 		return
 	}
 	vs := []core.Verified{v}
+	var second core.Factor
 	if r.Has(routes.FieldFactor) {
 		if h.second == nil {
 			r.Fail(w, mfasvc.ErrInvalidFactor)
@@ -42,17 +43,20 @@ func (h *handlers) reauth(w http.ResponseWriter, r *httpx.Request) {
 			r.Fail(w, err)
 			return
 		}
-		second, err := h.second.Verify(ctx, res.Attrs().Subject(), f, r.Field(routes.FieldCode))
+		sv, err := h.second.Verify(ctx, res.Attrs().Subject(), f, r.Field(routes.FieldCode))
 		if err != nil {
 			r.Fail(w, err)
 			return
 		}
-		vs = append(vs, second)
+		vs, second = append(vs, sv), f
 	}
 	resp, err := h.issuer.ReauthenticateAll(ctx, w, r, vs)
 	if err != nil {
 		r.Fail(w, err)
 		return
+	}
+	if second != (core.Factor{}) {
+		h.verified(ctx, res.Attrs().Subject(), second)
 	}
 	r.Respond(w, resp)
 }

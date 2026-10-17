@@ -41,8 +41,10 @@ func (inbox) SecurityNotice(context.Context, egauth.SecurityNoticeMessage) error
 func ExampleNew() {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
+	seed := make([]byte, 32)
+	_, _ = rand.Read(seed)
 	k, _ := kek.NewLocal(key)
-	signer, _ := signing.EdDSA("k1", key)
+	signer, _ := signing.EdDSA("k1", seed)
 	mail := inbox{links: make(chan string, 1)}
 
 	auth, err := egauth.New(egauth.Config[struct{}]{

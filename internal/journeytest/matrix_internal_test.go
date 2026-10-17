@@ -81,7 +81,7 @@ func TestMatrixExpectedEventsOrderTheChallengeAroundTheIssuance(t *testing.T) {
 
 	require.Equal(t, append([]event.Type{event.UserRegistered}, issue...), expectedEvents(register, SecondDriver{}, false, false))
 	require.Equal(t, issue, expectedEvents(password, SecondDriver{}, false, false))
-	require.Equal(t, []event.Type{event.MFAChallengeRequired, event.MFAVerified, event.SessionIssued, event.LoginSucceeded}, expectedEvents(password, totp, true, false))
+	require.Equal(t, []event.Type{event.MFAChallengeRequired, event.SessionIssued, event.LoginSucceeded, event.MFAVerified}, expectedEvents(password, totp, true, false))
 	require.Equal(t, []event.Type{event.MFAChallengeRequired, event.SessionIssued, event.LoginSucceeded, event.MFAVerified}, expectedEvents(password, stepUp, true, false))
 }
 

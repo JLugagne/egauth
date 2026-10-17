@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/JLugagne/egauth/event"
-	"github.com/JLugagne/egauth/internal/lifecycle"
 	"github.com/JLugagne/egauth/principal"
 )
 
@@ -39,17 +38,6 @@ func SystemCallerUsed(ctx context.Context, sink event.Sink, s Scope, reason stri
 		return errors.Join(ErrInvalidArgument, errors.New("empty system caller reason"))
 	}
 	return Emit(ctx, sink, event.SystemCallerUsed, s, Detail{Reason: reason}, nil)
-}
-
-// IdentifierChanged reports a changed contact identifier of kind k. It returns ErrInvalidArgument
-// for an undeclared kind.
-func IdentifierChanged(ctx context.Context, sink event.Sink, s Scope, k lifecycle.IdentifierKind) error {
-	switch k {
-	case lifecycle.IdentifierEmail, lifecycle.IdentifierPhone, lifecycle.IdentifierRecoveryEmail:
-	default:
-		return errors.Join(ErrInvalidArgument, errors.New("undeclared identifier kind"))
-	}
-	return Emit(ctx, sink, event.IdentifierChanged, s, Detail{}, nil, A(event.KeyIdentifierKind, k.String()))
 }
 
 func emitFactor(ctx context.Context, sink event.Sink, t event.Type, s Scope, f principal.Factor) error {

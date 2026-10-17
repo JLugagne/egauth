@@ -31,4 +31,4 @@ A reset starts with `POST /password/forgot`, which answers uniformly, and finish
 
 ## Delivery
 
-Messages are sent by your `egauth.EmailDeliverer` and `egauth.SMSDeliverer`. Link and code fields render as `REDACTED` in `fmt` and `slog`; the deliverer reads them directly.
+Messages are sent by your `egauth.EmailDeliverer` and `egauth.SMSDeliverer`. Link and code fields render as `REDACTED` under every `fmt` verb and in `slog` (JSON marshalling prints the real value); the deliverer reads them directly.

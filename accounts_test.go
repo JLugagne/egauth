@@ -33,6 +33,9 @@ func TestAccountsAPIKeyCallerIsRefusedByEveryFacadeMethod(t *testing.T) {
 	for _, c := range w.everyFacadeCall(target) {
 		require.ErrorIs(t, c.call(context.Background(), key), egauth.ErrAPIKeyCaller, c.name)
 	}
+	for _, c := range w.everyFacadeCall(principal.Subject{Tenant: target.Tenant}) {
+		require.ErrorIs(t, c.call(context.Background(), key), egauth.ErrAPIKeyCaller, c.name+" with a nil user id")
+	}
 	require.NoError(t, w.a.Accounts().Disable(context.Background(), admin, target.User), "the owner's own session still may")
 }
 

@@ -241,10 +241,15 @@ func contains(trusted []string, origin string) bool {
 }
 
 func bearerExempt(r *http.Request) bool {
-	if v, n := single(r, HeaderTransport); n == 1 && strings.EqualFold(v, bearerScheme) {
-		return true
-	}
-	return BearerAuthorization(r)
+	return BearerTransportHeader(r) || BearerAuthorization(r)
+}
+
+// BearerTransportHeader reports whether r carries exactly one X-Egauth-Transport header and it
+// selects bearer. Two conflicting headers select nothing, so the preamble and Check read the
+// selector by one rule.
+func BearerTransportHeader(r *http.Request) bool {
+	v, n := single(r, HeaderTransport)
+	return n == 1 && strings.EqualFold(v, bearerScheme)
 }
 
 // BearerAuthorization reports whether r carries exactly one Authorization header holding a

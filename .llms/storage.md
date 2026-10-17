@@ -11,7 +11,7 @@
 The adapter is a separate module, `github.com/JLugagne/egauth/adapters/pgx`.
 
 - `pgxstore.Migrate(ctx, pool)` brings every module's schema up to date: expand-only, idempotent, one transaction under an advisory lock, recorded per module and file in `egauth_schema_migrations`. It never reads or rewrites sealed data.
-- `pgxstore.New(ctx, pool)` returns a filled `egauth.Storage`. It only reads, and fails with `migrate.ErrNotMigrated` when a migration is missing.
+- `pgxstore.New(ctx, pool)` returns a filled `egauth.Storage`. It only reads, and fails with an error naming the first missing migration when one is missing.
 - Both take any handle that satisfies `pgxstore.DB` or `pgxstore.MigrationDB`, such as a pool.
 
 ## Your own backend
@@ -25,6 +25,6 @@ Secrets at rest (TOTP seeds, OAuth client secrets, tenant signing keys) are seal
 ## Upgrading from v0.16
 
 1. `pgxstore.Migrate`.
-2. `egauth.UpgradeSecretsV016(ctx, storage, kek.LegacyLocalV016(oldKey), newKEK)`: re-seals every legacy secret with associated data. Idempotent. `egauth.ErrUpgradeIncomplete` plus a report when rows open under no legacy form.
+2. `egauth.UpgradeSecretsV016(ctx, storage, legacy, newKEK)` where `legacy, err := kek.LegacyLocalV016(oldKey)`: re-seals every legacy secret with associated data. Idempotent. `egauth.ErrUpgradeIncomplete` plus a report when rows open under no legacy form.
 3. Deploy. Every user logs in again; emailed links are invalid. Credentials and API keys carry over.
 4. v0.18 drops the legacy tables.

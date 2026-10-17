@@ -74,6 +74,8 @@ func (l *memListener) Close() error {
 
 func (l *memListener) Addr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 80} }
 
+const shutdownBound = 30 * time.Second
+
 type memServer struct {
 	l  *memListener
 	hc *http.Client
@@ -85,7 +87,19 @@ func newMemServer(t testing.TB, h http.Handler) *memServer {
 	_ = srv.Listener.Close()
 	srv.Listener = l
 	srv.Start()
-	t.Cleanup(srv.Close)
+	t.Cleanup(func() {
+		srv.CloseClientConnections()
+		done := make(chan struct{})
+		go func() {
+			srv.Close()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(shutdownBound):
+			t.Errorf("journeytest: the in-memory server did not shut down within %s: a handler is blocked", shutdownBound)
+		}
+	})
 	m := &memServer{l: l, hc: srv.Client()}
 	tr, _ := m.hc.Transport.(*http.Transport)
 	tr.DisableKeepAlives = true

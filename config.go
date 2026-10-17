@@ -113,7 +113,8 @@ type ClaimsSource[C any] interface {
 var ErrUnknownSubject = errors.New("egauth: claims source does not know the subject")
 
 // AppClaims is the only claims surface an application controls. Its JSON encoding is capped at
-// MaxAppClaimsBytes so that an access-token cookie always fits the 4096-byte browser limit.
+// MaxAppClaimsBytes, which bounds the access-token cookie but cannot by itself keep it under the
+// 4096-byte browser limit: a session whose cookie would exceed it is refused, never truncated.
 type AppClaims[C any] struct {
 	Roles, Groups, Scopes []string
 	Custom                C

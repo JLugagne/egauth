@@ -495,6 +495,9 @@ func TestConfigOrigins(t *testing.T) {
 		{"base path well-known", func(c *egauth.Config[struct{}]) { c.BasePath = "/.well-known" }, "BasePath"},
 		{"base path under well-known", func(c *egauth.Config[struct{}]) { c.BasePath = "/.well-known/auth" }, "BasePath"},
 		{"page on a foreign origin", func(c *egauth.Config[struct{}]) { c.Pages.AfterLogin = "https://evil.example.net/home" }, "Pages.AfterLogin"},
+		{"page absolute with a doubled slash", func(c *egauth.Config[struct{}]) {
+			c.Pages.AfterLogin = c.PublicOrigin + "//evil.example.net/x"
+		}, "Pages.AfterLogin"},
 		{"page scheme relative", func(c *egauth.Config[struct{}]) { c.Pages.Login = "//evil.example.net/login" }, "Pages.Login"},
 	}
 	for _, tc := range cases {

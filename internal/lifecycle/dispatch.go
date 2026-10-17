@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/JLugagne/egauth/internal/clock"
+	"github.com/JLugagne/egauth/internal/principalctx"
 	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store/identity"
 )
@@ -157,8 +158,9 @@ func (d *Dispatcher) Matrix() map[identity.Component]Cells {
 }
 
 // Wired returns the object each component acts on: the session backend, or the store of the
-// ceremony, MFA, passkey, federation, API-key, key and identity rows, nil for an absent optional
-// store and for the notice and hook rows, which hold functions (their presence shows in Matrix).
+// MFA, passkey, federation, API-key, key and identity rows, nil for an absent optional store. The
+// ceremony row exposes a CeremoniesWiring, the notice row its NoticeSender; the hook rows hold
+// functions and expose none (their presence shows in Matrix).
 // G18 compares them with the objects the composed Auth owns, so a Dispatcher wired to a stand-in
 // is caught.
 func (d *Dispatcher) Wired() map[identity.Component]any {
@@ -173,9 +175,9 @@ func (d *Dispatcher) Wired() map[identity.Component]any {
 // (ComponentIdentity last) within FastPathBudget, acknowledging each success and deferring each
 // failure with backoff. It reports nothing to the caller: the mutation has committed, so the
 // operation has succeeded, and undone rows are retried by the reaper (DESIGN §7.1). The caller's
-// cancellation does not stop it.
+// cancellation does not stop it, and subscribers run outside the request principal, as on a retry.
 func (d *Dispatcher) DispatchOutbox(ctx context.Context, items []identity.OutboxItem) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), FastPathBudget)
+	ctx, cancel := context.WithTimeout(principalctx.Detach(context.WithoutCancel(ctx)), FastPathBudget)
 	defer cancel()
 	for _, it := range items {
 		if ctx.Err() != nil {

@@ -128,6 +128,8 @@ type Config struct {
 	Dispatcher      OutboxDispatcher
 	Clock           clock.Clock
 	Audit           httpx.Audit
+	// Startup bounds the blocking hash New computes; zero means 30 seconds.
+	Startup time.Duration
 }
 
 // Service is the identity service. It is safe for concurrent use; Close stops its delivery workers.
@@ -186,7 +188,13 @@ func New(cfg Config) (*Service, error) {
 	if len(errs) > 0 {
 		return nil, errors.Join(ErrInvalidConfig, errors.Join(errs...))
 	}
-	decoy, err := decoyHash(cfg.Hasher)
+	startup := cfg.Startup
+	if startup <= 0 {
+		startup = startupTimeout
+	}
+	startCtx, cancel := context.WithTimeout(context.Background(), startup)
+	defer cancel()
+	decoy, err := decoyHash(startCtx, cfg.Hasher)
 	if err != nil {
 		return nil, errors.Join(ErrInvalidConfig, errors.New("Hasher"), err)
 	}
@@ -226,13 +234,11 @@ func present(v any) bool {
 	return true
 }
 
-func decoyHash(h passwords.Hasher) (string, error) {
+func decoyHash(ctx context.Context, h passwords.Hasher) (string, error) {
 	raw := make([]byte, decoyBytes)
 	if _, err := rand.Read(raw); err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), startupTimeout)
-	defer cancel()
 	phc, err := h.Hash(ctx, base64.RawURLEncoding.EncodeToString(raw))
 	if err != nil {
 		return "", err

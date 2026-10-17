@@ -3,6 +3,12 @@
 // mandatory, so a ciphertext cannot be moved to another row, tenant or purpose, and every
 // ciphertext carries the id of the key that sealed it, so a rotated KEK keeps opening data sealed by
 // its predecessors and stale ciphertexts can be re-sealed lazily.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package kek
 
 import (
@@ -37,7 +43,8 @@ var (
 	// ErrAADRequired is returned by Seal and Open when the associated data is empty.
 	ErrAADRequired = errors.New("kek: associated data is required")
 	// ErrInvalidKey is returned by the constructors for a key that is not 32 bytes, is trivially
-	// guessable, or duplicates another key of the same KEK.
+	// guessable, duplicates another key of the same KEK, or is a credential published in egauth's
+	// examples or a near-copy of one.
 	ErrInvalidKey = errors.New("kek: invalid key")
 	// ErrMalformed is returned for a ciphertext that is not in the v1 format.
 	ErrMalformed = errors.New("kek: malformed ciphertext")

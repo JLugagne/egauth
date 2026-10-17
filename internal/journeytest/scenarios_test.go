@@ -60,6 +60,7 @@ func TestScenarioRememberMeSurvivesEveryRotation(t *testing.T) {
 					require.Equal(t, remember, age > 0, "cookie %s Max-Age %d at sign-in with remember=%t", name, age, remember)
 				}
 			}
+			rotatedCookies := 0
 			for i := range 6 {
 				res := sess.renew()
 				require.Less(t, res.Status, http.StatusBadRequest, "rotation %d: %s", i, journeytest.Describe(res))
@@ -67,11 +68,15 @@ func TestScenarioRememberMeSurvivesEveryRotation(t *testing.T) {
 					if !isSessionCookie(k.Name) || k.MaxAge < 0 {
 						continue
 					}
+					rotatedCookies++
 					want, known := initial[k.Name]
 					require.True(t, known, "rotation %d set the unexpected session cookie %s", i, k.Name)
 					require.Equal(t, want, k.MaxAge, "rotation %d changed the Max-Age of %s (remember=%t)", i, k.Name, remember)
 				}
 				require.Equal(t, remember, sess.view().RememberMe, "rotation %d", i)
+			}
+			if !s.bearer {
+				require.Positive(t, rotatedCookies, "no rotation re-set a session cookie, so the Max-Age loop proved nothing")
 			}
 		}
 	})
@@ -648,6 +653,10 @@ func TestScenarioFailingSubscribersDoNotKeepSessionsAliveAfterAPasswordReset(t *
 			settle(w)
 			require.Equal(t, http.StatusUnauthorized, first.status(), "a session survived the reset while the notice subscriber failed")
 			require.Equal(t, http.StatusUnauthorized, second.status())
+			if s.bearer && s.backend == journeytest.JWT {
+				require.Equal(t, http.StatusUnauthorized, first.refreshBearer().Status, "a refresh token survived the reset while the subscribers failed")
+				require.Equal(t, http.StatusUnauthorized, second.refreshBearer().Status)
+			}
 			login := w.NewClient().LoginPassword(journeytest.Credentials{Email: a.Email, Password: strongPassword}, s.bearer)
 			require.True(t, login.Established(), journeytest.Describe(login))
 		})

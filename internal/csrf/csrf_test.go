@@ -238,3 +238,15 @@ func TestBearerAuthorization(t *testing.T) {
 		}
 	}
 }
+
+func TestBearerTransportHeaderRefusesConflictingSelectors(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/", nil)
+	r.Header.Add(csrf.HeaderTransport, "bearer")
+	if !csrf.BearerTransportHeader(r) {
+		t.Fatal("single bearer selector refused")
+	}
+	r.Header.Add(csrf.HeaderTransport, "cookies")
+	if csrf.BearerTransportHeader(r) {
+		t.Fatal("conflicting selectors accepted")
+	}
+}

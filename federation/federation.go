@@ -1,5 +1,11 @@
 // Package federation defines the value spec of an OAuth or OIDC identity provider. A Provider
 // carries its own issuer and JWKS: neither is ever derived from the authorization URL.
+//
+// # Stability
+//
+// Stability class: frozen-v1 candidate. The exported API is intended to remain
+// backward-compatible for the life of v1; breaking changes require a new major version. Until v1
+// is tagged the API remains pre-1.0. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package federation
 
 import (

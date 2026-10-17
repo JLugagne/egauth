@@ -8,3 +8,5 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = lo_unlink(1)) T
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_stat_activity WHERE "pg_terminate_backend"(pid)) THEN NULL; END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'x' AND pg_catalog."lo_unlink"(1) = 1) THEN CREATE TABLE IF NOT EXISTS x (a int); END IF; END $$;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_class WHERE "evil".to_regclass('x') IS NULL) THEN NULL; END IF; END $$;
+CREATE TABLE IF NOT EXISTS t7 (a)WITH(fillfactor=10)AS SELECT lo_unlink(1);
+ALTER TABLE IF EXISTS a ADD COLUMN IF NOT EXISTS c int DEFAULT pg_terminate_backend(1);

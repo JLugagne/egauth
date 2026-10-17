@@ -21,13 +21,14 @@ type Signed struct {
 }
 
 // Verify checks s against v. An "alg" or "kid" other than the key's returns ErrInvalidSignature
-// before any cryptography, so a key is never used with another algorithm.
+// before any cryptography, so a key is never used with another algorithm. An Ed25519 key also
+// accepts the RFC 9864 "Ed25519" alg.
 func (v Verifier) Verify(s Signed) error {
 	if v.k == nil {
 		return ErrZeroKey
 	}
 	k := v.k
-	if s.Algorithm != k.alg {
+	if s.Algorithm != k.alg && (k.ed == nil || s.Algorithm != algEd25519) {
 		return errors.Join(ErrInvalidSignature, errors.New("algorithm "+s.Algorithm+" is not the key's "+k.alg))
 	}
 	if s.KeyID != k.kid {

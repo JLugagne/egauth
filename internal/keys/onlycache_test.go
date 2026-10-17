@@ -41,6 +41,9 @@ func TestInternalKeysOwnsTheOnlyKeyCache(t *testing.T) {
 			return err
 		}
 		if d.IsDir() {
+			if p != root && strings.HasPrefix(d.Name(), ".") {
+				return filepath.SkipDir
+			}
 			switch d.Name() {
 			case "testdata", "vendor", "node_modules", ".git":
 				return filepath.SkipDir
@@ -60,7 +63,7 @@ func TestInternalKeysOwnsTheOnlyKeyCache(t *testing.T) {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
 		if err != nil {
-			return nil
+			return err
 		}
 		for _, imp := range f.Imports {
 			ip, _ := strconv.Unquote(imp.Path.Value)
@@ -68,6 +71,10 @@ func TestInternalKeysOwnsTheOnlyKeyCache(t *testing.T) {
 				continue
 			}
 			name := path.Base(ip)
+			if imp.Name != nil && imp.Name.Name == "." {
+				offenders = append(offenders, fset.Position(imp.Pos()).String()+" (dot import)")
+				continue
+			}
 			if imp.Name != nil {
 				name = imp.Name.Name
 			}

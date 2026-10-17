@@ -51,10 +51,10 @@ type legacySource struct {
 // UpgradeSecretsV016 re-seals every v0.16 TOTP secret, OAuth client secret and tenant signing key
 // under the v0.17 format, trying each row's legacy associated data (tenant and owner, then tenant
 // alone for signing keys, then none) and writing back through the store's ReplaceSealed
-// compare-and-swap. It is idempotent and safe to run concurrently from several instances: a row another
-// instance changed first is counted as Concurrent and never overwritten. Stores absent from s (Federation, Keys) are skipped. A row
-// that opens under no candidate is listed in the report and makes it return ErrUpgradeIncomplete
-// after every other row was handled. A store failure, a cancelled ctx, a KEK failure or a
+// compare-and-swap. It is idempotent and safe to run concurrently from several instances: a row
+// another instance changed first is counted as Concurrent and never overwritten. Stores absent
+// from s (Federation, Keys) are skipped. A row that opens under no candidate is listed in the report and makes it
+// return ErrUpgradeIncomplete after every other row was handled. A store failure, a cancelled ctx, a KEK failure or a
 // LegacyOpener error other than kek.ErrOpenFailed and kek.ErrMalformed stops the run and returns it.
 // Run it once at startup, before New.
 func UpgradeSecretsV016(ctx context.Context, s Storage, legacy kek.LegacyOpener, k kek.KEK) (UpgradeReport, error) {

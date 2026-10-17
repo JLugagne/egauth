@@ -132,7 +132,7 @@ if [ -f "$MAKEFILE" ]; then
   while IFS=: read -r tool var; do
     want="$(sed -nE "s#^${var}[[:space:]]*:=[[:space:]]*(v[^[:space:]]+).*#\\1#p" "$MAKEFILE" | head -1)"
     [ -n "$want" ] || { fail "Makefile has no $var pin"; continue; }
-    for doc in "$REPO"/.github/workflows/*.yml "$RELEASING" "$REPO/CONTRIBUTING.md"; do
+    for doc in "$REPO"/.github/workflows/*.yml "$RELEASING" "$REPO/CONTRIBUTING.md" "$REPO/SECURITY.md"; do
       [ -f "$doc" ] || continue
       while IFS= read -r got; do
         [ "$got" = "$want" ] || fail "${doc#"$REPO"/} pins $tool at $got, Makefile $var says $want"

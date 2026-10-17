@@ -197,3 +197,18 @@ func TestRefusedPasskeyCompletionEmitsNoMFAVerified(t *testing.T) {
 		t.Fatalf("issued=%d verified=%d, want no event for a refused completion", w.sink.count(event.SessionIssued), w.sink.count(event.MFAVerified))
 	}
 }
+
+func TestRefusedTOTPCompletionEmitsNoMFAVerified(t *testing.T) {
+	w := newWorld(t)
+	sub := w.user("alice@example.com", "correct horse")
+	e := w.enrollTOTP("alice@example.com", "correct horse")
+	c := w.native()
+	flowHandle := decode[journeyBody](t, c.login("alice@example.com", "correct horse", nil)).Flow
+	_, err := w.identity.Apply(context.Background(), identity.BumpEpoch{Subject: sub, Change: identity.FactorPasskeyAdded})
+	must(t, err)
+	fields := map[string]any{routes.FieldFlow: flowHandle, routes.FieldFactor: "totp", routes.FieldCode: totpAt(t, e.secret, w.clock.Now())}
+	expect(t, c.post(routes.MFAChallenge, fields), http.StatusUnauthorized)
+	if w.sink.count(event.SessionIssued) != 0 || w.sink.count(event.MFAVerified) != 0 {
+		t.Fatalf("issued=%d verified=%d, want no event for a refused completion", w.sink.count(event.SessionIssued), w.sink.count(event.MFAVerified))
+	}
+}

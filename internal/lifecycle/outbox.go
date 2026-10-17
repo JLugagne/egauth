@@ -92,7 +92,7 @@ func (d *Dispatcher) Ready() error {
 
 func createdAt(it identity.OutboxItem, now time.Time) time.Time {
 	if it.CreatedAt.IsZero() {
-		return now
+		return now.Add(-StaleAfter - 1)
 	}
 	return it.CreatedAt
 }

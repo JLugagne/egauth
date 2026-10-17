@@ -40,6 +40,7 @@ var specLegacyPrefixes = []string{
 	"adapters/pgx/identity", "adapters/pgx/sessions", "adapters/pgx/tokens", "adapters/pgx/mfa",
 	"adapters/pgx/otp", "adapters/pgx/passkey", "adapters/pgx/oauth", "adapters/pgx/keystore",
 	"adapters/pgx/internal/pgxmigrate",
+	"test", "adapters/pgx/test", "e2e-security", "internal/examplekey",
 }
 
 func TestRatchetCountsMatchLists(t *testing.T) {

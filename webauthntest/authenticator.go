@@ -10,6 +10,11 @@
 // {"publicKey": ...} wrapper; responses are the PublicKeyCredential JSON a client posts back.
 // Only ES256 with "none" attestation is produced. The ceremony methods are safe for concurrent use;
 // the knobs are not, so set them before the first ceremony.
+//
+// # Stability
+//
+// Stability class: experimental. No SemVer guarantee: the API may change or be removed in any
+// release. See docs/adr/0001-v1-scope-and-stability-classes.md.
 package webauthntest
 
 import (

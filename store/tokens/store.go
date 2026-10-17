@@ -69,15 +69,18 @@ type Store interface {
 	// or the family already exists.
 	Create(ctx context.Context, r RefreshRecord) error
 	// Get returns the token with digest tokenHash, consumed or not. It returns ErrRevoked for a
-	// token whose family is revoked or past its absolute expiry.
+	// token whose family is revoked or past its absolute expiry, and store.ErrNotFound for an
+	// unconsumed idle-expired token. A consumed token is returned past its idle window so that its
+	// replay reaches ConsumeForRotation and counts as reuse.
 	Get(ctx context.Context, t principal.TenantID, tokenHash []byte) (RefreshRecord, error)
 	// ConsumeForRotation atomically consumes the presented token and inserts req.Next. When the token
 	// was already consumed, the store decides with its own clock and the persisted consumed_by: within
 	// ReuseGrace and from the same non-empty fingerprint it returns ErrConcurrent and changes
 	// nothing; otherwise it revokes the family, appends to the revocation feed and returns ErrReused.
-	// It returns ErrRevoked for a revoked or expired family, store.ErrNotFound for an unknown or
-	// idle-expired token, and store.ErrConflict when req.Next does not continue the presented token's
-	// tenant, subject, lineage and family.
+	// A consumed token past its idle window is reuse too. It returns ErrRevoked for a revoked or
+	// expired family, store.ErrNotFound for an unknown or unconsumed idle-expired token, and
+	// store.ErrConflict when req.Next does not continue the presented token's tenant, subject,
+	// lineage and family.
 	ConsumeForRotation(ctx context.Context, req RotationRequest) (Rotation, error)
 	// Reissue atomically revokes req.Family and inserts req.Next, only while req.Family is live and
 	// has the tenant, subject and lineage of req.Next; otherwise it changes nothing and returns

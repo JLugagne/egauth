@@ -177,9 +177,10 @@ type AccountReader interface {
 type Scoper interface {
 	// Scope returns the identifier scope of id.
 	Scope(id identity.Identifier) (ceremony.Scope, error)
-	// RevertScopes returns every scope holding SecurityRevert data of the subject beyond its current
-	// identifiers: links to previous addresses and the revert bookkeeping. Deleting them in the
-	// order returned, stopping at the first failure, keeps the rest retryable.
+	// RevertScopes returns every scope holding SecurityRevert bookkeeping of the subject beyond its
+	// current identifiers (anchors, span, lock and tenure records), never the links sent to previous
+	// addresses. Deleting them in the order returned, stopping at the first failure, keeps the rest
+	// retryable.
 	RevertScopes(ctx context.Context, s principal.Subject, current []identity.Identifier) ([]ceremony.Scope, error)
 }
 
@@ -215,8 +216,9 @@ type CeremoniesWiring struct {
 // identifier-scoped records of its email, phone and recovery email (and of the replaced identifier
 // for IdentifierChanged). A disable keeps the SecurityRevert links addressed to the current
 // identifiers, the owner's way back (a deliberate narrowing of DESIGN 7.2 "delete all"); a deletion
-// also erases the revert links to previous addresses and the revert bookkeeping (Scoper.RevertScopes). Revert links at previous addresses are left to their 7-day TTL: that scope is
-// per address, not per subject, and may hold another account's links.
+// also erases the revert bookkeeping (Scoper.RevertScopes). Revert links sent to previous addresses
+// are left to their 7-day TTL: that scope is per address, not per subject, and may hold another
+// account's links.
 // A row retried after a later ceremony was issued deletes that one too; this fails safe, the user
 // asks again.
 type Ceremonies struct {

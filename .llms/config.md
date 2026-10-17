@@ -47,7 +47,7 @@
 
 ## Insecure opt-outs
 
-`egauth.InsecureOptOuts` fields: `NoOriginCheck`, `NoRateLimit`, `NoReauthWindow`, `LongSessions`, `EphemeralState`, `SharedCookieDomain`, `OutboundPrivateNetwork`, `TenantOutboundPrivateNetwork`. Build the acknowledgement with `egauth.Acknowledge(reason)`. `Auth.Posture().OptOuts` lists every set field.
+`egauth.InsecureOptOuts` fields: `NoOriginCheck`, `NoRateLimit`, `NoReauthWindow`, `LongSessions`, `EphemeralState`, `SharedCookieDomain`, `OutboundPrivateNetwork`, `TenantOutboundPrivateNetwork`. Build the acknowledgement with `egauth.Acknowledge(reason)`; `SharedCookieDomain` and the two outbound opt-outs take a `*SharedCookieDomain` or `*OutboundAllowance` instead. `Auth.Posture().OptOuts` lists every set field.
 
 ## Resource servers
 

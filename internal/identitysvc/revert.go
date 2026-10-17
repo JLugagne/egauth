@@ -468,7 +468,7 @@ func (a *revertRun) removeIdentifiersSince(ctx context.Context, u identity.User,
 }
 
 func (a *revertRun) lockDown(ctx context.Context, sub core.Subject) error {
-	phc, err := decoyHash(a.hasher)
+	phc, err := decoyHash(ctx, a.hasher)
 	if err != nil {
 		return errors.Join(httpx.ErrInternal, err)
 	}

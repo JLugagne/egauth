@@ -1,12 +1,14 @@
 package egauthtest
 
 import (
-	"crypto/ed25519"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,7 +30,7 @@ type IdPUser struct {
 }
 
 // IdP is a fake OpenID Connect provider on a loopback TLS server: discovery, authorization, token,
-// userinfo and JWKS endpoints, ID tokens signed with a throwaway EdDSA key. It is as strict as a
+// userinfo and JWKS endpoints, ID tokens signed with a throwaway ES256 key. It is as strict as a
 // conforming provider so that a client regression fails: authorization requires state, nonce and an
 // S256 PKCE challenge; the token endpoint requires the authorization_code grant, the verifier and
 // client authentication (client_secret_post or client_secret_basic) by the client the code was
@@ -36,7 +38,7 @@ type IdPUser struct {
 // user.
 type IdP struct {
 	server *httptest.Server
-	key    ed25519.PrivateKey
+	key    *ecdsa.PrivateKey
 	kid    string
 	clock  clock.Clock
 
@@ -68,7 +70,7 @@ func NewIdP(t testing.TB, clk *Clock) *IdP {
 	if clk != nil {
 		c = clk.Library()
 	}
-	_, key, err := ed25519.GenerateKey(rand.Reader)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,8 +143,9 @@ type IDToken struct {
 	Nonce    string
 }
 
-// SignIDToken returns t signed by the provider, valid for ten minutes from the provider clock.
-func (p *IdP) SignIDToken(t IDToken) string {
+// SignIDToken returns t signed by the provider, valid for ten minutes from the provider clock. It
+// fails only when the system random source does.
+func (p *IdP) SignIDToken(t IDToken) (string, error) {
 	u, audience, nonce := t.User, t.Audience, t.Nonce
 	now := p.clock.Now()
 	claims := map[string]any{
@@ -153,9 +156,17 @@ func (p *IdP) SignIDToken(t IDToken) string {
 	if nonce != "" {
 		claims["nonce"] = nonce
 	}
-	header := map[string]any{"alg": "EdDSA", "typ": "JWT", "kid": p.kid}
+	header := map[string]any{"alg": "ES256", "typ": "JWT", "kid": p.kid}
 	input := segment(header) + "." + segment(claims)
-	return input + "." + base64.RawURLEncoding.EncodeToString(ed25519.Sign(p.key, []byte(input)))
+	digest := sha256.Sum256([]byte(input))
+	r, s, err := ecdsa.Sign(rand.Reader, p.key, digest[:])
+	if err != nil {
+		return "", errors.Join(errors.New("egauthtest: signing the id_token"), err)
+	}
+	sig := make([]byte, 64)
+	r.FillBytes(sig[:32])
+	s.FillBytes(sig[32:])
+	return input + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
 
 func segment(v any) string {
@@ -171,17 +182,22 @@ func (p *IdP) discovery(w http.ResponseWriter, _ *http.Request) {
 		"issuer": p.server.URL, "authorization_endpoint": p.server.URL + "/authorize",
 		"token_endpoint": p.server.URL + "/token", "userinfo_endpoint": p.server.URL + "/userinfo",
 		"jwks_uri": p.server.URL + "/jwks", "response_types_supported": []string{"code"},
-		"subject_types_supported": []string{"public"}, "id_token_signing_alg_values_supported": []string{"EdDSA"},
+		"subject_types_supported": []string{"public"}, "id_token_signing_alg_values_supported": []string{"ES256"},
 		"code_challenge_methods_supported":               []string{"S256"},
 		"authorization_response_iss_parameter_supported": true,
 	})
 }
 
 func (p *IdP) jwks(w http.ResponseWriter, _ *http.Request) {
-	pub := p.key.Public().(ed25519.PublicKey)
+	point, err := p.key.PublicKey.Bytes()
+	if err != nil || len(point) != 65 {
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	x, y := point[1:33], point[33:]
 	writeJSON(w, map[string]any{"keys": []map[string]string{{
-		"kty": "OKP", "crv": "Ed25519", "alg": "EdDSA", "use": "sig", "kid": p.kid,
-		"x": base64.RawURLEncoding.EncodeToString(pub),
+		"kty": "EC", "crv": "P-256", "alg": "ES256", "use": "sig", "kid": p.kid,
+		"x": base64.RawURLEncoding.EncodeToString(x), "y": base64.RawURLEncoding.EncodeToString(y),
 	}}})
 }
 
@@ -241,9 +257,14 @@ func (p *IdP) exchange(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.token[access] = g.user
 	p.mu.Unlock()
+	idToken, err := p.SignIDToken(IDToken{User: g.user, Audience: g.clientID, Nonce: g.nonce})
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		writeJSON(w, map[string]string{"error": "server_error"})
+		return
+	}
 	writeJSON(w, map[string]any{
-		"access_token": access, "token_type": "Bearer", "expires_in": 600,
-		"id_token": p.SignIDToken(IDToken{User: g.user, Audience: g.clientID, Nonce: g.nonce}),
+		"access_token": access, "token_type": "Bearer", "expires_in": 600, "id_token": idToken,
 	})
 }
 

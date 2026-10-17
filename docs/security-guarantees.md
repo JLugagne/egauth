@@ -62,7 +62,7 @@ Stability classes are in [ADR 0001](adr/0001-v1-scope-and-stability-classes.md).
 | Guarantee | Mechanism | Application responsibility |
 |---|---|---|
 | Events carry no secrets | declared attribute sensitivities (G10) | choose a sink |
-| Delivery messages redact credentials in `fmt` and `slog` | `LogValue`, `String`, `GoString` | keep JSON-queued messages protected |
+| Delivery messages redact credentials in `fmt` and `slog` | `LogValue`, `String`, `GoString`, `Format` | keep JSON-queued messages protected |
 
 Residual risks and accepted trade-offs are listed in [AUDIT.md](../AUDIT.md) and
 [SECURITY.md](../SECURITY.md).

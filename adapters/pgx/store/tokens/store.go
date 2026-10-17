@@ -40,8 +40,8 @@ const moduleName = "tokens"
 
 // Store is safe for concurrent use. Every decision reads the database clock at the statement that
 // takes it, after any lock wait, never an instant carried by a request (T-21). A rotation whose Next
-// ends after the presented token's family is refused with store.ErrConflict. Writes to one subject's families serialise on a per-subject advisory
-// lock, and feed rows are appended under one feed lock taken last, so feed positions are handed out
+// ends after the presented token's family is refused with store.ErrConflict. Writes to one
+// subject's families serialise on a per-subject advisory lock, and feed rows are appended under one feed lock taken last, so feed positions are handed out
 // in commit order.
 type Store struct {
 	db migrate.DB
@@ -300,16 +300,17 @@ func (s *Store) Create(ctx context.Context, r contract.RefreshRecord) error {
 }
 
 func (s *Store) Get(ctx context.Context, t principal.TenantID, tokenHash []byte) (contract.RefreshRecord, error) {
-	var ended, idle bool
+	var ended, idle, consumed bool
 	row, err := scanRefresh(s.db.QueryRow(ctx, `SELECT `+refreshColumns+`,
-    revoked_at IS NOT NULL OR family_expires_at <= statement_timestamp(), idle_expires_at <= statement_timestamp()
-FROM egauth_refresh_tokens WHERE hash = $1 AND tenant_id = $2`, tokenHash, t.String()), &ended, &idle)
+    revoked_at IS NOT NULL OR family_expires_at <= statement_timestamp(), idle_expires_at <= statement_timestamp(),
+    consumed_at IS NOT NULL
+FROM egauth_refresh_tokens WHERE hash = $1 AND tenant_id = $2`, tokenHash, t.String()), &ended, &idle, &consumed)
 	switch {
 	case err != nil:
 		return contract.RefreshRecord{}, err
 	case ended:
 		return contract.RefreshRecord{}, contract.ErrRevoked
-	case idle:
+	case idle && !consumed:
 		return contract.RefreshRecord{}, store.ErrNotFound
 	}
 	return contract.RestoreRefreshRecord(row)
@@ -356,7 +357,7 @@ FOR UPDATE`, req.Presented, next.Tenant().String(), contract.ReuseGrace.Microsec
 		case p.ended:
 			outcome = contract.ErrRevoked
 			return nil
-		case p.idle:
+		case p.idle && !p.consumed:
 			outcome = store.ErrNotFound
 			return nil
 		case p.user != next.Subject().User || p.lineage != next.Lineage() || p.family != next.Family():

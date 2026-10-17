@@ -240,3 +240,25 @@ func mustJSON(t *testing.T, v any) []byte {
 	require.NoError(t, err)
 	return b
 }
+
+func TestTenantsSetOAuthProviderRefusesAnErasedTenant(t *testing.T) {
+	var idp *egauthtest.IdP
+	loopback := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	w := newFacadeWorldWithIdP(t, func(clk *egauthtest.Clock) *egauthtest.IdP {
+		idp = egauthtest.NewIdP(t, clk)
+		return idp
+	}, func(c *egauth.Config[gateClaims], _ *egauthtest.IdP) {
+		tenantKeys(c)
+		c.Modules.OAuth = &egauth.OAuthModule{Providers: []federation.Provider{provider("static")}, PerTenant: true}
+		c.Insecure.OutboundPrivateNetwork = &egauth.OutboundAllowance{Prefixes: loopback, Ack: egauth.Acknowledge("fake idp")}
+		c.Insecure.TenantOutboundPrivateNetwork = &egauth.OutboundAllowance{Prefixes: loopback, Ack: egauth.Acknowledge("fake idp")}
+	})
+	ctx := context.Background()
+	sys := w.system("sso")
+	tn := principal.TenantID{}
+	require.NoError(t, w.a.Tenants().Erase(ctx, sys, tn))
+	err := w.a.Tenants().SetOAuthProvider(ctx, sys, egauth.SetProviderRequest{Tenant: tn, Provider: runtimeSpec(idp, "corp")})
+	require.ErrorIs(t, err, keys.ErrTenantTombstoned)
+	_, err = w.st.Federation.GetProvider(ctx, tn, "corp")
+	require.ErrorIs(t, err, store.ErrNotFound, "an erased tenant keeps no provider row nor sealed secret")
+}

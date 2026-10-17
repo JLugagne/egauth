@@ -48,6 +48,15 @@ type Mailbox struct {
 
 var _ egauth.EmailDeliverer = (*Mailbox)(nil)
 
+// String renders the mailbox without its messages, which carry secrets.
+func (m *Mailbox) String() string { return "egauthtest.Mailbox{REDACTED}" }
+
+// GoString renders like String.
+func (m *Mailbox) GoString() string { return m.String() }
+
+// LogValue renders like String.
+func (m *Mailbox) LogValue() slog.Value { return slog.StringValue(m.String()) }
+
 // Messages returns a copy of the captured messages in delivery order.
 func (m *Mailbox) Messages() []Mail {
 	m.mu.Lock()

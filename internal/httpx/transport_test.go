@@ -138,3 +138,26 @@ func TestCookieCarryingAuthenticatedRequestIsCSRFCheckedBeforeLimitAndResume(t *
 		t.Fatalf("order %v want %v", w.rec.got(), want)
 	}
 }
+
+func TestTenantMismatchAfterResumeDropsEveryRotatedCredential(t *testing.T) {
+	w := newWorld(t)
+	w.auth.attrs = attrs(core.ForTestAttrs{Subject: subject(mustTenant("globex")), Factors: []core.Factor{core.FactorPassword}, PrimaryAt: start, Transport: core.TransportBearer})
+	w.auth.setCookie = "__Host-access_token=rotated"
+	w.auth.setHeaders = map[string]string{"X-Egauth-Access-Token": "a", "X-Egauth-Refresh-Token": "r", "X-Egauth-Session-Token": "s"}
+	meta := httpx.Meta{Authenticated: true, BodyCap: httpx.FormBodyCap}
+	h := w.handler(t, meta, nil)
+	r := post(`{}`, "application/json")
+	r.Header.Set("X-Egauth-Transport", "bearer")
+	resp := serve(h, r)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d %s", resp.Code, resp.Body)
+	}
+	if c := resp.Header().Values("Set-Cookie"); len(c) != 0 {
+		t.Fatalf("cookies leaked: %v", c)
+	}
+	for k := range w.auth.setHeaders {
+		if v := resp.Header().Get(k); v != "" {
+			t.Fatalf("%s leaked: %q", k, v)
+		}
+	}
+}

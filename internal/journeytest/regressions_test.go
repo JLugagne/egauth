@@ -270,8 +270,6 @@ func TestRegressionC28PasskeyLoginWithoutUserVerificationNeverGivesASession(t *t
 		require.Empty(t, c.FlowHandle(res), "the refused assertion left a flow to continue")
 		require.False(t, res.Established(), "a passkey assertion without user verification admitted a session: "+journeytest.Describe(res))
 		require.Equal(t, http.StatusUnauthorized, c.Session().Status)
-
-		require.Equal(t, http.StatusUnauthorized, c.Session().Status)
 	})
 }
 

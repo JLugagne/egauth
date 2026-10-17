@@ -24,9 +24,11 @@ import (
 // Accounts administers the accounts of the caller's tenant. Every method needs a System caller or a
 // session caller allowed by Config.Admin, fresh within SessionPolicy.ReauthWindow and multi-factor
 // when its subject enrolled a second factor; RevokeSessions alone also lets a session caller act on
-// itself. Mutations are applied by the identity service the auth endpoints use, which bumps the
-// security epoch, queues the lifecycle outbox and notifies the owner. A user id of another
-// tenant is never reached: the target is always the caller's tenant.
+// itself. Disable, Enable, Delete and SetTemporaryPassword are applied by the identity service the
+// auth endpoints use, which bumps the security epoch, queues the lifecycle outbox and notifies the
+// owner; RevokeSessions and UnlockMFA act on the session backend and the MFA store directly, with
+// no epoch bump, outbox row or notice. A user id of another tenant is never reached: the target is
+// always the caller's tenant.
 type Accounts struct {
 	f *facade
 }
@@ -225,13 +227,13 @@ func (x *Accounts) apply(ctx context.Context, by principal.Caller, method string
 }
 
 func (x *Accounts) live(ctx context.Context, by principal.Caller, method string, user uuid.UUID, sc scope) (core.Subject, grant, error) {
-	sub, err := x.f.targetUser(by, user)
-	if err != nil {
-		return core.Subject{}, grant{}, err
-	}
+	sub, invalid := x.f.targetUser(by, user)
 	g, err := x.f.authorize(ctx, by, method, by.Tenant(), sub, sc)
-	if err != nil {
+	switch {
+	case err != nil:
 		return core.Subject{}, grant{}, err
+	case invalid != nil:
+		return core.Subject{}, grant{}, invalid
 	}
 	st, err := x.f.o.identity.AccountState(ctx, sub)
 	switch {

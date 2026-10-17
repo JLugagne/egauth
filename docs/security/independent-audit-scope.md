@@ -228,7 +228,7 @@ The maintainers will assemble and hand over, over a secure channel:
    post-hardening tree; the exact pin is recorded in the ledger entry. The tree is immutable for
    the duration of the audit.
 2. **Build and test instructions.** Go 1.26 toolchain; core module is Docker-free:
-   `GOWORK=off go test ./...`, `GOWORK=off go vet ./...`, `go run ./internal/doctest`,
+   `GOWORK=off go test -timeout 40m ./...`, `GOWORK=off go vet ./...`,
    `make test-unit` (no Docker), `make check` (lint/vet/vulncheck). The `adapters/pgx` module
    requires Docker for `testcontainers`: `cd adapters/pgx && go test ./...`. The maintainers will
    confirm a green build/test run at the pinned commit and provide the output.
@@ -241,8 +241,8 @@ The maintainers will assemble and hand over, over a secure channel:
    fix diffs/commits — provided under the engagement's confidentiality terms. It is deliberately
    **not** part of the published repository. The auditor is expected to treat it as untrusted
    input and independently verify, not trust, its conclusions.
-6. **Reproduction harness.** The `e2e-security/` suite, `test/` integration tests, and
-   `examples/fullstack` reference app, which can be used to reproduce and extend PoCs.
+6. **Reproduction harness.** The journey matrix (`internal/journeytest`), the `adapters/pgx/e2e`
+   suite, and the `examples/fullstack` reference app, which can be used to reproduce and extend PoCs.
 7. **Release/provenance material.** `RELEASING.md`, CI workflows, `scripts/`, `Makefile` pinned
    tool versions, and generated SBOMs.
 8. **Communication and disclosure plan.** Secure reporting channel, weekly check-ins, an

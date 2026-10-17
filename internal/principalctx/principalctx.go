@@ -49,3 +49,13 @@ func InRequest(ctx context.Context) bool {
 	_, ok := ctx.Value(slot{}).(held)
 	return ok
 }
+
+// Detach returns ctx with the slot emptied and every other value kept, for work a request starts
+// that must not count as in-request, such as the inline outbox dispatch: InRequest and Get report
+// false on it. A nil ctx is treated as context.Background().
+func Detach(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, slot{}, nil)
+}

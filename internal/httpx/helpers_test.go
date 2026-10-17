@@ -93,16 +93,20 @@ func (f *fakeLimiter) Allow(_ context.Context, k limiter.Key) (limiter.Decision,
 }
 
 type fakeAuth struct {
-	rec       *recorder
-	attrs     core.SessionAttrs
-	err       error
-	setCookie string
+	rec        *recorder
+	attrs      core.SessionAttrs
+	err        error
+	setCookie  string
+	setHeaders map[string]string
 }
 
 func (f *fakeAuth) Resume(_ context.Context, w http.ResponseWriter, _ *http.Request, _ core.TenantID) (session.Resumed, error) {
 	f.rec.add("resume")
 	if f.setCookie != "" {
 		w.Header().Add("Set-Cookie", f.setCookie)
+	}
+	for k, v := range f.setHeaders {
+		w.Header().Set(k, v)
 	}
 	if f.err != nil {
 		return session.Resumed{}, f.err

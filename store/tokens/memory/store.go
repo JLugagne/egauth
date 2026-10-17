@@ -255,6 +255,13 @@ func usable(r *refresh, now time.Time) error {
 	return nil
 }
 
+func replayable(r *refresh, now time.Time) error {
+	if err := usable(r, now); err != nil && (r.consumedAt.IsZero() || !errors.Is(err, store.ErrNotFound)) {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) Get(ctx context.Context, t principal.TenantID, tokenHash []byte) (tokens.RefreshRecord, error) {
 	if err := ctx.Err(); err != nil {
 		return tokens.RefreshRecord{}, err
@@ -266,7 +273,7 @@ func (s *Store) Get(ctx context.Context, t principal.TenantID, tokenHash []byte)
 	if !ok {
 		return tokens.RefreshRecord{}, store.ErrNotFound
 	}
-	if err := usable(r, now); err != nil {
+	if err := replayable(r, now); err != nil {
 		return tokens.RefreshRecord{}, err
 	}
 	return tokens.RestoreRefreshRecord(r.row)
@@ -290,7 +297,7 @@ func (s *Store) ConsumeForRotation(ctx context.Context, req tokens.RotationReque
 	if !ok {
 		return tokens.Rotation{}, store.ErrNotFound
 	}
-	if err := usable(r, now); err != nil {
+	if err := replayable(r, now); err != nil {
 		return tokens.Rotation{}, err
 	}
 	if !continues(r.row, req.Next) {

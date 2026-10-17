@@ -19,9 +19,10 @@ import (
 )
 
 type fakeOutbox struct {
-	n    atomic.Int64
-	err  error
-	gate chan struct{}
+	n      atomic.Int64
+	err    error
+	gate   chan struct{}
+	ctxErr bool
 }
 
 func (o *fakeOutbox) Retry(ctx context.Context) error {
@@ -31,6 +32,9 @@ func (o *fakeOutbox) Retry(ctx context.Context) error {
 		case <-o.gate:
 		case <-ctx.Done():
 		}
+	}
+	if o.ctxErr {
+		return ctx.Err()
 	}
 	return o.err
 }
@@ -201,6 +205,18 @@ func TestStopCancelsARunningPass(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("Stop must cancel and join the pass")
+	}
+}
+
+func TestStopDuringAPassEmitsNoRetryEvent(t *testing.T) {
+	o := &fakeOutbox{gate: make(chan struct{}), ctxErr: true}
+	s := &sink{}
+	r := newReaper(t, o, clock.NewTest(time.Now()), s)
+	r.Start()
+	eventually(t, func() bool { return o.n.Load() == 1 })
+	r.Stop()
+	if got := s.all(); len(got) != 0 {
+		t.Fatalf("a clean shutdown must not raise an outage signal, got %d events", len(got))
 	}
 }
 
