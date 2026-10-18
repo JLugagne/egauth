@@ -92,7 +92,7 @@ func TestRevertLinkNeverGivesTheMailboxHolderASessionPastTheSecondFactor(t *test
 		require.False(t, login.Established(), "mailbox access alone yielded a session on a passkey account: "+journeytest.Describe(login))
 	})
 
-	t.Run("TOTP enrolled after an earlier password-change notice", func(t *testing.T) {
+	t.Run("TOTP enrolled after an earlier password-change notice is removed with it", func(t *testing.T) {
 		w := journeytest.NewWorld(t, journeytest.Settings{})
 		email := w.FreshEmail("anchor")
 		sub := w.SeedUser(email, false)
@@ -115,9 +115,9 @@ func TestRevertLinkNeverGivesTheMailboxHolderASessionPastTheSecondFactor(t *test
 		w.Clock.Advance(24 * time.Hour)
 
 		login := mailboxThiefSignsIn(t, w, email, notice)
-		require.False(t, login.Established(), "a revert link of an earlier password-change notice stripped a TOTP enrolled two days later: "+journeytest.Describe(login))
+		require.False(t, login.Established(), "a revert link of an earlier password-change notice yielded a session past the second factor: "+journeytest.Describe(login))
 		confirmed, err := w.Storage.MFA.HasConfirmedTOTP(context.Background(), sub)
 		require.NoError(t, err)
-		require.True(t, confirmed, "the revert of a password change removed a TOTP enrolled two days after it")
+		require.False(t, confirmed, "the revert of a password change kept a TOTP enrolled after it")
 	})
 }

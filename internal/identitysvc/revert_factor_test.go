@@ -96,7 +96,7 @@ func TestRevertThatRemovesTheLastSecondFactorDisablesTheAccountInsteadOfMailingA
 	})
 }
 
-func TestRevertOfAnEarlierNoticeKeepsAFactorEnrolledAfterIt(t *testing.T) {
+func TestRevertOfAnEarlierNoticeRemovesAFactorEnrolledAfterIt(t *testing.T) {
 	w := newAcctWorld(t, nil)
 	sub := w.createVerified("owner@example.com", goodPass)
 	expectStatus(t, w.call(routes.PasswordChange, w.login(sub), map[string]string{routes.FieldPassword: goodPass, routes.FieldNewPassword: newPass}), http.StatusOK)
@@ -107,18 +107,16 @@ func TestRevertOfAnEarlierNoticeKeepsAFactorEnrolledAfterIt(t *testing.T) {
 	enrollConfirmedTOTP(t, w, sub, began)
 	w.clock.Advance(24 * time.Hour)
 
-	if got := revertState(t, w, rotated.RevertLink); got != "security_reverted" {
+	if got := revertState(t, w, rotated.RevertLink); got != "account_disabled" {
 		t.Fatalf("revert answered state %q", got)
 	}
-	if !hasConfirmedTOTP(t, w, sub) {
-		t.Fatal("the revert of a password change removed a TOTP enrolled two days after it")
+	if hasConfirmedTOTP(t, w, sub) {
+		t.Fatal("the revert of a password change kept a TOTP enrolled after it, which a hijacker would keep")
 	}
-	if !w.user(sub).DisabledAt.IsZero() || !w.user(sub).MustChange {
-		t.Fatal("the revert of a password change must lock the password down and keep the account usable")
+	if w.user(sub).DisabledAt.IsZero() {
+		t.Fatal("the revert removed the only second factor and left the account usable from the mailbox alone")
 	}
-	if resets := w.waitKind("reset", 1); resets[0].to != "owner@example.com" {
-		t.Fatalf("reset sent to %q", resets[0].to)
-	}
+	requireNoResetReachesTheMailbox(t, w, "owner@example.com")
 }
 
 func TestRevertOfATOTPNoticeRemovesThatTOTPHoweverSlowlyItWasConfirmed(t *testing.T) {
@@ -143,7 +141,7 @@ func TestRevertOfATOTPNoticeRemovesThatTOTPHoweverSlowlyItWasConfirmed(t *testin
 	}
 }
 
-func TestALaterChangeStaysRevertibleAfterTheRevertOfAnEarlierNotice(t *testing.T) {
+func TestTheRevertOfAnEarlierNoticeRemovesTheHijackersLaterPasskeyAndKeepsTheOwners(t *testing.T) {
 	w := newAcctWorld(t, nil)
 	sub := w.createVerified("owner@example.com", goodPass)
 	savePasskey(t, w, sub, "owner-key", w.clock.Now())
@@ -153,21 +151,16 @@ func TestALaterChangeStaysRevertibleAfterTheRevertOfAnEarlierNotice(t *testing.T
 	rotated := noticeTo(t, w, "owner@example.com", identitysvc.SecurityCredentialRotated)
 	w.clock.Advance(time.Hour)
 	addHijackerPasskey(t, w, sub, "hijacker-key")
-	added := noticeTo(t, w, "owner@example.com", identitysvc.SecurityFactorsChanged)
 	w.clock.Advance(time.Hour)
 
 	if got := revertState(t, w, rotated.RevertLink); got != "security_reverted" {
 		t.Fatalf("revert of the password change answered state %q", got)
 	}
-	if keys := passkeyIDs(t, w, sub); !keys["hijacker-key"] {
-		t.Fatalf("the revert of a password change removed a passkey added an hour after it: %v", keys)
-	}
-	w.clock.Advance(time.Minute)
-	if got := revertState(t, w, added.RevertLink); got != "security_reverted" {
-		t.Fatalf("revert of the passkey addition answered state %q", got)
-	}
 	if keys := passkeyIDs(t, w, sub); keys["hijacker-key"] || !keys["owner-key"] {
-		t.Fatalf("passkeys after both reverts = %v, want only the owner's", keys)
+		t.Fatalf("passkeys after the revert = %v, want only the owner's", keys)
+	}
+	if !w.user(sub).DisabledAt.IsZero() {
+		t.Fatal("the owner's own passkey survives, so the account must stay usable")
 	}
 }
 

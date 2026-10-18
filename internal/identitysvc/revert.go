@@ -185,26 +185,10 @@ type revertPlan struct {
 	address identity.Identifier
 	restore bool
 	since   time.Time
-	until   time.Time
 }
 
 func (p revertPlan) covers(at time.Time) bool {
-	return !at.Before(p.since.Add(-revertSlack)) && (p.until.IsZero() || !at.After(p.until.Add(revertSlack)))
-}
-
-func (p revertPlan) spans(start, end time.Time) []interval {
-	if p.until.IsZero() {
-		return []interval{{p.since, end}}
-	}
-	hi := p.until.Add(revertSlack)
-	if !hi.Before(start) {
-		return []interval{{p.since, maxTime(hi, end)}}
-	}
-	return []interval{{p.since, hi}, {start, end}}
-}
-
-type interval struct {
-	from, to time.Time
+	return !at.Before(p.since.Add(-revertSlack))
 }
 
 func (h *acctHandlers) revert(w http.ResponseWriter, r *httpx.Request) {
@@ -341,11 +325,7 @@ func (a *Accounts) planRevert(ctx context.Context, rec ceremony.Record, t core.T
 	case !first.IsZero() && first.Before(since):
 		since = first
 	}
-	until := changedAt
-	if restore {
-		until = time.Time{}
-	}
-	return revertPlan{user: u, address: addr, restore: restore, since: since, until: until}, nil
+	return revertPlan{user: u, address: addr, restore: restore, since: since}, nil
 }
 
 type revertOutcome struct {
@@ -354,7 +334,7 @@ type revertOutcome struct {
 
 type revertRun struct {
 	*Accounts
-	first, last time.Time
+	last time.Time
 }
 
 func (r *revertRun) Apply(ctx context.Context, m identity.Mutation) (identity.Applied, error) {
@@ -363,21 +343,11 @@ func (r *revertRun) Apply(ctx context.Context, m identity.Mutation) (identity.Ap
 		if it.CreatedAt.IsZero() {
 			continue
 		}
-		if r.first.IsZero() || it.CreatedAt.Before(r.first) {
-			r.first = it.CreatedAt
-		}
 		if it.CreatedAt.After(r.last) {
 			r.last = it.CreatedAt
 		}
 	}
 	return ap, err
-}
-
-func (r *revertRun) start(began time.Time) time.Time {
-	if r.first.IsZero() || began.Before(r.first) {
-		return began
-	}
-	return r.first
 }
 
 func (r *revertRun) end() time.Time {
@@ -389,7 +359,6 @@ func (r *revertRun) end() time.Time {
 
 func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, error) {
 	sub := plan.user.Subject
-	began := r.clock.Now()
 	if err := r.lockDown(ctx, sub); err != nil {
 		return revertOutcome{}, err
 	}
@@ -410,8 +379,8 @@ func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, 
 	if err := r.removeIdentifiers(ctx, plan); err != nil {
 		return revertOutcome{}, mutationProblem(err)
 	}
-	spans := plan.spans(r.start(began), r.end())
-	widens, err := r.spanWidens(ctx, sub, spans)
+	end := r.end()
+	widens, err := r.spanWidens(ctx, sub, plan.since, end)
 	if err != nil {
 		return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
 	}
@@ -420,10 +389,8 @@ func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, 
 			return revertOutcome{}, mutationProblem(err)
 		}
 	}
-	for _, s := range spans {
-		if err := r.recordSpan(ctx, plan.user, s.from, s.to); err != nil {
-			return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
-		}
+	if err := r.recordSpan(ctx, plan.user, plan.since, end); err != nil {
+		return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
 	}
 	r.dropAnchor(ctx, sub, plan.address)
 	if plan.restore && !out.taken {

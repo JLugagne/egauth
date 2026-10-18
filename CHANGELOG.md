@@ -58,9 +58,10 @@ before deploying: **every user logs in again**.
   email-change links issued by v0.16 do not work after the upgrade.
 - Federated identities are never linked automatically to an existing account; linking is an
   authenticated, sensitive action.
-- A security-revert link only removes what changed during the window of the notice it came from.
-  When that removes the account's last second factor, the account is disabled instead of mailing a
-  password reset: mailbox access alone never yields a session past the second factor.
+- A security-revert link removes every factor, federated link and verified identifier added since
+  the notice it came from, including what a hijacker added after it. When that removes the
+  account's last second factor, the account is disabled instead of mailing a password reset:
+  mailbox access alone never yields a session past the second factor.
 - `Auth.Close` returns within a bounded time: queued deliveries get a short grace period, then
   are cancelled and reported as `event.DeliveryFailed`, and a reaper pass in progress is cancelled
   and joined.
