@@ -69,3 +69,23 @@ func TestSetInstancesDividesTheBudget(t *testing.T) {
 	l.SetInstances(0)
 	l.SetInstances(1)
 }
+
+func TestAnEarlierReadingNeverRefillsABucket(t *testing.T) {
+	ctx := context.Background()
+	at := time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	tc := clock.NewTest(at)
+	l := memory.NewWithClock(tc.Clock())
+	k := limiter.Key{Class: limiter.SelfTest, Value: "v"}
+	for range k.Class.Budget().Burst {
+		_, err := l.Allow(ctx, k)
+		require.NoError(t, err)
+	}
+	tc.Set(at.Add(-k.Class.Budget().Refill))
+	d, err := l.Allow(ctx, k)
+	require.NoError(t, err)
+	require.False(t, d.Allowed)
+	tc.Set(at)
+	d, err = l.Allow(ctx, k)
+	require.NoError(t, err)
+	require.False(t, d.Allowed, "a call that read the clock earlier moved the bucket back in time and minted a token")
+}

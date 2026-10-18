@@ -110,10 +110,10 @@ func (l *Limiter) Allow(ctx context.Context, key limiter.Key) (limiter.Decision,
 	if !key.Valid() {
 		return limiter.Decision{}, errors.New("limiter: invalid key")
 	}
-	now := l.clk.Now()
 	sk := string(key.StorageKey())
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	now := l.clk.Now()
 	budget := key.Class.Budget().PerInstance(l.instances)
 	b, ok := l.buckets[sk]
 	if !ok {
@@ -127,7 +127,9 @@ func (l *Limiter) Allow(ctx context.Context, key limiter.Key) (limiter.Decision,
 		l.buckets[sk] = b
 	}
 	b.tokens = refilled(b, budget, now)
-	b.updated = now
+	if now.After(b.updated) {
+		b.updated = now
+	}
 	if b.tokens >= 1 {
 		b.tokens--
 		return limiter.Decision{Allowed: true}, nil
