@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"github.com/JLugagne/egauth/passwords"
@@ -160,7 +161,26 @@ func (h *Hasher) NeedsRehash(hash string) bool {
 // Ensure *Hasher satisfies the passwords.Hasher interface at compile time.
 var _ passwords.Hasher = (*Hasher)(nil)
 
-// Hasher implements the passwords.Hasher interface using Argon2id.
+var idKey = argon2.IDKey
+
+var derivations = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)))
+
+func derive(ctx context.Context, password, salt []byte, time, memory uint32, threads uint8, keyLen uint32) ([]byte, error) {
+	select {
+	case derivations <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	defer func() { <-derivations }()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return idKey(password, salt, time, memory, threads, keyLen), nil
+}
+
+// Hasher implements the passwords.Hasher interface using Argon2id. Every Hasher of the process
+// shares a budget of max(2, GOMAXPROCS) concurrent derivations, so concurrent logins cannot
+// exhaust memory; Hash and Compare wait for a slot and return ctx.Err() when ctx ends first.
 type Hasher struct {
 	time    uint32
 	memory  uint32
@@ -191,7 +211,10 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 		return "", errors.Join(passwords.ErrHashFailed, err)
 	}
 
-	hash := argon2.IDKey([]byte(password), salt, h.time, h.memory, h.threads, h.keyLen)
+	hash, err := derive(ctx, []byte(password), salt, h.time, h.memory, h.threads, h.keyLen)
+	if err != nil {
+		return "", err
+	}
 
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
@@ -297,7 +320,10 @@ func (h *Hasher) Compare(ctx context.Context, phc passwords.PHC, password string
 		return err
 	}
 
-	comparisonHash := argon2.IDKey([]byte(password), salt, time, memory, threads, keyLen)
+	comparisonHash, err := derive(ctx, []byte(password), salt, time, memory, threads, keyLen)
+	if err != nil {
+		return err
+	}
 
 	if subtle.ConstantTimeCompare(decodedHash, comparisonHash) == 1 {
 		return nil
