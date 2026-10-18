@@ -76,7 +76,6 @@ func HasherContractTesting(t *testing.T, hasher passwords.Hasher) {
 		hash, err := hasher.Hash(ctx, password)
 		require.NoError(t, err, "Hash should succeed")
 
-		// Modify the hash slightly
 		tamperedHash := hash + "tampered"
 
 		err = hasher.Compare(ctx, passwords.PHC(tamperedHash), password)

@@ -144,9 +144,6 @@ func (h *Hasher) NeedsRehash(hash string) bool {
 	}
 	saltLen := uint32(len(salt))
 
-	// Any stored parameter weaker than this hasher's target means the hash was
-	// produced under a lower cost (an imported/migrated row, or a pre-upgrade
-	// default) and must be strengthened.
 	if memory < h.memory ||
 		time < h.time ||
 		threads < h.threads ||
@@ -189,23 +186,18 @@ type Hasher struct {
 	saltLen uint32
 }
 
-// Hash securely hashes the password using Argon2id and returns the PHC string format.
+// Hash hashes password with Argon2id and returns it in PHC form
+// ($argon2id$v=19$m=<KiB>,t=<iterations>,p=<threads>$<salt>$<hash>). It returns
+// passwords.ErrHashFailed for an empty password, passwords.ErrPasswordTooLong past
+// passwords.MaxPasswordLength (checked before the KDF, so oversized input costs nothing), and
+// ctx.Err() when ctx ends before a derivation slot frees.
 func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 	if password == "" {
 		return "", passwords.ErrHashFailed
 	}
-	// Bound attacker-controlled input before running the (deliberately expensive) KDF, to
-	// prevent a pre-auth CPU/memory amplification DoS. See passwords.MaxPasswordLength.
 	if len(password) > passwords.MaxPasswordLength {
 		return "", passwords.ErrPasswordTooLong
 	}
-	// Honor cancellation before running the deliberately expensive KDF, so a cancelled or
-	// timed-out request cannot still cost a full Argon2id pass (memory + CPU). argon2.IDKey is
-	// not itself interruptible, so this pre-call check is the only available cancellation point.
-	if err := ctx.Err(); err != nil {
-		return "", err
-	}
-
 	salt := make([]byte, h.saltLen)
 	if _, err := rand.Read(salt); err != nil {
 		return "", errors.Join(passwords.ErrHashFailed, err)
@@ -219,29 +211,25 @@ func (h *Hasher) Hash(ctx context.Context, password string) (string, error) {
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
 
-	// Format: $argon2id$v=19$m=65536,t=1,p=4$<salt>$<hash>
 	phc := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version, h.memory, h.time, h.threads, b64Salt, b64Hash)
 
 	return phc, nil
 }
 
-// Compare checks a plaintext password against a PHC formatted Argon2id hash.
+// Compare checks password against the PHC hash phc in constant time. Every refusal is
+// passwords.ErrInvalidPassword, so a corrupt or forged stored hash cannot be told apart from a wrong
+// password: an empty or oversized candidate is refused before the KDF (which keeps an empty
+// password as fast as the decoy path, see SECURITY.md), and so is a stored hash whose cost would
+// crash or exhaust the KDF (t outside [MinTime, MaxTime], p below MinThreads, an empty key, m below
+// the 8*p KiB argon2 clamps to or above MaxMemoryKiB). It returns ctx.Err() when ctx ends before
+// a derivation slot frees.
 func (h *Hasher) Compare(ctx context.Context, phc passwords.PHC, password string) error {
 	hash := string(phc)
-	// Reject empty candidates immediately, mirroring Hash() which also short-circuits before
-	// the KDF on empty input. No stored hash can ever correspond to "": Hash rejects empty
-	// passwords, so the round-trip is impossible. Returning here restores timing symmetry with
-	// the decoy path (decoyHash -> Hash("") also returns instantly), preventing an
-	// empty-password timing oracle that would otherwise reveal which accounts have a stored
-	// password hash. See TASK-065 / SECURITY.md enumeration-defence contract.
 	if password == "" {
 		return passwords.ErrInvalidPassword
 	}
 
-	// Refuse to run the KDF on oversized candidate input (pre-auth DoS guard). A stored hash
-	// can only have come from an in-bounds password, so an oversized candidate cannot match;
-	// report it as an ordinary mismatch to avoid leaking a distinct signal.
 	if len(password) > passwords.MaxPasswordLength {
 		return passwords.ErrInvalidPassword
 	}
@@ -280,44 +268,17 @@ func (h *Hasher) Compare(ctx context.Context, phc passwords.PHC, password string
 	}
 	keyLen := uint32(len(decodedHash))
 
-	// Validate the parsed cost parameters before handing them to argon2.IDKey. They come from
-	// a stored PHC string that may have been populated by a consumer (import, migration, or a
-	// hand-edited DB row), so they are untrusted input on the verify path. golang.org/x/crypto
-	// v0.52.0 argon2.deriveKey PANICS on time<1 ("number of rounds too small") and threads<1
-	// ("parallelism degree too low"), and a zero-length final hash segment (keyLen==0) triggers
-	// a nil-pointer panic in extractKey -> blake2bHash, where blake2b.New(0, nil) returns a nil
-	// hash whose Write is then called. A single malformed row must never crash the verify path,
-	// so we treat any such hash as a non-match. We reuse the opaque ErrInvalidPassword returned
-	// throughout Compare so a corrupt or forged stored hash is indistinguishable from an
-	// ordinary password mismatch (no distinct signal to an attacker).
 	if time < 1 || threads < 1 || keyLen == 0 {
 		return passwords.ErrInvalidPassword
 	}
-	// Upper bound on the iteration count, mirroring the MaxMemoryKiB ceiling below: t is the one
-	// cost parameter the parser accepts without an upper limit, and argon2.IDKey is uninterruptible.
 	if time > MaxTime {
 		return passwords.ErrInvalidPassword
 	}
-	// deriveKey internally clamps memory up to a per-thread minimum of 8*threads KiB
-	// (2*syncPoints*threads, syncPoints==4). A stored memory below that floor could not have
-	// produced this hash (IDKey would have re-derived with the clamped value), so the hash is
-	// corrupt; reject it rather than silently verify against a different cost than was recorded.
 	if memory < 8*uint32(threads) {
 		return passwords.ErrInvalidPassword
 	}
-	// Reject an unreasonably large memory parameter before handing it to argon2.IDKey.
-	// argon2.IDKey allocates memory*1024 bytes; a uint32 goes up to ~4 TiB. A tampered or
-	// corrupt stored hash row with e.g. m=4000000000 would OOM-kill the process on the
-	// victim's next login. MaxMemoryKiB (512 MiB) is far above any legitimate operational
-	// cost and ensures a single bad row cannot trigger a multi-GiB allocation.
 	if memory > MaxMemoryKiB {
 		return passwords.ErrInvalidPassword
-	}
-
-	// Honor cancellation before the deliberately expensive KDF (same rationale as Hash): a
-	// cancelled or timed-out verification must not still cost a full Argon2id pass.
-	if err := ctx.Err(); err != nil {
-		return err
 	}
 
 	comparisonHash, err := derive(ctx, []byte(password), salt, time, memory, threads, keyLen)

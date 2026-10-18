@@ -157,18 +157,15 @@ func (f SinkFunc) EmitEvent(ctx context.Context, e Event) { f(ctx, e) }
 // Emit sends e to sink when sink is non-nil, so a nil (unconfigured) sink is a cheap no-op. It is
 // meant for applications emitting their own events: library code emits through internal/audit,
 // which enforces the attribute registry, and a guard test rejects any other library emitter. A
-// panic in the sink is recovered (see safeEmit) so a misbehaving audit sink can never change a
-// handler's client-visible behavior — the invariant this package documents.
+// panic in the sink is recovered and logged, so a misbehaving audit sink can never change a
+// handler's client-visible behavior (the invariant this package documents); a blocking sink stays
+// the implementation's responsibility, as the Sink contract requires non-blocking dispatch.
 func Emit(ctx context.Context, sink Sink, e Event) {
 	if sink != nil {
 		safeEmit(ctx, sink, e)
 	}
 }
 
-// safeEmit delivers e to a single sink, recovering any panic so it cannot unwind into the caller's
-// auth path. A recovered panic is logged (not silently swallowed) because a broken audit sink is
-// itself a security-relevant condition. Blocking sinks remain the implementation's responsibility
-// (the Sink contract requires non-blocking dispatch); this only contains panics.
 func safeEmit(ctx context.Context, sink Sink, e Event) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -190,8 +187,6 @@ func (m multiSink) EmitEvent(ctx context.Context, e Event) {
 	e = e.Public()
 	for _, s := range m {
 		if s != nil {
-			// Contain each member's panic so one misbehaving sink cannot stop the fan-out to the
-			// others (or unwind into the caller).
 			safeEmit(ctx, s, e)
 		}
 	}

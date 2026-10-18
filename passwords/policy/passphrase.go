@@ -22,7 +22,9 @@ const (
 // composition rules (no "must contain an uppercase/number/symbol") in favor of length, and
 // instead screens secrets against a denylist of common/compromised values and, optionally, a
 // pluggable BreachChecker. This matches current guidance: long passphrases, no forced
-// character classes, no periodic rotation, but reject known-bad secrets.
+// character classes, no periodic rotation, but reject known-bad secrets. Length counts characters
+// (runes), not bytes. Denylist entries match after removing all whitespace and lowercasing, so a
+// cosmetic edit of a banned secret is still refused.
 type PassphrasePolicy struct {
 	// MinLength is the minimum number of Unicode code points (not bytes), so multi-byte
 	// passphrases are not unfairly penalized.
@@ -98,7 +100,6 @@ func (p *PassphrasePolicy) Verify(ctx context.Context, password string) error {
 	if p.breach != nil {
 		breached, err := p.breach.IsBreached(ctx, password)
 		if err != nil {
-			// Propagate unchanged: the caller decides fail-open vs fail-closed.
 			return err
 		}
 		if breached {
@@ -109,16 +110,10 @@ func (p *PassphrasePolicy) Verify(ctx context.Context, password string) error {
 	return nil
 }
 
-// normalizeDenyEntry canonicalizes a secret for denylist comparison by removing ALL
-// whitespace and lowercasing, so trivial cosmetic edits ("correct horse battery staple",
-// "password password") cannot slip a banned secret past an exact-string match.
 func normalizeDenyEntry(s string) string {
 	return strings.ToLower(strings.Join(strings.Fields(s), ""))
 }
 
-// builtinDenylist is a minimal backstop of common secrets. It is intentionally small — real
-// compromised-credential screening should come from a BreachChecker. Entries are stored
-// already normalized (lowercase).
 var builtinDenylist = []string{
 	"password",
 	"password1",

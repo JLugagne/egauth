@@ -75,9 +75,6 @@ func NewDefaultPolicyFrom(c DefaultConfig) *DefaultPolicy {
 
 // Verify checks if the provided password meets all configured policy requirements.
 func (p *DefaultPolicy) Verify(ctx context.Context, password string) error {
-	// Length is measured in characters (runes), not bytes, so multibyte passwords are neither
-	// under-counted against MinLength nor over-restricted against MaxLength. This matches the
-	// passphrase policy. (The pre-auth byte-length DoS cap lives in the hasher, not here.)
 	length := utf8.RuneCountInString(password)
 	if length < p.MinLength {
 		return passwords.ErrPasswordTooShort

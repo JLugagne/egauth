@@ -91,8 +91,6 @@ func LoadPasswords(r io.Reader) (*Checker, error) {
 // IsBreached reports whether password's SHA-1 is in the loaded set. The only error it can
 // return is the context error when ctx is already cancelled.
 func (c *Checker) IsBreached(ctx context.Context, password string) (bool, error) {
-	// Honor cancellation so a cancelled or timed-out password-policy check fails fast rather
-	// than continuing the verification chain.
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
@@ -105,7 +103,6 @@ func hashUpper(password string) string {
 	return strings.ToUpper(hex.EncodeToString(sum[:]))
 }
 
-// normalizeHash validates a 40-char hex SHA-1 and returns it uppercased.
 func normalizeHash(s string) (string, error) {
 	if len(s) != 40 {
 		return "", fmt.Errorf("offline: invalid SHA-1 hash %q: want 40 hex chars", s)

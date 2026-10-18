@@ -37,8 +37,6 @@ var Denied = map[string]bool{
 	"kek-fixture-0123456789abcdefghij":                     true,
 }
 
-// markers are substrings that appear in published example credentials. A key containing one is
-// refused even when it is not byte-identical to a listed entry.
 var markers = []string{
 	"minimum-hs256-signing-secret",
 }

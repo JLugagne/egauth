@@ -33,8 +33,6 @@ import (
 const (
 	defaultBaseURL   = "https://api.pwnedpasswords.com"
 	defaultUserAgent = "egauth-hibp"
-	// maxResponseBytes caps the range response. Real responses are tens of KB even with padding;
-	// the cap defends against a misbehaving/hostile endpoint streaming unbounded data.
 	maxResponseBytes = 4 << 20 // 4 MiB
 )
 
@@ -85,6 +83,8 @@ func New(c Config) *Client {
 }
 
 // IsBreached reports whether password appears in the HIBP corpus at least Config.Threshold times.
+// A range response is read up to 1 MiB; a longer one is an upstream failure handled by the
+// configured failure posture, never a "not breached" answer from a truncated body.
 func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) {
 	sum := sha1.Sum([]byte(password))
 	full := strings.ToUpper(hex.EncodeToString(sum[:]))
@@ -107,11 +107,6 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 		return c.fail(fmt.Errorf("hibp: unexpected status %d", resp.StatusCode))
 	}
 
-	// Read with a hard cap, taking one byte past it: if the body exceeds the cap it is truncated,
-	// and a missing suffix in a TRUNCATED body must NOT be treated as "not breached" (that would
-	// be a silent false negative — even under the fail-closed default). Surface it as an upstream
-	// failure so the configured posture decides. Genuine range responses are tens of KB, well
-	// under the cap; this only guards a malformed/hostile endpoint (Config.BaseURL allows mirrors).
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return c.fail(err)
@@ -127,14 +122,8 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 	return count >= c.threshold, nil
 }
 
-// scanForSuffix returns the sighting count for suffix in a HIBP range response (lines of
-// "SUFFIX:COUNT"), or 0 if the suffix is absent. Comparison is case-insensitive.
 func scanForSuffix(r io.Reader, suffix string) (int, error) {
 	sc := bufio.NewScanner(r)
-	// Raise the per-line cap well above bufio's 64 KiB default so a large (but within the
-	// response cap) line from a misbehaving endpoint does not spuriously error — which under
-	// fail-open would otherwise be swallowed into a silent false negative. The body is already
-	// bounded by maxResponseBytes, so no accepted line can exceed it.
 	sc.Buffer(make([]byte, 0, 64*1024), maxResponseBytes)
 	for sc.Scan() {
 		suf, cnt, found := strings.Cut(sc.Text(), ":")
@@ -156,7 +145,6 @@ func scanForSuffix(r io.Reader, suffix string) (int, error) {
 	return 0, nil
 }
 
-// fail applies the configured failure posture: swallow (false, nil) when fail-open, else return.
 func (c *Client) fail(err error) (bool, error) {
 	if c.failOpen {
 		return false, nil
