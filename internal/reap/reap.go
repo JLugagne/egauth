@@ -151,9 +151,21 @@ func (r *Reaper) Poke() {
 }
 
 // RunOnce runs one pass now, waiting for a running one: it retries the outbox and runs every store
-// Reaper. It returns every failure joined, after emitting each as event.LifecycleRetry, and
-// ErrStopped once Stop was called.
+// Reaper. The pass is bounded by PassTimeout and cancelled by Stop, which waits for it. It returns
+// every failure joined, after emitting each as event.LifecycleRetry, and ErrStopped once Stop was
+// called.
 func (r *Reaper) RunOnce(ctx context.Context) error {
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return ErrStopped
+	}
+	r.wg.Add(1)
+	r.mu.Unlock()
+	defer r.wg.Done()
+	ctx, cancel := context.WithTimeout(ctx, PassTimeout)
+	defer cancel()
+	defer context.AfterFunc(r.base, cancel)()
 	r.pass.Lock()
 	defer r.pass.Unlock()
 	if r.base.Err() != nil {

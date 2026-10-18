@@ -254,3 +254,24 @@ func TestRunOnceAfterStopDoesNotRunAPass(t *testing.T) {
 		t.Fatalf("a stopped reaper ran a pass: outbox %d reapers %d", o.n.Load(), rp.n.Load())
 	}
 }
+
+func TestStopCancelsAndJoinsARunOnceOfTheCaller(t *testing.T) {
+	o := &fakeOutbox{gate: make(chan struct{})}
+	r := newReaper(t, o, clock.NewTest(time.Now()), &sink{})
+	ran := make(chan error, 1)
+	go func() { ran <- r.RunOnce(context.Background()) }()
+	eventually(t, func() bool { return o.n.Load() == 1 })
+	stopped := make(chan struct{})
+	go func() { r.Stop(); close(stopped) }()
+	select {
+	case <-stopped:
+		select {
+		case <-ran:
+		default:
+			t.Fatal("Stop returned while a RunOnce pass was still running against the stores")
+		}
+	case <-time.After(5 * time.Second):
+		close(o.gate)
+		t.Fatal("Stop neither cancelled nor joined the RunOnce pass")
+	}
+}
