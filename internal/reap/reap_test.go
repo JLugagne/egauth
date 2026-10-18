@@ -266,7 +266,8 @@ func TestStopCancelsAndJoinsARunOnceOfTheCaller(t *testing.T) {
 	select {
 	case <-stopped:
 		select {
-		case <-ran:
+		case err := <-ran:
+			t.Logf("RunOnce returned %v", err)
 		default:
 			t.Fatal("Stop returned while a RunOnce pass was still running against the stores")
 		}

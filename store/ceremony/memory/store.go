@@ -3,6 +3,7 @@
 package memory
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"slices"
@@ -196,7 +197,7 @@ func (s *Store) evict(keep key, now time.Time, same func(*entry) bool, limit int
 		if c := b.e.row.CreatedAt.Compare(a.e.row.CreatedAt); c != 0 {
 			return c
 		}
-		return int(b.e.seq) - int(a.e.seq)
+		return cmp.Compare(b.e.seq, a.e.seq)
 	})
 	victims := others[limit-1:]
 	for _, v := range victims {

@@ -1,0 +1,69 @@
+version: "2"
+
+# gosec runs on every module (make lint). Each exclusion below was reviewed finding by finding and
+# names the rule, the files and why the finding is not a defect. Add one only with such a reason;
+# never exclude a rule repository-wide.
+linters:
+  default: standard
+  enable:
+    - gosec
+    - bodyclose
+  exclusions:
+    rules:
+      # Tests and their fixtures: temporary files, short test keys, subprocesses of the scripts
+      # under test and httptest responses are not shipped.
+      - path: '_test\.go$'
+        linters: [gosec, bodyclose]
+      # Shipped test-support packages, imported only by tests: fixed test credentials, fixture
+      # digests, a seeded matrix shuffle and cookie jars that replay what the server set.
+      - path: '^(egauthtest|webauthntest|internal/journeytest|internal/session/backendtest|store/[a-z]+/storetest)/'
+        linters: [gosec]
+        text: 'G101|G115|G124|G404|G505|G710'
+      # Developer tooling reads and writes the repository files it is pointed at.
+      - path: '^tools/'
+        linters: [gosec]
+        text: 'G(204|301|304|306|703)'
+      # Names, not credentials: event attribute keys, form field names, route paths ending in
+      # /token, cookie names and the token endpoints of the fixed providers.
+      - path: '^(event/|internal/httpx/fields\.go|internal/routes/paths\.go|internal/lifecycle/matrix\.go|internal/session/(jwt|stateful)/transport\.go|federation/providers/fixed\.go)'
+        linters: [gosec]
+        text: 'G101'
+      # HMAC-SHA1 is the RFC 6238 TOTP default every authenticator app implements.
+      - path: '^internal/mfasvc/totp\.go$'
+        linters: [gosec]
+        text: 'G505|G401'
+      # SHA-1 is mandated by the HIBP k-anonymity range API and its offline corpus.
+      - path: '^passwords/breach/'
+        linters: [gosec]
+        text: 'G401|G505'
+      # The SSRF guard itself: every dial goes through Allowance.control.
+      - path: '^internal/outbound/outbound\.go$'
+        linters: [gosec]
+        text: 'G704'
+      # Cookie attributes are set from the Policy (Secure, HttpOnly, SameSite) in Policy.cookie.
+      - path: '^internal/cookie/cookie\.go$'
+        linters: [gosec]
+        text: 'G124'
+      # The poller keeps its cancel function and Stop calls it.
+      - path: '^internal/revoke/revoke\.go$'
+        linters: [gosec]
+        text: 'G118'
+      # The response body is closed by decodeJSON (federationsvc) and Query.Breached (breach); the
+      # observed transport hands its response to the caller.
+      - path: '^(internal/federationsvc/(discovery|protocol)|passwords/breach/breach|internal/outbound/outbound)\.go$'
+        linters: [bodyclose]
+      # Bounded conversions: lengths capped by validation (tenant 128 bytes, limiter value
+      # maxValueLen, key id 16 bytes, PHC salt and hash lengths), timestamps and enums read back
+      # from authenticated sealed data or from columns the store wrote from the narrower Go type,
+      # and an event code checked against its uint16 source right after the conversion.
+      # The instance count is the number of live heartbeat rows.
+      - path: '^(internal/ceremonycodec/sealer|internal/core/codec|internal/identitysvc/revert|internal/identitysvc/revert_mark|internal/passkeysvc/login|kek/local|passwords/argon2/hasher|store/limiter/limiter|liveness|wiring_adapters)\.go$'
+        linters: [gosec]
+        text: 'G115'
+      - path: '^adapters/pgx/store/'
+        linters: [gosec]
+        text: 'G115'
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

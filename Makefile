@@ -2,7 +2,7 @@
 
 # Pinned tool versions. CI runs `make lint` and `make vulncheck`, so these are the single source;
 # scripts/sync-versions.sh --check fails when ci.yml or RELEASING.md carry a different pin.
-GOLANGCI_LINT_VERSION := v2.14.0
+GOLANGCI_LINT_VERSION := v2.15.0
 GOVULNCHECK_VERSION   := v1.8.0
 # RELEASING.md repeats this pin (checked by sync-versions.sh). Update deliberately after reviewing the upstream release.
 SYFT_VERSION          := v1.54.0
