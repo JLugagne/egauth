@@ -110,7 +110,9 @@ func bringUp[C any](cfg *Config[C], pol *policies, o *owned, durability store.Du
 }
 
 // Close stops background work and waits for it, returning the errors of the services it closed.
-// Close is idempotent: only the first call stops anything and returns an error. Requests served
+// The wait is bounded: queued emails and texts get a few seconds to go out, then the running
+// deliveries are cancelled and the rest are reported as event.DeliveryFailed, so a deliverer that
+// hangs cannot hold the shutdown. Close is idempotent: only the first call stops anything and returns an error. Requests served
 // after Close keep their security properties because every revocation check falls back to the
 // store.
 func (a *Auth[C]) Close() error {

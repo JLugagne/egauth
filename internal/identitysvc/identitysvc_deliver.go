@@ -2,96 +2,31 @@ package identitysvc
 
 import (
 	"context"
-	"errors"
-	"sync"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/internal/audit"
 	"github.com/JLugagne/egauth/internal/core"
+	"github.com/JLugagne/egauth/internal/delivery"
 	"github.com/JLugagne/egauth/internal/httpx"
 	"github.com/JLugagne/egauth/store/identity"
 )
 
-const (
-	deliveryWorkers = 4
-	deliveryQueue   = 256
-	deliveryTimeout = 30 * time.Second
-)
-
-var (
-	errQueueFull = errors.New("identitysvc: delivery queue full")
-	errClosed    = errors.New("identitysvc: service closed")
-)
-
-type delivery struct {
-	id     uuid.UUID
-	tenant core.TenantID
-	send   func(ctx context.Context) error
-	ctx    context.Context
-}
-
 type deliveries struct {
 	mailer Mailer
-	audit  httpx.Audit
-	mu     sync.RWMutex
-	closed bool
-	queue  chan delivery
-	wg     sync.WaitGroup
+	pool   *delivery.Pool
 }
 
 func newDeliveries(m Mailer, a httpx.Audit) *deliveries {
-	d := &deliveries{mailer: m, audit: a, queue: make(chan delivery, deliveryQueue)}
-	d.wg.Add(deliveryWorkers)
-	for range deliveryWorkers {
-		go d.work()
-	}
-	return d
-}
-
-func (d *deliveries) work() {
-	defer d.wg.Done()
-	for job := range d.queue {
-		ctx, cancel := context.WithTimeout(job.ctx, deliveryTimeout)
-		err := job.send(ctx)
-		cancel()
-		if err != nil {
-			d.failed(job, err)
-		}
-	}
+	return &deliveries{mailer: m, pool: delivery.New(a)}
 }
 
 func (d *deliveries) enqueue(ctx context.Context, t core.TenantID, id uuid.UUID, send func(context.Context) error) {
-	job := delivery{id: id, tenant: t, send: send, ctx: context.WithoutCancel(ctx)}
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-	if d.closed {
-		d.failed(job, errClosed)
-		return
-	}
-	select {
-	case d.queue <- job:
-	default:
-		d.failed(job, errQueueFull)
-	}
+	d.pool.Enqueue(ctx, t, id, send)
 }
 
-func (d *deliveries) failed(job delivery, err error) {
-	_ = d.audit.Emit(job.ctx, event.DeliveryFailed, audit.Scope{TenantID: job.tenant.String()},
-		audit.Detail{Reason: "delivery_failed"}, err, audit.A(event.KeyDeliveryID, job.id.String()))
-}
-
-func (d *deliveries) close() {
-	d.mu.Lock()
-	if !d.closed {
-		d.closed = true
-		close(d.queue)
-	}
-	d.mu.Unlock()
-	d.wg.Wait()
-}
+func (d *deliveries) close() { d.pool.Close() }
 
 func (s *Service) sendRegistrationLink(ctx context.Context, m LinkMessage) {
 	m.DeliveryID = uuid.New()
