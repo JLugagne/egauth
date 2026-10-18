@@ -145,6 +145,13 @@ func (f *follower[K, V]) get(ctx context.Context, k K) (V, error) {
 	return v, nil
 }
 
+func (f *follower[K, V]) forgetWhere(drop func(K, V) bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.entries.removeWhere(drop)
+	f.gen++
+}
+
 func (f *follower[K, V]) forget(k K) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

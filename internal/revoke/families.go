@@ -63,6 +63,21 @@ func NewFamilies(src FamilySource, cfg Config) (*Families, error) {
 	return &Families{follower: f}, nil
 }
 
+// Forget drops the cached state of family in tenant t, so the next Live reads the store. Call it
+// after revoking the family, or a revocation made on this instance is served stale until the next
+// poll.
+func (f *Families) Forget(t principal.TenantID, family uuid.UUID) {
+	f.forget(familyKey{tenant: t, id: family})
+}
+
+// ForgetSubject drops the cached state of every family of s outside lineage keep (every family
+// when keep is uuid.Nil), matching tokens.Store.RevokeForSubject.
+func (f *Families) ForgetSubject(s principal.Subject, keep uuid.UUID) {
+	f.forgetWhere(func(_ familyKey, st tokens.FamilyState) bool {
+		return st.Subject == s && (keep == uuid.Nil || st.Lineage != keep)
+	})
+}
+
 // Live returns nil when family exists in s's tenant, belongs to s and to family.Lineage, is not
 // revoked and is not past its absolute expiry. It returns ErrNotLive otherwise, and ErrUnavailable
 // when the store cannot answer.

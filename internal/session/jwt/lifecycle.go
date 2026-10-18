@@ -10,6 +10,7 @@ import (
 )
 
 func (b *Backend) revokeSubject(ctx context.Context, s principal.Subject, keep uuid.UUID) error {
+	defer b.families.ForgetSubject(s, keep)
 	if err := b.tokens.RevokeForSubject(ctx, s, keep); err != nil {
 		return unavailable(err)
 	}

@@ -241,6 +241,7 @@ func (b *Backend) Reissue(ctx context.Context, w http.ResponseWriter, cur sessio
 	if err != nil {
 		return claimsOutage(err)
 	}
+	defer b.families.Forget(a.Subject().Tenant, cur.ID())
 	if err := b.tokens.Reissue(ctx, tokens.ReissueRequest{Family: cur.ID(), Next: out.record}); err != nil {
 		if errors.Is(err, store.ErrConflict) {
 			return err
@@ -404,6 +405,7 @@ func (b *Backend) rotationFailed(ctx context.Context, s core.Subject, err error)
 }
 
 func (b *Backend) revokeUnknown(ctx context.Context, s core.Subject, family uuid.UUID, cause error) error {
+	defer b.families.Forget(s.Tenant, family)
 	if err := b.tokens.RevokeFamily(ctx, s.Tenant, family); err != nil {
 		return unavailable(errors.Join(cause, err))
 	}
@@ -457,6 +459,7 @@ func (b *Backend) Live(ctx context.Context, h session.Handle) error {
 }
 
 func (b *Backend) revoke(ctx context.Context, t principal.TenantID, family uuid.UUID) error {
+	defer b.families.Forget(t, family)
 	if err := b.tokens.RevokeFamily(ctx, t, family); err != nil {
 		return unavailable(err)
 	}

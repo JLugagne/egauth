@@ -56,6 +56,15 @@ func (l *lru[K, V]) remove(k K) {
 	delete(l.items, k)
 }
 
+func (l *lru[K, V]) removeWhere(drop func(K, V) bool) {
+	for k, n := range l.items {
+		if drop(k, n.val) {
+			l.unlink(n)
+			delete(l.items, k)
+		}
+	}
+}
+
 func (l *lru[K, V]) clear() {
 	clear(l.items)
 	l.head, l.tail = nil, nil
