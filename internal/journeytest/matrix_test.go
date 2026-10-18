@@ -230,7 +230,7 @@ func splitLines(s string) []string {
 
 func TestMatrixJourneys(t *testing.T) {
 	cells := journeytest.FullMatrix()
-	if testing.Short() {
+	if !exhaustive(t) {
 		cells = journeytest.ShortMatrix()
 	}
 	journeytest.RunMatrix(t, cells)

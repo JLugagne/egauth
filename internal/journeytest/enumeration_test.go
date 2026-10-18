@@ -461,8 +461,8 @@ func timedPairs() []timedPair {
 }
 
 func TestEnumerationTimingMediansAreWithinTolerance(t *testing.T) {
-	if testing.Short() {
-		t.Skip("timing medians over 200 samples are not part of make check")
+	if !exhaustive(t) {
+		t.Skip("timing medians over 200 samples run only with the exhaustive journeys")
 	}
 	s := shape{backend: journeytest.JWT}
 	for _, p := range timedPairs() {

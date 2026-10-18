@@ -245,6 +245,7 @@ func TestSemanticLeavesAreAllClassified(t *testing.T) {
 }
 
 func TestSemanticOptOuts(t *testing.T) {
+	full := exhaustive(t)
 	golden := journeytest.NewWorld(t, journeytest.Settings{})
 	goldenReport := journeytest.Collect(worldProbes(golden))
 	goldenReport = append(goldenReport, journeytest.Collect(resourceProbes(journeytest.NewResourceWorld(t, journeytest.Settings{})))...)
@@ -257,7 +258,7 @@ func TestSemanticOptOuts(t *testing.T) {
 	sem := make(chan struct{}, 4)
 	t.Run("variants", func(t *testing.T) {
 		for _, v := range allVariants(t) {
-			if v.golden || (testing.Short() && !v.short()) {
+			if v.golden || (!full && !v.short()) {
 				continue
 			}
 			t.Run(v.key, func(t *testing.T) {
@@ -273,7 +274,7 @@ func TestSemanticOptOuts(t *testing.T) {
 				}
 				optOuts := len(w.Auth.Posture().OptOuts) > 0
 				require.Equal(t, v.kind == vFlag, optOuts, "variant %s: the Posture must list an opt-out exactly for Insecure variants", v.key)
-				if testing.Short() && v.kind == vFlag {
+				if !full && v.kind == vFlag {
 					return
 				}
 				rep := journeytest.Collect(worldProbes(w))
@@ -305,7 +306,7 @@ func TestSemanticOptOuts(t *testing.T) {
 			})
 		}
 	})
-	if !testing.Short() {
+	if full {
 		for _, ex := range exemptions {
 			require.True(t, used[ex.Symbol], "exemption %s explains no probe any more: remove it and lower maxExemptions", ex.Symbol)
 		}
