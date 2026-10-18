@@ -239,7 +239,7 @@ type world struct {
 	t          *testing.T
 	clock      *clock.Test
 	identity   identity.Store
-	ceremonies *ceremonymem.Store
+	ceremonies ceremony.Store
 	mfa        mfa.Store
 	passkeys   passkey.Store
 	hasher     *fakeHasher

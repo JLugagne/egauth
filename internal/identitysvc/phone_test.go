@@ -3,10 +3,13 @@ package identitysvc_test
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/internal/routes"
+	"github.com/JLugagne/egauth/principal"
 	"github.com/JLugagne/egauth/store/ceremony"
 	"github.com/JLugagne/egauth/store/identity"
 )
@@ -106,4 +109,42 @@ func wrongCode(code string) string {
 		return "111111"
 	}
 	return "000000"
+}
+
+type ceremonyCalls struct {
+	ceremony.Store
+	mu    sync.Mutex
+	calls []string
+}
+
+func (c *ceremonyCalls) note(k ceremony.Kind, name string) {
+	if k != ceremony.PhoneVerification {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls = append(c.calls, name)
+}
+
+func (c *ceremonyCalls) Consume(ctx context.Context, t principal.TenantID, k ceremony.Kind, h []byte) (ceremony.Record, error) {
+	c.note(k, "Consume")
+	return c.Store.Consume(ctx, t, k, h)
+}
+
+func (c *ceremonyCalls) RecordFailure(ctx context.Context, t principal.TenantID, k ceremony.Kind, h []byte) (int, error) {
+	c.note(k, "RecordFailure")
+	return c.Store.RecordFailure(ctx, t, k, h)
+}
+
+func TestPhoneCodeChargesItsAttemptBeforeItIsCompared(t *testing.T) {
+	w := newAcctWorld(t, nil)
+	spy := &ceremonyCalls{Store: w.ceremonies}
+	w.ceremonies = spy
+	w.build()
+	tok := w.login(w.createVerified("race@example.com", goodPass))
+	handle, code := requestPhoneCode(t, w, tok, "+15550003333", 1)
+	expectStatus(t, w.call(routes.PhoneVerify, tok, map[string]string{routes.FieldHandle: handle, routes.FieldCode: code}), http.StatusOK)
+	if got := strings.Join(spy.calls, ","); got != "RecordFailure,Consume" {
+		t.Fatalf("phone ceremony calls = %s, want RecordFailure,Consume: a code compared before its attempt is charged lets parallel guesses exceed the cap", got)
+	}
 }

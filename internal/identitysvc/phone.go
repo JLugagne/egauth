@@ -140,14 +140,17 @@ func (a *Accounts) checkPhoneCode(ctx context.Context, r *httpx.Request, c curre
 	if err != nil {
 		return identity.Identifier{}, core.Pending{}, errors.Join(ErrInvalidToken, err)
 	}
+	remaining, err := a.ceremonies.RecordFailure(ctx, t, ceremony.PhoneVerification, handle.Hash())
+	if err != nil {
+		return identity.Identifier{}, core.Pending{}, ceremonyProblem(err)
+	}
 	if !pc.Code.Matches(a.sealer, r.Field(routes.FieldCode)) {
-		if _, err := a.ceremonies.RecordFailure(ctx, t, ceremony.PhoneVerification, handle.Hash()); err != nil {
-			return identity.Identifier{}, core.Pending{}, ceremonyProblem(err)
-		}
 		return identity.Identifier{}, core.Pending{}, ErrInvalidCode
 	}
-	if rec, err = a.ceremonies.Consume(ctx, t, ceremony.PhoneVerification, handle.Hash()); err != nil {
-		return identity.Identifier{}, core.Pending{}, ceremonyProblem(err)
+	if remaining > 0 {
+		if rec, err = a.ceremonies.Consume(ctx, t, ceremony.PhoneVerification, handle.Hash()); err != nil {
+			return identity.Identifier{}, core.Pending{}, ceremonyProblem(err)
+		}
 	}
 	p, bound, err := openReset(rec, t)
 	if err != nil || bound != sub {
