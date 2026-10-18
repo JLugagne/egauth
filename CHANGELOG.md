@@ -153,6 +153,22 @@ before deploying: **every user logs in again**.
    reference, and `ExampleNew` in the root package is the minimal configuration.
 6. In v0.18 the contract migrations drop the legacy tables.
 
+## [v0.16.1] — 2026-10-07
+
+### Fixed
+
+- **Passkeys enrolled by egauth now work with usernameless login.** Registration options only
+  carried `userVerification`, so `residentKey` defaulted to `"discouraged"` and authenticators
+  could create non-discoverable credentials. `BeginDiscoverableLogin` sends no
+  `allowCredentials`, so the browser could not find such a credential and showed "No passkeys
+  found". Registration now sends `residentKey: "required"` and `requireResidentKey: true` by
+  default. Passkeys enrolled before this fix may be non-discoverable: delete and re-register them.
+
+### Added
+
+- `passkey.Config.ResidentKey`. The zero value means `required`. Set `Preferred` or
+  `Discouraged` only for username-first deployments that must still enroll old security keys.
+
 ## [v0.16.0] — 2026-10-07
 
 ### Fixed
