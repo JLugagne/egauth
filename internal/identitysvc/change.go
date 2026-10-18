@@ -28,6 +28,7 @@ var (
 	ErrInvalidCode         = httpx.NewProblem(http.StatusBadRequest, "invalid_code")
 	ErrEmailUnverified     = httpx.NewProblem(http.StatusForbidden, "email_unverified")
 	ErrIdentifierUnchanged = httpx.NewProblem(http.StatusBadRequest, "identifier_unchanged")
+	ErrIdentifierHeld      = httpx.NewProblem(http.StatusConflict, "identifier_repair_required")
 )
 
 // SecurityEvent classifies a security notice; its values equal egauth.SecurityEvent's and are

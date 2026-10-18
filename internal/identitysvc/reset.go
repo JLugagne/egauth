@@ -142,5 +142,8 @@ func mutationProblem(err error) error {
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, identity.ErrTombstoned) {
 		return errors.Join(ErrInvalidToken, err)
 	}
+	if errors.Is(err, identity.ErrIdentifiersHeld) {
+		return errors.Join(ErrIdentifierHeld, err)
+	}
 	return errors.Join(httpx.ErrServiceUnavailable, err)
 }

@@ -58,6 +58,7 @@ type current struct {
 	phone    contract.Identifier
 	recovery contract.Identifier
 	epoch    uint64
+	held     bool
 }
 
 func subjectOf(m contract.Mutation) principal.Subject {
@@ -111,6 +112,8 @@ FROM users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, sub.User, sub.Tenant.St
 	c.email = ident(contract.IdentifierEmail, &email)
 	c.phone = ident(contract.IdentifierPhone, phone)
 	c.recovery = ident(contract.IdentifierRecoveryEmail, recovery)
+	c.held = !canonical(contract.IdentifierEmail, &email) || !canonical(contract.IdentifierPhone, phone) ||
+		!canonical(contract.IdentifierRecoveryEmail, recovery)
 	return c, nil
 }
 
@@ -128,11 +131,22 @@ func apply(ctx context.Context, tx pgx.Tx, m contract.Mutation) (contract.Applie
 		if c, err = lockUser(ctx, tx, subjectOf(m)); err != nil {
 			return contract.Applied{}, err
 		}
+		if c.held && !protective(m) {
+			return contract.Applied{}, contract.ErrIdentifiersHeld
+		}
 		if old, err = mutate(ctx, tx, c, m); err != nil {
 			return contract.Applied{}, err
 		}
 	}
 	return effects(ctx, tx, c, m, old)
+}
+
+func protective(m contract.Mutation) bool {
+	switch m.(type) {
+	case contract.SetDisabledState, contract.SetMustChange, contract.BumpEpoch, contract.UnlinkFederated, contract.Tombstone:
+		return true
+	}
+	return false
 }
 
 func exec(ctx context.Context, tx migrate.Querier, what string, sql string, args ...any) (int64, error) {

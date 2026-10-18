@@ -11,9 +11,11 @@ import (
 )
 
 // ErrIdentifiersHeld is returned by UpgradeIdentifiersV016, with the report, when a v0.16
-// identifier could not be made canonical. It does not stop New: a held account stays readable and
-// administrable by subject (disable, delete, change email or phone), but no login finds it by the
-// held identifier until an operator repairs it and runs the upgrade again.
+// identifier could not be made canonical. It does not stop New: a held account stays readable by
+// subject and accepts only protective changes (disable, forced password change, ending sessions,
+// unlinking, deletion). Email, phone, password and factor changes answer 409
+// identifier_repair_required, and no login finds it by the held identifier, until an operator
+// repairs the stored value and runs the upgrade again.
 var ErrIdentifiersHeld = errors.New("egauth: v0.16 identifiers remain that v0.17 cannot represent or that collide")
 
 // IdentifierProblem says why UpgradeIdentifiersV016 held an identifier back.

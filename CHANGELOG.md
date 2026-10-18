@@ -146,7 +146,8 @@ before deploying: **every user logs in again**.
 3. Run `egauth.UpgradeIdentifiersV016(ctx, storage)` once, after draining the v0.16 replicas.
    It re-normalises every v0.16 email, phone and recovery email; `New` refuses to start until
    every account is checked. Identifiers it cannot make canonical are listed with
-   `ErrIdentifiersHeld` and stay readable by subject.
+   `ErrIdentifiersHeld`; such an account stays readable by subject but only accepts protective
+   changes (409 `identifier_repair_required` otherwise) until the stored value is repaired.
 4. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
    passwords, TOTP, passkeys, OAuth links and signing keys carry over. Passkeys report
    `needs_reregistration` only when they are legacy.

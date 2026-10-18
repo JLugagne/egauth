@@ -115,6 +115,14 @@ func nullIdent(id contract.Identifier) *string {
 	return &v
 }
 
+func canonical(k contract.IdentifierKind, v *string) bool {
+	if v == nil || *v == "" {
+		return true
+	}
+	_, err := contract.NewIdentifier(k, *v)
+	return err == nil
+}
+
 func ident(k contract.IdentifierKind, v *string) contract.Identifier {
 	if v == nil || *v == "" {
 		return contract.Identifier{}
