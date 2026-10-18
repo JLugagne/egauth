@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"slices"
 	"time"
 
 	"github.com/JLugagne/egauth/internal/sealing"
@@ -60,6 +61,7 @@ func (ks *keyset) publishedAt(now time.Time) []signing.Verifier {
 			out = append(out, e.verifier)
 		}
 	}
+	slices.SortFunc(out, func(a, b signing.Verifier) int { return cmp.Compare(a.KeyID(), b.KeyID()) })
 	return out
 }
 

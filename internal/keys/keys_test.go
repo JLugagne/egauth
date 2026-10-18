@@ -522,3 +522,28 @@ func TestUnknownTenantsDoNotEvictTheKeyCache(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, before, st.reads.Load(), "tenants without keys must not evict cached keysets")
 }
+
+func TestPublishedKeysComeInAStableOrder(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	acme := tenant(t, "acme")
+	for _, kid := range []string{"k-f", "k-b", "k-e", "k-a", "k-d", "k-c"} {
+		require.NoError(t, e.m.Import(ctx, keys.ImportRequest{
+			Tenant: acme, KeyID: kid, Alg: signing.AlgEdDSA, Material: random(t, 32),
+			Lifetime: storekeys.DefaultExpiry(), Overlap: storekeys.DefaultExpiry(),
+		}))
+	}
+	ids := func() []string {
+		pub, err := e.m.Published(ctx, acme)
+		require.NoError(t, err)
+		out := make([]string, len(pub))
+		for i, v := range pub {
+			out[i] = v.KeyID()
+		}
+		return out
+	}
+	want := []string{"k-a", "k-b", "k-c", "k-d", "k-e", "k-f"}
+	for range 30 {
+		require.Equal(t, want, ids(), "the JWKS document changes order between requests, defeating caches and ETags")
+	}
+}

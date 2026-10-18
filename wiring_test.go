@@ -20,6 +20,7 @@ import (
 	"github.com/JLugagne/egauth/egauthtest"
 	"github.com/JLugagne/egauth/event"
 	"github.com/JLugagne/egauth/internal/core"
+	"github.com/JLugagne/egauth/internal/delivery"
 	"github.com/JLugagne/egauth/internal/httpx"
 	"github.com/JLugagne/egauth/internal/lifecycle"
 	"github.com/JLugagne/egauth/internal/routes"
@@ -251,7 +252,9 @@ func TestNewDoesNotTakeACallerContext(t *testing.T) {
 	require.Equal(t, reflect.TypeOf(egauth.Config[struct{}]{}), ty.In(0))
 }
 
-var workerMarkers = []string{"revoke.(*follower", "reap.(*Reaper)", "owned).startHeartbeat", "identitysvc.(*deliveries)", "codesvc.(*workers)"}
+const deliveryMarker = "delivery.(*Pool).work"
+
+var workerMarkers = []string{"revoke.(*follower", "reap.(*Reaper)", "owned).startHeartbeat", deliveryMarker}
 
 func workerCounts() map[string]int {
 	out := map[string]int{}
@@ -273,6 +276,7 @@ func TestNewStartsTheBackgroundWorkAndCloseStopsIt(t *testing.T) {
 	for _, m := range workerMarkers {
 		require.Greater(t, running[m], before[m], "%s is not running after New", m)
 	}
+	require.Equal(t, before[deliveryMarker]+2*delivery.Workers, running[deliveryMarker], "the code and identity services each run one delivery pool")
 	require.NoError(t, a.Close())
 	require.Eventually(t, func() bool {
 		return reflect.DeepEqual(workerCounts(), before)
