@@ -324,8 +324,7 @@ func TestSignerIsOpaque(t *testing.T) {
 			if strings.HasPrefix(m.Name, "Sign") {
 				t.Errorf("%s exposes %s", typ, m.Name)
 			}
-			for i := range m.Type.NumOut() {
-				out := m.Type.Out(i)
+			for out := range m.Type.Outs() {
 				if out.Kind() == reflect.Slice || out.Kind() == reflect.Interface || out.Kind() == reflect.Pointer {
 					t.Errorf("%s.%s returns %s, which could carry key material", typ, m.Name, out)
 				}

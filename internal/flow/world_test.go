@@ -10,9 +10,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -97,9 +99,9 @@ func (s *recordingSink) count(t event.Type) int {
 func (s *recordingSink) last(t event.Type) (event.Event, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := len(s.events) - 1; i >= 0; i-- {
-		if s.events[i].Type == t {
-			return s.events[i], true
+	for _, v := range slices.Backward(s.events) {
+		if v.Type == t {
+			return v, true
 		}
 	}
 	return event.Event{}, false
@@ -473,9 +475,7 @@ func (c *client) cookie(n cookie.Name) (*http.Cookie, bool) {
 func (c *client) login(email, password string, extra map[string]any) *httptest.ResponseRecorder {
 	c.w.t.Helper()
 	fields := map[string]any{routes.FieldIdentifier: email, routes.FieldPassword: password}
-	for k, v := range extra {
-		fields[k] = v
-	}
+	maps.Copy(fields, extra)
 	return c.post(routes.Login, fields)
 }
 
@@ -619,8 +619,6 @@ func (c *client) finishStepUp(a *webauthntest.Authenticator, flowField string) *
 	body := map[string]any{}
 	must(c.w.t, json.Unmarshal(a.Login(c.w.t, ch.Options), &body))
 	body[routes.FieldHandle] = ch.Handle
-	for k, v := range fields {
-		body[k] = v
-	}
+	maps.Copy(body, fields)
 	return c.post(routes.MFAPasskeyFinish, body)
 }

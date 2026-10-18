@@ -50,11 +50,9 @@ func TestRegressionP07ParallelBeginsOfOneAccountAllFinish(t *testing.T) {
 	begins := make([]*journeytest.Resp, n)
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			begins[i] = clients[i].Post(egauth.PathPasskeyLoginBegin, map[string]any{egauth.FieldIdentifier: a.Email})
-		}()
+		})
 	}
 	wg.Wait()
 	for i := n - 1; i >= 0; i-- {

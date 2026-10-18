@@ -3,6 +3,7 @@ package identitysvc_test
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -26,9 +27,7 @@ func register(w *world, email, pw string, bearer bool) *httptest.ResponseRecorde
 
 func confirm(w *world, token string, fields map[string]string, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	f := map[string]string{"token": token}
-	for k, v := range fields {
-		f[k] = v
-	}
+	maps.Copy(f, fields)
 	return w.do(req{path: routes.RegisterConfirm, fields: f, cookies: cookies})
 }
 

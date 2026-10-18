@@ -16,10 +16,10 @@ import (
 )
 
 func TestSpecCannotCarryAnIndependentSealedValue(t *testing.T) {
-	typ := reflect.TypeOf(sessions.Spec{})
-	for i := 0; i < typ.NumField(); i++ {
-		if typ.Field(i).Type == reflect.TypeOf(principal.Sealed{}) {
-			t.Fatalf("Spec.%s lets a caller pair attributes with another session's sealed value", typ.Field(i).Name)
+	typ := reflect.TypeFor[sessions.Spec]()
+	for field := range typ.Fields() {
+		if field.Type == reflect.TypeFor[principal.Sealed]() {
+			t.Fatalf("Spec.%s lets a caller pair attributes with another session's sealed value", field.Name)
 		}
 	}
 }
@@ -49,8 +49,8 @@ type handleKeyedStore interface {
 }
 
 func TestStatefulReissueAndSessionEndNeedOnlyTheHandle(t *testing.T) {
-	st := reflect.TypeOf((*sessions.Store)(nil)).Elem()
-	if !st.Implements(reflect.TypeOf((*handleKeyedStore)(nil)).Elem()) {
+	st := reflect.TypeFor[sessions.Store]()
+	if !st.Implements(reflect.TypeFor[handleKeyedStore]()) {
 		t.Fatal("sessions.Store must replace and revoke a row by the id a session.Handle carries")
 	}
 	s := spec(t)

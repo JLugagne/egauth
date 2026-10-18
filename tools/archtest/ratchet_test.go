@@ -225,7 +225,7 @@ func baselineAtRef(t *testing.T, root, ref string) ([]string, bool) {
 	if err != nil {
 		t.Fatal(errors.Join(errors.New("list the testdata baselines at "+ref), err))
 	}
-	for _, f := range strings.Split(strings.TrimSpace(string(files)), "\n") {
+	for f := range strings.SplitSeq(strings.TrimSpace(string(files)), "\n") {
 		if !strings.HasSuffix(f, "/"+archtest.BaselineFileName) {
 			continue
 		}

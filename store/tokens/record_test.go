@@ -238,10 +238,10 @@ func TestFamilyStateLive(t *testing.T) {
 }
 
 func TestStoreContract(t *testing.T) {
-	st := reflect.TypeOf((*tokens.Store)(nil)).Elem()
+	st := reflect.TypeFor[tokens.Store]()
 	for _, base := range []reflect.Type{
-		reflect.TypeOf((*store.Base)(nil)).Elem(),
-		reflect.TypeOf((*store.Reaper)(nil)).Elem(),
+		reflect.TypeFor[store.Base](),
+		reflect.TypeFor[store.Reaper](),
 	} {
 		if !st.Implements(base) {
 			t.Fatalf("tokens.Store must embed %s", base)
@@ -269,15 +269,15 @@ func TestStoreContract(t *testing.T) {
 }
 
 func TestRotationAndReissueRequestsCarryOnlyASealedRecordAndOneHash(t *testing.T) {
-	for _, typ := range []reflect.Type{reflect.TypeOf(tokens.RotationRequest{}), reflect.TypeOf(tokens.ReissueRequest{})} {
+	for _, typ := range []reflect.Type{reflect.TypeFor[tokens.RotationRequest](), reflect.TypeFor[tokens.ReissueRequest]()} {
 		records, hashes := 0, 0
-		for i := 0; i < typ.NumField(); i++ {
-			switch f := typ.Field(i); f.Type {
-			case reflect.TypeOf(tokens.RefreshRecord{}):
+		for field := range typ.Fields() {
+			switch f := field; f.Type {
+			case reflect.TypeFor[tokens.RefreshRecord]():
 				records++
-			case reflect.TypeOf([]byte(nil)):
+			case reflect.TypeFor[[]byte]():
 				hashes++
-			case reflect.TypeOf(uuid.UUID{}):
+			case reflect.TypeFor[uuid.UUID]():
 			default:
 				t.Errorf("%s.%s: unexpected field type %s", typ.Name(), f.Name, f.Type)
 			}

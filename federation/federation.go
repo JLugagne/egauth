@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -191,10 +192,8 @@ func (p Provider) Verified(email string, claim bool) bool {
 	case Always:
 		return true
 	case ClaimBased:
-		for _, d := range p.Domains {
-			if d == domain {
-				return true
-			}
+		if slices.Contains(p.Domains, domain) {
+			return true
 		}
 	}
 	return false

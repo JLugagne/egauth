@@ -547,8 +547,8 @@ func (a *Authenticator) Get(requestOptionsJSON []byte) ([]byte, error) {
 }
 
 func (a *Authenticator) pick(rp string, allowed [][]byte) *credential {
-	for i := len(a.creds) - 1; i >= 0; i-- {
-		c := a.creds[i]
+	for _, c := range slices.Backward(a.creds) {
+
 		if c.RPID != rp {
 			continue
 		}

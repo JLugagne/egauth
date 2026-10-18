@@ -366,14 +366,12 @@ func replayConcurrent(t *testing.T, h *harness) {
 	var wins atomic.Int32
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ok, err := h.s.MarkTOTPUsed(ctx, sub, 777)
 			if err == nil && ok {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, wins.Load(), "a step is accepted exactly once")
@@ -457,14 +455,12 @@ func totpLockoutParallel(t *testing.T, h *harness) {
 	var within atomic.Int32
 	var wg sync.WaitGroup
 	for range 4 * goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			n, err := h.s.IncrementTOTPAttempts(ctx, lockout(sub, base, max, time.Hour))
 			if err == nil && n <= max {
 				within.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, max, within.Load(), "concurrent guesses never get more than Max comparisons")
@@ -491,14 +487,12 @@ func recoveryLockout(t *testing.T, h *harness) {
 	var wg sync.WaitGroup
 	racer := subjectIn(t, "tenant-a")
 	for range 4 * goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			n, err := h.s.IncrementRecoveryAttempts(ctx, lockout(racer, base, 4, time.Hour))
 			if err == nil && n <= 4 {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 4, wins.Load(), "concurrent first guesses never exceed Max")
@@ -563,13 +557,11 @@ func recoveryConsumeRace(t *testing.T, h *harness) {
 	var wins atomic.Int32
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if h.s.ConsumeRecoveryCode(ctx, sub, "once") == nil {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, wins.Load())
@@ -864,14 +856,12 @@ func replaceSealedCAS(t *testing.T, h *harness) {
 	var wins atomic.Int32
 	var wg sync.WaitGroup
 	for i := range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ok, err := h.s.ReplaceSealed(ctx, mfa.Reseal{Ref: ref, Old: []byte("n3"), New: []byte{byte('A' + i)}})
 			if err == nil && ok {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, wins.Load(), "concurrent upgraders: exactly one CAS wins")

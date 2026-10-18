@@ -44,8 +44,7 @@ func TestStoreConformance(t *testing.T) {
 
 func TestStoreCarriesNoTestSeam(t *testing.T) {
 	typ := reflect.TypeFor[memory.Store]()
-	for i := range typ.NumField() {
-		f := typ.Field(i)
+	for f := range typ.Fields() {
 		require.NotEqual(t, reflect.Func, f.Type.Kind(), "field %s is a hook only a test would set", f.Name)
 	}
 }

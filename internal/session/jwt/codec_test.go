@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"maps"
 	"math"
 	"net/http/httptest"
 	"os"
@@ -230,9 +231,7 @@ func TestVerifyRefusesEveryClaimDefect(t *testing.T) {
 	}
 	for name, edit := range edits {
 		p := map[string]any{}
-		for k, v := range base {
-			p[k] = v
-		}
+		maps.Copy(p, base)
 		edit(p)
 		if _, err := w.codec.VerifySession(t.Context(), w.resign(t, header, p), w.keys); !errors.Is(err, jwt.ErrInvalidToken) {
 			t.Errorf("%s: accepted (%v)", name, err)
@@ -279,9 +278,7 @@ func TestVerifyRefusesLifetimesBeyondTheRepresentableRange(t *testing.T) {
 	}
 	for name, edit := range edits {
 		p := map[string]any{}
-		for k, v := range base {
-			p[k] = v
-		}
+		maps.Copy(p, base)
 		edit(p)
 		if got, err := w.codec.VerifySession(t.Context(), w.resign(t, header, p), w.keys); !errors.Is(err, jwt.ErrInvalidToken) {
 			t.Errorf("%s: accepted with RecheckEvery %v, expires %v (%v)", name, fx.Lifetimes.RecheckEvery, got.ExpiresAt(), err)

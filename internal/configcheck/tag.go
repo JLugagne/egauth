@@ -116,7 +116,7 @@ func ParseTag(raw string) (Tag, error) {
 		return t, grammar("empty tag")
 	}
 	seen := map[PredicateKind]bool{}
-	for _, tok := range strings.Split(raw, ",") {
+	for tok := range strings.SplitSeq(raw, ",") {
 		if tok == "" {
 			return Tag{}, grammar("empty key in " + quote(raw))
 		}

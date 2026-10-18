@@ -142,12 +142,10 @@ func (r *Reaper) Poke() {
 		return
 	}
 	r.triggered = true
-	r.wg.Add(1)
-	go func() {
-		defer r.wg.Done()
+	r.wg.Go(func() {
 		defer r.untrigger()
 		r.tryPass(false)
-	}()
+	})
 }
 
 // RunOnce runs one pass now, waiting for a running one: it retries the outbox and runs every store

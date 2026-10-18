@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -507,9 +508,7 @@ func (w *world) doHeaders(method, path string, h http.Header) *httptest.Response
 	w.t.Helper()
 	r := httptest.NewRequestWithContext(w.t.Context(), method, origin+basePath+path, nil)
 	r.RemoteAddr = "198.51.100.7:1"
-	for k, vs := range h {
-		r.Header[k] = vs
-	}
+	maps.Copy(r.Header, h)
 	rec := httptest.NewRecorder()
 	w.mux.ServeHTTP(rec, r)
 	return rec

@@ -41,8 +41,7 @@ var (
 
 func leavesOf(t reflect.Type, prefix string) []leaf {
 	var out []leaf
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if !f.IsExported() {
 			continue
 		}
@@ -72,8 +71,8 @@ func leavesOf(t reflect.Type, prefix string) []leaf {
 }
 
 func isOpaqueStruct(t reflect.Type) bool {
-	for i := range t.NumField() {
-		if t.Field(i).IsExported() {
+	for field := range t.Fields() {
+		if field.IsExported() {
 			return false
 		}
 	}
@@ -82,7 +81,7 @@ func isOpaqueStruct(t reflect.Type) bool {
 
 func fieldByPath(root reflect.Value, path string) reflect.Value {
 	v := root
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		for v.Kind() == reflect.Pointer {
 			if v.IsNil() {
 				v.Set(reflect.New(v.Type().Elem()))
@@ -281,7 +280,7 @@ func policyVariants(l leaf) ([]variant, bool) {
 }
 
 func durationBound(tag reflect.StructTag, current map[string]time.Duration) (time.Duration, bool) {
-	for _, part := range strings.Split(tag.Get("egauth"), ",") {
+	for part := range strings.SplitSeq(tag.Get("egauth"), ",") {
 		spec, ok := strings.CutPrefix(part, "bound=")
 		if !ok {
 			continue
@@ -357,8 +356,7 @@ func enumVariants(l leaf) ([]variant, bool) {
 func optOutVariants() []variant {
 	var out []variant
 	t := insecureType
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		name := f.Name
 		ack := egauth.Acknowledge("g7b semantic opt-out guard")
 		var val reflect.Value

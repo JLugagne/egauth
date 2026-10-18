@@ -258,7 +258,7 @@ var workerMarkers = []string{"revoke.(*follower", "reap.(*Reaper)", "owned).star
 
 func workerCounts() map[string]int {
 	out := map[string]int{}
-	for _, g := range strings.Split(stacks(), "\n\n") {
+	for g := range strings.SplitSeq(stacks(), "\n\n") {
 		for _, m := range workerMarkers {
 			if strings.Contains(g, m) {
 				out[m]++

@@ -3,6 +3,7 @@ package flow_test
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -49,9 +50,7 @@ func (c *client) finishPasskeyReauth(a *webauthntest.Authenticator, ch passkeyCh
 	must(c.w.t, json.Unmarshal(a.Login(c.w.t, ch.Options), &body))
 	body[routes.FieldFactor] = "passkey"
 	body[routes.FieldHandle] = ch.Handle
-	for k, v := range extra {
-		body[k] = v
-	}
+	maps.Copy(body, extra)
 	return c.post(routes.Reauth, body)
 }
 

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -136,12 +137,7 @@ func (s *recordingSink) types() []event.Type {
 }
 
 func (s *recordingSink) has(t event.Type) bool {
-	for _, got := range s.types() {
-		if got == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(s.types(), t)
 }
 
 type admission struct {

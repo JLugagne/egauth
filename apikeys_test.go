@@ -77,8 +77,8 @@ func TestAPIKeysCreatedKeyServesProtectAPIWithItsGrant(t *testing.T) {
 
 func TestAPIKeysCarryNoCustomClaims(t *testing.T) {
 	for _, typ := range []reflect.Type{reflect.TypeFor[egauth.APIKeyRequest](), reflect.TypeFor[egauth.APIKeyInfo]()} {
-		for i := range typ.NumField() {
-			require.NotEqual(t, "Custom", typ.Field(i).Name, typ.String())
+		for field := range typ.Fields() {
+			require.NotEqual(t, "Custom", field.Name, typ.String())
 		}
 	}
 }

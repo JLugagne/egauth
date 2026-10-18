@@ -136,7 +136,7 @@ func envKey(name string) ([]byte, error) {
 
 func adminSubjects() (map[uuid.UUID]bool, error) {
 	out := map[uuid.UUID]bool{}
-	for _, raw := range strings.Split(os.Getenv("EGAUTH_ADMIN_USERS"), ",") {
+	for raw := range strings.SplitSeq(os.Getenv("EGAUTH_ADMIN_USERS"), ",") {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
 			continue

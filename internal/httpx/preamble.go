@@ -136,8 +136,7 @@ func (g *gate) ServeHTTP(w http.ResponseWriter, hr *http.Request) {
 	secureHeaders(w)
 	req, err := g.run(w, hr)
 	if err != nil {
-		var limited *rateLimited
-		if errors.As(err, &limited) {
+		if limited, ok := errors.AsType[*rateLimited](err); ok {
 			writeRateLimited(w, limited.retryAfter)
 			return
 		}

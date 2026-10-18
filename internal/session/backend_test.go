@@ -77,8 +77,8 @@ func TestNewResumedRefusesAHandleOfAnotherSession(t *testing.T) {
 }
 
 func TestBackendContract(t *testing.T) {
-	bt := reflect.TypeOf((*session.Backend)(nil)).Elem()
-	if !bt.Implements(reflect.TypeOf((*lifecycle.Subscriber)(nil)).Elem()) {
+	bt := reflect.TypeFor[session.Backend]()
+	if !bt.Implements(reflect.TypeFor[lifecycle.Subscriber]()) {
 		t.Fatal("Backend must embed lifecycle.Subscriber so every backend decides every event")
 	}
 	want := map[string]string{
@@ -99,7 +99,7 @@ func TestBackendContract(t *testing.T) {
 			t.Errorf("Backend.%s is %s, want %s (DESIGN §3.10)", name, got, sig)
 		}
 	}
-	if bt.NumMethod() != len(want)+reflect.TypeOf((*lifecycle.Subscriber)(nil)).Elem().NumMethod() {
+	if bt.NumMethod() != len(want)+reflect.TypeFor[lifecycle.Subscriber]().NumMethod() {
 		t.Fatalf("Backend has %d methods; it must be exactly §3.10 plus lifecycle.Subscriber", bt.NumMethod())
 	}
 }

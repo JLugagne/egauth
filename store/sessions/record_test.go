@@ -151,10 +151,10 @@ func TestRestoreRoundTripsAndRefusesInconsistentRows(t *testing.T) {
 }
 
 func TestStoreContract(t *testing.T) {
-	st := reflect.TypeOf((*sessions.Store)(nil)).Elem()
+	st := reflect.TypeFor[sessions.Store]()
 	for _, base := range []reflect.Type{
-		reflect.TypeOf((*store.Base)(nil)).Elem(),
-		reflect.TypeOf((*store.Reaper)(nil)).Elem(),
+		reflect.TypeFor[store.Base](),
+		reflect.TypeFor[store.Reaper](),
 	} {
 		if !st.Implements(base) {
 			t.Fatalf("sessions.Store must embed %s", base)
@@ -167,8 +167,8 @@ func TestStoreContract(t *testing.T) {
 			t.Errorf("sessions.Store lacks %s", m)
 		}
 	}
-	rot := reflect.TypeOf(sessions.RotateRequest{})
-	if rot.NumField() != 2 || rot.Field(0).Type != reflect.TypeOf([]byte(nil)) || rot.Field(1).Type != reflect.TypeOf(sessions.Record{}) {
+	rot := reflect.TypeFor[sessions.RotateRequest]()
+	if rot.NumField() != 2 || rot.Field(0).Type != reflect.TypeFor[[]byte]() || rot.Field(1).Type != reflect.TypeFor[sessions.Record]() {
 		t.Errorf("RotateRequest must wrap one hash and one sealed record")
 	}
 }

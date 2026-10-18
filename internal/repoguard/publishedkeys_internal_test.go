@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -186,7 +187,7 @@ func markdownKeyLiterals(t *testing.T, path string) []string {
 	}
 	var out []string
 	inFence := false
-	for _, line := range strings.Split(string(raw), "\n") {
+	for line := range strings.SplitSeq(string(raw), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "```") {
 			inFence = !inFence
@@ -256,12 +257,7 @@ func isKeyFieldName(e ast.Expr) bool {
 	if name == "" {
 		return false
 	}
-	for _, field := range keyFieldNames {
-		if name == field {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(keyFieldNames, name)
 }
 
 func exprName(e ast.Expr) string {

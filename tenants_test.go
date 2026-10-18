@@ -137,8 +137,8 @@ func TestTenantsImportKeyRequestIsRedacted(t *testing.T) {
 
 func TestTenantsHaveNoUnboundSealingMethod(t *testing.T) {
 	for _, typ := range []reflect.Type{reflect.TypeFor[*egauth.Tenants](), reflect.TypeFor[*egauth.Auth[gateClaims]]()} {
-		for i := range typ.NumMethod() {
-			require.NotContains(t, typ.Method(i).Name, "Seal", "%s: secrets enter only through ImportKey and SetOAuthProvider (X-03)", typ)
+		for method := range typ.Methods() {
+			require.NotContains(t, method.Name, "Seal", "%s: secrets enter only through ImportKey and SetOAuthProvider (X-03)", typ)
 		}
 	}
 }

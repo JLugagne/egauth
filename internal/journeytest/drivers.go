@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"hash/fnv"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -170,9 +171,7 @@ func (r *Run) bearer() bool { return r.Cell.Carrier == Bearer }
 
 func (r *Run) fields(extra map[string]any) map[string]any {
 	f := map[string]any{egauth.FieldRemember: r.Remember, egauth.FieldReturnTo: JourneyReturnTo}
-	for k, v := range extra {
-		f[k] = v
-	}
+	maps.Copy(f, extra)
 	return f
 }
 
@@ -225,9 +224,7 @@ func mergeJSON(t testing.TB, raw []byte, extra map[string]any) map[string]any {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatalf("journeytest: credential JSON: %v", err)
 	}
-	for k, v := range extra {
-		m[k] = v
-	}
+	maps.Copy(m, extra)
 	return m
 }
 

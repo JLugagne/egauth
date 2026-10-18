@@ -253,10 +253,10 @@ func TestRecordLiteralIsRefused(t *testing.T) {
 }
 
 func TestStoreContract(t *testing.T) {
-	st := reflect.TypeOf((*ceremony.Store)(nil)).Elem()
+	st := reflect.TypeFor[ceremony.Store]()
 	for _, base := range []reflect.Type{
-		reflect.TypeOf((*store.Base)(nil)).Elem(),
-		reflect.TypeOf((*store.Reaper)(nil)).Elem(),
+		reflect.TypeFor[store.Base](),
+		reflect.TypeFor[store.Reaper](),
 	} {
 		if !st.Implements(base) {
 			t.Fatalf("ceremony.Store must embed %s", base)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -230,9 +231,7 @@ func newWorld(t *testing.T, reg federationsvc.Registration) *world {
 func (w *world) login(name, identifier, secret string, extra map[string]string) *httptest.ResponseRecorder {
 	w.t.Helper()
 	fields := map[string]string{routes.FieldIdentifier: identifier, routes.FieldPassword: secret}
-	for k, v := range extra {
-		fields[k] = v
-	}
+	maps.Copy(fields, extra)
 	b, err := json.Marshal(fields)
 	if err != nil {
 		w.t.Fatal(err)

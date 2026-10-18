@@ -169,8 +169,7 @@ func (c *Client) DoSecretPath(req *http.Request) (*http.Response, error) {
 		return nil, ErrZeroClient
 	}
 	resp, err := c.do(c.hcSecretPath, req)
-	var ue *url.Error
-	if errors.As(err, &ue) {
+	if ue, ok := errors.AsType[*url.Error](err); ok {
 		ue.URL = (&url.URL{Scheme: req.URL.Scheme, Host: req.URL.Host}).String()
 	}
 	return resp, err

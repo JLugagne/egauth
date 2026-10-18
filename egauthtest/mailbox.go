@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/JLugagne/egauth"
@@ -69,9 +70,9 @@ func (m *Mailbox) Messages() []Mail {
 func (m *Mailbox) Last(kind string) (Mail, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for i := len(m.mail) - 1; i >= 0; i-- {
-		if m.mail[i].Kind == kind {
-			return m.mail[i], true
+	for _, v := range slices.Backward(m.mail) {
+		if v.Kind == kind {
+			return v, true
 		}
 	}
 	return Mail{}, false

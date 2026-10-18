@@ -2,6 +2,7 @@ package backendtest
 
 import (
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -162,9 +163,7 @@ func (e *env) mustNotWrite(rec *httptest.ResponseRecorder, what string) {
 
 func (c *client) clone() *client {
 	n := &client{e: c.e, ua: c.ua, cookies: map[string]jarCookie{}, header: c.header.Clone()}
-	for k, v := range c.cookies {
-		n.cookies[k] = v
-	}
+	maps.Copy(n.cookies, c.cookies)
 	return n
 }
 

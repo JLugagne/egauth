@@ -7,6 +7,7 @@ package endpoints
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 
 	"github.com/JLugagne/egauth/event"
@@ -168,9 +169,7 @@ func (h handlers) refresh(w http.ResponseWriter, r *httpx.Request) {
 		r.Fail(w, errors.Join(httpx.ErrUnauthenticated, errors.New("endpoints: session of another transport or tenant")))
 		return
 	}
-	for k, vs := range held.h {
-		w.Header()[k] = vs
-	}
+	maps.Copy(w.Header(), held.h)
 	r.Respond(w, httpx.Response{Body: viewOf(a)})
 }
 

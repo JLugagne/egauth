@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 	"sync"
 
@@ -148,8 +149,8 @@ func (res *Resolver) Resolve(r *http.Request) (Client, error) {
 		return Client{addr: peer}, nil
 	}
 	current := peer
-	for i := len(hops) - 1; i >= 0; i-- {
-		hop, ok := parseHost(hops[i])
+	for _, hop := range slices.Backward(hops) {
+		hop, ok := parseHost(hop)
 		if !ok {
 			return Client{addr: current}, nil
 		}

@@ -99,7 +99,7 @@ func (in *inspector) resolveModulesType(root reflect.Type) {
 		return
 	}
 	t := root
-	for _, seg := range strings.Split(in.o.Modules, ".") {
+	for seg := range strings.SplitSeq(in.o.Modules, ".") {
 		f, ok := exportedField(t, seg)
 		if !ok {
 			in.fail(in.o.Modules, "modules path does not resolve")
@@ -120,8 +120,7 @@ func (in *inspector) walk(t reflect.Type, path string, inModules bool) {
 	}
 	in.stack[t] = true
 	defer delete(in.stack, t)
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		fp := join(path, f.Name)
 		raw, tagged := f.Tag.Lookup(TagName)
 		if !f.IsExported() {
@@ -324,8 +323,7 @@ func reachesTag(t reflect.Type, seen map[reflect.Type]bool) bool {
 		return false
 	}
 	seen[t] = true
-	for i := range t.NumField() {
-		f := t.Field(i)
+	for f := range t.Fields() {
 		if _, ok := f.Tag.Lookup(TagName); ok {
 			return true
 		}
@@ -348,7 +346,7 @@ func exportedField(t reflect.Type, name string) (reflect.StructField, bool) {
 }
 
 func typeAt(t reflect.Type, path string) (reflect.Type, bool) {
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		f, ok := exportedField(derefType(t), seg)
 		if !ok {
 			return nil, false

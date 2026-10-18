@@ -158,15 +158,13 @@ func concurrentAllow(t *testing.T, l limiter.Limiter) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			d, err := l.Allow(context.Background(), k)
 			if err == nil && d.Allowed {
 				allowed.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

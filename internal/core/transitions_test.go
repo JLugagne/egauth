@@ -316,8 +316,7 @@ func TestRenewNeverAddsFactor(t *testing.T) {
 		vt := reflect.TypeFor[core.Verified]()
 		pt := reflect.TypeFor[core.Pending]()
 		rt := reflect.TypeOf(core.Renew)
-		for i := range rt.NumIn() {
-			in := rt.In(i)
+		for in := range rt.Ins() {
 			require.NotEqual(t, ft, in)
 			require.NotEqual(t, vt, in)
 			require.NotEqual(t, pt, in)
@@ -529,9 +528,9 @@ func TestNewPendingAppliesRememberPolicyOnce(t *testing.T) {
 		}
 		for _, fn := range others {
 			ft := reflect.TypeOf(fn)
-			for i := range ft.NumIn() {
-				require.NotEqual(t, pol, ft.In(i), "%s takes the policy", ft)
-				require.NotEqual(t, intent, ft.In(i), "%s takes the intent", ft)
+			for in := range ft.Ins() {
+				require.NotEqual(t, pol, in, "%s takes the policy", ft)
+				require.NotEqual(t, intent, in, "%s takes the intent", ft)
 			}
 		}
 	})

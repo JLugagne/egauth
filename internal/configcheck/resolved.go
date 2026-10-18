@@ -50,7 +50,7 @@ func valueAt(v reflect.Value, path string) (reflect.Value, bool) {
 	if path == "" || !v.IsValid() {
 		return reflect.Value{}, false
 	}
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		name, indices, ok := splitIndices(seg)
 		if !ok {
 			return reflect.Value{}, false

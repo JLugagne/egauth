@@ -134,7 +134,7 @@ func pathProblem(s string) string {
 	if strings.HasSuffix(s, "/") {
 		return "must not end with /"
 	}
-	for _, seg := range strings.Split(s[1:], "/") {
+	for seg := range strings.SplitSeq(s[1:], "/") {
 		switch {
 		case seg == "":
 			return "has an empty segment"

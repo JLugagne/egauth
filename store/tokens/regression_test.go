@@ -12,10 +12,10 @@ import (
 )
 
 func TestRefreshSpecCannotCarryAnIndependentSealedValue(t *testing.T) {
-	typ := reflect.TypeOf(tokens.RefreshSpec{})
-	for i := 0; i < typ.NumField(); i++ {
-		if typ.Field(i).Type == reflect.TypeOf(principal.Sealed{}) {
-			t.Fatalf("RefreshSpec.%s lets a caller pair attributes with another session's sealed value", typ.Field(i).Name)
+	typ := reflect.TypeFor[tokens.RefreshSpec]()
+	for field := range typ.Fields() {
+		if field.Type == reflect.TypeFor[principal.Sealed]() {
+			t.Fatalf("RefreshSpec.%s lets a caller pair attributes with another session's sealed value", field.Name)
 		}
 	}
 }

@@ -22,8 +22,7 @@ func TestLoadErrorsKeepTheirCause(t *testing.T) {
 		t.Errorf("malformed count: %v does not wrap strconv.ErrSyntax", err)
 	}
 	_, err = offline.LoadHashes(strings.NewReader(strings.Repeat("Z", 40) + "\n"))
-	var bad hex.InvalidByteError
-	if !errors.As(err, &bad) {
+	if _, ok := errors.AsType[hex.InvalidByteError](err); !ok {
 		t.Errorf("invalid hash: %v does not wrap hex.InvalidByteError", err)
 	}
 	if _, err := offline.LoadHashes(failingReader{}); !errors.Is(err, errRead) {

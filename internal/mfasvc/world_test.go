@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -64,9 +65,9 @@ func (s *recordingSink) EmitEvent(_ context.Context, e event.Event) {
 func (s *recordingSink) last(t event.Type) (event.Event, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for i := len(s.events) - 1; i >= 0; i-- {
-		if s.events[i].Type == t {
-			return s.events[i], true
+	for _, v := range slices.Backward(s.events) {
+		if v.Type == t {
+			return v, true
 		}
 	}
 	return event.Event{}, false

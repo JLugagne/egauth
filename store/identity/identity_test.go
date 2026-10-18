@@ -147,10 +147,10 @@ func TestMutationSetIsClosed(t *testing.T) {
 	if !slices.Equal(implementers, want) {
 		t.Fatalf("Mutation implementers %v, want the 12 intent mutations %v (DESIGN §4.7)", implementers, want)
 	}
-	it := reflect.TypeOf((*identity.Mutation)(nil)).Elem()
-	for i := 0; i < it.NumMethod(); i++ {
-		if it.Method(i).IsExported() {
-			t.Fatalf("Mutation exposes %s: an exported method lets other packages implement it", it.Method(i).Name)
+	it := reflect.TypeFor[identity.Mutation]()
+	for method := range it.Methods() {
+		if method.IsExported() {
+			t.Fatalf("Mutation exposes %s: an exported method lets other packages implement it", method.Name)
 		}
 	}
 }
@@ -375,10 +375,10 @@ func TestPasswordHashNeverFormats(t *testing.T) {
 }
 
 func TestStoreContract(t *testing.T) {
-	st := reflect.TypeOf((*identity.Store)(nil)).Elem()
+	st := reflect.TypeFor[identity.Store]()
 	for _, base := range []reflect.Type{
-		reflect.TypeOf((*store.Base)(nil)).Elem(),
-		reflect.TypeOf((*store.Reaper)(nil)).Elem(),
+		reflect.TypeFor[store.Base](),
+		reflect.TypeFor[store.Reaper](),
 	} {
 		if !st.Implements(base) {
 			t.Fatalf("identity.Store must embed %s", base)
@@ -392,8 +392,8 @@ func TestStoreContract(t *testing.T) {
 			t.Errorf("identity.Store lacks %s", m)
 		}
 	}
-	for i := 0; i < st.NumMethod(); i++ {
-		name := st.Method(i).Name
+	for method := range st.Methods() {
+		name := method.Name
 		if strings.HasPrefix(name, "Update") || strings.Contains(name, "Verification") || strings.HasPrefix(name, "Set") {
 			t.Errorf("identity.Store.%s: accounts change only through Apply (I-24)", name)
 		}

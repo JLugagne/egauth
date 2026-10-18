@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -511,9 +512,7 @@ func (w *world) do(r req) *httptest.ResponseRecorder {
 			w.t.Fatal(err)
 		}
 	}
-	for k, v := range r.fields {
-		fields[k] = v
-	}
+	maps.Copy(fields, r.fields)
 	b, err := json.Marshal(fields)
 	if err != nil {
 		w.t.Fatal(err)
@@ -593,9 +592,7 @@ func (w *world) beginRegistration(tok string) challenge {
 func (w *world) finishRegistration(tok string, c challenge, body []byte, extra map[string]any) *httptest.ResponseRecorder {
 	w.t.Helper()
 	fields := map[string]any{routes.FieldHandle: c.Handle}
-	for k, v := range extra {
-		fields[k] = v
-	}
+	maps.Copy(fields, extra)
 	return w.do(req{path: routes.PasskeyRegisterFinish, token: tok, body: body, fields: fields})
 }
 

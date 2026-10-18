@@ -93,15 +93,13 @@ func putIfAbsentRace(t *testing.T, s deployment.Store) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			ok, err := s.PutSealedIfAbsent(ctx, "race", []byte{byte(i + 1)})
 			if err == nil && ok {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -146,15 +144,13 @@ func replaceSealedRace(t *testing.T, s deployment.Store) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for i := range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			ok, err := s.ReplaceSealed(ctx, "k", deployment.Replacement{Old: []byte("old"), New: []byte{byte(i + 1)}})
 			if err == nil && ok {
 				wins.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -195,11 +191,9 @@ func heartbeatLiveness(t *testing.T, s deployment.Store) {
 
 	var wg sync.WaitGroup
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = s.Heartbeat(ctx, uuid.New())
-		}()
+		})
 	}
 	wg.Wait()
 	live, err = s.Heartbeat(ctx, first)

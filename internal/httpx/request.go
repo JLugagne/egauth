@@ -114,8 +114,7 @@ func parse(hr *http.Request, meta Meta) (map[string]string, bool, []byte, error)
 	_ = hr.Body.Close()
 	hr.Body = http.NoBody
 	if err != nil {
-		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		if _, ok := errors.AsType[*http.MaxBytesError](err); ok {
 			return nil, false, nil, ErrBodyTooLarge
 		}
 		return nil, false, nil, errors.Join(ErrInvalidRequest, err)

@@ -130,7 +130,7 @@ func TestSyncVersions_DetectsDrift(t *testing.T) {
 		"trailing comment mentions replace without a directive": func(t *testing.T, dir string) {
 			rewrite(t, filepath.Join(dir, "adapters/otel/go.mod"), func(s string) string {
 				var keep []string
-				for _, l := range strings.Split(s, "\n") {
+				for l := range strings.SplitSeq(s, "\n") {
 					if !strings.Contains(l, "replace") {
 						keep = append(keep, l)
 					}
@@ -147,7 +147,7 @@ func TestSyncVersions_DetectsDrift(t *testing.T) {
 		"comment containing an arrow hides a missing replace directive": func(t *testing.T, dir string) {
 			rewrite(t, filepath.Join(dir, "adapters/otel/go.mod"), func(s string) string {
 				var keep []string
-				for _, l := range strings.Split(s, "\n") {
+				for l := range strings.SplitSeq(s, "\n") {
 					if !strings.Contains(l, "replace") || strings.HasPrefix(l, "//") {
 						keep = append(keep, l)
 					}

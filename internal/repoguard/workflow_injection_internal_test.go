@@ -101,7 +101,7 @@ func TestSbomTargetReadsVersionOnlyFromTheEnvironment(t *testing.T) {
 func targetRecipe(mk, target string) string {
 	var b strings.Builder
 	in := false
-	for _, line := range strings.Split(mk, "\n") {
+	for line := range strings.SplitSeq(mk, "\n") {
 		switch {
 		case line == target+":":
 			in = true

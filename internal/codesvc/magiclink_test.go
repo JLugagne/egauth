@@ -2,6 +2,7 @@ package codesvc_test
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"slices"
 	"testing"
@@ -14,9 +15,7 @@ import (
 func (w *world) requestLink(email string, fields map[string]string) (*http.Cookie, string) {
 	w.t.Helper()
 	f := map[string]string{routes.FieldIdentifier: email}
-	for k, v := range fields {
-		f[k] = v
-	}
+	maps.Copy(f, fields)
 	before := len(w.mail.all())
 	rec := w.do(req{path: routes.MagicLinkRequest, fields: f})
 	if rec.Code != http.StatusAccepted {

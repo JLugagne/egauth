@@ -6,6 +6,7 @@ package redirect
 import (
 	"errors"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -169,14 +170,12 @@ func absolute(u *url.URL, extra []string) (string, error) {
 		return "", reject("dot segment")
 	}
 	origin := u.Scheme + "://" + strings.ToLower(u.Host)
-	for _, e := range extra {
-		if e == origin {
-			out := origin + u.EscapedPath()
-			if u.RawQuery != "" {
-				out += "?" + u.RawQuery
-			}
-			return out, nil
+	if slices.Contains(extra, origin) {
+		out := origin + u.EscapedPath()
+		if u.RawQuery != "" {
+			out += "?" + u.RawQuery
 		}
+		return out, nil
 	}
 	return "", reject("origin not trusted")
 }

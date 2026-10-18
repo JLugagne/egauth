@@ -313,9 +313,7 @@ func consumeSingleUse(t *testing.T, s ceremony.Store, rs Restorer) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_, err := s.Consume(ctx, r.Tenant(), r.Kind(), r.HandleHash())
 			switch {
@@ -324,7 +322,7 @@ func consumeSingleUse(t *testing.T, s ceremony.Store, rs Restorer) {
 			case errors.Is(err, store.ErrNotFound):
 				misses.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -342,15 +340,13 @@ func markConsumed(t *testing.T, s ceremony.Store, rs Restorer) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			first, err := s.MarkConsumed(ctx, a, ceremony.OAuthState, h, until)
 			if err == nil && first {
 				firsts.Add(1)
 			}
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -443,12 +439,10 @@ func evictionConcurrent(t *testing.T, s ceremony.Store, rs Restorer) {
 	var wg sync.WaitGroup
 	start := make(chan struct{})
 	for _, r := range recs {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			_, _ = s.Put(context.Background(), r)
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()
@@ -539,13 +533,11 @@ func attempts(t *testing.T, s ceremony.Store, rs Restorer) {
 	put(t, s, conc)
 	var zeros atomic.Int32
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if rem, err := s.RecordFailure(ctx, a, conc.Kind(), conc.HandleHash()); err == nil && rem == 0 {
 				zeros.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, zeros.Load(), "exactly one failure takes the last attempt")

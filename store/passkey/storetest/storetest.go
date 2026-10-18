@@ -278,16 +278,14 @@ func saveConflictRace(t *testing.T, s passkey.Store) {
 	var wg sync.WaitGroup
 	tn := tenant(t, "tenant-a")
 	for range goroutines {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			switch err := s.Save(ctx, cred(principal.Subject{Tenant: tn, User: uuid.New()}, "same")); {
 			case err == nil:
 				wins.Add(1)
 			case errors.Is(err, store.ErrConflict):
 				conflicts.Add(1)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.EqualValues(t, 1, wins.Load())
@@ -485,14 +483,12 @@ func signCountRace(t *testing.T, s passkey.Store) {
 	var wg sync.WaitGroup
 	oks := make([]atomic.Bool, goroutines+1)
 	for next := uint32(1); next <= goroutines; next++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			ok, err := s.UpdateSignCount(ctx, sub, id, next)
 			if err == nil {
 				oks[next].Store(ok)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	require.True(t, oks[goroutines].Load(), "the greatest counter beats whatever a concurrent ceremony stored")

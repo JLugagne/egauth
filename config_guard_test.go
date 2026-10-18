@@ -133,8 +133,8 @@ func reachStructs(t reflect.Type, seen map[string]bool) {
 		}
 		seen[name] = true
 	}
-	for i := range t.NumField() {
-		if f := t.Field(i); f.IsExported() {
+	for f := range t.Fields() {
+		if f.IsExported() {
 			reachStructs(f.Type, seen)
 		}
 	}
@@ -238,7 +238,7 @@ func TestG05GuardRootHooksSeeTheirOwnRoot(t *testing.T) {
 func fieldAt(t *testing.T, root reflect.Value, path string) reflect.Value {
 	t.Helper()
 	v := root
-	for _, seg := range strings.Split(path, ".") {
+	for seg := range strings.SplitSeq(path, ".") {
 		for v.Kind() == reflect.Pointer {
 			require.False(t, v.IsNil(), "%s crosses a nil pointer in the full config", path)
 			v = v.Elem()

@@ -2,6 +2,7 @@ package journeytest_test
 
 import (
 	"encoding/json"
+	"maps"
 	"net/http"
 	"testing"
 
@@ -29,9 +30,7 @@ func mergeFields(t testing.TB, raw []byte, extra map[string]any) map[string]any 
 	t.Helper()
 	var m map[string]any
 	require.NoError(t, json.Unmarshal(raw, &m))
-	for k, v := range extra {
-		m[k] = v
-	}
+	maps.Copy(m, extra)
 	return m
 }
 
@@ -50,9 +49,7 @@ func (s *session) registerPasskey(key *webauthntest.Authenticator) {
 func (a *account) loginBegin(c *journeytest.Client, extra map[string]any) *journeytest.Resp {
 	a.t.Helper()
 	fields := map[string]any{}
-	for k, v := range extra {
-		fields[k] = v
-	}
+	maps.Copy(fields, extra)
 	res := c.Post(egauth.PathPasskeyLoginBegin, fields)
 	require.Equal(a.t, http.StatusOK, res.Status, journeytest.Describe(res))
 	return res

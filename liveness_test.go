@@ -296,7 +296,7 @@ func ephemeralLimiterConfig(t *testing.T, shared egauth.Storage, sink event.Sink
 func allowedUntilDenied(t *testing.T, a *egauth.Auth[struct{}], value string) int {
 	t.Helper()
 	l := egauth.OwnedOf(a).Limiter
-	for n := 0; n < 100; n++ {
+	for n := range 100 {
 		d, err := l.Allow(context.Background(), limiter.Key{Class: limiter.LoginClient, Value: value})
 		require.NoError(t, err)
 		if !d.Allowed {
