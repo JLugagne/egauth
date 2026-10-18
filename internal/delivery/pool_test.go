@@ -78,3 +78,29 @@ func TestAMessageAfterCloseIsReported(t *testing.T) {
 		t.Fatalf("got %d delivery.failed events, want 1", s.failed())
 	}
 }
+
+func TestCloseReportsTheMessagesQueuedBehindDeliverersThatIgnoreCancellation(t *testing.T) {
+	s := &sink{}
+	p := delivery.New(httpx.SinkAudit(s))
+	release := make(chan struct{})
+	defer close(release)
+	running := make(chan struct{}, delivery.Workers)
+	for range delivery.Workers {
+		p.Enqueue(context.Background(), tenant(t), uuid.New(), func(context.Context) error {
+			running <- struct{}{}
+			<-release
+			return nil
+		})
+	}
+	for range delivery.Workers {
+		<-running
+	}
+	const queued = 10
+	for range queued {
+		p.Enqueue(context.Background(), tenant(t), uuid.New(), func(context.Context) error { return nil })
+	}
+	p.Close()
+	if got := s.failed(); got < queued {
+		t.Fatalf("Close returned with %d of the %d queued messages reported (doc: the rest are reported as DeliveryFailed)", got, queued)
+	}
+}

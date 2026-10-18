@@ -77,16 +77,22 @@ func New(a httpx.Audit) *Pool {
 // message that is dropped or fails is reported as event.DeliveryFailed.
 func (p *Pool) Enqueue(ctx context.Context, t core.TenantID, id uuid.UUID, send func(context.Context) error) {
 	j := job{id: id, tenant: t, send: send, ctx: context.WithoutCancel(ctx)}
+	if err := p.offer(j); err != nil {
+		p.failed(j, err)
+	}
+}
+
+func (p *Pool) offer(j job) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.closed {
-		p.failed(j, ErrClosed)
-		return
+		return ErrClosed
 	}
 	select {
 	case p.queue <- j:
+		return nil
 	default:
-		p.failed(j, ErrQueueFull)
+		return ErrQueueFull
 	}
 }
 
@@ -113,6 +119,9 @@ func (p *Pool) Close() {
 		select {
 		case <-done:
 		case <-time.After(AbortWait):
+			for j := range p.queue {
+				p.failed(j, ErrAborted)
+			}
 		}
 	})
 }
