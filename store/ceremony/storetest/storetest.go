@@ -467,14 +467,14 @@ func identifierCeiling(t *testing.T, s ceremony.Store, rs Restorer) {
 	ceiling := kind.MaxLivePerTenant()
 	require.Positive(t, ceiling)
 
-	ttl := kind.TTL()
-	guard := build(t, rs, spec{tenant: b, kind: kind, age: ttl - time.Minute})
+	require.Less(t, 30*time.Second, kind.TTL()-time.Minute, "the records must outlive a slow insert of the whole ceiling")
+	guard := build(t, rs, spec{tenant: b, kind: kind, age: 31 * time.Second})
 	require.Zero(t, put(t, s, guard))
-	oldest := build(t, rs, spec{tenant: a, kind: kind, age: ttl - time.Minute})
+	oldest := build(t, rs, spec{tenant: a, kind: kind, age: 31 * time.Second})
 	require.Zero(t, put(t, s, oldest))
 	var all []ceremony.Record
 	for i := 1; i < ceiling; i++ {
-		r := build(t, rs, spec{tenant: a, kind: kind, age: ttl/2 - time.Duration(i)*time.Millisecond})
+		r := build(t, rs, spec{tenant: a, kind: kind, age: 30*time.Second - time.Duration(i)*time.Millisecond})
 		require.Zero(t, put(t, s, r))
 		all = append(all, r)
 	}
