@@ -127,9 +127,10 @@ func (p Provider) Validate() error {
 	if !p.EmailVerification.Valid() {
 		return invalid("email verification is not a declared value")
 	}
-	for field, raw := range map[string]string{
-		"auth url": p.AuthURL, "token url": p.TokenURL, "userinfo url": p.UserInfoURL, "jwks url": p.JWKSURL,
+	for _, u := range []struct{ field, raw string }{
+		{"auth url", p.AuthURL}, {"token url", p.TokenURL}, {"userinfo url", p.UserInfoURL}, {"jwks url", p.JWKSURL},
 	} {
+		field, raw := u.field, u.raw
 		if raw == "" {
 			continue
 		}

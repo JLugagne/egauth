@@ -26,6 +26,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
+	"slices"
 )
 
 // Type identifies a security or lifecycle event.
@@ -217,8 +219,9 @@ func (s *slogSink) EmitEvent(ctx context.Context, e Event) {
 	if e.Reason != "" {
 		attrs = append(attrs, slog.String("reason", e.Reason))
 	}
-	for k, v := range e.PublicAttrs() {
-		attrs = append(attrs, slog.Any(k, v))
+	public := e.PublicAttrs()
+	for _, k := range slices.Sorted(maps.Keys(public)) {
+		attrs = append(attrs, slog.Any(k, public[k]))
 	}
 	if !e.Err.IsZero() {
 		attrs = append(attrs, slog.String("error_type", e.Err.Type()))

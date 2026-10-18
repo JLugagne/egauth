@@ -230,3 +230,16 @@ func TestSecretIsNeverFormatted(t *testing.T) {
 		t.Fatal("Reveal must return the plaintext")
 	}
 }
+
+func TestValidateNamesTheSameURLEveryTime(t *testing.T) {
+	p := valid()
+	p.AuthURL = "http://idp.example.com/a"
+	p.TokenURL = "http://idp.example.com/t"
+	p.UserInfoURL = "http://idp.example.com/u"
+	first := p.Validate().Error()
+	for range 50 {
+		if got := p.Validate().Error(); got != first {
+			t.Fatalf("Validate reported %q then %q for the same provider", first, got)
+		}
+	}
+}

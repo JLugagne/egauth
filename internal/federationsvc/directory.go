@@ -105,12 +105,15 @@ type Directory struct {
 // NewDirectory returns ErrInvalidConfig joined with every missing member.
 func NewDirectory(cfg DirectoryConfig) (*Directory, error) {
 	var errs []error
-	for name, ok := range map[string]bool{
-		"Users": present(cfg.Users), "Links": present(cfg.Links), "Accounts": present(cfg.Accounts),
-		"Registration": cfg.Registration.valid(), "Audit": present(cfg.Audit),
+	for _, m := range []struct {
+		name string
+		ok   bool
+	}{
+		{"Users", present(cfg.Users)}, {"Links", present(cfg.Links)}, {"Accounts", present(cfg.Accounts)},
+		{"Registration", cfg.Registration.valid()}, {"Audit", present(cfg.Audit)},
 	} {
-		if !ok {
-			errs = append(errs, errors.New(name))
+		if !m.ok {
+			errs = append(errs, errors.New(m.name))
 		}
 	}
 	if len(errs) > 0 {
