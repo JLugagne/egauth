@@ -64,6 +64,8 @@ before deploying: **every user logs in again**.
 - `Auth.Close` returns within a bounded time: queued deliveries get a short grace period, then
   are cancelled and reported as `event.DeliveryFailed`, and a reaper pass in progress is cancelled
   and joined.
+- `hashertest.MockHasher` takes a `T testing.TB`; a call whose function field is nil fails the
+  test instead of only returning `ErrUndefined`.
 - Argon2id derivations are capped at max(2, GOMAXPROCS) per process, shared by every
   `argon2.Hasher`; a waiting `Hash` or `Compare` returns `ctx.Err()` when its context ends.
 - `kek.NewLocal` refuses every key committed to this repository (test fixtures and the keys former

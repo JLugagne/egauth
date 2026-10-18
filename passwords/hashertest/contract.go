@@ -10,29 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// MockHasher is a function-based mock implementation of the passwords.Hasher interface.
-// It allows flexible testing by injecting custom behavior for each method.
+// MockHasher is a function-based mock of passwords.Hasher. T is required: a call whose function
+// field is nil fails T, so an unexpected call never lets a test pass silently, and returns
+// ErrUndefined. It is safe to call from any goroutine.
 type MockHasher struct {
+	T           testing.TB
 	HashFunc    func(ctx context.Context, password string) (string, error)
 	CompareFunc func(ctx context.Context, hash passwords.PHC, password string) error
 }
 
 var _ passwords.Hasher = (*MockHasher)(nil)
 
-// ErrUndefined is returned by a MockHasher method whose function field is nil.
+// ErrUndefined is returned by a MockHasher method whose function field is nil, after failing T.
 var ErrUndefined = errors.New("hashertest: mock function is not defined")
 
-// Hash calls HashFunc, or returns ErrUndefined when it is nil.
+// Hash calls HashFunc.
 func (m *MockHasher) Hash(ctx context.Context, password string) (string, error) {
 	if m.HashFunc == nil {
+		m.T.Errorf("hashertest: MockHasher.Hash called but HashFunc is not defined")
 		return "", ErrUndefined
 	}
 	return m.HashFunc(ctx, password)
 }
 
-// Compare calls CompareFunc, or returns ErrUndefined when it is nil.
+// Compare calls CompareFunc.
 func (m *MockHasher) Compare(ctx context.Context, hash passwords.PHC, password string) error {
 	if m.CompareFunc == nil {
+		m.T.Errorf("hashertest: MockHasher.Compare called but CompareFunc is not defined")
 		return ErrUndefined
 	}
 	return m.CompareFunc(ctx, hash, password)
