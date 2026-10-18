@@ -1,5 +1,5 @@
 // Package identity is the PostgreSQL identity.Store. Accounts live in the v0.16 users and identities
-// tables, extended in place by 009_security_epoch.sql and 010_identifier_state.sql; the epoch feed
+// tables, extended in place by 009_security_epoch.sql, 010_identifier_state.sql and 011_link_authority.sql; the epoch feed
 // and the lifecycle outbox live in egauth_epoch_log and egauth_lifecycle_outbox. users.identifier_state
 // defaults to IdentifiersUnchecked, so every row a v0.16 replica writes, even during a rolling
 // upgrade, is listed by V016Identifiers.
