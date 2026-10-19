@@ -99,9 +99,11 @@ func RuntimeAuthority(p ProviderSpec) string {
 // as the provider returned it; it never becomes the account email by itself (C-05). Authority is
 // the StaticAuthority or RuntimeAuthority of the provider configuration the link was made through;
 // a sign-in resolves the link only through that same configuration. A v0.16 link, stored without
-// one, reports the RuntimeAuthority of the tenant provider of the same name, or StaticAuthority
-// when the tenant has none; since HasLinksOutside then refuses any spec of another authority, a
-// v0.16 link keeps the authority it was made under.
+// one, reports the RuntimeAuthority of the tenant provider bearing that name, or StaticAuthority
+// when the tenant has none; since HasLinksOutside then refuses any spec of another authority and
+// DeleteProvider binds such links to the deleted spec first, a v0.16 link keeps the authority it
+// was made under. A v0.16 link whose provider row was already gone before the upgrade reads as
+// StaticAuthority.
 type LinkedIdentity struct {
 	Subject               principal.Subject
 	Key                   LinkKey

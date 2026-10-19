@@ -37,10 +37,11 @@ const (
 	passwordProvider = "password"
 	specColumns      = `tenant_id, provider_name, client_id, client_secret, aad_version, auth_url, token_url,
     user_info_url, scopes, issuer, jwks_url, domains, email_verification, updated_at`
-	linkColumns   = `i.user_id, i.tenant_id, i.provider, i.provider_id, ` + linkAuthority + `, i.provider_email, i.provider_email_verified, i.created_at`
-	linkAuthority = `CASE WHEN i.authority <> '' THEN i.authority
+	linkColumns      = `i.user_id, i.tenant_id, i.provider, i.provider_id, ` + linkAuthority + `, i.provider_email, i.provider_email_verified, i.created_at`
+	runtimeAuthority = `'tenant:' || encode(sha256(convert_to(p.issuer || E'\n' || p.jwks_url || E'\n' || p.token_url || E'\n' || p.user_info_url, 'UTF8')), 'hex')`
+	linkAuthority    = `CASE WHEN i.authority <> '' THEN i.authority
     WHEN p.provider_name IS NULL THEN 'static'
-    ELSE 'tenant:' || encode(sha256(convert_to(p.issuer || E'\n' || p.jwks_url || E'\n' || p.token_url || E'\n' || p.user_info_url, 'UTF8')), 'hex') END`
+    ELSE ` + runtimeAuthority + ` END`
 	linkSource = `identities i JOIN users u ON u.id = i.user_id AND u.tenant_id = i.tenant_id
 LEFT JOIN oauth_oidc_providers p ON p.tenant_id = i.tenant_id AND p.provider_name = i.provider`
 )
@@ -237,8 +238,21 @@ WHERE tenant_id = $1 ORDER BY provider_name COLLATE "C"`, t.String())
 }
 
 func (s *Store) DeleteProvider(ctx context.Context, t principal.TenantID, name string) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM oauth_oidc_providers WHERE tenant_id = $1 AND provider_name = $2`, t.String(), name); err != nil {
-		return errors.Join(errors.New("federation: delete provider"), err)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return errors.Join(errors.New("federation: begin"), err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE identities i SET authority = `+runtimeAuthority+`
+FROM oauth_oidc_providers p
+WHERE p.tenant_id = i.tenant_id AND p.provider_name = i.provider
+  AND i.tenant_id = $1 AND i.provider = $2 AND i.authority = ''`, t.String(), name); err != nil {
+		return errors.Join(errors.New("federation: bind v0.16 links"), err, rollback(ctx, tx))
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM oauth_oidc_providers WHERE tenant_id = $1 AND provider_name = $2`, t.String(), name); err != nil {
+		return errors.Join(errors.New("federation: delete provider"), err, rollback(ctx, tx))
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return errors.Join(errors.New("federation: commit"), err)
 	}
 	return nil
 }
