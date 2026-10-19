@@ -99,7 +99,7 @@ func TestNoKEKIsDerivedFromALiteral(t *testing.T) {
 }
 
 func TestLiteralKEKScanSeesEveryDerivationForm(t *testing.T) {
-	header := "package x\nimport (\n\t\"crypto/rand\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n\t\"github.com/JLugagne/egauth/kek\"\n)\n"
+	header := "package x\nimport (\n\t\"bytes\"\n\t\"crypto/rand\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n\t\"github.com/JLugagne/egauth/kek\"\n)\n"
 	flagged := map[string]string{
 		"digest in the same func": "func a() { sum := sha256.Sum256([]byte(\"public\")); _, _ = kek.NewLocal(sum[:]) }\n",
 		"literal bytes":           "func a() { _, _ = kek.NewLocal([]byte(\"0123456789abcdef0123456789abcdef\")) }\n",
@@ -108,6 +108,10 @@ func TestLiteralKEKScanSeesEveryDerivationForm(t *testing.T) {
 		"helper func":             "func derive() []byte { s := sha256.Sum256([]byte(\"helper\")); return s[:] }\nfunc a() { _, _ = kek.NewLocal(derive()) }\n",
 		"helper of a helper":      "func seed() []byte { s := sha256.Sum256([]byte(\"deep\")); return s[:] }\nfunc derive() []byte { return seed() }\nfunc a() { _, _ = kek.NewLocal(derive()) }\n",
 		"named const":             "const devSecret = \"0123456789abcdef0123456789abcdef\"\nfunc a() { _, _ = kek.NewLocal([]byte(devSecret)) }\n",
+		"byte composite literal":  "func a() { _, _ = kek.NewLocal([]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}) }\n",
+		"bytes.Repeat":            "func a() { k := bytes.Repeat([]byte(\"abcdefgh\"), 4); _, _ = kek.NewLocal(k) }\n",
+		"method helper":           "type h struct{}\nfunc (h) key() []byte { return []byte(\"0123456789abcdef0123456789abcdef\") }\nfunc a() { _, _ = kek.NewLocal(h{}.key()) }\n",
+		"package array var":       "var seed = [32]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}\nfunc a() { _, _ = kek.NewLocal(seed[:]) }\n",
 	}
 	for name, body := range flagged {
 		if got := literalKEKSites(t, map[string]any{"x.go": header + body}); len(got) != 1 {
@@ -175,7 +179,7 @@ type kekSite struct {
 	line int
 }
 
-var derivations = map[string]bool{"Sum256": true, "Sum512": true, "Key": true, "Expand": true, "Extract": true, "DecodeString": true}
+var derivations = map[string]bool{"Sum256": true, "Sum512": true, "Key": true, "Expand": true, "Extract": true, "DecodeString": true, "Repeat": true}
 
 func literalKEKSites(t *testing.T, srcs map[string]any) []kekSite {
 	t.Helper()
@@ -196,14 +200,14 @@ func literalKEKSites(t *testing.T, srcs map[string]any) []kekSite {
 				for _, spec := range d.Specs {
 					if vs, ok := spec.(*ast.ValueSpec); ok {
 						for i, name := range vs.Names {
-							if i < len(vs.Values) && hasStringLit(vs.Values[i]) || len(vs.Values) == 1 && hasStringLit(vs.Values[0]) {
+							if i < len(vs.Values) && hasLiteral(vs.Values[i]) || len(vs.Values) == 1 && hasLiteral(vs.Values[0]) {
 								tainted[name.Name] = true
 							}
 						}
 					}
 				}
 			case *ast.FuncDecl:
-				if d.Recv == nil && d.Body != nil {
+				if d.Body != nil {
 					funcs[d.Name.Name] = d
 				}
 			}
@@ -308,6 +312,8 @@ func argsDerive(args []ast.Expr, tainted, derives map[string]bool) bool {
 			switch x := n.(type) {
 			case *ast.BasicLit:
 				found = found || x.Kind == token.STRING
+			case *ast.CompositeLit:
+				found = found || isByteLiteral(x)
 			case *ast.Ident:
 				found = found || tainted[x.Name]
 			case *ast.CallExpr:
@@ -319,15 +325,27 @@ func argsDerive(args []ast.Expr, tainted, derives map[string]bool) bool {
 	return found
 }
 
-func hasStringLit(e ast.Expr) bool {
+func hasLiteral(e ast.Expr) bool {
 	found := false
 	ast.Inspect(e, func(n ast.Node) bool {
-		if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-			found = true
+		switch x := n.(type) {
+		case *ast.BasicLit:
+			found = x.Kind == token.STRING
+		case *ast.CompositeLit:
+			found = isByteLiteral(x)
 		}
 		return !found
 	})
 	return found
+}
+
+func isByteLiteral(lit *ast.CompositeLit) bool {
+	at, ok := lit.Type.(*ast.ArrayType)
+	if !ok || len(lit.Elts) == 0 {
+		return false
+	}
+	id, ok := at.Elt.(*ast.Ident)
+	return ok && id.Name == "byte"
 }
 
 func isByteConversion(call *ast.CallExpr) bool {
