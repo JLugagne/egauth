@@ -18,6 +18,7 @@ import (
 	"github.com/JLugagne/egauth/store"
 	"github.com/JLugagne/egauth/store/ceremony"
 	"github.com/JLugagne/egauth/store/identity"
+	"github.com/JLugagne/egauth/store/tokens"
 )
 
 // ErrInvalidAccountsConfig is returned by NewAccounts, joined with one error per missing member.
@@ -117,9 +118,17 @@ type PendingSource interface {
 	Detached(ctx context.Context, t core.TenantID) (core.Pending, error)
 }
 
+// APIKeyStore is the part of tokens.Store a security revert needs: it revokes the API keys created
+// in the window it reverts, since a key minted on a hijacked session outlives the epoch bump.
+type APIKeyStore interface {
+	ListAPIKeys(ctx context.Context, owner core.Subject) ([]tokens.APIKey, error)
+	RevokeAPIKey(ctx context.Context, owner core.Subject, id uuid.UUID) error
+}
+
 // AccountsConfig is what NewAccounts needs. Mailer and Pendings are always required; Texter and
 // Sealer (which keys the texted code) are required with Phone. Email, Phone, RecoveryEmail and
-// SelfDelete mount the endpoints of Modules.Verification and Modules.SelfDelete.
+// SelfDelete mount the endpoints of Modules.Verification and Modules.SelfDelete. APIKeys is set
+// whenever the deployment stores API keys, so a security revert revokes those it covers.
 type AccountsConfig struct {
 	Mailer        AccountMailer
 	Texter        Texter
@@ -129,6 +138,7 @@ type AccountsConfig struct {
 	Phone         bool
 	RecoveryEmail bool
 	SelfDelete    bool
+	APIKeys       APIKeyStore
 }
 
 // Accounts serves the account management endpoints of a Service and the security notices of its
@@ -144,6 +154,7 @@ type Accounts struct {
 	phone      bool
 	recovery   bool
 	selfDelete bool
+	apiKeys    APIKeyStore
 }
 
 // NewAccounts validates cfg against s and reports every problem at once as ErrInvalidAccountsConfig
@@ -160,6 +171,7 @@ func NewAccounts(s *Service, cfg AccountsConfig) (*Accounts, error) {
 	need(present(cfg.Pendings), "Pendings")
 	need(!cfg.Phone || present(cfg.Texter), "Texter")
 	need(!cfg.Phone || cfg.Sealer != nil, "Sealer")
+	need(cfg.APIKeys == nil || present(cfg.APIKeys), "APIKeys")
 	if len(errs) > 0 {
 		return nil, errors.Join(ErrInvalidAccountsConfig, errors.Join(errs...))
 	}
@@ -173,6 +185,7 @@ func NewAccounts(s *Service, cfg AccountsConfig) (*Accounts, error) {
 		phone:      cfg.Phone,
 		recovery:   cfg.RecoveryEmail,
 		selfDelete: cfg.SelfDelete,
+		apiKeys:    cfg.APIKeys,
 	}, nil
 }
 

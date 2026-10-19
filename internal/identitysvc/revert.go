@@ -379,6 +379,9 @@ func (r *revertRun) apply(ctx context.Context, plan revertPlan) (revertOutcome, 
 	if err := r.removeIdentifiers(ctx, plan); err != nil {
 		return revertOutcome{}, mutationProblem(err)
 	}
+	if err := r.revokeKeys(ctx, sub, plan); err != nil {
+		return revertOutcome{}, errors.Join(httpx.ErrServiceUnavailable, err)
+	}
 	end := r.end()
 	widens, err := r.spanWidens(ctx, sub, plan.since, end)
 	if err != nil {
@@ -483,6 +486,25 @@ func (a *revertRun) removeLinks(ctx context.Context, sub core.Subject, plan reve
 		}
 		m := identity.UnlinkFederated{Subject: sub, Provider: l.Identity.Provider, ProviderSubject: l.Identity.ProviderSubject}
 		if _, err := a.Apply(ctx, m); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *revertRun) revokeKeys(ctx context.Context, sub core.Subject, plan revertPlan) error {
+	if a.apiKeys == nil {
+		return nil
+	}
+	keys, err := a.apiKeys.ListAPIKeys(ctx, sub)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if !k.RevokedAt.IsZero() || !plan.covers(k.CreatedAt) {
+			continue
+		}
+		if err := a.apiKeys.RevokeAPIKey(ctx, sub, k.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 			return err
 		}
 	}

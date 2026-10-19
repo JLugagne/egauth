@@ -333,6 +333,9 @@ func (b *builder[C]) accountServices() {
 		}
 		ac.Sealer, ac.Texter = sealer, smsAdapter{d: cfg.SMS}
 	}
+	if present(cfg.Storage.Tokens) {
+		ac.APIKeys = cfg.Storage.Tokens
+	}
 	accounts, err := identitysvc.NewAccounts(o.identity, ac)
 	if err != nil {
 		b.fail("Modules.Verification", err)
