@@ -4,11 +4,6 @@ go 1.26.7
 
 toolchain go1.26.9
 
-// The `replace` below resolves the core module from this repo's root so every go command works
-// offline before the core tag exists. The `require` tracks the VERSION file (enforced by
-// scripts/sync-versions.sh --check). At release the maintainer drops the replace and re-tidies
-// against the published core tag; see RELEASING.md.
-
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
@@ -84,5 +79,3 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
-
-replace github.com/JLugagne/egauth => ../..
