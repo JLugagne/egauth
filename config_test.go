@@ -3,6 +3,7 @@ package egauth_test
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -180,8 +181,7 @@ func (observerStub) OutboundStart(*http.Request) func(*http.Response, error) { r
 
 func testKEK(t testing.TB) kek.KEK {
 	t.Helper()
-	sum := sha256.Sum256([]byte("egauth config test kek"))
-	k, err := kek.NewLocal(sum[:])
+	k, err := kek.NewLocal(testKEKKey)
 	require.NoError(t, err)
 	return k
 }
@@ -898,4 +898,14 @@ func TestConfigFormattingOmitsWiring(t *testing.T) {
 	for _, leak := range []string{"client-secret-value", "identityStub", "kek.Local", "admin"} {
 		require.NotContains(t, out, leak)
 	}
+}
+
+var testKEKKey = randomKEKKey()
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }

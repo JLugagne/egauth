@@ -2,6 +2,7 @@ package journeytest_test
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"io"
@@ -148,8 +149,7 @@ func TestProbesHaveTeeth(t *testing.T) {
 
 func TestProdConfigPosture(t *testing.T) {
 	clk := egauthtest.NewClock(egauthtest.ReferenceTime())
-	sum := sha256.Sum256([]byte("prod config posture kek"))
-	k, err := kek.NewLocal(sum[:])
+	k, err := kek.NewLocal(randomKEKKey())
 	require.NoError(t, err)
 	seed := sha256.Sum256([]byte("prod config posture signer"))
 	signer, err := signing.EdDSA("prod-1", seed[:])
@@ -217,8 +217,7 @@ func TestProbesAreDerivedFromEndpointMeta(t *testing.T) {
 
 func TestProbesRunAgainstAServer(t *testing.T) {
 	journeytest.RunAgainst(t, func(_ *slog.Logger, origin string) (http.Handler, func() error, error) {
-		sum := sha256.Sum256([]byte("run against kek"))
-		k, err := kek.NewLocal(sum[:])
+		k, err := kek.NewLocal(randomKEKKey())
 		if err != nil {
 			return nil, nil, err
 		}
@@ -474,4 +473,12 @@ func TestCrossTenantProbesCoverEveryConsumedRecordTheHarnessCanDrive(t *testing.
 	} {
 		require.True(t, names[name], "missing probe %s", name)
 	}
+}
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }

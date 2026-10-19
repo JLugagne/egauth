@@ -2,7 +2,7 @@ package federationsvc_test
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"net/http"
 	"testing"
 
@@ -15,8 +15,7 @@ import (
 
 func (w *world) storeProvider(p federation.Provider) kek.KEK {
 	w.t.Helper()
-	sum := sha256.Sum256([]byte("egauth/federationsvc_test/kek"))
-	k, err := kek.NewLocal(sum[:])
+	k, err := kek.NewLocal(testKEKKey)
 	if err != nil {
 		w.t.Fatal(err)
 	}
@@ -63,4 +62,14 @@ func TestTenantProviderLogsInALinkedIdentity(t *testing.T) {
 	if got.Code != http.StatusOK || w.issuer.completions()[0].verified.Subject() != owner {
 		t.Fatalf("tenant provider sign-in answered %d %s", got.Code, got.Body.String())
 	}
+}
+
+var testKEKKey = randomKEKKey()
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }

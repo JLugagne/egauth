@@ -3,6 +3,7 @@ package flow_test
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"encoding/base32"
@@ -259,7 +260,7 @@ func newWorldWith(t *testing.T, o options) *world {
 	must(t, err)
 	trusted, err := csrf.NewOrigins(origin, nil)
 	must(t, err)
-	k, err := kek.NewLocal(sha(t, "egauth/flow_test/kek"))
+	k, err := kek.NewLocal(testKEKKey)
 	must(t, err)
 	mfaSvc, err := mfasvc.New(mfasvc.Config{
 		MFA: w.mfa, Passkeys: w.passkeys, Identity: w.identity, Mutations: mutator{w.identity}, KEK: k,
@@ -621,4 +622,14 @@ func (c *client) finishStepUp(a *webauthntest.Authenticator, flowField string) *
 	body[routes.FieldHandle] = ch.Handle
 	maps.Copy(body, fields)
 	return c.post(routes.MFAPasskeyFinish, body)
+}
+
+var testKEKKey = randomKEKKey()
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }

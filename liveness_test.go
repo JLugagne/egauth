@@ -2,11 +2,11 @@ package egauth_test
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,8 +88,8 @@ func (s flakyIdentity) EpochsChangedSince(ctx context.Context, c store.Cursor) (
 func derivedKEK(t testing.TB, label string, previous ...string) *kek.Local {
 	t.Helper()
 	key := func(l string) []byte {
-		sum := sha256.Sum256([]byte("egauth liveness test " + l))
-		return sum[:]
+		k, _ := labelKEKKeys.LoadOrStore(l, randomKEKKey())
+		return k.([]byte)
 	}
 	var prev [][]byte
 	for _, p := range previous {
@@ -410,3 +410,5 @@ func TestLivenessMountConflictIsAnErrorNotAPanic(t *testing.T) {
 	require.Error(t, second)
 	require.ErrorIs(t, second, routes.ErrConflict)
 }
+
+var labelKEKKeys sync.Map

@@ -5,7 +5,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha1"
-	"crypto/sha256"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/binary"
@@ -258,8 +257,7 @@ type world struct {
 
 func newKEK(t *testing.T) kek.KEK {
 	t.Helper()
-	sum := sha256.Sum256([]byte("egauth/mfasvc_test/kek"))
-	k, err := kek.NewLocal(sum[:])
+	k, err := kek.NewLocal(testKEKKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -489,4 +487,14 @@ func (w *world) addPasskey(s core.Subject) {
 	if err != nil {
 		w.t.Fatal(err)
 	}
+}
+
+var testKEKKey = randomKEKKey()
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }

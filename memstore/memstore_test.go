@@ -2,7 +2,7 @@ package memstore_test
 
 import (
 	"context"
-	"crypto/sha256"
+	"crypto/rand"
 	"reflect"
 	"testing"
 
@@ -19,8 +19,7 @@ import (
 
 func testKEK(t testing.TB) kek.KEK {
 	t.Helper()
-	sum := sha256.Sum256([]byte("egauth memstore test kek"))
-	k, err := kek.NewLocal(sum[:])
+	k, err := kek.NewLocal(testKEKKey)
 	require.NoError(t, err)
 	return k
 }
@@ -68,4 +67,14 @@ func TestFederationReadsLinksFromTheSameIdentityStore(t *testing.T) {
 	got, err := s.Federation.FindLinked(ctx, tn, federation.LinkKey{Provider: "google", ProviderSubject: "g-1"})
 	require.NoError(t, err)
 	require.Equal(t, applied.Subject, got.Subject)
+}
+
+var testKEKKey = randomKEKKey()
+
+func randomKEKKey() []byte {
+	k := make([]byte, kek.KeyLength)
+	if _, err := rand.Read(k); err != nil {
+		panic(err)
+	}
+	return k
 }
