@@ -72,7 +72,7 @@ type Config struct {
 type Backend struct {
 	codec     *Codec
 	keys      Keys
-	tokens    tokens.Store
+	tokens    familyStore
 	families  *revoke.Families
 	epochs    *revoke.Epochs
 	renewer   *session.Renewer
@@ -102,7 +102,7 @@ func New(cfg Config) (*Backend, error) {
 		}
 	}
 	return &Backend{
-		codec: cfg.Codec, keys: cfg.Keys, tokens: forgetting{Store: cfg.Tokens, families: cfg.Families}, families: cfg.Families, epochs: cfg.Epochs,
+		codec: cfg.Codec, keys: cfg.Keys, tokens: forgetting{tokens: cfg.Tokens, families: cfg.Families}, families: cfg.Families, epochs: cfg.Epochs,
 		renewer: cfg.Renewer, cookies: cfg.Cookies, audiences: slices.Clone(cfg.Audiences), life: life,
 		clk: cfg.Clock, events: cfg.Events,
 	}, nil
