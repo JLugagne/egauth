@@ -52,6 +52,13 @@ func fixture(t *testing.T) string {
 	return dir
 }
 
+func coreRequire(t *testing.T, dir string) string {
+	t.Helper()
+	v, err := os.ReadFile(filepath.Join(dir, "VERSION"))
+	require.NoError(t, err)
+	return "github.com/JLugagne/egauth v" + strings.TrimSpace(string(v))
+}
+
 func runCheck(t *testing.T, dir string) (string, error) {
 	t.Helper()
 	cmd := exec.Command("bash", filepath.Join(dir, "scripts/sync-versions.sh"), "--check")
@@ -135,13 +142,13 @@ func TestSyncVersions_DetectsDrift(t *testing.T) {
 						keep = append(keep, l)
 					}
 				}
-				return strings.Replace(strings.Join(keep, "\n"), "github.com/JLugagne/egauth v0.17.0-dev", "github.com/JLugagne/egauth v0.17.0-dev // pinned; see the replace below", 1)
+				return strings.Replace(strings.Join(keep, "\n"), coreRequire(t, dir), coreRequire(t, dir)+" // pinned; see the replace below", 1)
 			})
 		},
 		"stale require hidden behind a version-qualified replace block": func(t *testing.T, dir string) {
 			rewrite(t, filepath.Join(dir, "adapters/otel/go.mod"), func(s string) string {
-				s = strings.Replace(s, "\nrequire", "\nreplace (\n\tgithub.com/JLugagne/egauth v0.17.0-dev => ../..\n)\n\nrequire", 1)
-				return strings.Replace(s, "\tgithub.com/JLugagne/egauth v0.17.0-dev\n", "\tgithub.com/JLugagne/egauth v0.16.0\n", 1)
+				s = strings.Replace(s, "\nrequire", "\nreplace (\n\t"+coreRequire(t, dir)+" => ../..\n)\n\nrequire", 1)
+				return strings.Replace(s, "\t"+coreRequire(t, dir)+"\n", "\tgithub.com/JLugagne/egauth v0.16.0\n", 1)
 			})
 		},
 		"comment containing an arrow hides a missing replace directive": func(t *testing.T, dir string) {
@@ -273,7 +280,7 @@ func TestSyncVersions_RewriteHandlesSingleLineRequire(t *testing.T) {
 	require.NoError(t, err, out)
 	data, err := os.ReadFile(filepath.Join(dir, "adapters/otel/go.mod"))
 	require.NoError(t, err)
-	require.Contains(t, string(data), "require github.com/JLugagne/egauth v0.17.0-dev")
+	require.Contains(t, string(data), "require "+coreRequire(t, dir))
 }
 
 func TestSyncVersions_DocumentedReleaseStepsStayInSync(t *testing.T) {
