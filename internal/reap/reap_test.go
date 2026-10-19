@@ -297,3 +297,22 @@ func TestRunOnceGivesUpWhenItsContextEndsWhileAPassRuns(t *testing.T) {
 	}
 	close(o.gate)
 }
+
+func TestRunOnceWaitingForAPassReturnsErrStoppedWhenStopRuns(t *testing.T) {
+	o := &fakeOutbox{gate: make(chan struct{})}
+	r := newReaper(t, o, clock.NewTest(time.Now()), &sink{})
+	go func() { _ = r.RunOnce(context.Background()) }()
+	eventually(t, func() bool { return o.n.Load() == 1 })
+	done := make(chan error, 1)
+	go func() { done <- r.RunOnce(context.Background()) }()
+	time.Sleep(50 * time.Millisecond)
+	r.Stop()
+	select {
+	case err := <-done:
+		if !errors.Is(err, reap.ErrStopped) {
+			t.Fatalf("RunOnce waiting while Stop ran = %v, want reap.ErrStopped", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunOnce kept waiting after Stop")
+	}
+}

@@ -168,6 +168,9 @@ func (r *Reaper) RunOnce(ctx context.Context) error {
 	select {
 	case r.pass <- struct{}{}:
 	case <-ctx.Done():
+		if r.base.Err() != nil {
+			return ErrStopped
+		}
 		return ctx.Err()
 	}
 	defer func() { <-r.pass }()
