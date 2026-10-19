@@ -52,7 +52,10 @@ func (s *Service) checkCurrentPassword(ctx context.Context, c current, password 
 	case err != nil:
 		return errors.Join(httpx.ErrServiceUnavailable, err)
 	}
-	ok := s.matches(ctx, cred.PHC.PHC(), password)
+	ok, err := s.matches(ctx, cred.PHC.PHC(), password)
+	if err != nil {
+		return err
+	}
 	if cred.LockedUntil.After(s.clock.Now()) {
 		return ErrInvalidCredentials
 	}

@@ -47,13 +47,15 @@ func (h *handlers) login(w http.ResponseWriter, r *httpx.Request) {
 func (s *Service) verifyPassword(ctx context.Context, t core.TenantID, rawID, password string) (core.Subject, error) {
 	id, err := Normalize(rawID)
 	if err != nil {
-		s.decoy(ctx, password)
+		if err := s.decoy(ctx, password); err != nil {
+			return core.Subject{}, err
+		}
 		return core.Subject{}, ErrInvalidCredentials
 	}
 	u, err := s.identity.FindUser(ctx, t, id)
 	known := err == nil
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.decoy(ctx, password)
+		_ = s.decoy(ctx, password)
 		return core.Subject{}, errors.Join(httpx.ErrServiceUnavailable, err)
 	}
 	decoySub := core.Subject{Tenant: t, User: s.decoyUser}
@@ -63,15 +65,20 @@ func (s *Service) verifyPassword(ctx context.Context, t core.TenantID, rawID, pa
 	}
 	cred, err := s.identity.GetPassword(ctx, sub)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
-		s.decoy(ctx, password)
+		_ = s.decoy(ctx, password)
 		return core.Subject{}, errors.Join(httpx.ErrServiceUnavailable, err)
 	}
 	if !known || err != nil {
-		s.decoy(ctx, password)
+		if err := s.decoy(ctx, password); err != nil {
+			return core.Subject{}, err
+		}
 		s.chargeDecoy(ctx, decoySub)
 		return core.Subject{}, ErrInvalidCredentials
 	}
-	ok := s.matches(ctx, cred.PHC.PHC(), password)
+	ok, err := s.matches(ctx, cred.PHC.PHC(), password)
+	if err != nil {
+		return core.Subject{}, err
+	}
 	if !loginAllowed(u, id) || cred.LockedUntil.After(s.clock.Now()) {
 		s.chargeDecoy(ctx, decoySub)
 		return core.Subject{}, ErrInvalidCredentials

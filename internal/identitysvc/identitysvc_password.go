@@ -64,16 +64,22 @@ func passwordProblem(err error) error {
 	return errors.Join(ErrPasswordRejected, err)
 }
 
-func (s *Service) matches(ctx context.Context, phc, password string) bool {
+func (s *Service) matches(ctx context.Context, phc, password string) (bool, error) {
 	canon := passwords.Canonical(password)
-	ok := s.hasher.Compare(ctx, passwords.PHC(phc), canon) == nil
+	err := s.hasher.Compare(ctx, passwords.PHC(phc), canon)
+	ok := err == nil
 	if canon != password {
-		legacy := s.hasher.Compare(ctx, passwords.PHC(phc), password) == nil
-		ok = ok || legacy
+		legacy := s.hasher.Compare(ctx, passwords.PHC(phc), password)
+		ok = ok || legacy == nil
+		err = errors.Join(err, legacy)
 	}
-	return ok
+	if !ok && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return false, errors.Join(httpx.ErrServiceUnavailable, err)
+	}
+	return ok, nil
 }
 
-func (s *Service) decoy(ctx context.Context, password string) {
-	_ = s.matches(ctx, s.decoyPHC, password)
+func (s *Service) decoy(ctx context.Context, password string) error {
+	_, err := s.matches(ctx, s.decoyPHC, password)
+	return err
 }

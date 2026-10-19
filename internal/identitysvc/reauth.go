@@ -18,13 +18,18 @@ func (s *Service) CheckPassword(ctx context.Context, sub core.Subject, password 
 	cred, err := s.identity.GetPassword(ctx, sub)
 	switch {
 	case errors.Is(err, store.ErrNotFound):
-		s.decoy(ctx, password)
+		if err := s.decoy(ctx, password); err != nil {
+			return err
+		}
 		return ErrInvalidCredentials
 	case err != nil:
-		s.decoy(ctx, password)
+		_ = s.decoy(ctx, password)
 		return errors.Join(httpx.ErrServiceUnavailable, err)
 	}
-	ok := s.matches(ctx, cred.PHC.PHC(), password)
+	ok, err := s.matches(ctx, cred.PHC.PHC(), password)
+	if err != nil {
+		return err
+	}
 	if cred.LockedUntil.After(s.clock.Now()) {
 		return ErrInvalidCredentials
 	}
