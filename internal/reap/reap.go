@@ -68,7 +68,7 @@ type Reaper struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	pass sync.Mutex
+	pass chan struct{}
 
 	mu        sync.Mutex
 	started   bool
@@ -106,6 +106,7 @@ func New(cfg Config) (*Reaper, error) {
 		events: cfg.Events,
 		base:   base,
 		cancel: cancel,
+		pass:   make(chan struct{}, 1),
 	}, nil
 }
 
@@ -148,7 +149,7 @@ func (r *Reaper) Poke() {
 	})
 }
 
-// RunOnce runs one pass now, waiting for a running one: it retries the outbox and runs every store
+// RunOnce runs one pass now, waiting for a running one unless ctx ends first (ctx.Err()): it retries the outbox and runs every store
 // Reaper. The pass is bounded by PassTimeout and cancelled by Stop, which waits for it. It returns
 // every failure joined, after emitting each as event.LifecycleRetry, and ErrStopped once Stop was
 // called.
@@ -164,8 +165,12 @@ func (r *Reaper) RunOnce(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, PassTimeout)
 	defer cancel()
 	defer context.AfterFunc(r.base, cancel)()
-	r.pass.Lock()
-	defer r.pass.Unlock()
+	select {
+	case r.pass <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-r.pass }()
 	if r.base.Err() != nil {
 		return ErrStopped
 	}
@@ -193,10 +198,12 @@ func (r *Reaper) loop() {
 }
 
 func (r *Reaper) tryPass(force bool) {
-	if !r.pass.TryLock() {
+	select {
+	case r.pass <- struct{}{}:
+	default:
 		return
 	}
-	defer r.pass.Unlock()
+	defer func() { <-r.pass }()
 	if r.base.Err() != nil {
 		return
 	}

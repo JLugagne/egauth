@@ -276,3 +276,24 @@ func TestStopCancelsAndJoinsARunOnceOfTheCaller(t *testing.T) {
 		t.Fatal("Stop neither cancelled nor joined the RunOnce pass")
 	}
 }
+
+func TestRunOnceGivesUpWhenItsContextEndsWhileAPassRuns(t *testing.T) {
+	o := &fakeOutbox{gate: make(chan struct{})}
+	r := newReaper(t, o, clock.NewTest(time.Now()), &sink{})
+	go func() { _ = r.RunOnce(context.Background()) }()
+	eventually(t, func() bool { return o.n.Load() == 1 })
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- r.RunOnce(ctx) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("RunOnce = %v, want its context's error", err)
+		}
+	case <-time.After(2 * time.Second):
+		close(o.gate)
+		t.Fatal("RunOnce kept waiting for the running pass after its context ended")
+	}
+	close(o.gate)
+}
