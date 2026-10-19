@@ -2,7 +2,9 @@ package egauth_test
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"testing"
 
@@ -92,4 +94,32 @@ func TestTenantsSetOAuthProviderHidesDiscoveryNetworkDetails(t *testing.T) {
 	require.Len(t, rejected, 3, "the operator still sees every rejected discovery")
 	require.Contains(t, rejected[0].Err.Text(), "127.0.0.1", "the detailed cause goes to the PII-classified event field only")
 	require.Equal(t, "discovery", rejected[0].Reason)
+}
+
+type unreachableFederation struct {
+	storefed.Store
+}
+
+func (unreachableFederation) HasLinksOutside(context.Context, storefed.ProviderSpec) (bool, error) {
+	return false, errors.New("failed to connect to `user=egauth_svc database=egauth_prod`: 10.0.0.5:5432: dial error")
+}
+
+func TestTenantsSetOAuthProviderNeverReturnsAStoreFailureVerbatim(t *testing.T) {
+	var idp *egauthtest.IdP
+	loopback := []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}
+	w := newFacadeWorldWithIdP(t, func(clk *egauthtest.Clock) *egauthtest.IdP {
+		idp = egauthtest.NewIdP(t, clk)
+		return idp
+	}, func(c *egauth.Config[gateClaims], _ *egauthtest.IdP) {
+		c.Modules.OAuth = &egauth.OAuthModule{Providers: []federation.Provider{provider("static")}, PerTenant: true}
+		c.Insecure.OutboundPrivateNetwork = &egauth.OutboundAllowance{Prefixes: loopback, Ack: egauth.Acknowledge("fake idp")}
+		c.Insecure.TenantOutboundPrivateNetwork = &egauth.OutboundAllowance{Prefixes: loopback, Ack: egauth.Acknowledge("fake idp")}
+		c.Storage.Federation = unreachableFederation{c.Storage.Federation}
+	})
+	err := w.a.Tenants().SetOAuthProvider(context.Background(), w.system("sso"), egauth.SetProviderRequest{Provider: trustedSpec(idp, "corp")})
+	require.ErrorIs(t, err, egauth.ErrStorageUnavailable)
+	require.NotRegexp(t, `egauth_svc|egauth_prod|10\.0\.0\.5|dial`, err.Error(), "a store failure reached the tenant admin verbatim")
+	rejected := w.sink.of(event.OAuthProviderRejected)
+	require.NotEmpty(t, rejected, "the operator still sees the cause")
+	require.Contains(t, rejected[len(rejected)-1].Err.Text(), "10.0.0.5")
 }

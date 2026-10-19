@@ -148,8 +148,25 @@ func (t *Tenants) RevokeKeys(ctx context.Context, by principal.Caller, tenant pr
 // caller sets Domains, keys.ErrTenantTombstoned for a tenant Erase removed, and ErrProviderLinked when identities are linked to the name under another
 // configuration, a removed provider's included. A failed discovery is ErrInvalidRequest joined with
 // federationsvc.ErrDiscovery alone: its network cause, which can name internal addresses, goes only
-// to the event.OAuthProviderRejected Err. Returned errors are safe to show the calling tenant admin.
+// to the event.OAuthProviderRejected Err; so does any store, KEK or session failure, returned as
+// ErrStorageUnavailable alone. Returned errors are safe to show the calling tenant admin.
 func (t *Tenants) SetOAuthProvider(ctx context.Context, by principal.Caller, req SetProviderRequest) error {
+	err := t.setOAuthProvider(ctx, by, req)
+	if err == nil || errors.Is(err, ErrInvalidRequest) {
+		return err
+	}
+	for _, safe := range []error{ErrFacadeUnavailable, ErrForbidden, ErrReauthRequired, ErrAPIKeyCaller, ErrResourceTokenCaller,
+		ErrSessionEnded, ErrSystemCallerInRequest, ErrTenantMismatch, ErrClosed, keys.ErrTenantTombstoned} {
+		if errors.Is(err, safe) {
+			return safe
+		}
+	}
+	_ = audit.Emit(ctx, t.f.o.events, event.OAuthProviderRejected, audit.Scope{TenantID: req.Tenant.String()},
+		audit.Detail{Reason: "storage"}, err, audit.A(event.KeyProvider, req.Provider.Name))
+	return ErrStorageUnavailable
+}
+
+func (t *Tenants) setOAuthProvider(ctx context.Context, by principal.Caller, req SetProviderRequest) error {
 	if err := t.providerAccess(ctx, by, "Tenants.SetOAuthProvider", req.Tenant, req.Provider.Name); err != nil {
 		return err
 	}

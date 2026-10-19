@@ -29,6 +29,10 @@ var (
 	// Modules.Password, key provisioning without TenantKeys, runtime providers without
 	// OAuthModule.PerTenant.
 	ErrFacadeUnavailable = errors.New("egauth: the deployment does not enable what this facade method needs")
+	// ErrStorageUnavailable replaces a store, KEK or session-backend failure in the methods whose
+	// errors are documented as safe to show the caller (Tenants.SetOAuthProvider): the cause, which
+	// can name database users, hosts and addresses, goes to the event sink only. Retry later.
+	ErrStorageUnavailable = errors.New("egauth: storage unavailable, retry later")
 	// ErrProviderLinked is returned, joined with ErrInvalidRequest, by Tenants.SetOAuthProvider for a
 	// spec whose Issuer, JWKSURL, TokenURL or UserInfoURL differ from those the provider name's
 	// linked identities were made under: those links would stop resolving, and must not resolve to
