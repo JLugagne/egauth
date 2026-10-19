@@ -78,6 +78,11 @@ func (f *Families) ForgetSubject(s principal.Subject, keep uuid.UUID) {
 	})
 }
 
+// ForgetTenant drops the cached state of every family of tenant t, matching an erasure of t.
+func (f *Families) ForgetTenant(t principal.TenantID) {
+	f.forgetWhere(func(k familyKey, _ tokens.FamilyState) bool { return k.tenant == t })
+}
+
 // Live returns nil when family exists in s's tenant, belongs to s and to family.Lineage, is not
 // revoked and is not past its absolute expiry. It returns ErrNotLive otherwise, and ErrUnavailable
 // when the store cannot answer.
