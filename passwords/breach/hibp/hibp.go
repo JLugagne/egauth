@@ -20,7 +20,6 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -33,7 +32,14 @@ import (
 const (
 	defaultBaseURL   = "https://api.pwnedpasswords.com"
 	defaultUserAgent = "egauth-hibp"
-	maxResponseBytes = 4 << 20 // 4 MiB
+	maxResponseBytes = 4 << 20
+)
+
+var (
+	// ErrUnexpectedStatus reports a range response whose HTTP status is not 200.
+	ErrUnexpectedStatus = errors.New("hibp: unexpected status")
+	// ErrResponseTooLarge reports a range response longer than 4 MiB, never read as "not breached".
+	ErrResponseTooLarge = errors.New("hibp: response exceeds 4 MiB")
 )
 
 // Client is a passwords.BreachChecker backed by the HIBP range API.
@@ -83,7 +89,7 @@ func New(c Config) *Client {
 }
 
 // IsBreached reports whether password appears in the HIBP corpus at least Config.Threshold times.
-// A range response is read up to 1 MiB; a longer one is an upstream failure handled by the
+// A range response is read up to 4 MiB; a longer one is an upstream failure handled by the
 // configured failure posture, never a "not breached" answer from a truncated body.
 func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) {
 	sum := sha1.Sum([]byte(password))
@@ -104,7 +110,7 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		return c.fail(fmt.Errorf("hibp: unexpected status %d", resp.StatusCode))
+		return c.fail(errors.Join(ErrUnexpectedStatus, errors.New(strconv.Itoa(resp.StatusCode))))
 	}
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
@@ -112,7 +118,7 @@ func (c *Client) IsBreached(ctx context.Context, password string) (bool, error) 
 		return c.fail(err)
 	}
 	if int64(len(body)) > maxResponseBytes {
-		return c.fail(fmt.Errorf("hibp: response exceeds %d bytes", maxResponseBytes))
+		return c.fail(ErrResponseTooLarge)
 	}
 
 	count, err := scanForSuffix(bytes.NewReader(body), suffix)

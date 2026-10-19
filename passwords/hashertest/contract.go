@@ -24,7 +24,6 @@ var _ passwords.Hasher = (*MockHasher)(nil)
 // ErrUndefined is returned by a MockHasher method whose function field is nil, after failing T.
 var ErrUndefined = errors.New("hashertest: mock function is not defined")
 
-// Hash calls HashFunc.
 func (m *MockHasher) Hash(ctx context.Context, password string) (string, error) {
 	if m.HashFunc == nil {
 		m.T.Errorf("hashertest: MockHasher.Hash called but HashFunc is not defined")
@@ -33,7 +32,6 @@ func (m *MockHasher) Hash(ctx context.Context, password string) (string, error) 
 	return m.HashFunc(ctx, password)
 }
 
-// Compare calls CompareFunc.
 func (m *MockHasher) Compare(ctx context.Context, hash passwords.PHC, password string) error {
 	if m.CompareFunc == nil {
 		m.T.Errorf("hashertest: MockHasher.Compare called but CompareFunc is not defined")

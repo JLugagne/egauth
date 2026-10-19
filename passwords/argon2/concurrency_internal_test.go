@@ -39,10 +39,13 @@ func TestKeyDerivationsAreBoundedPerProcess(t *testing.T) {
 			_ = h.Compare(context.Background(), passwords.PHC(stored), "correct horse")
 		})
 	}
-	time.Sleep(200 * time.Millisecond)
+	limit := int64(max(2, runtime.GOMAXPROCS(0)))
+	for deadline := time.Now().Add(5 * time.Second); peak.Load() < limit && time.Now().Before(deadline); {
+		runtime.Gosched()
+	}
 	close(release)
 	wg.Wait()
-	if got, limit := peak.Load(), int64(max(2, runtime.GOMAXPROCS(0))); got > limit {
+	if got := peak.Load(); got > limit {
 		t.Fatalf("%d Argon2id derivations ran at once (64 MiB each), want at most %d: concurrent logins exhaust memory", got, limit)
 	}
 }
@@ -59,7 +62,9 @@ func TestAWaitingDerivationHonoursItsContext(t *testing.T) {
 	for range max(2, runtime.GOMAXPROCS(0)) {
 		wg.Go(func() { _, _ = h.Hash(context.Background(), "busy") })
 	}
-	time.Sleep(100 * time.Millisecond)
+	for deadline := time.Now().Add(5 * time.Second); len(derivations) < cap(derivations) && time.Now().Before(deadline); {
+		runtime.Gosched()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	done := make(chan error, 1)
