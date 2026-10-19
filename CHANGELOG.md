@@ -59,7 +59,8 @@ before deploying: **every user logs in again**.
 - Federated identities are never linked automatically to an existing account; linking is an
   authenticated, sensitive action.
 - A security-revert link removes every factor, federated link and verified identifier added since
-  the notice it came from, including what a hijacker added after it. When that removes the
+  the notice it came from, including what a hijacker added after it, and revokes the API keys
+  created in that window. When that removes the
   account's last second factor, the account is disabled instead of mailing a password reset:
   mailbox access alone never yields a session past the second factor.
 - `Auth.Close` returns within a bounded time: queued deliveries get a short grace period, then
@@ -148,7 +149,9 @@ before deploying: **every user logs in again**.
    It re-normalises every v0.16 email, phone and recovery email; `New` refuses to start until
    every account is checked. Identifiers it cannot make canonical are listed with
    `ErrIdentifiersHeld`; such an account stays readable by subject but only accepts protective
-   changes (409 `identifier_repair_required` otherwise) until the stored value is repaired.
+   changes (disabling, a security revert, a temporary password, removing a factor or an
+   identifier, deletion; 409 `identifier_repair_required` otherwise) until the stored value is
+   repaired.
 4. Deploy. Every user logs in again, and outstanding emailed links are invalid. API keys,
    passwords, TOTP, passkeys, OAuth links and signing keys carry over. Passkeys report
    `needs_reregistration` only when they are legacy.

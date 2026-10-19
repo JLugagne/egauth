@@ -60,8 +60,9 @@ func ValidateUpgrade(u IdentifierUpgrade) error {
 }
 
 // ErrIdentifiersHeld is returned by Store.Apply for a mutation that would rely on, replace or add
-// to the identifiers of an account whose stored email, phone or recovery email is not canonical
-// (a v0.16 value UpgradeIdentifiers held back). Only protective mutations apply to such an
-// account until an operator repairs it: SetDisabledState, SetMustChange, BumpEpoch,
-// UnlinkFederated and Tombstone.
+// to the credentials or identifiers of an account that is IdentifiersHeld or whose stored email,
+// phone or recovery email is not canonical: its security notices may reach no one. Only protective
+// mutations apply until an operator repairs it: SetDisabledState, SetMustChange, UnlinkFederated,
+// Tombstone, a BumpEpoch that removes a TOTP or a passkey, a SetPassword of RotationSecurityRevert
+// or RotationTemporaryPassword, and a SetPhone or SetRecoveryEmail that clears the value.
 var ErrIdentifiersHeld = errors.New("identity: the account holds a v0.16 identifier awaiting repair")

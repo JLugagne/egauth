@@ -95,10 +95,11 @@ func lockUser(ctx context.Context, tx pgx.Tx, sub principal.Subject) (current, e
 		phone, recovery *string
 		verified, del   *time.Time
 		epoch           int64
+		state           int16
 	)
-	err := tx.QueryRow(ctx, `SELECT email, email_verified_at, phone, recovery_email, deleted_at, security_epoch
+	err := tx.QueryRow(ctx, `SELECT email, email_verified_at, phone, recovery_email, deleted_at, security_epoch, identifier_state
 FROM users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, sub.User, sub.Tenant.String()).
-		Scan(&email, &verified, &phone, &recovery, &del, &epoch)
+		Scan(&email, &verified, &phone, &recovery, &del, &epoch, &state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return current{}, store.ErrNotFound
 	}
@@ -112,7 +113,7 @@ FROM users WHERE id = $1 AND tenant_id = $2 FOR UPDATE`, sub.User, sub.Tenant.St
 	c.email = ident(contract.IdentifierEmail, &email)
 	c.phone = ident(contract.IdentifierPhone, phone)
 	c.recovery = ident(contract.IdentifierRecoveryEmail, recovery)
-	c.held = !canonical(contract.IdentifierEmail, &email) || !canonical(contract.IdentifierPhone, phone) ||
+	c.held = state == int16(contract.IdentifiersHeld) || !canonical(contract.IdentifierEmail, &email) || !canonical(contract.IdentifierPhone, phone) ||
 		!canonical(contract.IdentifierRecoveryEmail, recovery)
 	return c, nil
 }
@@ -142,9 +143,17 @@ func apply(ctx context.Context, tx pgx.Tx, m contract.Mutation) (contract.Applie
 }
 
 func protective(m contract.Mutation) bool {
-	switch m.(type) {
-	case contract.SetDisabledState, contract.SetMustChange, contract.BumpEpoch, contract.UnlinkFederated, contract.Tombstone:
+	switch x := m.(type) {
+	case contract.SetDisabledState, contract.SetMustChange, contract.UnlinkFederated, contract.Tombstone:
 		return true
+	case contract.BumpEpoch:
+		return x.Change == contract.FactorTOTPRemoved || x.Change == contract.FactorPasskeyRemoved
+	case contract.SetPassword:
+		return x.Reason == contract.RotationSecurityRevert || x.Reason == contract.RotationTemporaryPassword
+	case contract.SetPhone:
+		return x.Phone.IsZero()
+	case contract.SetRecoveryEmail:
+		return x.RecoveryEmail.IsZero()
 	}
 	return false
 }
