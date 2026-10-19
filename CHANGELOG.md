@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.17.0] — Unreleased
+## [v0.17.0] — 2026-10-19
 
 v0.17.0 is a breaking, misuse-resistant redesign. A deployment is one validated composition object
 (`egauth.New`) and the application's routes are declared through `Auth.Routes`. Read "Upgrading"
