@@ -49,7 +49,8 @@ type job struct {
 }
 
 // Pool delivers messages on Workers goroutines. It is safe for concurrent use; Close is
-// idempotent and returns within CloseGrace plus AbortWait.
+// idempotent and returns within CloseGrace plus AbortWait, plus the time the audit sink takes to
+// record each abandoned message.
 type Pool struct {
 	audit  httpx.Audit
 	mu     sync.RWMutex
