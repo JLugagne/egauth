@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.17.1] — 2026-10-20
+
+Patch release with no library code or API change. It ships the test-suite fixes that make the CI
+matrix pass on Linux, macOS and Windows.
+
+### Fixed
+
+- Tests resolve `localhost` on IPv6-only runners and read `go.mod` through CRLF checkouts on Windows.
+- `.gitattributes` forces LF checkouts on every OS.
+- The worker-count, reap and wiring tests settle their baseline before counting, never truncate the
+  goroutine dump, and check joins without a race.
+
 ## [v0.17.0] — 2026-10-20
 
 v0.17.0 is a breaking, misuse-resistant redesign. A deployment is one validated composition object
