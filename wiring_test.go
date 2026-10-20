@@ -268,8 +268,20 @@ func workerCounts() map[string]int {
 	return out
 }
 
+func settledWorkerCounts(t *testing.T) map[string]int {
+	t.Helper()
+	prev := workerCounts()
+	require.Eventually(t, func() bool {
+		cur := workerCounts()
+		same := reflect.DeepEqual(cur, prev)
+		prev = cur
+		return same
+	}, 10*time.Second, 100*time.Millisecond, "the workers of earlier tests never settled")
+	return prev
+}
+
 func TestNewStartsTheBackgroundWorkAndCloseStopsIt(t *testing.T) {
-	before := workerCounts()
+	before := settledWorkerCounts(t)
 	a, err := egauth.New(fullConfig(t))
 	require.NoError(t, err)
 	running := workerCounts()

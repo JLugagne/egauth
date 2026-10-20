@@ -19,7 +19,7 @@ func repoRoot(t *testing.T) string {
 	dir, err := os.Getwd()
 	must(t, err)
 	for {
-		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && strings.Contains(string(b), "module "+modulePath+"\n") {
+		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && strings.Contains(strings.ReplaceAll(string(b), "\r\n", "\n"), "module "+modulePath+"\n") {
 			return dir
 		}
 		parent := filepath.Dir(dir)
