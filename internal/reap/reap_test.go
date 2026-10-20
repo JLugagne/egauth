@@ -20,6 +20,7 @@ import (
 
 type fakeOutbox struct {
 	n      atomic.Int64
+	out    atomic.Int64
 	err    error
 	gate   chan struct{}
 	ctxErr bool
@@ -27,6 +28,7 @@ type fakeOutbox struct {
 
 func (o *fakeOutbox) Retry(ctx context.Context) error {
 	o.n.Add(1)
+	defer o.out.Add(1)
 	if o.gate != nil {
 		select {
 		case <-o.gate:
@@ -265,12 +267,10 @@ func TestStopCancelsAndJoinsARunOnceOfTheCaller(t *testing.T) {
 	go func() { r.Stop(); close(stopped) }()
 	select {
 	case <-stopped:
-		select {
-		case err := <-ran:
-			t.Logf("RunOnce returned %v", err)
-		default:
+		if o.out.Load() != 1 {
 			t.Fatal("Stop returned while a RunOnce pass was still running against the stores")
 		}
+		t.Logf("RunOnce returned %v", <-ran)
 	case <-time.After(5 * time.Second):
 		close(o.gate)
 		t.Fatal("Stop neither cancelled nor joined the RunOnce pass")

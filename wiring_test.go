@@ -62,8 +62,12 @@ func mustNew(t *testing.T, cfg egauth.Config[struct{}]) *egauth.Auth[struct{}] {
 }
 
 func stacks() string {
-	buf := make([]byte, 1<<22)
-	return string(buf[:runtime.Stack(buf, true)])
+	for size := 1 << 22; ; size *= 2 {
+		buf := make([]byte, size)
+		if n := runtime.Stack(buf, true); n < size {
+			return string(buf[:n])
+		}
+	}
 }
 
 func minimalConfig(t testing.TB) egauth.Config[struct{}] {
