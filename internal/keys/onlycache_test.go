@@ -22,7 +22,7 @@ func moduleRoot(t *testing.T) string {
 		t.Fatal(err)
 	}
 	for {
-		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && strings.Contains(string(b), "module github.com/JLugagne/egauth\n") {
+		if b, err := os.ReadFile(filepath.Join(dir, "go.mod")); err == nil && strings.Contains(strings.ReplaceAll(string(b), "\r\n", "\n"), "module github.com/JLugagne/egauth\n") {
 			return dir
 		}
 		parent := filepath.Dir(dir)

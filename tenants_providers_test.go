@@ -92,7 +92,7 @@ func TestTenantsSetOAuthProviderHidesDiscoveryNetworkDetails(t *testing.T) {
 	}
 	rejected := w.sink.of(event.OAuthProviderRejected)
 	require.Len(t, rejected, 3, "the operator still sees every rejected discovery")
-	require.Contains(t, rejected[0].Err.Text(), "127.0.0.1", "the detailed cause goes to the PII-classified event field only")
+	require.Contains(t, rejected[1].Err.Text(), "127.0.0.1", "the detailed cause goes to the PII-classified event field only")
 	require.Equal(t, "discovery", rejected[0].Reason)
 }
 
