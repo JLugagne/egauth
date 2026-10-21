@@ -288,7 +288,7 @@ func TestNewStartsTheBackgroundWorkAndCloseStopsIt(t *testing.T) {
 	before := settledWorkerCounts(t)
 	a, err := egauth.New(fullConfig(t))
 	require.NoError(t, err)
-	running := workerCounts()
+	running := startedWorkerCounts(before)
 	for _, m := range workerMarkers {
 		require.Greater(t, running[m], before[m], "%s is not running after New", m)
 	}
@@ -465,4 +465,22 @@ func TestNewRunsTheApplicationHooksFromTheLifecycleOutbox(t *testing.T) {
 	defer mu.Unlock()
 	require.Len(t, ids, 2)
 	require.Equal(t, ids[0], ids[1], "a retried erasure carries the same DeliveryID")
+}
+
+// startedWorkerCounts waits, up to five seconds, until every worker New started shows its own frame.
+// A goroutine started by `go p.work()` that has not been scheduled yet shows only its compiler
+// wrapper (delivery.New.gowrap1), so a snapshot taken right after New can miss it.
+func startedWorkerCounts(before map[string]int) map[string]int {
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		running := workerCounts()
+		started := running[deliveryMarker] >= before[deliveryMarker]+2*delivery.Workers
+		for _, m := range workerMarkers {
+			started = started && running[m] > before[m]
+		}
+		if started || time.Now().After(deadline) {
+			return running
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
