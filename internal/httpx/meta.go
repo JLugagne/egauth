@@ -43,12 +43,21 @@ type Meta struct {
 	// It budgets authenticated actions that verify no guessable secret, so clients sharing an
 	// address (NAT, IPv6 /64) cannot drain them through the per-client budget (C-71).
 	SessionLimit limiter.Class
+	// RecipientField names the request field that carries a caller-chosen recipient (a phone number
+	// or an e-mail address the endpoint sends a code or a link to). It is set exactly when
+	// RecipientLimit is.
+	RecipientField string
+	// RecipientLimit is the limiter class charged per normalised recipient, after authentication and
+	// the sensitive gate. It bounds what one account can send to one recipient however many client
+	// addresses it uses (F-HGR-001), and an unauthenticated caller cannot drain it.
+	RecipientLimit limiter.Class
 }
 
 // Validate reports metadata the preamble cannot enforce: a body cap outside (0, WebAuthnBodyCap],
 // a sensitive endpoint that is not authenticated, a session-ending endpoint that is not a mutation
 // or is sensitive or identifier-keyed, an identifier key without its limiter class (or
-// the reverse), a session limit on an unauthenticated endpoint, or an undeclared limiter class.
+// the reverse), a session limit on an unauthenticated endpoint, a recipient limit without its
+// field (or the reverse) or on an unauthenticated endpoint, or an undeclared limiter class.
 func (m Meta) Validate() error {
 	var errs []error
 	if m.BodyCap <= 0 || m.BodyCap > WebAuthnBodyCap {
@@ -71,6 +80,12 @@ func (m Meta) Validate() error {
 	}
 	if m.SessionLimit != 0 && (!m.SessionLimit.Valid() || m.SessionLimit.PerTenant() || !m.Authenticated) {
 		errs = append(errs, errors.New("session limit needs an authenticated endpoint and a client class"))
+	}
+	if (m.RecipientField != "") != (m.RecipientLimit != 0) {
+		errs = append(errs, errors.New("recipient field and recipient limit disagree"))
+	}
+	if m.RecipientLimit != 0 && (!m.RecipientLimit.Valid() || !m.RecipientLimit.PerTenant() || !m.Authenticated || !isField(m.RecipientField)) {
+		errs = append(errs, errors.New("recipient limit needs an authenticated endpoint, a per-tenant class and a known field"))
 	}
 	if len(errs) == 0 {
 		return nil

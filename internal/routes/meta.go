@@ -42,6 +42,7 @@ func MetaFor(path string) (EndpointMeta, bool) {
 	if sessionAction(path) {
 		m.ClientLimit, m.SessionLimit = 0, limiter.LoginClient
 	}
+	m.RecipientField, m.RecipientLimit = recipientLimit(path)
 	m.IdentifierKeyed = m.IdentifierLimit != 0
 	if webAuthn(path) {
 		m.BodyCap = httpx.WebAuthnBodyCap
@@ -131,4 +132,16 @@ func clientLimit(path, method string) limiter.Class {
 		return limiter.LoginClient
 	}
 	return 0
+}
+
+// recipientLimit names the field carrying the caller-chosen recipient of the endpoints that send a
+// code or a link to it, and the class budgeting that recipient (F-HGR-001).
+func recipientLimit(path string) (string, limiter.Class) {
+	switch path {
+	case PhoneVerifyRequest:
+		return "phone", limiter.CodeRequestIdentifier
+	case EmailChange, RecoveryEmail:
+		return "email", limiter.CodeRequestIdentifier
+	}
+	return "", 0
 }

@@ -200,6 +200,11 @@ func (g *gate) run(w http.ResponseWriter, hr *http.Request) (*Request, error) {
 			return nil, err
 		}
 	}
+	if g.meta.RecipientLimit != 0 && !set.Insecure.NoRateLimit {
+		if err := g.limitRecipient(req); err != nil {
+			return nil, err
+		}
+	}
 	if env.BeforeEndpoint != nil {
 		call := EndpointCall{Endpoint: g.endpoint, Client: client.Addr(), Tenant: tenant, captchaToken: fields[fieldCaptchaToken]}
 		if err := env.BeforeEndpoint.BeforeEndpoint(hr.Context(), call); err != nil {
@@ -319,4 +324,18 @@ func (g *gate) sensitive(req *Request) error {
 		return ErrReauthRequired
 	}
 	return nil
+}
+
+// limitRecipient charges the per-recipient bucket of an endpoint that sends to a caller-chosen
+// address. A value the normaliser refuses is left to the service, which refuses it too.
+func (g *gate) limitRecipient(req *Request) error {
+	raw := req.fields[g.meta.RecipientField]
+	if raw == "" {
+		return nil
+	}
+	id, err := g.p.env.Identifiers.Normalize(raw)
+	if err != nil || id.IsZero() {
+		return nil
+	}
+	return g.charge(req, limiter.Key{Class: g.meta.RecipientLimit, Tenant: req.tenant, Value: limiterValue("recipient:" + id.Kind().String() + ":" + id.Value())})
 }
