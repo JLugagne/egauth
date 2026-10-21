@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `POST /phone/verify/request`, `POST /email/change` and `POST /recovery-email` are now budgeted per
+  recipient as well as per client. One account rotating its source address could previously send
+  an unbounded number of texts or links to a single phone number or address (SMS and e-mail
+  bombing, toll fraud). The recipient bucket uses the `CodeRequestIdentifier` budget and is charged
+  after authentication and the sensitive gate, so an unauthenticated caller cannot drain it.
+- With `JWT(TenantKeys())`, a session token whose `tid` names another tenant than the one the
+  request resolved to is refused before any key lookup. A forged token previously made each
+  unauthenticated `GET /session`, `POST /logout` or `POST /resource-token` read the keys store for
+  the named tenant. `POST /logout` also only clears a credential of another tenant instead of
+  revoking its family.
+
 ## [v0.17.1] — 2026-10-20
 
 Patch release with no library code or API change. It ships the test-suite fixes that make the CI

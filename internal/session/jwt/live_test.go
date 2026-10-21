@@ -34,7 +34,7 @@ func TestLiveRefusesASessionThisInstanceJustEnded(t *testing.T) {
 	if err := w.backend.Live(ctx, h); err != nil {
 		t.Fatalf("live before End: %v", err)
 	}
-	if err := w.backend.End(ctx, httptest.NewRecorder(), bearerRequest(t, access, refresh)); err != nil {
+	if err := w.backend.End(ctx, httptest.NewRecorder(), bearerRequest(t, access, refresh), tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.backend.Live(ctx, h); !errors.Is(err, session.ErrEnded) {

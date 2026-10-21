@@ -31,8 +31,10 @@ type Backend interface {
 	// lineage; it returns store.ErrConflict, and issues nothing, once cur is no longer live (C-33).
 	// cur.ID() is all the store needs: tokens.ReissueRequest.Family or sessions.ReplaceRequest.Previous.
 	Reissue(ctx context.Context, w http.ResponseWriter, cur Handle, a core.SessionAttrs) error
-	// End revokes the session presented by r and clears its credentials on w. It is idempotent.
-	End(ctx context.Context, w http.ResponseWriter, r *http.Request) error
+	// End revokes the session presented by r and clears its credentials on w. A credential sealed
+	// for another tenant than tenant, the tenant the request resolved to, only clears. It is
+	// idempotent.
+	End(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) error
 	// Live returns nil while the stored session h names is live by the rules of Resume: not ended,
 	// revoked, replaced by Reissue nor past its absolute lifetime. It returns ErrEnded otherwise, and
 	// an error joined with httpx.ErrUnavailable when the store cannot answer. Facades call it for

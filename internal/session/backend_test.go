@@ -85,7 +85,7 @@ func TestBackendContract(t *testing.T) {
 		"Start":      "func(context.Context, http.ResponseWriter, core.SessionAttrs, core.SealedClaims) error",
 		"Resume":     "func(context.Context, http.ResponseWriter, *http.Request, core.TenantID) (session.Resumed, error)",
 		"Reissue":    "func(context.Context, http.ResponseWriter, session.Handle, core.SessionAttrs) error",
-		"End":        "func(context.Context, http.ResponseWriter, *http.Request) error",
+		"End":        "func(context.Context, http.ResponseWriter, *http.Request, core.TenantID) error",
 		"Durability": "func() store.Durability",
 		"Live":       "func(context.Context, session.Handle) error",
 	}

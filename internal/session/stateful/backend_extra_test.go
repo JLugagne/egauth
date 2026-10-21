@@ -203,7 +203,7 @@ func TestEndRevokesEveryPresentedToken(t *testing.T) {
 	r := cookieRequest(t, w, ctok)
 	r.Header.Set("Authorization", "Bearer "+btok)
 	rr := httptest.NewRecorder()
-	if err := w.backend.End(t.Context(), rr, r); err != nil {
+	if err := w.backend.End(t.Context(), rr, r, tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	if ck := sessionCookie(t, w, rr); ck == nil || ck.MaxAge >= 0 {
@@ -223,7 +223,7 @@ func TestEndClearsCookiesItCannotRead(t *testing.T) {
 	r.AddCookie(&http.Cookie{Name: w.cookies.CookieName(cookie.StatefulSession), Value: "not-a-token"})
 	r.AddCookie(&http.Cookie{Name: w.cookies.CookieName(cookie.StatefulSession), Value: "a-duplicate"})
 	rr := httptest.NewRecorder()
-	if err := w.backend.End(t.Context(), rr, r); err != nil {
+	if err := w.backend.End(t.Context(), rr, r, tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	if ck := sessionCookie(t, w, rr); ck == nil || ck.MaxAge >= 0 {

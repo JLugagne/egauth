@@ -328,9 +328,10 @@ func (b *Backend) revokeUnknown(ctx context.Context, s core.Subject, id uuid.UUI
 }
 
 // End revokes every session token r presents, on either transport, and clears the session cookie
-// on w whenever r carries a cookie. It is idempotent: an absent, malformed, unknown or ended token
-// only clears. A store failure is joined with httpx.ErrUnavailable.
-func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+// on w whenever r carries a cookie. A token of another tenant than tenant, the tenant the request
+// resolved to, only clears. It is idempotent: an absent, malformed, unknown or ended token only
+// clears. A store failure is joined with httpx.ErrUnavailable.
+func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) error {
 	p := b.read(r)
 	if p.transport == core.TransportCookies || cookie.Present(r) {
 		b.cookies.Clear(w, cookie.StatefulSession)
@@ -338,7 +339,7 @@ func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	var errs []error
 	for _, tok := range p.presented() {
 		t, hash, err := parseToken(tok)
-		if err != nil {
+		if err != nil || t != tenant {
 			continue
 		}
 		if err := b.sessions.Revoke(ctx, t, hash); err != nil {

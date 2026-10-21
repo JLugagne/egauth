@@ -254,7 +254,11 @@ func (c *client) resume() (session.Resumed, error) {
 
 func (c *client) end() error {
 	rec := httptest.NewRecorder()
-	err := c.e.b.End(c.e.t.Context(), rec, c.request())
+	tenant, err := principal.ParseTenantID(tenantName)
+	if err != nil {
+		c.e.t.Fatal(err)
+	}
+	err = c.e.b.End(c.e.t.Context(), rec, c.request(), tenant)
 	c.absorb(rec)
 	return err
 }

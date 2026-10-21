@@ -124,7 +124,7 @@ func (h handlers) session(w http.ResponseWriter, r *httpx.Request) {
 }
 
 func (h handlers) logout(w http.ResponseWriter, r *httpx.Request) {
-	if err := h.backend.End(r.Context(), w, r.HTTP()); err != nil {
+	if err := h.backend.End(r.Context(), w, r.HTTP(), r.Tenant()); err != nil {
 		cookie.Discard(w)
 		r.Fail(w, failure(err))
 		return
@@ -145,7 +145,7 @@ func (h handlers) logoutEverywhere(w http.ResponseWriter, r *httpx.Request) {
 		return
 	}
 	cookie.Discard(w)
-	if err := h.backend.End(r.Context(), w, r.HTTP()); err != nil {
+	if err := h.backend.End(r.Context(), w, r.HTTP(), r.Tenant()); err != nil {
 		r.Fail(w, failure(err))
 		return
 	}

@@ -409,9 +409,9 @@ type recorder struct {
 	calls []string
 }
 
-func (r *recorder) End(ctx context.Context, w http.ResponseWriter, req *http.Request) error {
+func (r *recorder) End(ctx context.Context, w http.ResponseWriter, req *http.Request, tenant core.TenantID) error {
 	r.calls = append(r.calls, "End")
-	return r.Backend.End(ctx, w, req)
+	return r.Backend.End(ctx, w, req, tenant)
 }
 
 func (r *recorder) OnDisabled(ctx context.Context, e lifecycle.AccountEvent) error {

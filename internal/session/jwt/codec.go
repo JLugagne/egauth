@@ -279,7 +279,7 @@ func strictDecode(b []byte, v any) error {
 // ErrExpired once the token is at or past its "exp", ErrInvalidToken for any other defect, and an
 // error joined with httpx.ErrUnavailable when the key source cannot answer.
 func (c *Codec) VerifySession(ctx context.Context, raw string, keys KeySource) (Token, error) {
-	tok, expired, err := c.verify(ctx, raw, keys, "")
+	tok, expired, err := c.verify(ctx, raw, keys, "", nil)
 	if err != nil {
 		return Token{}, err
 	}
@@ -295,7 +295,7 @@ func (c *Codec) VerifyResource(ctx context.Context, raw string, keys KeySource, 
 	if audience == "" {
 		return Token{}, errors.Join(ErrInvalidToken, errors.New("jwt: a resource audience is required"))
 	}
-	tok, expired, err := c.verify(ctx, raw, keys, audience)
+	tok, expired, err := c.verify(ctx, raw, keys, audience, nil)
 	if err != nil {
 		return Token{}, err
 	}
@@ -309,7 +309,7 @@ func invalid(reason string) error {
 	return errors.Join(ErrInvalidToken, errors.New("jwt: "+reason))
 }
 
-func (c *Codec) verify(ctx context.Context, raw string, keys KeySource, audience string) (Token, bool, error) {
+func (c *Codec) verify(ctx context.Context, raw string, keys KeySource, audience string, want *principal.TenantID) (Token, bool, error) {
 	if raw == "" || len(raw) > MaxTokenLen {
 		return Token{}, false, invalid("token length")
 	}
@@ -340,6 +340,11 @@ func (c *Codec) verify(ctx context.Context, raw string, keys KeySource, audience
 	tenant, err := parseTenant(cs.Tid)
 	if err != nil {
 		return Token{}, false, invalid("tenant")
+	}
+	if want != nil && tenant != *want {
+		// The resolved tenant is known: refuse before the key lookup, so a forged "tid" cannot make
+		// an unauthenticated request load another tenant's keyset (F-TJK-001).
+		return Token{}, false, errors.Join(ErrInvalidToken, session.ErrTenantMismatch)
 	}
 	tok, expired, err := c.check(cs, tenant, audience)
 	if err != nil {

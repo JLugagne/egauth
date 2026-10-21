@@ -273,10 +273,12 @@ func (b *Backend) Resume(ctx context.Context, w http.ResponseWriter, r *http.Req
 	}
 	var prior *Token
 	if p.access != "" {
-		tok, expired, err := b.codec.verify(ctx, p.access, b.keys, "")
+		tok, expired, err := b.codec.verify(ctx, p.access, b.keys, "", &tenant)
 		switch {
 		case errors.Is(err, httpx.ErrUnavailable):
 			return session.Resumed{}, err
+		case errors.Is(err, session.ErrTenantMismatch):
+			return session.Resumed{}, session.ErrTenantMismatch
 		case err != nil && p.refresh == "":
 			return session.Resumed{}, err
 		case err == nil && tok.attrs.Subject().Tenant != tenant:
@@ -413,15 +415,16 @@ func (b *Backend) revokeUnknown(ctx context.Context, s core.Subject, family uuid
 
 // End revokes the family presented by r, through its refresh token or, failing that, its verified
 // access token even if expired, and clears the session cookies on w whenever r carries a cookie.
-// It is idempotent: an absent, unknown or revoked credential only clears. A store failure is
-// joined with httpx.ErrUnavailable.
-func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Request) error {
+// A credential of another tenant than tenant, the tenant the request resolved to, only clears: its
+// family is not revoked and its keyset is never loaded. It is idempotent: an absent, unknown or
+// revoked credential only clears. A store failure is joined with httpx.ErrUnavailable.
+func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Request, tenant core.TenantID) error {
 	p := b.read(r)
 	b.clear(w, r, p)
 	if p.refresh != "" {
 		rec, _, _, err := b.load(ctx, p.refresh)
 		switch {
-		case err == nil:
+		case err == nil && rec.Tenant() == tenant:
 			return b.revoke(ctx, rec.Tenant(), rec.Family())
 		case errors.Is(err, httpx.ErrUnavailable):
 			return err
@@ -430,7 +433,7 @@ func (b *Backend) End(ctx context.Context, w http.ResponseWriter, r *http.Reques
 	if p.access == "" {
 		return nil
 	}
-	tok, _, err := b.codec.verify(ctx, p.access, b.keys, "")
+	tok, _, err := b.codec.verify(ctx, p.access, b.keys, "", &tenant)
 	switch {
 	case errors.Is(err, httpx.ErrUnavailable):
 		return err

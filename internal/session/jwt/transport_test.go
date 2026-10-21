@@ -165,7 +165,7 @@ func TestEndClearsSessionCookiesItCannotRead(t *testing.T) {
 	r := withCookies(httptest.NewRequestWithContext(t.Context(), http.MethodPost, "https://acme.example.test/logout", nil),
 		&http.Cookie{Name: name, Value: access}, &http.Cookie{Name: name, Value: access})
 	rec := httptest.NewRecorder()
-	if err := w.backend.End(t.Context(), rec, r); err != nil {
+	if err := w.backend.End(t.Context(), rec, r, tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	cleared := map[string]bool{}

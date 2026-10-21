@@ -221,7 +221,7 @@ func TestEndWithAccessTokenOnly(t *testing.T) {
 	s := mustUser(t, w)
 	access, refresh := startPair(t, w, passwordAttrs(t, w, s, core.TransportBearer))
 	fx.Clock.Advance(fx.Lifetimes.RecheckEvery)
-	if err := w.backend.End(t.Context(), httptest.NewRecorder(), bearerRequest(t, access, "")); err != nil {
+	if err := w.backend.End(t.Context(), httptest.NewRecorder(), bearerRequest(t, access, ""), tenant(t)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := w.backend.Resume(t.Context(), httptest.NewRecorder(), bearerRequest(t, "", refresh), tenant(t)); err == nil {
