@@ -2,7 +2,7 @@ module github.com/JLugagne/egauth/adapters/otel
 
 go 1.26.7
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // The `replace` below resolves the core module from this repo's root so every go command works
 // offline before the core tag exists. The `require` tracks the VERSION file (enforced by
@@ -10,7 +10,7 @@ toolchain go1.26.9
 // against the published core tag; see RELEASING.md.
 
 require (
-	github.com/JLugagne/egauth v0.18.0-dev
+	github.com/JLugagne/egauth v0.17.2
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0

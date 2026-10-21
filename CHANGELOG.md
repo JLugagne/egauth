@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.17.2] — 2026-10-21
+
+Security patch release. It fixes two Medium findings of the October 2026 audit and moves the
+toolchain to go1.26.10. No public API changes; every consumer should upgrade.
+
 ### Security
 
 - `POST /phone/verify/request`, `POST /email/change` and `POST /recovery-email` are now budgeted per
@@ -19,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unauthenticated `GET /session`, `POST /logout` or `POST /resource-token` read the keys store for
   the named tenant. `POST /logout` also only clears a credential of another tenant instead of
   revoking its family.
+
+### Changed
+
+- Every module's `toolchain` directive is go1.26.10, which fixes GO-2026-6809 in `crypto/x509`
+  (reachable from the outbound client and the breach check).
 
 ## [v0.17.1] — 2026-10-20
 

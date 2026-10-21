@@ -2,7 +2,7 @@ module github.com/JLugagne/egauth/adapters/pgx
 
 go 1.26.7
 
-toolchain go1.26.9
+toolchain go1.26.10
 
 // The `replace` below resolves the core module from this repo's root so every go command works
 // offline before the core tag exists. The `require` tracks the VERSION file (enforced by
@@ -34,7 +34,7 @@ require (
 require (
 	dario.cat/mergo v1.0.2 // indirect
 	github.com/Azure/go-ansiterm v0.0.0-20260917205352-e937bb47801a // indirect
-	github.com/JLugagne/egauth v0.18.0-dev
+	github.com/JLugagne/egauth v0.17.2
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
