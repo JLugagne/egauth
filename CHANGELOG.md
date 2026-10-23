@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `adapters/pgx`: under `SingleTenant`, the refresh-token, API-key and stateful-session stores read
+  the single tenant back as an invalid tenant id. Every JWT renewal and every API-key check failed
+  with 503 `unavailable` once PostgreSQL held the data, and the revocation feeds of both stores
+  failed to read. The store contract suites now cover the single tenant.
+
 ## [v0.17.2] — 2026-10-21
 
 Security patch release. It fixes two Medium findings of the October 2026 audit and moves the

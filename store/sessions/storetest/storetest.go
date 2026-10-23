@@ -75,6 +75,7 @@ func Run(t *testing.T, newStore func(*testing.T) sessions.Store) {
 		"RevocationsBackdated": revocationsBackdated,
 		"DeleteForSubject":     deleteForSubject,
 		"ReapExpired":          reapExpired,
+		"SingleTenant":         singleTenant,
 	}
 	for name, fn := range suites {
 		t.Run(name, func(t *testing.T) { fn(t, &harness{t: t, s: newStore(t), f: f}) })
@@ -610,4 +611,19 @@ func reapExpired(t *testing.T, h *harness) {
 	n, err = h.s.ReapExpired(ctx)
 	require.NoError(t, err)
 	require.Zero(t, n)
+}
+
+func singleTenant(t *testing.T, h *harness) {
+	ctx := context.Background()
+	s := principal.Subject{User: uuid.New()}
+	r := h.create(spec{subject: s})
+	got, err := h.s.Get(ctx, s.Tenant, r.TokenHash())
+	require.NoError(t, err, "a session of the single tenant reads back")
+	h.requireRecord(r, got)
+
+	c0 := h.head()
+	require.NoError(t, h.s.Revoke(ctx, s.Tenant, r.TokenHash()))
+	revs, _ := h.feed(c0)
+	require.Equal(t, []uuid.UUID{r.ID()}, ids(revs))
+	require.True(t, revs[0].Tenant.IsZero(), "the feed reports the single tenant")
 }

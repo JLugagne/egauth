@@ -238,7 +238,7 @@ func scanRefresh(row scanner, extra ...any) (contract.RefreshRow, error) {
 		}
 		return r, errors.Join(errors.New("tokens: read refresh token"), err)
 	}
-	t, err := principal.ParseTenantID(tenant)
+	t, err := tenantOf(tenant)
 	if err != nil {
 		return r, errors.Join(contract.ErrInvalidRecord, err)
 	}
@@ -492,7 +492,7 @@ WHERE seq > $1 ORDER BY seq`, int64(c.Position()))
 		if err := rows.Scan(&seq, &tenant, &r.Family, &r.At); err != nil {
 			return nil, c, errors.Join(errors.New("tokens: read revocation"), err)
 		}
-		if r.Tenant, err = principal.ParseTenantID(tenant); err != nil {
+		if r.Tenant, err = tenantOf(tenant); err != nil {
 			return nil, c, errors.Join(errors.New("tokens: read revocation tenant"), err)
 		}
 		r.At = r.At.UTC()
@@ -580,7 +580,7 @@ func scanAPIKey(row scanner) (contract.APIKey, error) {
 		}
 		return k, errors.Join(errors.New("tokens: read api key"), err)
 	}
-	t, err := principal.ParseTenantID(tenant)
+	t, err := tenantOf(tenant)
 	if err != nil {
 		return k, errors.Join(contract.ErrInvalidRecord, err)
 	}
@@ -646,4 +646,15 @@ SELECT EXISTS (SELECT 1 FROM hit)
 		return store.ErrNotFound
 	}
 	return nil
+}
+
+func tenantOf(s string) (principal.TenantID, error) {
+	if s == "" {
+		return principal.TenantID{}, nil
+	}
+	t, err := principal.ParseTenantID(s)
+	if err != nil {
+		return principal.TenantID{}, errors.Join(errors.New("tokens: stored tenant"), err)
+	}
+	return t, nil
 }

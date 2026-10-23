@@ -83,6 +83,7 @@ func Run(t *testing.T, newStore func(*testing.T) tokens.Store) {
 		"APIKeyRefusals":           apiKeyRefusals,
 		"APIKeyConcurrentID":       apiKeyConcurrentID,
 		"ReapExpired":              reapExpired,
+		"SingleTenant":             singleTenant,
 	}
 	for name, fn := range suites {
 		t.Run(name, func(t *testing.T) { fn(t, &harness{t: t, s: newStore(t), f: f}) })
@@ -896,4 +897,31 @@ func reapExpired(t *testing.T, h *harness) {
 	n, err = h.s.ReapExpired(ctx)
 	require.NoError(t, err)
 	require.Zero(t, n)
+}
+
+func singleTenant(t *testing.T, h *harness) {
+	ctx := context.Background()
+	s := principal.Subject{User: uuid.New()}
+	a := h.create(spec{subject: s})
+	got, err := h.s.Get(ctx, s.Tenant, a.TokenHash())
+	require.NoError(t, err, "a token of the single tenant reads back")
+	h.requireRecord(a, got)
+	_, err = h.rotate(a, h.next(a, nil))
+	require.NoError(t, err, "a token of the single tenant rotates")
+
+	c0 := h.head()
+	require.NoError(t, h.s.RevokeFamily(ctx, s.Tenant, a.Family()))
+	revs, _ := h.feed(c0)
+	require.Equal(t, []uuid.UUID{a.Family()}, families(revs))
+	require.True(t, revs[0].Tenant.IsZero(), "the feed reports the single tenant")
+
+	k := apiKey(s)
+	require.NoError(t, h.s.CreateAPIKey(ctx, k))
+	gotKey, err := h.s.GetAPIKey(ctx, s.Tenant, k.KeyHash)
+	require.NoError(t, err, "an API key of the single tenant reads back")
+	require.Equal(t, s, gotKey.Owner)
+	list, err := h.s.ListAPIKeys(ctx, s)
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	require.Equal(t, s, list[0].Owner)
 }

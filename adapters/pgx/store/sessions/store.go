@@ -175,7 +175,7 @@ func scan(row pgx.Row) (contract.Record, error) {
 		}
 		return contract.Record{}, errors.Join(errors.New("sessions: read session"), err)
 	}
-	t, err := principal.ParseTenantID(tenant)
+	t, err := tenantOf(tenant)
 	if err != nil {
 		return contract.Record{}, errors.Join(contract.ErrInvalidRecord, err)
 	}
@@ -345,7 +345,7 @@ WHERE seq > $1 ORDER BY seq`, int64(c.Position()))
 		if err := rows.Scan(&seq, &tenant, &r.Session, &r.At); err != nil {
 			return nil, c, errors.Join(errors.New("sessions: read revocation"), err)
 		}
-		if r.Tenant, err = principal.ParseTenantID(tenant); err != nil {
+		if r.Tenant, err = tenantOf(tenant); err != nil {
 			return nil, c, errors.Join(errors.New("sessions: read revocation tenant"), err)
 		}
 		r.At = r.At.UTC()
@@ -365,4 +365,15 @@ func (s *Store) DeleteForSubject(ctx context.Context, sub principal.Subject) err
 		}
 		return endRows(ctx, tx, `tenant_id = $1 AND user_id = $2`, sub.Tenant.String(), sub.User)
 	})
+}
+
+func tenantOf(s string) (principal.TenantID, error) {
+	if s == "" {
+		return principal.TenantID{}, nil
+	}
+	t, err := principal.ParseTenantID(s)
+	if err != nil {
+		return principal.TenantID{}, errors.Join(errors.New("sessions: stored tenant"), err)
+	}
+	return t, nil
 }
