@@ -23,7 +23,7 @@ REPO="${1:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 CORE='github.com/JLugagne/egauth'
 PGX='github.com/JLugagne/egauth/adapters/pgx'
 OTEL='github.com/JLugagne/egauth/adapters/otel'
-CORE_VERSION='v0.17.3'
+CORE_VERSION='v0.18.0-dev'
 PLACEHOLDER='v0.0.0-00010101000000-000000000000'
 
 # Pick a Go binary >= 1.26.7 without triggering a toolchain download.
