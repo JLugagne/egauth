@@ -10,7 +10,7 @@ toolchain go1.26.10
 // against the published core tag; see RELEASING.md.
 
 require (
-	github.com/JLugagne/egauth v0.18.0-dev
+	github.com/JLugagne/egauth v0.17.3
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/sdk v1.46.0
 	go.opentelemetry.io/otel/trace v1.46.0

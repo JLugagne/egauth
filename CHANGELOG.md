@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.17.3] — 2026-10-23
+
+Patch release for `adapters/pgx` users running `SingleTenant`. No public API changes; every
+single-tenant PostgreSQL deployment should upgrade.
+
 ### Fixed
 
 - `adapters/pgx`: under `SingleTenant`, the refresh-token, API-key and stateful-session stores read
