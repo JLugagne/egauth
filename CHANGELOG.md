@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.17.4] — 2026-11-02
+
+Dependency maintenance release. No public API or behavior changes.
+
+### Changed
+
+- Core: `fxamacker/cbor/v2` v2.10.0, `golang.org/x/crypto` v0.58.0, `golang.org/x/net` v0.62.0,
+  `golang.org/x/text` v0.43.0, `golang.org/x/sys` v0.49.0.
+- `adapters/pgx`: `jackc/pgx/v5` v5.12.0, OpenTelemetry v1.47.0 and refreshed test-container
+  dependencies.
+- `adapters/otel`: OpenTelemetry (`otel`, `otel/sdk`, `otel/metric`, `otel/trace`) v1.47.0.
+
 ## [v0.17.3] — 2026-10-23
 
 Patch release for `adapters/pgx` users running `SingleTenant`. No public API changes; every
