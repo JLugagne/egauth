@@ -2,6 +2,7 @@ package egauth_test
 
 import (
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestRecipientLimit_CodeSendersAreBudgetedPerRecipient(t *testing.T) {
 	send := func(path, field, recipient string, ok ...int) int {
 		t.Helper()
 		accepted := 0
-		for i := 0; i < requests; i++ {
+		for i := range requests {
 			res := c.Do(journeytest.Req{
 				Method: http.MethodPost,
 				Path:   "/auth" + path,
@@ -66,10 +67,5 @@ func TestRecipientLimit_CodeSendersAreBudgetedPerRecipient(t *testing.T) {
 }
 
 func containsStatus(set []int, status int) bool {
-	for _, s := range set {
-		if s == status {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(set, status)
 }
