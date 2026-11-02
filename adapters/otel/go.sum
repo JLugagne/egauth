@@ -1,3 +1,5 @@
+github.com/JLugagne/egauth v0.17.4 h1:FJWYOpM5FpR5mk1CcP6pUwUVLD7hD1y1IRemIbC6J4w=
+github.com/JLugagne/egauth v0.17.4/go.mod h1:8iSEku8SXN5LIUr6SNXiDt+5vILMDoKlZ5q/IGiobmI=
 github.com/cespare/xxhash/v2 v2.3.0 h1:UL815xU9SqsFlibzuggzjXhog7bL6oX9BbNZnL2UFvs=
 github.com/cespare/xxhash/v2 v2.3.0/go.mod h1:VGX0DQ3Q6kWi7AoAeZDth3/j3BFtOZR5XLFGgcrjCOs=
 github.com/go-logr/logr v1.2.2/go.mod h1:jdQByPbusPIv2/zmleS9BjJVeZ6kBagPoEUsqbVz/1A=
