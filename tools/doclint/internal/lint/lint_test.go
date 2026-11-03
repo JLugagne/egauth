@@ -381,7 +381,7 @@ func workspaceCopy(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	copyTree(t, fixtureRoot(t, "mod"), dir)
-	writeFile(t, filepath.Join(dir, "go.work"), "go 1.26\n\nuse .\n")
+	writeFile(t, filepath.Join(dir, "go.work"), "go 1.27.3\n\nuse .\n")
 	writeFile(t, filepath.Join(dir, "README.md"), "<!-- embed: alpha/example_test.go#ExampleNew -->\n```go\ns := alpha.New()\ns.Start()\nfmt.Println(\"ok\")\n// Output: ok\n```\n")
 	return dir
 }

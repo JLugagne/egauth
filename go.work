@@ -2,9 +2,7 @@
 // published adapters (./adapters/pgx, ./adapters/otel) and the unpublished guard module (./tools).
 // External consumers do NOT use this file; they resolve each module via its published tag. See
 // RELEASING.md.
-go 1.26.7
-
-toolchain go1.26.10
+go 1.27.3
 
 use (
 	.

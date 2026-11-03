@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Every module (core, `adapters/pgx`, `adapters/otel`, `tools`) and `go.work` now declare
+  `go 1.27.3`; the separate `toolchain` directive is dropped. Consumers need Go >= 1.27.3.
+- `adapters/pgx`: `ebitengine/purego` v0.11.3.
+- Tooling: govulncheck v1.9.0, Hugo 0.169.0 for the docs site, `actions/upload-artifact` v7.0.2.
+
 ## [v0.17.4] — 2026-11-02
 
 Dependency maintenance release. No public API or behavior changes.

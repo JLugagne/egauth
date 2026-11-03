@@ -1,8 +1,6 @@
 module github.com/JLugagne/egauth/adapters/otel
 
-go 1.26.7
-
-toolchain go1.26.10
+go 1.27.3
 
 require (
 	github.com/JLugagne/egauth v0.17.4

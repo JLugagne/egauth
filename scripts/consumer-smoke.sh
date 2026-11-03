@@ -11,7 +11,7 @@
 # is given).
 #
 # The script first warms the module cache from the configured public proxy with the dependency
-# graph of every published module; the offline run is the assertion. Requires Go >= 1.26.7 and
+# graph of every published module; the offline run is the assertion. Requires Go >= 1.27.3 and
 # network access to GOPROXY for the warm-up.
 #
 # Usage: scripts/consumer-smoke.sh [path-to-repo]
@@ -26,11 +26,11 @@ OTEL='github.com/JLugagne/egauth/adapters/otel'
 CORE_VERSION='v0.17.4'
 PLACEHOLDER='v0.0.0-00010101000000-000000000000'
 
-# Pick a Go binary >= 1.26.7 without triggering a toolchain download.
+# Pick a Go binary >= 1.27.3 without triggering a toolchain download.
 GO="$(command -v go)"
-if ! GOTOOLCHAIN=local "$GO" version 2>/dev/null | grep -qE 'go1\.(26\.(7|[89]|[1-9][0-9])|2[7-9]|[3-9][0-9])'; then
-  CACHED="$(find "$(go env GOMODCACHE)/golang.org" -maxdepth 1 -name 'toolchain@v0.0.1-go1.26.7.*' -type d 2>/dev/null | head -1)"
-  [ -n "$CACHED" ] || { echo "SKIP: no go1.26.7 toolchain available"; exit 2; }
+if ! GOTOOLCHAIN=local "$GO" version 2>/dev/null | grep -qE 'go1\.(27\.([3-9]|[1-9][0-9])|2[89]|[3-9][0-9])'; then
+  CACHED="$(find "$(go env GOMODCACHE)/golang.org" -maxdepth 1 -name 'toolchain@v0.0.1-go1.27.3.*' -type d 2>/dev/null | head -1)"
+  [ -n "$CACHED" ] || { echo "SKIP: no go1.27.3 toolchain available"; exit 2; }
   GO="$CACHED/bin/go"
 fi
 
@@ -54,7 +54,7 @@ mkdir -p "$WORK/consumer"
 cat > "$WORK/consumer/go.mod" <<EOF
 module example.com/consumer
 
-go 1.26.7
+go 1.27.3
 
 require (
 	$CORE $CORE_VERSION
