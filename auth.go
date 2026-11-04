@@ -363,14 +363,71 @@ func checkOrigins[C any](cfg *Config[C], v *problems) {
 			v.add(field, "must not equal PublicOrigin or one of its tenant origins: session tokens are never accepted by resource servers")
 		case a != "" && slices.ContainsFunc(cfg.ExtraOrigins, func(o string) bool { return sameOrTenantOf(o, a) }):
 			v.add(field, "must not equal an ExtraOrigins entry or one of its tenant origins: session tokens are never accepted by resource servers")
+		case a != "" && slices.ContainsFunc(cfg.SPAOrigins, func(o string) bool { return strings.EqualFold(o, a) }):
+			v.add(field, "must not equal a SPAOrigins entry: a single-page application is a browser client, not a resource server")
 		}
 	}
+	checkSPAOrigins(cfg, v)
 	if cfg.BasePath == wellKnownRoot || strings.HasPrefix(cfg.BasePath, wellKnownRoot+"/") {
 		v.add("BasePath", "must not be under "+wellKnownRoot+", which holds the discovery document")
 	}
 	if s := cfg.Insecure.SharedCookieDomain; s != nil {
 		checkSharedDomain(cfg, s.Domain, v)
 	}
+}
+
+func checkSPAOrigins[C any](cfg *Config[C], v *problems) {
+	public := samplePage(cfg.PublicOrigin)
+	seen := map[string]int{}
+	for i, o := range cfg.SPAOrigins {
+		field := "SPAOrigins[" + strconv.Itoa(i) + "]"
+		lower := strings.ToLower(o)
+		switch {
+		case strings.Contains(o, tenantLabel):
+			v.add(field, "must be a fixed origin, without "+tenantLabel)
+		case sameOrTenantOf(strings.ToLower(cfg.PublicOrigin), lower):
+			v.add(field, "must not equal PublicOrigin or one of its tenant origins, which the auth handler serves itself")
+		case slices.ContainsFunc(cfg.ExtraOrigins, func(e string) bool { return sameOrTenantOf(strings.ToLower(e), lower) }):
+			v.add(field, "must not equal an ExtraOrigins entry, which the auth handler serves itself")
+		case !sameSite(public, o):
+			v.add(field, "must be same-site with PublicOrigin (same scheme and registrable domain): browsers do not send SameSite session cookies across sites")
+		}
+		if j, ok := seen[lower]; ok {
+			v.add(field, "duplicates SPAOrigins["+strconv.Itoa(j)+"]")
+			continue
+		}
+		seen[lower] = i
+	}
+}
+
+// sameSite reports whether origins a and b are schemefully same-site: the same scheme and the same
+// registrable domain (every localhost host is one site, an IP address is its own site).
+func sameSite(a, b string) bool {
+	ua, err := url.Parse(a)
+	if err != nil {
+		return false
+	}
+	ub, err := url.Parse(b)
+	if err != nil {
+		return false
+	}
+	sa, sb := siteOf(ua.Hostname()), siteOf(ub.Hostname())
+	return strings.EqualFold(ua.Scheme, ub.Scheme) && sa != "" && sa == sb
+}
+
+func siteOf(host string) string {
+	host = strings.ToLower(host)
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return "localhost"
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return addr.String()
+	}
+	site, err := publicsuffix.EffectiveTLDPlusOne(host)
+	if err != nil {
+		return ""
+	}
+	return site
 }
 
 func sameOrTenantOf(pattern, origin string) bool {
@@ -449,6 +506,7 @@ func isLoopbackOrigin(origin string) bool {
 
 func loopbackOnly[C any](cfg *Config[C]) bool {
 	all := append([]string{cfg.PublicOrigin}, cfg.ExtraOrigins...)
+	all = append(all, cfg.SPAOrigins...)
 	all = append(all, cfg.Audiences...)
 	return !slices.ContainsFunc(all, func(o string) bool { return !isLoopbackOrigin(o) })
 }
@@ -461,16 +519,36 @@ func checkPasskey[C any](cfg *Config[C], v *problems) {
 	if rpID == "" {
 		return
 	}
+	field := "PublicOrigin"
+	if id := cfg.Modules.Passkey.RPID; id != "" {
+		field = "Modules.Passkey.RPID"
+		switch {
+		case tenancyOf(cfg.Tenancy) == tenancySubdomain:
+			v.add(field, "is not supported under TenantBySubdomain, where each tenant host is its own relying party id")
+			return
+		case id != strings.ToLower(id) || strings.ContainsAny(id, "/:@[] ") || strings.HasPrefix(id, ".") || strings.HasSuffix(id, "."):
+			v.add(field, "must be a lower-case domain name, without scheme, port or path")
+			return
+		case !domainCovers(id, strings.ToLower(rpID)):
+			v.add(field, "must be the host of PublicOrigin ("+rpID+") or one of its parent domains")
+			return
+		}
+		rpID = id
+	}
 	if _, err := netip.ParseAddr(rpID); err == nil {
-		v.add("PublicOrigin", "passkeys need a domain name as relying party id, not the IP address "+rpID)
+		v.add(field, "passkeys need a domain name as relying party id, not the IP address "+rpID)
 		return
 	}
 	if !registrable(rpID) {
-		v.add("PublicOrigin", "passkey relying party id "+rpID+" is a public suffix")
+		v.add(field, "passkey relying party id "+rpID+" is a public suffix")
 		return
 	}
-	for _, o := range originHosts(cfg)[1:] {
-		if o.host != "" && !domainCovers(rpID, o.host) {
+	hosts := originHosts(cfg)[1:]
+	for i, o := range cfg.SPAOrigins {
+		hosts = append(hosts, originHost{"SPAOrigins[" + strconv.Itoa(i) + "]", hostOf(o)})
+	}
+	for _, o := range hosts {
+		if o.host != "" && !domainCovers(rpID, strings.ToLower(o.host)) {
 			v.add(o.field, "host "+o.host+" is outside the passkey relying party id "+rpID+", so browsers refuse its ceremonies")
 		}
 	}
@@ -589,7 +667,7 @@ func checkPages[C any](cfg *Config[C], v *problems) {
 			continue
 		}
 		if _, err := redirect.Parse(samplePage(page), origins); err != nil {
-			v.add("Pages."+pv.Type().Field(i).Name, "must be a relative path or an absolute URL on PublicOrigin or ExtraOrigins")
+			v.add("Pages."+pv.Type().Field(i).Name, "must be a relative path or an absolute URL on PublicOrigin, ExtraOrigins or SPAOrigins")
 		}
 	}
 }

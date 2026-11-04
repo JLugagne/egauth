@@ -56,7 +56,10 @@ func (g *sessionGate[C]) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if g.a.cfg.Insecure.NoOriginCheck == nil {
-		pol := csrf.Policy{Origins: o.trusted.For(tenant), Authenticated: true, BearerTransport: !cookie.Present(r) && csrf.BearerAuthorization(r)}
+		pol := csrf.Policy{
+			Origins: o.trusted.For(tenant), SameSite: o.trusted.SameSite(), Authenticated: true,
+			BearerTransport: !cookie.Present(r) && csrf.BearerAuthorization(r),
+		}
 		if err := csrf.Check(r, pol); err != nil {
 			if g.optional && safeMethod(r.Method) {
 				g.h(w, withPrincipal(r, Principal[C]{}), Principal[C]{})

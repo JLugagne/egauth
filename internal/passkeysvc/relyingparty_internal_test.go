@@ -1,10 +1,15 @@
 package passkeysvc
 
 import (
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/JLugagne/egauth/internal/core"
+	"github.com/JLugagne/egauth/internal/csrf"
+	"github.com/JLugagne/egauth/store/ceremony"
 )
 
 func TestSessionPayloadLengthIgnoresTheExpiryNanoseconds(t *testing.T) {
@@ -42,5 +47,39 @@ func TestSessionPayloadKeepsTheExpiryWithinASecond(t *testing.T) {
 	}
 	if sd.Expires.After(exp) || exp.Sub(sd.Expires) >= time.Second {
 		t.Fatalf("expiry %v moved from %v by more than the truncation", sd.Expires, exp)
+	}
+}
+
+func TestRelyingPartyIDDefaultsToTheFirstOriginHost(t *testing.T) {
+	o, err := csrf.NewOrigins("https://auth.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rp, err := (&Service{origins: o, displayName: "Example"}).relyingParty(core.TenantID{}, ceremony.PasskeyRegistration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Config.RPID != "auth.example.com" {
+		t.Fatalf("RPID %q", rp.Config.RPID)
+	}
+}
+
+func TestRelyingPartyIDOverrideCoversTheSPAOrigins(t *testing.T) {
+	o, err := csrf.NewOrigins("https://auth.example.com", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o, err = o.WithSameSite([]string{"https://app.example.com"}); err != nil {
+		t.Fatal(err)
+	}
+	rp, err := (&Service{origins: o, rpID: "example.com", displayName: "Example"}).relyingParty(core.TenantID{}, ceremony.PasskeyRegistration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rp.Config.RPID != "example.com" {
+		t.Fatalf("RPID %q", rp.Config.RPID)
+	}
+	if !slices.Contains(rp.Config.RPOrigins, "https://app.example.com") || !slices.Contains(rp.Config.RPOrigins, "https://auth.example.com") {
+		t.Fatalf("RPOrigins %v", rp.Config.RPOrigins)
 	}
 }

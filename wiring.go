@@ -278,7 +278,7 @@ func (b *builder[C]) factorServices() {
 		svc, err := passkeysvc.New(passkeysvc.Config{
 			Passkeys: cfg.Storage.Passkeys, MFA: cfg.Storage.MFA, Identity: cfg.Storage.Identity, Accounts: o.identity,
 			Mutations: o.identity, Ceremonies: cfg.Storage.Ceremonies, Origins: o.trusted, Cookies: o.cookies,
-			DisplayName: m.DisplayName, DataKey: o.dataKey, Clock: o.clock, Audit: o.audit,
+			RPID: m.RPID, DisplayName: m.DisplayName, DataKey: o.dataKey, Clock: o.clock, Audit: o.audit,
 		})
 		if err != nil {
 			b.fail("Modules.Passkey", err)

@@ -118,7 +118,7 @@ var classified = map[string]class{
 	"Pages.Error": classText, "Pages.ConfirmRegistration": classText, "Pages.MagicLink": classText,
 	"Pages.PasswordReset": classText, "Pages.VerifyEmail": classText, "Pages.ConfirmEmailChange": classText,
 	"Pages.SecurityRevert":        classText,
-	"Modules.Passkey.DisplayName": classText, "Modules.MFA.TOTPIssuer": classText,
+	"Modules.Passkey.DisplayName": classText, "Modules.Passkey.RPID": classOrigin, "Modules.MFA.TOTPIssuer": classText,
 	"Modules.APIKeys.Kinds": classText, "Modules.APIKeys.Prefix": classText,
 	"Modules.OAuth.Providers[].Name": classWiring, "Modules.OAuth.Providers[].ClientID": classWiring,
 	"Modules.OAuth.Providers[].ClientSecret": classWiring, "Modules.OAuth.Providers[].AuthURL": classWiring,
@@ -272,7 +272,7 @@ func policyVariants(l leaf) ([]variant, bool) {
 	case externalsType:
 		return []variant{{key: key("AcceptEveryone"), kind: vPolicy, opts: []change{setter(l.path, reflect.ValueOf([]egauth.ExternalFactor{acceptEveryone{}}))}}}, true
 	case extraOrigins:
-		if l.path == "ExtraOrigins" {
+		if l.path == "ExtraOrigins" || l.path == "SPAOrigins" {
 			return []variant{{key: key("EvilOrigin"), kind: vOrigins, opts: []change{setter(l.path, reflect.ValueOf([]string{evil}))}}}, true
 		}
 	}

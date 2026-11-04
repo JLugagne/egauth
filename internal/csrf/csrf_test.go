@@ -250,3 +250,81 @@ func TestBearerTransportHeaderRefusesConflictingSelectors(t *testing.T) {
 		t.Fatal("conflicting selectors accepted")
 	}
 }
+
+const spa = "https://spa.example.com"
+
+func spaPolicy(t *testing.T, sets bool) csrf.Policy {
+	t.Helper()
+	o, err := csrf.NewOrigins(public, []string{"https://admin.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o, err = o.WithSameSite([]string{"HTTPS://Spa.Example.com:443"}); err != nil {
+		t.Fatal(err)
+	}
+	return csrf.Policy{Origins: o.For(core.TenantID{}), SameSite: o.SameSite(), SetsCookies: sets}
+}
+
+func TestSameSiteNeedsDeclaredSPAOrigin(t *testing.T) {
+	spaOrigin := hdr{"Origin", spa}
+	spaReferer := hdr{"Referer", spa + "/login"}
+	cases := []struct {
+		name  string
+		sets  bool
+		h     []hdr
+		allow bool
+	}{
+		{"cookie: same-site from the SPA origin", false, []hdr{withCookie, sameSite, spaOrigin}, true},
+		{"login: same-site from the SPA origin sets cookies", true, []hdr{sameSite, spaOrigin}, true},
+		{"cookie: same-site from an extra origin that is not a SPA origin", false, []hdr{withCookie, sameSite, extraOrigin}, false},
+		{"cookie: same-site from the public origin itself", false, []hdr{withCookie, sameSite, goodOrigin}, false},
+		{"cookie: same-site from an undeclared sibling", false, []hdr{withCookie, sameSite, hdr{"Origin", "https://other.example.com"}}, false},
+		{"cookie: same-site without Origin, SPA Referer", false, []hdr{withCookie, sameSite, spaReferer}, false},
+		{"cookie: same-site with duplicate SPA Origin", false, []hdr{withCookie, sameSite, spaOrigin, spaOrigin}, false},
+		{"cookie: cross-site from the SPA origin", false, []hdr{withCookie, crossSite, spaOrigin}, false},
+		{"cookie: no fetch metadata, SPA origin", false, []hdr{withCookie, spaOrigin}, true},
+		{"cookie: same-origin still works", false, []hdr{withCookie, sameOrigin, goodOrigin}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := csrf.Check(req(http.MethodPost, tc.h...), spaPolicy(t, tc.sets))
+			if tc.allow && err != nil {
+				t.Fatalf("want allow, got %v", err)
+			}
+			if !tc.allow && !errors.Is(err, csrf.ErrForbidden) {
+				t.Fatalf("want ErrForbidden, got %v", err)
+			}
+		})
+	}
+}
+
+func TestSameSiteWithoutSPAOriginsStaysRefused(t *testing.T) {
+	if err := csrf.Check(req(http.MethodPost, withCookie, sameSite, hdr{"Origin", spa}), policy(false, false)); !errors.Is(err, csrf.ErrForbidden) {
+		t.Fatalf("same-site must stay refused without declared SPA origins, got %v", err)
+	}
+}
+
+func TestWithSameSite(t *testing.T) {
+	o, err := csrf.NewOrigins(public, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, bad := range [][]string{{"https://{tenant}.example.com"}, {"spa.example.com"}, {"https://spa.example.com/app"}, {"null"}, {""}} {
+		if _, err := o.WithSameSite(bad); !errors.Is(err, csrf.ErrInvalidOrigin) {
+			t.Errorf("%q: want ErrInvalidOrigin, got %v", bad, err)
+		}
+	}
+	s, err := o.WithSameSite([]string{"HTTPS://Spa.Example.com:443"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.SameSite(); !slices.Equal(got, []string{spa}) {
+		t.Fatalf("SameSite %v", got)
+	}
+	if got := s.For(core.TenantID{}); !slices.Equal(got, []string{public, spa}) {
+		t.Fatalf("For must trust the SPA origins too: %v", got)
+	}
+	if got := o.SameSite(); len(got) != 0 {
+		t.Fatalf("WithSameSite must not mutate the receiver: %v", got)
+	}
+}

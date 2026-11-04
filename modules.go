@@ -58,12 +58,17 @@ type LoginCodeModule struct {
 	SMS   bool
 }
 
-// PasskeyModule enables WebAuthn passkeys. The relying party id is the host of PublicOrigin (the
-// per-tenant host under TenantBySubdomain); New requires it to be a registrable domain and a suffix
-// of every origin.
+// PasskeyModule enables WebAuthn passkeys. The relying party id is RPID when set, otherwise the host
+// of PublicOrigin (the per-tenant host under TenantBySubdomain); New requires it to be a registrable
+// domain and a suffix of every origin, SPAOrigins included. RPID is a lower-case domain that is the
+// host of PublicOrigin or one of its parent domains, such as example.com for a PublicOrigin on
+// auth.example.com and a single-page application on app.example.com; it is refused under
+// TenantBySubdomain. A credential is bound to the relying party id it was registered under:
+// changing RPID on a deployment makes every existing passkey unusable.
 type PasskeyModule struct {
 	DisplayName string            `egauth:"required,nonempty"`
 	Attestation AttestationPolicy `egauth:"default=attestation_none"`
+	RPID        string            `egauth:"optional"`
 }
 
 // AttestationPolicy is the attestation conveyance requested at passkey registration. The zero

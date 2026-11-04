@@ -42,7 +42,7 @@ type policies struct {
 
 func buildPolicies[C any](cfg *Config[C], v *problems) *policies {
 	p := &policies{fingerprint: claimsFingerprint[C]()}
-	p.origins = origins{public: cfg.PublicOrigin, extra: cfg.ExtraOrigins}
+	p.origins = origins{public: cfg.PublicOrigin, extra: cfg.ExtraOrigins, spa: cfg.SPAOrigins}
 	var err error
 	if p.cookies, err = cookie.NewPolicy(cookie.Options{PublicOrigin: cfg.PublicOrigin, SharedDomain: sharedDomain(cfg)}); err != nil {
 		v.add("PublicOrigin", err.Error())
@@ -50,6 +50,8 @@ func buildPolicies[C any](cfg *Config[C], v *problems) *policies {
 	p.clients = buildClients(cfg, v)
 	if p.trusted, err = csrf.NewOrigins(cfg.PublicOrigin, cfg.ExtraOrigins); err != nil {
 		v.add("ExtraOrigins", err.Error())
+	} else if p.trusted, err = p.trusted.WithSameSite(cfg.SPAOrigins); err != nil {
+		v.add("SPAOrigins", err.Error())
 	}
 	p.outbound = buildOutbound(cfg, v)
 	p.transports = transportsOf(cfg.Transport)
@@ -144,8 +146,9 @@ func buildTenants[C any](cfg *Config[C], v *problems) httpx.TenantResolver {
 
 func samplePage(s string) string { return strings.ReplaceAll(s, tenantLabel, sampleTenant) }
 
-func trustedAbsolute(public string, extra []string) []string {
-	return append([]string{public}, extra...)
+func trustedAbsolute(public string, extra, spa []string) []string {
+	out := append([]string{public}, extra...)
+	return append(out, spa...)
 }
 
 func sampleOrigins[C any](cfg *Config[C]) (redirect.Origins, error) {
@@ -154,7 +157,19 @@ func sampleOrigins[C any](cfg *Config[C]) (redirect.Origins, error) {
 		extra[i] = samplePage(o)
 	}
 	public := samplePage(cfg.PublicOrigin)
-	return redirect.NewOrigins(public, trustedAbsolute(public, extra))
+	return redirect.NewOrigins(public, trustedAbsolute(public, extra, cfg.SPAOrigins))
+}
+
+// spaLanding returns t when it is an absolute URL on one of the SPA origins.
+func spaLanding(t redirect.Target, spa []string) (string, bool) {
+	ref := t.String()
+	for _, o := range spa {
+		rest, ok := strings.CutPrefix(ref, strings.ToLower(o))
+		if ok && (rest == "" || rest[0] == '/' || rest[0] == '?') {
+			return ref, true
+		}
+	}
+	return "", false
 }
 
 func landingPath(t redirect.Target, public string) (string, bool) {
@@ -182,6 +197,7 @@ func buildPages[C any](cfg *Config[C], v *problems) (out issuance.Pages, login r
 		return out, login
 	}
 	public := samplePage(cfg.PublicOrigin)
+	out.SPAOrigins = cfg.SPAOrigins
 	for _, p := range []struct {
 		field string
 		raw   string
@@ -199,9 +215,13 @@ func buildPages[C any](cfg *Config[C], v *problems) (out issuance.Pages, login r
 			v.add(p.field, err.Error())
 			continue
 		}
+		if abs, ok := spaLanding(t, cfg.SPAOrigins); ok {
+			*p.dst = abs
+			continue
+		}
 		path, ok := landingPath(t, public)
 		if !ok {
-			v.add(p.field, "must be a path on PublicOrigin: a login lands on it through issuance, which serves no other origin")
+			v.add(p.field, "must be a path on PublicOrigin or an absolute URL on a SPAOrigins entry: a login lands on it through issuance")
 			continue
 		}
 		if _, err := redirect.Parse(path, o); err != nil {
@@ -262,6 +282,7 @@ func checkExtraOriginLabels[C any](cfg *Config[C], v *problems) {
 type origins struct {
 	public string
 	extra  []string
+	spa    []string
 }
 
 var errTenantLabel = errors.New("egauth: the tenant cannot form a host label")
@@ -300,7 +321,7 @@ func (o origins) Origins(t core.TenantID) (redirect.Origins, error) {
 	if err != nil {
 		return redirect.Origins{}, err
 	}
-	return redirect.NewOrigins(public, trustedAbsolute(public, o.extra))
+	return redirect.NewOrigins(public, trustedAbsolute(public, o.extra, o.spa))
 }
 
 type links struct {

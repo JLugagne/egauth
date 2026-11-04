@@ -38,10 +38,20 @@ import (
 // application's custom claims. The egauth tags are the validation contract: required fields must
 // be set, default= fields take a library default when zero, and module= fields are required
 // exactly when one of the named modules (or session backends) is enabled.
+//
+// SPAOrigins are the exact origins of single-page applications served from a sibling host of
+// PublicOrigin, with its scheme and registrable domain (https://app.example.com for
+// https://auth.example.com, or a loopback development server). The Build handler answers them with
+// credentialed CORS, and they are the only origins whose Sec-Fetch-Site same-site requests pass the
+// cross-site gate; sessions stay HttpOnly cookies on the PublicOrigin host and token headers are
+// never exposed to them. New refuses an origin that is cross-site, carries a {tenant} label, equals
+// another configured origin, or, with passkeys, falls outside the relying party id (see
+// PasskeyModule.RPID) (doclint:enforced-by egauth.TestConfigSPAOrigins).
 type Config[C any] struct {
 	PublicOrigin string           `egauth:"required,origin"`
 	BasePath     string           `egauth:"default=basepath,path"`
 	ExtraOrigins []string         `egauth:"optional,each=origin"`
+	SPAOrigins   []string         `egauth:"optional,each=origin"`
 	Audiences    []string         `egauth:"optional,each=origin"`
 	Proxy        ProxyPolicy      `egauth:"required"`
 	Tenancy      Tenancy          `egauth:"default=single_tenant"`
@@ -270,6 +280,7 @@ func totpIssuer(r *configcheck.Resolved) any {
 
 func snapshot[C any](cfg Config[C]) Config[C] {
 	cfg.ExtraOrigins = slices.Clone(cfg.ExtraOrigins)
+	cfg.SPAOrigins = slices.Clone(cfg.SPAOrigins)
 	cfg.Audiences = slices.Clone(cfg.Audiences)
 	m := &cfg.Modules
 	m.Password = clonePtr(m.Password)

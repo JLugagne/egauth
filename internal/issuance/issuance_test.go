@@ -43,3 +43,19 @@ func TestNewRefusesMalformedPages(t *testing.T) {
 		t.Fatalf("valid pages refused: %v", err)
 	}
 }
+
+// TestNewAcceptsPagesOnSPAOrigins: a page may be an absolute URL on a declared single-page
+// application origin, and only there.
+func TestNewAcceptsPagesOnSPAOrigins(t *testing.T) {
+	spa := []string{"https://spa.example.com"}
+	_, err := issuance.New(issuance.Config{Pages: issuance.Pages{
+		AfterLogin: "https://spa.example.com/home", MFA: "https://spa.example.com/mfa?step=2", Reauth: "/reauth", SPAOrigins: spa,
+	}})
+	if strings.Contains(err.Error(), "Pages") {
+		t.Fatalf("pages on a SPA origin refused: %v", err)
+	}
+	_, err = issuance.New(issuance.Config{Pages: issuance.Pages{AfterLogin: "https://evil.example/home", SPAOrigins: spa}})
+	if !errors.Is(err, issuance.ErrInvalidConfig) || !strings.Contains(err.Error(), "Pages.AfterLogin") {
+		t.Fatalf("a page outside the SPA origins accepted: %v", err)
+	}
+}

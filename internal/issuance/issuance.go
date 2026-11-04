@@ -75,12 +75,15 @@ type Completer interface {
 
 // Pages are the application pages a cookie-transport browser is sent to with a 303: AfterLogin when
 // a login completes without return_to, MFA when it is parked, Reauth when /reauth still needs a
-// second factor. Each is optional and, when set, a path-absolute reference on the public origin:
-// New refuses any other value through internal/redirect, so no login can fail on a page later.
+// second factor. Each is optional and, when set, a path-absolute reference on the public origin or
+// an absolute URL on one of SPAOrigins (the single-page application origins, which the
+// OriginResolver also returns): New refuses any other value through internal/redirect, so no login
+// can fail on a page later.
 type Pages struct {
 	AfterLogin string
 	MFA        string
 	Reauth     string
+	SPAOrigins []string
 }
 
 // Config is what New needs. Every member is required except Pages and Clock, whose zero value
@@ -160,7 +163,7 @@ func New(cfg Config) (*Issuer, error) {
 const pagesOrigin = "https://pages.invalid"
 
 func validPages(p Pages) []error {
-	o, err := redirect.NewOrigins(pagesOrigin, nil)
+	o, err := redirect.NewOrigins(pagesOrigin, p.SPAOrigins)
 	if err != nil {
 		return []error{errors.Join(errors.New("Pages"), err)}
 	}

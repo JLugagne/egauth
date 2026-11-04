@@ -43,10 +43,12 @@ var (
 )
 
 // Origins is the trusted-origin set: the public origin, possibly with a {tenant} first host label,
-// and the exact extra origins. The zero Origins trusts nothing.
+// the exact extra origins and the exact single-page application origins. The zero Origins trusts
+// nothing.
 type Origins struct {
 	public string
 	extra  []string
+	spa    []string
 }
 
 // NewOrigins canonicalises public and extra (lowercase scheme and host, default port dropped).
@@ -101,14 +103,32 @@ func canonical(raw string, templated bool) (string, error) {
 	return s + "://" + host, nil
 }
 
+// WithSameSite returns a copy of o that also trusts the exact single-page application origins spa,
+// canonicalised like NewOrigins; a {tenant} label is refused. They are the only origins whose
+// Sec-Fetch-Site same-site requests Check accepts. It returns ErrInvalidOrigin.
+func (o Origins) WithSameSite(spa []string) (Origins, error) {
+	out := Origins{public: o.public, extra: o.extra}
+	for _, e := range spa {
+		c, err := canonical(e, false)
+		if err != nil {
+			return Origins{}, err
+		}
+		out.spa = append(out.spa, c)
+	}
+	return out, nil
+}
+
+// SameSite returns a copy of the canonical single-page application origins (Policy.SameSite).
+func (o Origins) SameSite() []string { return append([]string(nil), o.spa...) }
+
 // IsZero reports whether o trusts no origin.
-func (o Origins) IsZero() bool { return o.public == "" && len(o.extra) == 0 }
+func (o Origins) IsZero() bool { return o.public == "" && len(o.extra) == 0 && len(o.spa) == 0 }
 
 // For returns the exact origins trusted for a request of tenant t: the tenant-expanded public
-// origin (omitted for the zero tenant when the public origin is a template) and the extra
-// origins.
+// origin (omitted for the zero tenant when the public origin is a template), the extra origins and
+// the single-page application origins.
 func (o Origins) For(t core.TenantID) []string {
-	out := make([]string, 0, len(o.extra)+1)
+	out := make([]string, 0, len(o.extra)+len(o.spa)+1)
 	switch {
 	case o.public == "":
 	case strings.Contains(o.public, tenantMarker):
@@ -118,13 +138,17 @@ func (o Origins) For(t core.TenantID) []string {
 	default:
 		out = append(out, o.public)
 	}
-	return append(out, o.extra...)
+	out = append(out, o.extra...)
+	return append(out, o.spa...)
 }
 
 // Policy is the per-request input of Check.
 type Policy struct {
 	// Origins are the exact trusted origins of this request (Origins.For).
 	Origins []string
+	// SameSite are the single-page application origins (Origins.SameSite): a Sec-Fetch-Site
+	// same-site request is accepted only with exactly one Origin header naming one of them.
+	SameSite []string
 	// SetsCookies is EndpointMeta.SetsCookies: unsafe requests are checked even without cookies,
 	// which closes login CSRF.
 	SetsCookies bool
@@ -143,9 +167,9 @@ type Policy struct {
 // Sec-Fetch-Site is cross-site and Sec-Fetch-Mode is not navigate. Every other method is checked
 // when r carries a cookie or p.SetsCookies; a request with no cookie that carries
 // X-Egauth-Transport: bearer or an Authorization Bearer credential is exempt when
-// p.BearerTransport. A checked request
-// needs Sec-Fetch-Site same-origin or none when present, then an Origin (or, without Origin, a
-// Referer origin) among p.Origins.
+// p.BearerTransport. A checked request needs Sec-Fetch-Site same-origin or none when present (or
+// same-site with exactly one Origin among p.SameSite, never a Referer), then an Origin (or, without
+// Origin, a Referer origin) among p.Origins.
 func Check(r *http.Request, p Policy) error {
 	hasCookie := cookie.Present(r)
 	if safe(r.Method) {
@@ -157,7 +181,7 @@ func Check(r *http.Request, p Policy) error {
 	if !hasCookie && ((p.BearerTransport && bearerExempt(r)) || !p.SetsCookies) {
 		return nil
 	}
-	if err := fetchSite(r); err != nil {
+	if err := fetchSite(r, p.SameSite); err != nil {
 		return err
 	}
 	return originMatch(r, p.Origins)
@@ -193,7 +217,7 @@ func safeFetch(r *http.Request) error {
 	return deny("cross-site non-navigation request")
 }
 
-func fetchSite(r *http.Request) error {
+func fetchSite(r *http.Request, sameSite []string) error {
 	site, n := single(r, headerFetchSite)
 	switch {
 	case n == 0:
@@ -202,6 +226,11 @@ func fetchSite(r *http.Request) error {
 		return deny("duplicate Sec-Fetch-Site")
 	case strings.EqualFold(site, "same-origin"), strings.EqualFold(site, "none"):
 		return nil
+	case strings.EqualFold(site, "same-site"):
+		if origin, n := single(r, headerOrigin); n == 1 && contains(sameSite, asciiLower(origin)) {
+			return nil
+		}
+		return deny("Sec-Fetch-Site same-site from an origin that is not a single-page application origin")
 	}
 	return deny("Sec-Fetch-Site " + site)
 }

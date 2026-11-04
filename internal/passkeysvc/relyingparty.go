@@ -28,10 +28,14 @@ func (s *Service) relyingParty(t core.TenantID, k ceremony.Kind) (*webauthn.WebA
 	if err != nil || u.Hostname() == "" {
 		return nil, errors.Join(errNoOrigin, err)
 	}
+	rpID := strings.ToLower(u.Hostname())
+	if s.rpID != "" {
+		rpID = s.rpID
+	}
 	ttl := k.TTL()
 	timeout := webauthn.TimeoutConfig{Enforce: true, Timeout: ttl, TimeoutUVD: ttl}
 	return webauthn.New(&webauthn.Config{
-		RPID:                  strings.ToLower(u.Hostname()),
+		RPID:                  rpID,
 		RPDisplayName:         s.displayName,
 		RPOrigins:             origins,
 		AttestationPreference: protocol.PreferNoAttestation,

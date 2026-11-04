@@ -91,9 +91,13 @@ type Config struct {
 	Accounts   Accounts
 	Mutations  Mutator
 	Ceremonies ceremony.Store
-	// Origins are the trusted origins; the relying party id of a tenant is the host of its first
-	// origin (the tenant-expanded public origin), and every origin of the tenant is accepted.
+	// Origins are the trusted origins; the relying party id of a tenant is RPID when set, otherwise
+	// the host of its first origin (the tenant-expanded public origin), and every origin of the
+	// tenant, single-page application origins included, is accepted.
 	Origins csrf.Origins
+	// RPID overrides the relying party id (Modules.Passkey.RPID); the composition root checks that
+	// it covers every origin.
+	RPID string
 	Cookies cookie.Policy
 	// DisplayName is the relying party name shown by authenticators (Modules.Passkey.DisplayName).
 	DisplayName string
@@ -124,6 +128,7 @@ type Service struct {
 	mutations   Mutator
 	ceremonies  ceremony.Store
 	origins     csrf.Origins
+	rpID        string
 	cookies     cookie.Policy
 	displayName string
 	sealer      *ceremonycodec.Sealer
@@ -188,6 +193,7 @@ func New(cfg Config) (*Service, error) {
 		mutations:   cfg.Mutations,
 		ceremonies:  cfg.Ceremonies,
 		origins:     cfg.Origins,
+		rpID:        cfg.RPID,
 		cookies:     cfg.Cookies,
 		displayName: cfg.DisplayName,
 		sealer:      sealer,

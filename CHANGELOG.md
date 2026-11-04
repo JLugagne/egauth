@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `Config.SPAOrigins`: single-page applications served from another host of the same site (for
+  example `https://app.example.com` for a `PublicOrigin` of `https://auth.example.com`, or a
+  loopback development server) keep cookie sessions. Every route `Build` serves answers them with
+  credentialed CORS, and the cross-site gate accepts `Sec-Fetch-Site: same-site` from exactly those
+  origins (on the `Origin` header, never a `Referer`). Sessions stay `HttpOnly` cookies: only
+  `Content-Type` is an allowed request header and no token header is exposed. `Pages` entries,
+  `AfterLogin`, `MFA` and `Reauth` included, and `return_to` may target a SPA origin. `New` refuses
+  cross-site, templated, duplicate or colliding SPA origins.
+- `PasskeyModule.RPID`: an explicit passkey relying party id (the `PublicOrigin` host or a parent
+  domain) so that a SPA on a sibling host can run WebAuthn ceremonies. Refused under
+  `TenantBySubdomain`. Changing it invalidates existing passkeys.
+
 ### Changed
 
 - Every module (core, `adapters/pgx`, `adapters/otel`, `tools`) and `go.work` now declare

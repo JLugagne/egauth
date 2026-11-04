@@ -13,6 +13,7 @@
 | Request body caps | 4 KiB, 64 KiB | none |
 | Tenant resolution | 401 when unresolved | none |
 | Cookies | `Secure`, `HttpOnly`, `__Host-` | `egauth.InsecureOptOuts.SharedCookieDomain` |
+| CORS | none; credentialed only for exact same-site `Config.SPAOrigins`, never exposing token headers | none |
 | Session lifetime | at most 90 days | `egauth.InsecureOptOuts.LongSessions` (400 days) |
 | Durable shared state off loopback | required | `egauth.InsecureOptOuts.EphemeralState` |
 | Outbound requests refuse private networks | on | `egauth.InsecureOptOuts.OutboundPrivateNetwork` |
