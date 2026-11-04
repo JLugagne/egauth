@@ -75,6 +75,24 @@ func TestConfigSPAOrigins(t *testing.T) {
 		{"outside the default passkey relying party id", func(c *egauth.Config[struct{}]) {
 			c.SPAOrigins = []string{spaOrigin}
 		}, "SPAOrigins[0]"},
+		{"parent of the public origin", func(c *egauth.Config[struct{}]) {
+			c.Modules.Passkey = nil
+			c.SPAOrigins = []string{"https://example.com"}
+		}, "SPAOrigins[0]"},
+		{"shared cookie domain", func(c *egauth.Config[struct{}]) {
+			withSPA(c)
+			c.Modules.Passkey = nil
+			c.Insecure.SharedCookieDomain = &egauth.SharedCookieDomain{
+				Domain: "example.com",
+				Ack:    egauth.Acknowledge("test: a shared cookie would reach the SPA"),
+			}
+		}, "SPAOrigins"},
+		{"multi-tenant tenancy", func(c *egauth.Config[struct{}]) {
+			c.Modules.Passkey = nil
+			c.Tenancy = egauth.TenantBySubdomain()
+			c.PublicOrigin, c.ExtraOrigins, c.Audiences = "https://{tenant}.example.com", nil, nil
+			c.SPAOrigins = []string{spaOrigin}
+		}, "SPAOrigins"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -288,6 +306,28 @@ func TestSPAPreflight(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			require.Equal(t, http.StatusNotFound, rec.Code)
+			requireNoCORS(t, rec)
+		})
+	}
+}
+
+func TestSPACannotReadCredentialRoutes(t *testing.T) {
+	w, h, _ := spaWorld(t)
+	_, c := spaLogin(w, h, fromSite(devSPAOrigin, "same-site"))
+
+	for _, path := range []string{
+		egauth.PathResourceToken,
+		egauth.PathMFATOTPEnroll,
+		egauth.PathMFATOTPConfirm,
+		egauth.PathMFARecoveryCodesRegenerate,
+	} {
+		t.Run(path, func(t *testing.T) {
+			rec := w.request(h, http.MethodPost, "/auth"+path, c, fromSite(devSPAOrigin, "same-site"))
+			require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+			requireNoCORS(t, rec)
+
+			rec = preflight(w, h, devSPAOrigin, "/auth"+path, http.MethodPost, "content-type")
+			require.NotEqual(t, http.StatusNoContent, rec.Code)
 			requireNoCORS(t, rec)
 		})
 	}

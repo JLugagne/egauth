@@ -377,11 +377,24 @@ func checkOrigins[C any](cfg *Config[C], v *problems) {
 }
 
 func checkSPAOrigins[C any](cfg *Config[C], v *problems) {
+	if len(cfg.SPAOrigins) == 0 {
+		return
+	}
+	switch {
+	case tenancyOf(cfg.Tenancy) != tenancySingle:
+		v.add("SPAOrigins", "requires SingleTenant: a SPA origin is trusted for the whole deployment, not for one tenant")
+		return
+	case cfg.Insecure.SharedCookieDomain != nil:
+		v.add("SPAOrigins", "cannot be combined with Insecure.SharedCookieDomain: the shared session cookie would be sent to the SPA host")
+		return
+	}
 	public := samplePage(cfg.PublicOrigin)
+	publicHost := strings.ToLower(hostOf(cfg.PublicOrigin))
 	seen := map[string]int{}
 	for i, o := range cfg.SPAOrigins {
 		field := "SPAOrigins[" + strconv.Itoa(i) + "]"
 		lower := strings.ToLower(o)
+		spaHost := strings.ToLower(hostOf(o))
 		switch {
 		case strings.Contains(o, tenantLabel):
 			v.add(field, "must be a fixed origin, without "+tenantLabel)
@@ -389,6 +402,8 @@ func checkSPAOrigins[C any](cfg *Config[C], v *problems) {
 			v.add(field, "must not equal PublicOrigin or one of its tenant origins, which the auth handler serves itself")
 		case slices.ContainsFunc(cfg.ExtraOrigins, func(e string) bool { return sameOrTenantOf(strings.ToLower(e), lower) }):
 			v.add(field, "must not equal an ExtraOrigins entry, which the auth handler serves itself")
+		case publicHost != "" && spaHost != "" && strings.HasSuffix(publicHost, "."+spaHost):
+			v.add(field, "must not be a parent domain of PublicOrigin: every host under it could otherwise speak for the SPA")
 		case !sameSite(public, o):
 			v.add(field, "must be same-site with PublicOrigin (same scheme and registrable domain): browsers do not send SameSite session cookies across sites")
 		}

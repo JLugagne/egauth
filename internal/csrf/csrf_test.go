@@ -328,3 +328,19 @@ func TestWithSameSite(t *testing.T) {
 		t.Fatalf("WithSameSite must not mutate the receiver: %v", got)
 	}
 }
+
+func TestForWithoutSPADropsTheSPAOrigins(t *testing.T) {
+	o, err := csrf.NewOrigins(public, []string{"https://admin.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o, err = o.WithSameSite([]string{spa}); err != nil {
+		t.Fatal(err)
+	}
+	if got := o.ForWithoutSPA(core.TenantID{}); !slices.Equal(got, []string{public, "https://admin.example.com"}) {
+		t.Fatalf("ForWithoutSPA %v", got)
+	}
+	if got := o.For(core.TenantID{}); !slices.Equal(got, []string{public, "https://admin.example.com", spa}) {
+		t.Fatalf("For %v", got)
+	}
+}

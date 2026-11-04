@@ -41,7 +41,8 @@ type builtHandler struct {
 	poke      func()
 	reported  atomic.Bool
 	// spa are the canonical Config.SPAOrigins; empty means no CORS at all.
-	spa []string
+	spa  []string
+	base string
 }
 
 const (
@@ -88,11 +89,26 @@ func (h *builtHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // cors applies credentialed CORS for the SPA origins and reports whether it answered r itself (a
-// preflight). Only an exact SPA origin gets Access-Control-* headers; a preflight is answered only
-// when a route serves the requested method on that path, otherwise it falls through to the 404 the
-// handler gives every unrouted request. The cross-site gate still checks every actual request.
+// preflight). Only an exact SPA origin gets Access-Control-* headers, and only when the matched
+// route is classified as SPA-safe (routes.spaAllowed). Credential-returning auth endpoints stay
+// same-origin even for a declared SPA. A preflight is answered only when a route serves the
+// requested method on that path, otherwise it falls through to the 404 the handler gives every
+// unrouted request. The cross-site gate still checks every actual request.
 func (h *builtHandler) cors(w http.ResponseWriter, r *http.Request) bool {
 	if len(h.spa) == 0 {
+		return false
+	}
+	method, preflight := preflightMethod(r)
+	if preflight && method == "" {
+		return false
+	}
+	probe := r
+	if preflight {
+		probe = r.Clone(r.Context())
+		probe.Method = method
+	}
+	_, pattern := h.mux.Handler(probe)
+	if pattern == "" || !h.allowsSPAPattern(pattern) {
 		return false
 	}
 	hdr := w.Header()
@@ -100,17 +116,6 @@ func (h *builtHandler) cors(w http.ResponseWriter, r *http.Request) bool {
 	origin, ok := h.spaOrigin(r)
 	if !ok {
 		return false
-	}
-	method, preflight := preflightMethod(r)
-	if preflight {
-		if method == "" {
-			return false
-		}
-		probe := r.Clone(r.Context())
-		probe.Method = method
-		if _, pattern := h.mux.Handler(probe); pattern == "" {
-			return false
-		}
 	}
 	hdr.Set(headerAllowOrigin, origin)
 	hdr.Set(headerAllowCreds, "true")
@@ -125,6 +130,27 @@ func (h *builtHandler) cors(w http.ResponseWriter, r *http.Request) bool {
 	hdr.Set(headerMaxAge, corsMaxAge)
 	noStore(w)
 	w.WriteHeader(http.StatusNoContent)
+	return true
+}
+
+// allowsSPAPattern reports whether the ServeMux pattern may answer a configured SPA origin. Auth
+// routes consult their endpoint classification; the discovery document and the application's own
+// routes stay available to the SPA. An unknown pattern is refused.
+func (h *builtHandler) allowsSPAPattern(pattern string) bool {
+	if pattern == "" {
+		return false
+	}
+	path := pattern
+	if i := strings.IndexByte(pattern, ' '); i >= 0 {
+		path = pattern[i+1:]
+	}
+	if path == routes.WellKnown {
+		return true
+	}
+	if strings.HasPrefix(path, h.base+"/") {
+		m, ok := routes.MetaFor(strings.TrimPrefix(path, h.base))
+		return ok && m.SPA
+	}
 	return true
 }
 
@@ -259,6 +285,7 @@ func (a *Auth[C]) build(decls []routes.Declaration, handlers []declared[C]) (htt
 		mux: root.mux, patterns: root.patterns, events: o.events,
 		anonymous: func(r *http.Request) *http.Request { return withPrincipal(r, Principal[C]{}) },
 		spa:       o.trusted.SameSite(),
+		base:      base,
 		layout:    "serve the Build handler at the server root; auth endpoints live under " + base + " and the discovery document at " + routes.WellKnown,
 	}
 	if o.reaper != nil {

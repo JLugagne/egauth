@@ -19,7 +19,7 @@ type InsecureOptOuts struct {
 	// EphemeralState accepts Ephemeral stores on a public origin that is not loopback.
 	EphemeralState *Ack
 	// SharedCookieDomain drops the __Host- prefix of session cookies and scopes them to a parent
-	// domain.
+	// domain. New refuses it together with SPAOrigins: the shared cookie would reach the SPA host.
 	SharedCookieDomain *SharedCookieDomain
 	// OutboundPrivateNetwork lets statically configured providers reach private prefixes.
 	OutboundPrivateNetwork *OutboundAllowance

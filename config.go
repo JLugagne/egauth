@@ -39,14 +39,18 @@ import (
 // be set, default= fields take a library default when zero, and module= fields are required
 // exactly when one of the named modules (or session backends) is enabled.
 //
-// SPAOrigins are the exact origins of single-page applications served from a sibling host of
-// PublicOrigin, with its scheme and registrable domain (https://app.example.com for
-// https://auth.example.com, or a loopback development server). The Build handler answers them with
-// credentialed CORS, and they are the only origins whose Sec-Fetch-Site same-site requests pass the
-// cross-site gate; sessions stay HttpOnly cookies on the PublicOrigin host and token headers are
-// never exposed to them. New refuses an origin that is cross-site, carries a {tenant} label, equals
-// another configured origin, or, with passkeys, falls outside the relying party id (see
-// PasskeyModule.RPID) (doclint:enforced-by egauth.TestConfigSPAOrigins).
+// SPAOrigins are the exact origins of single-page applications served from another same-site host
+// that is not a parent of PublicOrigin, with its scheme and registrable domain
+// (https://app.example.com for https://auth.example.com, or a loopback development server). They
+// require SingleTenant. The Build handler answers them with credentialed CORS only on routes
+// classified SPA-safe, and they are the only origins whose Sec-Fetch-Site same-site requests pass
+// the cross-site gate on those routes; auth routes that return a credential in the body stay
+// same-origin;
+// sessions stay HttpOnly cookies on the PublicOrigin host and token headers are never exposed to
+// them. New refuses an origin that is cross-site, carries a {tenant} label, is a parent domain of
+// PublicOrigin, equals another configured origin, is combined with Insecure.SharedCookieDomain, or,
+// with passkeys, falls outside the relying party id (see PasskeyModule.RPID)
+// (doclint:enforced-by egauth.TestConfigSPAOrigins).
 type Config[C any] struct {
 	PublicOrigin string           `egauth:"required,origin"`
 	BasePath     string           `egauth:"default=basepath,path"`

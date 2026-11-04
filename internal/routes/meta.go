@@ -34,6 +34,7 @@ func MetaFor(path string) (EndpointMeta, bool) {
 		Sensitive:         sensitive(path),
 		AcceptsMustChange: acceptsMustChange(path),
 		SetsCookies:       setsCookies(path, method),
+		SPA:               spaAllowed[path],
 		EndsSession:       path == Logout || path == LogoutEverywhere,
 		BodyCap:           httpx.FormBodyCap,
 		ClientLimit:       clientLimit(path, method),

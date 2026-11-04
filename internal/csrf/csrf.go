@@ -128,7 +128,18 @@ func (o Origins) IsZero() bool { return o.public == "" && len(o.extra) == 0 && l
 // origin (omitted for the zero tenant when the public origin is a template), the extra origins and
 // the single-page application origins.
 func (o Origins) For(t core.TenantID) []string {
-	out := make([]string, 0, len(o.extra)+len(o.spa)+1)
+	return append(o.forTenant(t), o.spa...)
+}
+
+// ForWithoutSPA returns the same tenant-expanded public and extra origins as For, but omits the
+// single-page application origins. An endpoint that must stay same-origin uses it, so a SPA origin
+// can neither match the origin list nor pass the same-site branch of fetchSite.
+func (o Origins) ForWithoutSPA(t core.TenantID) []string {
+	return o.forTenant(t)
+}
+
+func (o Origins) forTenant(t core.TenantID) []string {
+	out := make([]string, 0, len(o.extra)+1)
 	switch {
 	case o.public == "":
 	case strings.Contains(o.public, tenantMarker):
@@ -138,8 +149,7 @@ func (o Origins) For(t core.TenantID) []string {
 	default:
 		out = append(out, o.public)
 	}
-	out = append(out, o.extra...)
-	return append(out, o.spa...)
+	return append(out, o.extra...)
 }
 
 // Policy is the per-request input of Check.

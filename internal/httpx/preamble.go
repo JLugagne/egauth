@@ -165,8 +165,12 @@ func (g *gate) run(w http.ResponseWriter, hr *http.Request) (*Request, error) {
 		return nil, err
 	}
 	requested := g.requestedTransport(hr)
+	origins, sameSite := set.Origins.For(tenant), set.Origins.SameSite()
+	if !g.meta.SPA {
+		origins, sameSite = set.Origins.ForWithoutSPA(tenant), nil
+	}
 	pol := csrf.Policy{
-		Origins: set.Origins.For(tenant), SameSite: set.Origins.SameSite(), SetsCookies: g.meta.SetsCookies, Authenticated: g.meta.Authenticated,
+		Origins: origins, SameSite: sameSite, SetsCookies: g.meta.SetsCookies, Authenticated: g.meta.Authenticated,
 		BearerTransport: requested == core.TransportBearer,
 	}
 	if err := g.originCheck(hr, pol); err != nil {

@@ -7,7 +7,7 @@
 | `PublicOrigin` | https, or http on a loopback host, with no path. Under `TenantBySubdomain` it holds one `{tenant}` label |
 | `BasePath` | where the auth endpoints mount; default is set by the library; starts with `/`, no trailing `/` |
 | `ExtraOrigins`, `Audiences` | exact origins; an audience differs from `PublicOrigin` and needs asymmetric keys |
-| `SPAOrigins` | exact origins of single-page applications on another host of the same site (same scheme and registrable domain); they get credentialed CORS and same-site cross-site-gate acceptance; no `{tenant}` label |
+| `SPAOrigins` | exact origins of single-page applications on another host of the same site (same scheme and registrable domain); `SingleTenant` only, not a parent domain of `PublicOrigin`, refused with `Insecure.SharedCookieDomain`; credentialed CORS and same-site gate acceptance only on SPA-safe routes, credential-returning endpoints are same-origin; no `{tenant}` label |
 | `Proxy` | `egauth.DirectClients()` or `egauth.TrustedProxies(prefixes...)`; decides which peers may set forwarding headers |
 | `Tenancy` | `egauth.SingleTenant()` (default), `egauth.TenantBySubdomain()`, `egauth.TenantFromRequest(r)` |
 | `Storage` | every store; from `memstore.New` or `pgxstore.New` |
@@ -33,7 +33,7 @@
 ## What New checks
 
 1. Tags, bounds and defaults.
-2. Origins, SPA origins (same-site with `PublicOrigin`, distinct from every other origin), base path, shared cookie domain.
+2. Origins, SPA origins (`SingleTenant`, same-site with `PublicOrigin`, not a parent domain of it, distinct from every other origin, not with `SharedCookieDomain`), base path, shared cookie domain.
 3. Passkey relying-party ID (`PasskeyModule.RPID` or the `PublicOrigin` host) against every origin, SPA origins included.
 4. Store durability: every security store reports the same level; ephemeral stores are accepted only on a loopback origin or with `Insecure.EphemeralState`.
 5. Schema: every embedded migration is recorded.

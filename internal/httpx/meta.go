@@ -29,6 +29,10 @@ type Meta struct {
 	AcceptsMustChange bool
 	IdentifierKeyed   bool
 	SetsCookies       bool
+	// SPA reports that a configured single-page application origin may call this endpoint and
+	// read its response. It is false by default; routes that return credentials keep it false, so
+	// a new endpoint is same-origin until it is deliberately classified in routes.spaAllowed.
+	SPA bool
 	// EndsSession marks an endpoint that only revokes credentials (/logout, /logout-everywhere)
 	// and never issues one. Login CSRF cannot apply there, so a cookieless request carrying an
 	// Authorization Bearer credential selects Bearer transport without X-Egauth-Transport.
