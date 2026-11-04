@@ -47,13 +47,18 @@ var exemptions = []exemption{
 		Probes:   []string{"csrf/cross-origin-with-cookie/", "csrf/cross-origin-referer-with-cookie/", "csrf/login-cross-origin-no-cookie/", "csrf/user-cross-origin-with-cookie/"},
 	},
 	{
+		Guard: guardG7b, Symbol: "egauth.Config.SPAOrigins", ReliesOnAbsenceOf: "egauth.RelaxedOrigins",
+		Variants: []string{"SPAOrigins=EvilOrigin"},
+		Probes:   []string{"csrf/cross-origin-with-cookie/", "csrf/cross-origin-referer-with-cookie/", "csrf/login-cross-origin-no-cookie/", "csrf/user-cross-origin-with-cookie/"},
+	},
+	{
 		Guard: guardG7b, Symbol: "egauth.TrustedProxies", ReliesOnAbsenceOf: "egauth.TrustForwardedFromAnyone",
 		Variants: []string{"Proxy=TrustedProxies"},
 		Probes:   []string{"limits/forwarded-for-from-an-untrusted-peer-is-ignored"},
 	},
 }
 
-const maxExemptions = 4
+const maxExemptions = 5
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()
@@ -278,12 +283,14 @@ func TestSemanticOptOuts(t *testing.T) {
 					return
 				}
 				rep := journeytest.Collect(worldProbes(w))
+				resourceRejected := false
 				if w.Config.Transport != egauth.Cookies {
 					rw, err := journeytest.BuildResourceWorld(t, settingsOf(v.opts))
 					var ce *egauth.ConfigError
 					switch {
 					case errors.As(err, &ce):
 						t.Logf("New rejects %s for the resource server's Auth: %v", v.key, ce)
+						resourceRejected = true
 					case err != nil:
 						t.Fatalf("variant %s: the resource world failed outside New validation: %v", v.key, err)
 					default:
@@ -299,7 +306,7 @@ func TestSemanticOptOuts(t *testing.T) {
 				for _, f := range unexplained(v.key, optOuts, rep, mark) {
 					t.Errorf("variant %s weakens probe %s (want %s, got %s) without New rejecting it, an Insecure field, or a typed exemption", v.key, f.Name, f.Want, f.Got)
 				}
-				facts := variantFacts{key: v.key, optOuts: optOuts, transport: w.Config.Transport, tenancy: w.Settings.Tenancy, lost: lostLabels(goldenServed, servedLabels(w))}
+				facts := variantFacts{key: v.key, optOuts: optOuts, transport: w.Config.Transport, tenancy: w.Settings.Tenancy, lost: lostLabels(goldenServed, servedLabels(w)), resourceRejected: resourceRejected}
 				for _, name := range vanished(facts, goldenNames, rep, mark) {
 					t.Errorf("variant %s silently drops probe %s: a probe may disappear only when the variant unmounts its endpoint through a module, selects another transport or tenancy, sets an Insecure field, or carries a typed exemption", v.key, name)
 				}
@@ -334,6 +341,9 @@ type variantFacts struct {
 	transport egauth.Transport
 	tenancy   journeytest.Tenancy
 	lost      []string
+	// resourceRejected is true when New rejected the variant for the resource world's Auth (a
+	// loopback PublicOrigin), which legitimately takes every resource-server probe with it.
+	resourceRejected bool
 }
 
 func servedLabels(w *journeytest.World) map[string]bool {
@@ -409,7 +419,7 @@ func vanished(f variantFacts, golden []string, rep journeytest.Report, markUsed 
 	present := rep.ByName()
 	var out []string
 	for _, name := range golden {
-		if _, ok := present[name]; ok || f.optOuts || f.transportExplains(name) || f.mountingExplains(name) || f.moduleExplains(name) {
+		if _, ok := present[name]; ok || f.optOuts || f.transportExplains(name) || f.mountingExplains(name) || f.moduleExplains(name) || (f.resourceRejected && strings.HasPrefix(name, "resource-server/")) {
 			continue
 		}
 		if f.tenancy == journeytest.Single && strings.HasPrefix(name, "tenancy/") {
@@ -515,4 +525,22 @@ func TestSemanticGuardRejectsAVariantThatDropsProbes(t *testing.T) {
 
 	notAModule := variantFacts{key: "Policy.Remember=Always", lost: []string{"POST /auth/login"}}
 	require.Contains(t, vanished(notAModule, golden, rep, none), golden[0], "only a module or the backend may unmount an endpoint")
+
+	resourceGolden := []string{"resource-server/no-credential", "csrf/cross-origin-with-cookie/POST /auth/logout"}
+	accepted := variantFacts{key: "Policy.Mystery=flipped", transport: egauth.CookiesAndBearer, tenancy: journeytest.Subdomain}
+	require.Contains(t, vanished(accepted, resourceGolden, nil, none), resourceGolden[0], "resource-server probes may not vanish while New accepts the resource world")
+	rejected := variantFacts{key: "Policy.Mystery=flipped", transport: egauth.CookiesAndBearer, tenancy: journeytest.Subdomain, resourceRejected: true}
+	got = vanished(rejected, resourceGolden, nil, none)
+	require.NotContains(t, got, resourceGolden[0], "New rejecting the resource world's Auth takes the resource-server probes with it")
+	require.Contains(t, got, resourceGolden[1], "a resource-world rejection explains only the resource-server probes")
+}
+
+func TestSemanticGuardExemptsTrustedSPAOrigins(t *testing.T) {
+	rep := journeytest.Report{
+		{Name: "csrf/cross-origin-with-cookie/POST /auth/logout", Want: "403", Got: "200"},
+		{Name: "facades/non-admin-on-system", Want: "403", Got: "200"},
+	}
+	got := unexplained("SPAOrigins=EvilOrigin", false, rep, func(string) {})
+	require.Len(t, got, 1, "a declared SPA origin is trusted for CSRF and nothing else")
+	require.Equal(t, "facades/non-admin-on-system", got[0].Name)
 }
