@@ -47,18 +47,13 @@ var exemptions = []exemption{
 		Probes:   []string{"csrf/cross-origin-with-cookie/", "csrf/cross-origin-referer-with-cookie/", "csrf/login-cross-origin-no-cookie/", "csrf/user-cross-origin-with-cookie/"},
 	},
 	{
-		Guard: guardG7b, Symbol: "egauth.Config.SPAOrigins", ReliesOnAbsenceOf: "egauth.RelaxedOrigins",
-		Variants: []string{"SPAOrigins=EvilOrigin"},
-		Probes:   []string{"csrf/cross-origin-with-cookie/", "csrf/cross-origin-referer-with-cookie/", "csrf/login-cross-origin-no-cookie/", "csrf/user-cross-origin-with-cookie/"},
-	},
-	{
 		Guard: guardG7b, Symbol: "egauth.TrustedProxies", ReliesOnAbsenceOf: "egauth.TrustForwardedFromAnyone",
 		Variants: []string{"Proxy=TrustedProxies"},
 		Probes:   []string{"limits/forwarded-for-from-an-untrusted-peer-is-ignored"},
 	},
 }
 
-const maxExemptions = 5
+const maxExemptions = 4
 
 func moduleRoot(t *testing.T) string {
 	t.Helper()
@@ -533,14 +528,4 @@ func TestSemanticGuardRejectsAVariantThatDropsProbes(t *testing.T) {
 	got = vanished(rejected, resourceGolden, nil, none)
 	require.NotContains(t, got, resourceGolden[0], "New rejecting the resource world's Auth takes the resource-server probes with it")
 	require.Contains(t, got, resourceGolden[1], "a resource-world rejection explains only the resource-server probes")
-}
-
-func TestSemanticGuardExemptsTrustedSPAOrigins(t *testing.T) {
-	rep := journeytest.Report{
-		{Name: "csrf/cross-origin-with-cookie/POST /auth/logout", Want: "403", Got: "200"},
-		{Name: "facades/non-admin-on-system", Want: "403", Got: "200"},
-	}
-	got := unexplained("SPAOrigins=EvilOrigin", false, rep, func(string) {})
-	require.Len(t, got, 1, "a declared SPA origin is trusted for CSRF and nothing else")
-	require.Equal(t, "facades/non-admin-on-system", got[0].Name)
 }

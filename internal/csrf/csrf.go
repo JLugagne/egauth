@@ -131,9 +131,9 @@ func (o Origins) For(t core.TenantID) []string {
 	return append(o.forTenant(t), o.spa...)
 }
 
-// ForWithoutSPA returns the same tenant-expanded public and extra origins as For, but omits the
-// single-page application origins. An endpoint that must stay same-origin uses it, so a SPA origin
-// can neither match the origin list nor pass the same-site branch of fetchSite.
+// ForWithoutSPA returns the tenant-expanded public and extra origins without the single-page
+// application origins. An endpoint that stays same-origin uses it, so a SPA origin can neither
+// match the origin list nor pass the same-site branch of fetchSite.
 func (o Origins) ForWithoutSPA(t core.TenantID) []string {
 	return o.forTenant(t)
 }
