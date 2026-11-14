@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.18.0] — 2026-11-14
+
 ### Added
 
 - `Config.SPAOrigins`: single-page applications served from another same-site host that is not a

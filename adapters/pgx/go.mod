@@ -3,7 +3,7 @@ module github.com/JLugagne/egauth/adapters/pgx
 go 1.27.4
 
 require (
-	github.com/JLugagne/egauth v0.17.4
+	github.com/JLugagne/egauth v0.18.0
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.13.0
 	github.com/stretchr/testify v1.12.1

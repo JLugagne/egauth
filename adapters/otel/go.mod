@@ -3,7 +3,7 @@ module github.com/JLugagne/egauth/adapters/otel
 go 1.27.4
 
 require (
-	github.com/JLugagne/egauth v0.17.4
+	github.com/JLugagne/egauth v0.18.0
 	go.opentelemetry.io/otel v1.47.0
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
