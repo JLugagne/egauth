@@ -36,6 +36,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Go 1.27.4 (fixes GO-2026-6859 in `net/http`): every module and `go.work` declare `go 1.27.4`; consumers need Go >= 1.27.4.
+- Dependencies: `golang.org/x/crypto` v0.59.0, `golang.org/x/text` v0.44.0, `jackc/pgx/v5` v5.13.0, `testcontainers-go` v0.45.0.
+
 - Every module (core, `adapters/pgx`, `adapters/otel`, `tools`) and `go.work` now declare
   `go 1.27.3`; the separate `toolchain` directive is dropped. Consumers need Go >= 1.27.3.
 - `adapters/pgx`: `ebitengine/purego` v0.11.3.
